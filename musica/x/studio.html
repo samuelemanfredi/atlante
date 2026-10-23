@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Studio</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.tabs{overflow-x:auto;scrollbar-width:none;margin:2px 0 14px}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:1 0 auto;padding:0 10px;font-size:13px;white-space:nowrap}
+.chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:2px 0 6px;margin:6px 0}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;min-height:32px;padding:0 12px;border-radius:99px;background:var(--fill);font-size:14px;font-weight:600;white-space:nowrap}
+.chip.on{background:var(--accent);color:var(--onaccent)}
+.btn.danger{background:var(--bad);color:#fff}
+i.pill{font-style:normal}
+.btn.full{width:100%}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:var(--fill);padding:1px 5px;border-radius:5px;word-break:break-word}
+pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;background:var(--fill);padding:8px 10px;border-radius:8px;overflow-x:auto;white-space:pre-wrap}
+ol.passi,ul.passi{margin:6px 0;padding-left:22px}
+ol.passi li,ul.passi li{margin:5px 0}
+.note.warn{background:rgba(255,159,10,.14)}
+.note.bad{background:rgba(255,59,48,.12)}
+.note.ok{background:rgba(52,199,89,.13)}
+.note b{color:var(--fg)}
+.vuoto{color:var(--fg2);text-align:center;padding:18px 10px;font-size:15px}
+.tre{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.tre select{padding:10px 6px}
+.field label{white-space:nowrap}
+.hint{font-size:13px;color:var(--fg2);margin:4px 4px 0}
+.prog{height:6px;border-radius:3px;background:var(--fill);overflow:hidden;margin:8px 0}
+.prog>i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}
+details>summary{cursor:pointer;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::after{content:'›';float:right;color:var(--fg3);transform:rotate(90deg);transition:transform .2s}
+details[open]>summary::after{transform:rotate(-90deg)}
+/* UCI */
+.hero{border-radius:16px;padding:18px;background:linear-gradient(135deg,#1c3f94,#0a84ff 60%,#34c759);color:#fff;margin:6px 0 12px}
+.hero b{font-size:22px;display:block;margin-bottom:4px}
+.hero p{margin:0;opacity:.92;font-size:15px}
+.azioni{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.azioni .btn{justify-content:space-between;width:100%}
+/* notizie */
+.nlist{background:var(--bg2);border-radius:12px;overflow:hidden;margin:10px 0}
+.nw{border-bottom:.5px solid var(--sep)}
+.nw:last-child{border-bottom:0}
+.nwtop{display:flex;gap:12px;padding:12px 14px;width:100%;text-align:left;align-items:flex-start}
+.nwtop img{width:76px;height:76px;border-radius:8px;object-fit:cover;flex:none;background:var(--fill)}
+.nwtop .tx{flex:1;min-width:0}
+.nwtop b{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-size:16px;line-height:1.25}
+.nwtop .ex{margin:4px 0 0;font-size:14px;color:var(--fg2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.nw.on .nwtop .ex{display:block;-webkit-line-clamp:unset}
+.meta{font-size:12px;color:var(--fg2);margin-bottom:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.ia-tag{font-size:11px;font-weight:700;color:var(--link)}
+.det{padding:0 14px 12px}
+.fonti label{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:.5px solid var(--sep);font-size:15px}
+.fonti label:last-child{border-bottom:0}
+.fonti input{width:20px;height:20px;accent-color:var(--accent)}
+.fonti .lg{margin-left:auto;font-size:12px;color:var(--fg2)}
+/* allenati */
+.opt{display:flex;gap:10px;align-items:flex-start;width:100%;text-align:left;padding:12px;border-radius:12px;background:var(--bg2);margin:8px 0;font-size:16px;border:2px solid transparent}
+.opt b{flex:none;width:26px;height:26px;border-radius:50%;background:var(--fill);display:flex;align-items:center;justify-content:center;font-size:14px}
+.opt.giusta{border-color:var(--ok);background:rgba(52,199,89,.15)}
+.opt.sbagliata{border-color:var(--bad);background:rgba(255,59,48,.12)}
+.opt:disabled{opacity:1}
+.qtext{font-size:19px;font-weight:600;line-height:1.3;margin:10px 0;white-space:pre-wrap}
+.qhead{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.boxes{display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--fill);margin:8px 0}
+.boxes i{display:block;height:100%}
+.leg{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--fg2)}
+.leg span::before{content:'';display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--c);margin-right:4px}
+.chart{display:flex;align-items:flex-end;gap:3px;height:70px;margin:8px 0 2px}
+.chart i{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px}
+.chart i.zero{background:var(--fill)}
+.num4{display:grid;grid-template-columns:repeat(auto-fit,minmax(70px,1fr));gap:8px;margin:8px 0}
+.num4 div{background:var(--bg2);border-radius:12px;padding:10px;text-align:center}
+.num4 b{display:block;font-size:22px}
+.num4 span{font-size:12px;color:var(--fg2)}
+.opz-in{display:flex;gap:8px;align-items:center;margin:6px 0}
+.opz-in input[type=radio]{width:22px;height:22px;flex:none;accent-color:var(--ok)}
+.qrow{display:flex;gap:10px;align-items:flex-start;padding:10px 14px;border-bottom:.5px solid var(--sep)}
+.qrow:last-child{border-bottom:0}
+.qrow .tx{flex:1;min-width:0;font-size:15px}
+.qrow .tx span{display:block;font-size:12px;color:var(--fg2);margin-top:2px}
+/* idee */
+.chat{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+.bub{max-width:90%;padding:10px 12px;border-radius:16px;font-size:16px;line-height:1.4;overflow-wrap:anywhere}
+.bub.u{align-self:flex-end;background:var(--accent);color:var(--onaccent);border-bottom-right-radius:5px;white-space:pre-wrap}
+.bub.a{align-self:flex-start;background:var(--bg2);border-bottom-left-radius:5px}
+.bub.a h4{margin:10px 0 4px;font-size:16px}
+.bub.a h4:first-child{margin-top:0}
+.bub.a ul,.bub.a ol{margin:4px 0;padding-left:20px}
+.bub.a li{margin:3px 0}
+.bub.a p{margin:5px 0}
+.bub.err{background:rgba(255,59,48,.12)}
+.composer{position:sticky;bottom:0;background:var(--bg);display:flex;gap:8px;align-items:flex-end;padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px));z-index:3}
+.composer textarea.in{min-height:44px;max-height:160px;height:44px;resize:none}
+.sugg{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+.sugg button{text-align:left;padding:12px;border-radius:12px;background:var(--bg2);font-size:15px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="seg tabs" id="tabs" role="tablist">
+    <button data-t="uci" role="tab">Atlante UCI</button>
+    <button data-t="notizie" role="tab">Notizie</button>
+    <button data-t="allenati" role="tab">Allenati</button>
+    <button data-t="idee" role="tab">Idee</button>
+  </div>
+
+  <!-- ===================== ATLANTE UCI ===================== -->
+  <section id="s-uci" hidden>
+    <div class="hero"><b>Atlante UCI</b><p>L'app per prepararti all'esame UCI: quiz, simulazioni e i tuoi progressi.</p></div>
+    <div class="azioni">
+      <a class="btn pri" href="https://cycling.rider-agent.workers.dev" target="_blank" rel="noopener">Apri Atlante UCI <span>↗</span></a>
+      <a class="btn" href="https://cycling.rider-agent.workers.dev/accedi.html" target="_blank" rel="noopener">Accedi con le tue credenziali <span>↗</span></a>
+      <a class="btn" href="https://cycling.rider-agent.workers.dev/account.html" target="_blank" rel="noopener">Il mio account <span>↗</span></a>
+    </div>
+    <div class="note"><b>I tuoi progressi sono sul tuo account UCI.</b> Per collegarli entra nell'app UCI con le tue credenziali (pulsante «Accedi»): li ritrovi su ogni dispositivo da cui accedi. Atlante non chiede, non vede e non salva la tua password.</div>
+    <div class="note">L'app UCI si apre in una nuova finestra: per sicurezza il sito non permette di essere mostrato dentro altre app, quindi non può stare in questo riquadro. La musica di Atlante continua a suonare.</div>
+    <div class="card"><b>Averla come app sul telefono</b>
+      <ol class="passi"><li>iPhone e iPad: aprila in Safari › Condividi › «Aggiungi alla schermata Home».</li><li>Android: aprila in Chrome › menu ⋮ › «Aggiungi a schermata Home» o «Installa app».</li><li>Mac: Safari › Archivio › «Aggiungi al Dock».</li></ol>
+    </div>
+    <div class="card"><b>Ripassa anche qui</b><p class="small" style="margin:4px 0 8px">Nella scheda «Allenati» l'IA del tuo Mac crea quiz su qualsiasi argomento, anche sul regolamento.</p>
+      <button class="btn sm" type="button" id="uAllena">Allenati sul regolamento UCI ›</button></div>
+  </section>
+
+  <!-- ===================== NOTIZIE ===================== -->
+  <section id="s-notizie" hidden>
+    <div id="nNota"></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input class="in" id="nCerca" type="search" placeholder="Cerca nelle notizie" autocomplete="off" style="flex:1">
+      <button class="btn" id="nAgg" type="button">Aggiorna</button>
+    </div>
+    <div class="chips" id="nChips"></div>
+    <p class="small" id="nStato" style="margin:2px 4px"></p>
+    <div id="nLista"></div>
+    <details class="card" id="nFonti"><summary><b>Fonti</b> <span class="small" id="nFontiN"></span></summary>
+      <div class="fonti" id="nFontiL"></div>
+      <label style="display:flex;gap:10px;align-items:center;margin-top:10px;font-size:15px"><input type="checkbox" id="nAuto" style="width:20px;height:20px;accent-color:var(--accent)"> Riassunti automatici con l'IA (prime notizie)</label>
+      <div class="field"><label for="nNuovaUrl">Aggiungi un feed RSS</label><input class="in" id="nNuovaUrl" type="url" placeholder="https://…/feed/" autocomplete="off"></div>
+      <div class="field"><input class="in" id="nNuovaNome" placeholder="Nome della fonte" autocomplete="off"></div>
+      <button class="btn sm" id="nNuova" type="button">Aggiungi fonte</button>
+      <p class="small">L'UCI e Bicisport non pubblicano un feed RSS: per i comunicati ufficiali apri <a href="https://www.uci.org/news" target="_blank" rel="noopener">uci.org/news</a>.</p>
+    </details>
+  </section>
+
+  <!-- ===================== ALLENATI ===================== -->
+  <section id="s-allenati" hidden>
+    <div id="aCorpo"></div>
+  </section>
+
+  <!-- ===================== ASSISTENTE IDEE ===================== -->
+  <section id="s-idee" hidden>
+    <div id="iIa"></div>
+    <div class="btns" style="margin-top:0">
+      <button class="btn sm" type="button" id="iStoricoBtn">Conversazioni</button>
+      <button class="btn sm" type="button" id="iNuova">+ Nuova</button>
+    </div>
+    <div id="iStorico" hidden></div>
+    <div class="seg tabs" id="iModo" style="margin:6px 0">
+      <button type="button" data-m="idee">Brainstorming</button>
+      <button type="button" data-m="piano">Piano</button>
+      <button type="button" data-m="procontro">Pro e contro</button>
+      <button type="button" data-m="libero">Libero</button>
+    </div>
+    <p class="small" id="iModoDesc" style="margin:0 4px"></p>
+    <div class="chat" id="iMsg"></div>
+    <div class="btns" id="iAz" hidden>
+      <button class="btn sm" type="button" data-a="esporta">Esporta .txt</button>
+      <button class="btn sm" type="button" data-a="copia">Copia</button>
+      <button class="btn sm" type="button" data-a="condividi" id="iShare">Condividi</button>
+      <button class="btn sm" type="button" data-a="elimina">Elimina</button>
+    </div>
+    <div class="composer">
+      <textarea class="in" id="iIn" rows="1" placeholder="Scrivi un'idea…" enterkeyhint="send"></textarea>
+      <button class="btn pri" id="iInvia" type="button">Invia</button>
+    </div>
+  </section>
+</div>
+
+<script src="kit.js"></script>
+<script>
+'use strict';
+(function () {
+const {$, esc, toast} = AX;
+const qsa = (s, el) => [...(el || document).querySelectorAll(s)];
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+async function copia(t) {
+  try { await navigator.clipboard.writeText(t); toast('Copiato'); return; } catch (e) {}
+  const a = document.createElement('textarea'); a.value = t; a.style.cssText = 'position:fixed;opacity:0;top:0'; document.body.appendChild(a); a.select();
+  try { document.execCommand('copy'); toast('Copiato'); } catch (e) { toast('Copia non riuscita'); }
+  a.remove();
+}
+function scarica(nome, testo) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([testo], {type: 'text/plain;charset=utf-8'}));
+  a.download = nome; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
+}
+function conferma(btn, azione, testo) {
+  if (btn.dataset.armato) { delete btn.dataset.armato; clearTimeout(btn._t); btn.textContent = btn.dataset.orig; btn.classList.remove('danger'); azione(); return; }
+  btn.dataset.armato = '1'; btn.dataset.orig = btn.textContent; btn.textContent = testo || 'Tocca di nuovo per confermare'; btn.classList.add('danger');
+  btn._t = setTimeout(() => { if (!btn.dataset.armato) return; delete btn.dataset.armato; btn.textContent = btn.dataset.orig; btn.classList.remove('danger'); }, 4000);
+}
+function fa(t) {
+  if (!t) return '';
+  const s = (Date.now() - t) / 1000;
+  if (s < 90) return 'ora';
+  if (s < 3600) return Math.round(s / 60) + ' min fa';
+  if (s < 86400) return Math.round(s / 3600) + ' h fa';
+  if (s < 7 * 86400) return Math.round(s / 86400) + ' g fa';
+  return new Date(t).toLocaleDateString('it-IT', {day: 'numeric', month: 'short'});
+}
+const oggi = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
+// Markdown semplice e sicuro (prima si fa l'escape, poi titoli, elenchi, grassetto, codice)
+function md(t) {
+  const blocchi = String(t || '').split(/```/);
+  return blocchi.map((b, i) => {
+    if (i % 2) return '<pre>' + esc(b.replace(/^\w*\n/, '')) + '</pre>';
+    const righe = b.split('\n'); let h = '', lista = '';
+    const chiudi = () => { if (lista) { h += '</' + lista + '>'; lista = ''; } };
+    const inl = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, '$1<i>$2</i>');
+    righe.forEach(r => {
+      let m;
+      if ((m = r.match(/^\s*#{1,6}\s+(.*)$/))) { chiudi(); h += '<h4>' + inl(m[1]) + '</h4>'; }
+      else if ((m = r.match(/^\s*(?:[-*•])\s+(.*)$/))) { if (lista !== 'ul') { chiudi(); h += '<ul>'; lista = 'ul'; } h += '<li>' + inl(m[1]) + '</li>'; }
+      else if ((m = r.match(/^\s*\d+[.)]\s+(.*)$/))) { if (lista !== 'ol') { chiudi(); h += '<ol>'; lista = 'ol'; } h += '<li>' + inl(m[1]) + '</li>'; }
+      else if (r.trim()) { chiudi(); h += '<p>' + inl(r) + '</p>'; }
+      else chiudi();
+    });
+    chiudi(); return h;
+  }).join('');
+}
+
+/* ---------- IA locale (comune) ---------- */
+const IA = {
+  st: null,
+  async verifica(force) {
+    const s = await AX.stato(force);
+    if (!s.ok) return (this.st = {mac: false, attiva: false, modelli: [], modello: ''});
+    let j = null;
+    try { j = await AX.api('ia', {timeout: 8000}); } catch (e) {}
+    return (this.st = {mac: true, attiva: j ? !!j.attiva : !!s.ollama, modelli: (j && j.modelli) || s.modelli || [], modello: (j && j.modello) || ''});
+  },
+  modello() { const m = AX.store.get('ia-modello', ''); return this.st && this.st.modelli.indexOf(m) >= 0 ? m : ''; },
+  pulisci(t) { return String(t == null ? '' : t).replace(/<think>[\s\S]*?<\/think>/gi, '').trim(); },
+  estrai(t) {
+    t = this.pulisci(t).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+    try { return JSON.parse(t); } catch (e) {}
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch (e) {} }
+    return null;
+  },
+  async testo(prompt, sistema, timeout) { return this.pulisci(await AX.ia(prompt, {sistema, modello: this.modello(), timeout})); },
+  async json(prompt, sistema, valida, tentativi) {
+    let errore = '';
+    for (let i = 0; i < (tentativi || 2); i++) {
+      const p = errore ? prompt + '\n\nATTENZIONE: la risposta precedente non era valida (' + errore + '). Rispondi di nuovo SOLO con il JSON richiesto.' : prompt;
+      const t = await AX.ia(p, {sistema, json: true, modello: this.modello()});
+      const o = this.estrai(t);
+      errore = !o || typeof o !== 'object' ? 'non era JSON' : valida(o);
+      if (!errore) return o;
+    }
+    throw new Error('L\'IA ha risposto in un formato non valido (' + errore + '). Riprova o scegli un altro modello.');
+  },
+  nota(st, extra) {
+    if (!st.mac) return '<div class="note warn"><b>Il Mac non risponde.</b> L\'IA di Atlante gira sul tuo Mac, non su Internet: accendi il Mac, avvia il server della musica e collegati alla stessa rete (o a Tailscale). ' + (extra || '') + '<div class="btns"><button class="btn sm" type="button" data-a="riprova-ia">Riprova</button></div></div>';
+    if (!st.attiva) return '<div class="note warn"><b>L\'IA locale non è attiva sul Mac.</b> Per attivarla (una volta sola):<ol class="passi"><li>Sul Mac scarica e installa <a href="https://ollama.com/download" target="_blank" rel="noopener">Ollama</a>, poi aprilo (resta nella barra in alto).</li><li>Nel Terminale scrivi <code>ollama pull qwen3.5:9b</code> (Mac con 16 GB di RAM o più) oppure <code>ollama pull gemma3:4b</code> (Mac con 8 GB).</li><li>Lascia Ollama aperto e premi «Riprova».</li></ol>' + (extra || '') + '<div class="btns"><button class="btn sm" type="button" data-a="riprova-ia">Riprova</button></div></div>';
+    return '';
+  }
+};
+
+/* =====================================================================
+   ATLANTE UCI
+   ===================================================================== */
+const Uci = {
+  init() {
+    $('uAllena').onclick = () => { mostra('allenati'); Allena.preimposta('Regolamento UCI del ciclismo su strada (categorie, gare, sicurezza, comportamento in corsa)'); };
+  }
+};
+
+/* =====================================================================
+   NOTIZIE DI CICLISMO
+   ===================================================================== */
+// fonti verificate (feed RSS/Atom reali); «on»: attive all'inizio
+const FONTI = [
+  {id: 'tbw', nome: 'Tuttobiciweb', url: 'https://www.tuttobiciweb.it/rss.xml', lingua: 'it', on: true},
+  {id: 'cicloweb', nome: 'Cicloweb', url: 'https://www.cicloweb.it/feed/', lingua: 'it', on: true},
+  {id: 'spazio', nome: 'SpazioCiclismo', url: 'https://cyclingpro.net/spaziociclismo/feed/', lingua: 'it', on: true},
+  {id: 'oa', nome: 'OA Sport', url: 'https://www.oasport.it/category/ciclismo/feed/', lingua: 'it', on: true},
+  {id: 'ciclismoweb', nome: 'Ciclismoweb', url: 'https://www.ciclismoweb.net/feed/', lingua: 'it', on: true},
+  {id: 'inbici', nome: 'inBici', url: 'https://www.inbici.net/feed/', lingua: 'it', on: false},
+  {id: 'bikeitalia', nome: 'Bikeitalia', url: 'https://www.bikeitalia.it/feed/', lingua: 'it', on: false},
+  {id: 'cyclingnews', nome: 'Cyclingnews', url: 'https://www.cyclingnews.com/feeds.xml', lingua: 'en', on: true},
+  {id: 'domestique', nome: 'Domestique', url: 'https://www.domestiquecycling.com/en/feed/news.xml', lingua: 'en', on: false},
+  {id: 'cw', nome: 'Cycling Weekly', url: 'https://www.cyclingweekly.com/feeds.xml', lingua: 'en', on: false},
+  {id: 'velo', nome: 'Velo', url: 'https://www.velonews.com/feed/', lingua: 'en', on: false},
+  {id: 'roadcc', nome: 'road.cc', url: 'https://road.cc/feed', lingua: 'en', on: false}
+];
+function pulisciHtml(h) {
+  if (!h) return '';
+  const d = new DOMParser().parseFromString('<body>' + h, 'text/html');
+  d.querySelectorAll('script,style,figcaption').forEach(x => x.remove());
+  return (d.body.textContent || '').replace(/\s+/g, ' ')
+    .replace(/\s*(The post|L'articolo|L’articolo)\s.{0,250}?(appeared first on|proviene da)\s.*$/i, '')
+    .replace(/\s*(Continua a leggere|Leggi tutto|Read more)\W*$/i, '').trim();
+}
+function primeRighe(t, n) {
+  t = (t || '').trim(); n = n || 260;
+  if (t.length <= n) return t;
+  const c = t.slice(0, n); const p = Math.max(c.lastIndexOf('. '), c.lastIndexOf('! '), c.lastIndexOf('? '));
+  return (p > n * 0.5 ? c.slice(0, p + 1) : c.replace(/\s+\S*$/, '') + '…');
+}
+function leggiFeed(txt, f) {
+  const doc = new DOMParser().parseFromString(txt, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('feed non valido');
+  let els = [...doc.getElementsByTagName('item')];
+  if (!els.length) els = [...doc.getElementsByTagName('entry')];
+  return els.slice(0, 40).map(el => {
+    const t = tag => { const x = el.getElementsByTagName(tag)[0]; return x ? (x.textContent || '').trim() : ''; };
+    let link = '';
+    const ls = [...el.getElementsByTagName('link')];
+    const alt = ls.find(l => l.getAttribute('href') && (l.getAttribute('rel') || 'alternate') === 'alternate') || ls.find(l => l.getAttribute('href'));
+    link = alt ? alt.getAttribute('href') : t('link');
+    if (!/^https?:/i.test(link)) { const g = t('guid'); link = /^https?:/i.test(g) ? g : link; }
+    const data = Date.parse(t('pubDate') || t('published') || t('updated') || t('dc:date')) || 0;
+    const descr = t('description') || t('summary');
+    const cont = t('content:encoded') || t('content');
+    let img = '';
+    const mc = el.getElementsByTagName('media:content')[0] || el.getElementsByTagName('media:thumbnail')[0];
+    if (mc && mc.getAttribute('url') && !/video|audio/.test(mc.getAttribute('type') || '')) img = mc.getAttribute('url');
+    if (!img) { const en = el.getElementsByTagName('enclosure')[0]; if (en && /^image/.test(en.getAttribute('type') || 'image/')) img = en.getAttribute('url') || ''; }
+    if (!img) { const m = (cont + descr).match(/<img[^>]+src=["']([^"']+)/i); if (m) img = m[1]; }
+    const testo = pulisciHtml(descr || cont);
+    return {id: link, fonte: f.id, nomeFonte: f.nome, titolo: pulisciHtml(t('title')), link, data, testo: testo.slice(0, 700), lungo: pulisciHtml(cont || descr).slice(0, 9000), img: /^https?:\/\//i.test(img) ? img : ''};
+  }).filter(x => /^https?:/i.test(x.link) && x.titolo);
+}
+function estraiArticolo(html) {
+  const d = new DOMParser().parseFromString(html, 'text/html');
+  d.querySelectorAll('script,style,nav,header,footer,aside,form,noscript,figure').forEach(x => x.remove());
+  const root = d.querySelector('article') || d.querySelector('main') || d.body;
+  return [...root.querySelectorAll('p')].map(p => (p.textContent || '').replace(/\s+/g, ' ').trim()).filter(t => t.length > 40).join('\n').slice(0, 9000);
+}
+async function testoDaRisposta(r) {
+  const buf = await r.arrayBuffer();
+  let enc = ((r.headers.get('content-type') || '').match(/charset=["']?([\w-]+)/i) || [])[1];
+  if (!enc) { const h = new TextDecoder('iso-8859-1').decode(buf.slice(0, 400)); enc = (h.match(/encoding=["']([\w-]+)/i) || h.match(/charset=["']?([\w-]+)/i) || [])[1] || 'utf-8'; }
+  try { return new TextDecoder(enc).decode(buf); } catch (e) { return new TextDecoder('utf-8').decode(buf); }
+}
+const Notizie = {
+  items: [], filtro: 'tutte', aperto: '', coda: [], lavora: false, errori: [], agg: 0, inCorso: false,
+  fonti() {
+    const on = AX.store.get('notizie-fonti', {});
+    return FONTI.concat(AX.store.get('notizie-extra', [])).map(f => Object.assign({}, f, {on: on[f.id] != null ? on[f.id] : f.on}));
+  },
+  riassunti() { return AX.store.get('notizie-riassunti', {}); },
+  async init() {
+    const c = AX.store.get('notizie-cache', null);
+    if (c && c.items) { this.items = c.items; this.agg = c.t || 0; }
+    $('nAuto').checked = AX.store.get('notizie-auto', true);
+    $('nAuto').onchange = () => { AX.store.set('notizie-auto', $('nAuto').checked); if ($('nAuto').checked) this.auto(); };
+    $('nAgg').onclick = () => this.aggiorna(true);
+    $('nCerca').oninput = () => this.disegna();
+    $('nChips').onclick = e => { const b = e.target.closest('.chip'); if (!b) return; this.filtro = b.dataset.f; this.disegna(); };
+    $('nLista').onclick = e => this.clic(e);
+    $('nNota').onclick = e => { if (e.target.closest('[data-a="riprova-ia"]')) this.aggiorna(true); };
+    $('nFontiL').onchange = e => { const i = e.target; if (!i.dataset.id) return; const on = AX.store.get('notizie-fonti', {}); on[i.dataset.id] = i.checked; AX.store.set('notizie-fonti', on); this.disegnaFonti(); };
+    $('nFontiL').onclick = e => { const b = e.target.closest('button[data-del]'); if (!b) return; e.preventDefault(); AX.store.set('notizie-extra', AX.store.get('notizie-extra', []).filter(f => f.id !== b.dataset.del)); this.disegnaFonti(); };
+    $('nNuova').onclick = () => this.nuovaFonte();
+    this.disegnaFonti();
+    this.disegna();
+    await this.aggiorna();
+  },
+  disegnaFonti() {
+    const ff = this.fonti();
+    $('nFontiN').textContent = '(' + ff.filter(f => f.on).length + ' attive su ' + ff.length + ')';
+    $('nFontiL').innerHTML = ff.map(f => '<label><input type="checkbox" data-id="' + esc(f.id) + '"' + (f.on ? ' checked' : '') + '> ' + esc(f.nome) + '<span class="lg">' + (f.lingua === 'en' ? 'inglese' : f.lingua === 'it' ? 'italiano' : 'aggiunta') + '</span>' + (f.extra ? '<button class="btn sm" type="button" data-del="' + esc(f.id) + '">Togli</button>' : '') + '</label>').join('');
+  },
+  nuovaFonte() {
+    const url = $('nNuovaUrl').value.trim(), nome = $('nNuovaNome').value.trim();
+    if (!/^https?:\/\/\S+\.\S+/.test(url)) { toast('Scrivi l\'indirizzo del feed (https://…)'); return; }
+    const ex = AX.store.get('notizie-extra', []);
+    ex.push({id: 'x' + uid(), nome: nome || url.replace(/^https?:\/\/(www\.)?/, '').split('/')[0], url, lingua: '', on: true, extra: true});
+    AX.store.set('notizie-extra', ex);
+    $('nNuovaUrl').value = ''; $('nNuovaNome').value = '';
+    this.disegnaFonti(); this.aggiorna(true);
+  },
+  async aggiorna(force) {
+    if (this.inCorso) return;
+    this.inCorso = true;
+    $('nAgg').disabled = true;
+    $('nStato').textContent = 'Aggiorno le notizie…';
+    const st = await AX.stato(force);
+    IA.verifica(force).then(() => { this.disegna(); this.auto(); });
+    if (!st.ok) {
+      $('nNota').innerHTML = '<div class="note warn"><b>Il Mac non risponde.</b> Le notizie si scaricano tramite il Mac (i siti non permettono di leggerle direttamente dal telefono). ' + (this.items.length ? 'Ti mostro quelle salvate' + (this.agg ? ' (aggiornate ' + fa(this.agg) + ')' : '') + '.' : 'Non ci sono ancora notizie salvate per l\'uso offline.') + '<div class="btns"><button class="btn sm" type="button" data-a="riprova-ia">Riprova</button></div></div>';
+      $('nStato').textContent = '';
+      this.inCorso = false; $('nAgg').disabled = false; this.disegna(); return;
+    }
+    $('nNota').innerHTML = '';
+    const fonti = this.fonti().filter(f => f.on);
+    const res = await Promise.allSettled(fonti.map(async f => leggiFeed(await testoDaRisposta(await AX.proxy(f.url, 30000)), f)));
+    const nuovi = []; this.errori = [];
+    res.forEach((r, i) => { if (r.status === 'fulfilled') nuovi.push(...r.value); else this.errori.push(fonti[i].nome); });
+    if (nuovi.length) {
+      const mappa = new Map(this.items.map(x => [x.id, x]));
+      nuovi.forEach(x => mappa.set(x.id, Object.assign({}, mappa.get(x.id), x)));
+      const limite = Date.now() - 21 * 86400000;
+      this.items = [...mappa.values()].filter(x => !x.data || x.data > limite).sort((a, b) => (b.data || 0) - (a.data || 0)).slice(0, 160);
+      this.agg = Date.now();
+      AX.store.set('notizie-cache', {t: this.agg, items: this.items.map(x => { const y = Object.assign({}, x); delete y.lungo; return y; })});
+    }
+    this.inCorso = false; $('nAgg').disabled = false;
+    this.disegna();
+    this.auto();
+  },
+  visibili() {
+    const q = $('nCerca').value.trim().toLowerCase();
+    const attive = this.fonti().filter(f => f.on).map(f => f.id);
+    return this.items.filter(x => (this.filtro === 'tutte' ? attive.indexOf(x.fonte) >= 0 || !this.fonti().some(f => f.id === x.fonte) : x.fonte === this.filtro) && (!q || (x.titolo + ' ' + x.testo).toLowerCase().indexOf(q) >= 0));
+  },
+  disegna() {
+    const ff = this.fonti().filter(f => f.on);
+    const conta = {}; this.items.forEach(x => { conta[x.fonte] = (conta[x.fonte] || 0) + 1; });
+    if (this.filtro !== 'tutte' && !ff.some(f => f.id === this.filtro)) this.filtro = 'tutte';
+    $('nChips').innerHTML = '<button class="chip' + (this.filtro === 'tutte' ? ' on' : '') + '" type="button" data-f="tutte">Tutte</button>' + ff.map(f => '<button class="chip' + (this.filtro === f.id ? ' on' : '') + '" type="button" data-f="' + esc(f.id) + '">' + esc(f.nome) + (conta[f.id] ? ' ' + conta[f.id] : '') + '</button>').join('');
+    $('nStato').textContent = this.inCorso ? 'Aggiorno le notizie…' : (this.agg ? 'Aggiornate ' + fa(this.agg) : '') + (this.errori.length ? ' · non raggiungibili: ' + this.errori.join(', ') : '');
+    const v = this.visibili().slice(0, 80);
+    const ria = this.riassunti();
+    const ia = IA.st && IA.st.attiva;
+    if (!v.length) { $('nLista').innerHTML = '<p class="vuoto">' + (this.items.length ? 'Nessuna notizia con questi filtri.' : this.inCorso ? 'Carico…' : 'Nessuna notizia.') + '</p>'; return; }
+    $('nLista').innerHTML = '<div class="nlist">' + v.map(x => {
+      const on = this.aperto === x.id, r = ria[x.id];
+      const testo = r || primeRighe(x.testo || x.lungo, 260);
+      return '<article class="nw' + (on ? ' on' : '') + '" data-id="' + esc(x.id) + '"><button class="nwtop" type="button" data-a="apri">' +
+        (x.img ? '<img src="' + esc(x.img) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '') +
+        '<div class="tx"><div class="meta"><i class="pill">' + esc(x.nomeFonte || x.fonte) + '</i>' + esc(fa(x.data)) + (r ? ' <span class="ia-tag">RIASSUNTO IA</span>' : '') + (this.coda.indexOf(x.id) >= 0 ? ' <span class="small">riassunto in corso…</span>' : '') + '</div>' +
+        '<b>' + esc(x.titolo) + '</b>' + (testo ? '<p class="ex">' + esc(testo) + '</p>' : '') + '</div></button>' +
+        (on ? '<div class="det"><div class="btns"><a class="btn sm pri" href="' + esc(x.link) + '" target="_blank" rel="noopener">Apri l\'articolo ↗</a>' + (ia && !r ? '<button class="btn sm" type="button" data-a="riassumi">Riassunto IA</button>' : '') + '<button class="btn sm" type="button" data-a="copia">Copia link</button></div>' +
+          (!ia && !r ? '<p class="small">Senza l\'IA sul Mac vedi le prime righe dell\'articolo.</p>' : '') + '</div>' : '') + '</article>';
+    }).join('') + '</div>';
+  },
+  clic(e) {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const art = b.closest('.nw'); const id = art && art.dataset.id;
+    const x = this.items.find(i => i.id === id); if (!x) return;
+    if (b.dataset.a === 'apri') { this.aperto = this.aperto === id ? '' : id; this.disegna(); }
+    else if (b.dataset.a === 'copia') copia(x.link);
+    else if (b.dataset.a === 'riassumi') { this.metti(x.id, true); }
+  },
+  metti(id, primo) {
+    if (this.coda.indexOf(id) >= 0) return;
+    if (primo) this.coda.unshift(id); else this.coda.push(id);
+    this.disegna(); this.lavoraCoda();
+  },
+  auto() {
+    if (!$('nAuto').checked || !(IA.st && IA.st.attiva)) return;
+    const ria = this.riassunti();
+    this.visibili().slice(0, 6).forEach(x => { if (!ria[x.id]) this.metti(x.id); });
+  },
+  async lavoraCoda() {
+    if (this.lavora) return;
+    this.lavora = true;
+    while (this.coda.length) {
+      const id = this.coda[0];
+      const x = this.items.find(i => i.id === id);
+      if (x && !this.riassunti()[id]) {
+        try { await this.riassumi(x); }
+        catch (err) { if (this.aperto === id) toast('Riassunto non riuscito: ' + err.message); }
+      }
+      this.coda.shift(); this.disegna();
+    }
+    this.lavora = false;
+  },
+  async riassumi(x) {
+    let testo = x.lungo || x.testo || '';
+    if (testo.length < 600) { try { testo = estraiArticolo(await testoDaRisposta(await AX.proxy(x.link, 20000))) || testo; } catch (e) {} }
+    if (!testo.trim()) testo = x.titolo;
+    const sistema = 'Sei un giornalista sportivo esperto di ciclismo. Riassumi la notizia in italiano in 2 o 3 frasi chiare (massimo 60 parole), usando solo i fatti presenti nel testo, senza aggiungere nulla. Se il testo è in inglese, scrivi comunque il riassunto in italiano. Rispondi solo con il riassunto.';
+    const t = await IA.testo('Titolo: ' + x.titolo + '\nFonte: ' + (x.nomeFonte || '') + '\n\nTesto:\n' + testo.slice(0, 6000), sistema, 120000);
+    if (!t) throw new Error('risposta vuota');
+    const r = this.riassunti(); r[x.id] = t.slice(0, 800);
+    const k = Object.keys(r); if (k.length > 200) k.slice(0, k.length - 200).forEach(z => delete r[z]);
+    AX.store.set('notizie-riassunti', r);
+  }
+};
+
+/* =====================================================================
+   ALLENATI SU QUALSIASI ARGOMENTO
+   ===================================================================== */
+const GIORNI = [0, 1, 3, 7, 14];          // ripetizione dilazionata (Leitner): scatola 1–5
+const COL_BOX = ['#ff3b30', '#ff9f0a', '#ffcc00', '#34c759', '#007aff'];
+function mescola(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function daFare(q) { return !q.prossima || q.prossima <= Date.now(); }
+function normalizzaDomanda(d) {
+  if (!d || typeof d !== 'object') return null;
+  const domanda = String(d.domanda || d.testo || d.question || '').trim();
+  if (domanda.length < 5) return null;
+  let tipo = String(d.tipo || '').toLowerCase();
+  if (Array.isArray(d.opzioni) && d.opzioni.length >= 2 && tipo !== 'aperta') tipo = 'crocette';
+  if (tipo === 'crocette' || tipo === 'multipla') {
+    const op = (d.opzioni || []).map(o => String(typeof o === 'object' && o ? o.testo || o.text || '' : o).replace(/^\s*[A-Fa-f][).:]\s+/, '').trim()).filter(Boolean);
+    if (op.length < 2 || op.length > 6 || new Set(op.map(o => o.toLowerCase())).size !== op.length) return null;
+    let c = d.corretta;
+    if (typeof c === 'string') { const s = c.trim(); if (/^[A-Fa-f]$/.test(s)) c = s.toUpperCase().charCodeAt(0) - 65; else if (/^\d+$/.test(s)) c = +s; else c = op.findIndex(o => o.toLowerCase() === s.toLowerCase()); }
+    if (!Number.isInteger(c) || c < 0 || c >= op.length) return null;
+    // si mescolano le opzioni: i modelli tendono a mettere la risposta giusta sempre al primo posto
+    const ord = mescola(op.map((_, i) => i));
+    return {id: uid(), tipo: 'crocette', domanda, opzioni: ord.map(i => op[i]), corretta: ord.indexOf(c), spiegazione: String(d.spiegazione || '').trim(), box: 1, prossima: 0, viste: 0, giuste: 0};
+  }
+  const risposta = String(d.risposta || d.risposta_modello || '').trim();
+  if (risposta.length < 3) return null;
+  const punti = (Array.isArray(d.punti) ? d.punti : Array.isArray(d.punti_chiave) ? d.punti_chiave : []).map(p => String(p).trim()).filter(Boolean).slice(0, 8);
+  return {id: uid(), tipo: 'aperta', domanda, risposta, punti, box: 1, prossima: 0, viste: 0, giuste: 0};
+}
+const opzioni = (vv, sel) => vv.map(v => '<option value="' + v[0] + '"' + (v[0] === sel ? ' selected' : '') + '>' + v[1] + '</option>').join('');
+const Allena = {
+  vista: 'home', mazzoId: '', sess: null, fonte: 'arg', fileTesto: '', creando: false, ritorno: 'home', opz: {n: '10', tipo: 'misto', liv: 'medio'},
+  mazzi() { return AX.store.get('studio-mazzi', []); },
+  salva(m) { AX.store.set('studio-mazzi', m); },
+  mazzo(id) { return this.mazzi().find(m => m.id === (id || this.mazzoId)); },
+  async init() {
+    $('aCorpo').addEventListener('click', e => this.clic(e));
+    $('aCorpo').addEventListener('change', e => this.cambia(e));
+    $('aCorpo').addEventListener('input', e => { if (e.target.id === 'aArg') this.arg = e.target.value; if (e.target.id === 'aTesto') this.testoIn = e.target.value; });
+    this.disegna();
+    await IA.verifica();
+    if (this.vista === 'home') this.disegna(true);
+  },
+  preimposta(arg) { this.vista = 'home'; this.fonte = 'arg'; this.arg = arg; this.disegna(); const i = $('aArg'); if (i) i.focus(); },
+  disegna(fermo) {
+    const v = this.vista;
+    $('aCorpo').innerHTML = v === 'mazzo' ? this.hMazzo() : v === 'quiz' ? this.hQuiz() : v === 'mano' ? this.hMano() : v === 'fine' ? this.hFine() : this.hHome();
+    if (this.vista === 'home') this.dopoHome();
+    if (this.vista === 'mano') this.dopoMano();
+    if (!fermo) window.scrollTo(0, 0);
+  },
+  hHome() {
+    const st = IA.st;
+    const mm = this.mazzi();
+    let h = st ? IA.nota(st, 'Intanto puoi <b>creare le domande a mano</b> e allenarti con quelle.') : '<p class="small">Controllo l\'IA sul Mac…</p>';
+    h += '<div class="card"><b>Nuovo allenamento con l\'IA</b>' +
+      '<div class="seg" id="aFonte"><button type="button" data-a="fonte" data-v="arg" class="' + (this.fonte === 'arg' ? 'on' : '') + '">Argomento</button><button type="button" data-a="fonte" data-v="testo" class="' + (this.fonte === 'testo' ? 'on' : '') + '">Testo o appunti</button><button type="button" data-a="fonte" data-v="file" class="' + (this.fonte === 'file' ? 'on' : '') + '">File TXT</button></div>' +
+      '<div data-f="arg"' + (this.fonte !== 'arg' ? ' hidden' : '') + '><input class="in" id="aArg" placeholder="Es. la Rivoluzione francese, le frazioni, il regolamento UCI" autocomplete="off" value="' + esc(this.arg || '') + '"></div>' +
+      '<div data-f="testo"' + (this.fonte !== 'testo' ? ' hidden' : '') + '><textarea class="in" id="aTesto" placeholder="Incolla qui appunti, un capitolo o una pagina: le domande saranno solo su questo testo.">' + esc(this.testoIn || '') + '</textarea></div>' +
+      '<div data-f="file"' + (this.fonte !== 'file' ? ' hidden' : '') + '><label class="btn" for="aFile">Scegli un file .txt</label><input type="file" id="aFile" accept=".txt,.md,text/plain" hidden><p class="small" id="aFileNome">' + (this.fileTesto ? esc(this.fileNome || 'File') + ' · ' + this.fileTesto.length.toLocaleString('it-IT') + ' caratteri' : '') + '</p></div>' +
+      '<div class="tre"><div class="field"><label for="aN">Domande</label><select class="in" id="aN">' + opzioni([['5', '5'], ['10', '10'], ['15', '15'], ['20', '20']], this.opz.n) + '</select></div>' +
+      '<div class="field"><label for="aTipo">Tipo</label><select class="in" id="aTipo">' + opzioni([['misto', 'Misto'], ['crocette', 'Crocette'], ['aperte', 'Aperte']], this.opz.tipo) + '</select></div>' +
+      '<div class="field"><label for="aLiv">Livello</label><select class="in" id="aLiv">' + opzioni([['base', 'Base'], ['medio', 'Medio'], ['avanzato', 'Avanzato']], this.opz.liv) + '</select></div></div>' +
+      '<button class="btn pri full" type="button" data-a="crea"' + (st && st.attiva && !this.creando ? '' : ' disabled') + '>' + (this.creando ? 'Sto creando…' : st && !st.attiva ? 'Crea con l\'IA (serve l\'IA sul Mac)' : 'Crea le domande') + '</button><div id="aCreaStato"></div></div>' +
+      '<div class="btns"><button class="btn" type="button" data-a="mano">+ Crea domande a mano</button></div>';
+    h += '<div class="h2">I tuoi allenamenti</div>';
+    h += mm.length ? '<div class="list">' + mm.map(m => {
+      const n = m.domande.length, df = m.domande.filter(daFare).length, pad = n ? Math.round(m.domande.filter(q => q.box >= 4).length / n * 100) : 0;
+      return '<button class="row" type="button" data-a="apri" data-id="' + m.id + '"><div class="tx"><b>' + esc(m.titolo) + '</b><span>' + n + ' domande · ' + (df ? df + ' da ripassare' : 'tutto ripassato') + ' · padronanza ' + pad + '%</span></div><span style="color:var(--fg3)">›</span></button>';
+    }).join('') + '</div>' : '<p class="vuoto">Ancora nessun allenamento.</p>';
+    h += this.hStat();
+    h += '<details class="card" id="aModelli"' + (this.modelliAperti ? ' open' : '') + '><summary><b>Modelli dell\'IA</b></summary><div id="aModLista"></div>' +
+      '<p class="small">Per aggiungere altri modelli, sul Mac apri il Terminale e scrivi per esempio:</p>' +
+      '<pre>ollama pull qwen3.5:9b    # 16 GB di RAM: ottimo in italiano\nollama pull gemma3:4b     # leggero, per Mac con 8 GB\nollama pull gpt-oss:20b   # più preciso, servono 24–32 GB\nollama list               # modelli installati\nollama rm nome-modello    # elimina e libera spazio</pre>' +
+      '<p class="small">L\'elenco completo è su <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a>. Poi premi «Aggiorna elenco».</p><button class="btn sm" type="button" data-a="mod-agg">Aggiorna elenco</button></details>';
+    return h;
+  },
+  dopoHome() {
+    const f = $('aFile');
+    if (f) f.onchange = async () => { const x = f.files[0]; if (!x) return; if (x.size > 2e6) { toast('File troppo grande (max 2 MB)'); return; } this.fileTesto = (await x.text()).trim(); this.fileNome = x.name; $('aFileNome').textContent = x.name + ' · ' + this.fileTesto.length.toLocaleString('it-IT') + ' caratteri'; };
+    $('aModelli').ontoggle = () => { this.modelliAperti = $('aModelli').open; };
+    this.disegnaModelli();
+  },
+  disegnaModelli() {
+    const box = $('aModLista'); if (!box) return;
+    const st = IA.st;
+    if (!st) { box.innerHTML = '<p class="small">Controllo…</p>'; return; }
+    if (!st.mac || !st.attiva) { box.innerHTML = '<p class="small">' + (!st.mac ? 'Il Mac non risponde.' : 'Ollama non è attivo sul Mac.') + '</p>'; return; }
+    const scelto = IA.modello();
+    box.innerHTML = '<div class="list">' + ['' ].concat(st.modelli).map(m => '<label class="row" style="cursor:pointer"><input type="radio" name="aMod" value="' + esc(m) + '"' + (m === scelto ? ' checked' : '') + ' style="width:20px;height:20px;accent-color:var(--accent)"><div class="tx"><b>' + (m ? esc(m) : 'Automatico') + '</b><span>' + (m ? (m === st.modello ? 'predefinito del Mac' : 'installato sul Mac') : 'quello predefinito del Mac' + (st.modello ? ' (' + esc(st.modello) + ')' : '')) + '</span></div></label>').join('') + '</div>' +
+      (st.modelli.length ? '' : '<p class="small">Nessun modello installato: scaricane uno con «ollama pull».</p>');
+  },
+  hStat() {
+    const log = AX.store.get('studio-log', []);
+    const t0 = oggi();
+    const g = [];
+    for (let i = 13; i >= 0; i--) { const a = t0 - i * 864e5, b = a + 864e5; const s = log.filter(x => x.t >= a && x.t < b); g.push({n: s.reduce((p, x) => p + x.n, 0), ok: s.reduce((p, x) => p + x.giuste, 0)}); }
+    const max = Math.max(1, ...g.map(x => x.n));
+    const sett = log.filter(x => x.t >= t0 - 6 * 864e5);
+    const n7 = sett.reduce((p, x) => p + x.n, 0), ok7 = sett.reduce((p, x) => p + x.giuste, 0);
+    let serie = 0;
+    for (let i = g.length - 1; i >= 0; i--) { if (g[i].n) serie++; else if (i === g.length - 1) continue; else break; }
+    const tot = this.mazzi().reduce((p, m) => p + m.domande.length, 0);
+    const df = this.mazzi().reduce((p, m) => p + m.domande.filter(daFare).length, 0);
+    return '<div class="h2">Statistiche</div><div class="num4"><div><b>' + g[13].n + '</b><span>risposte oggi</span></div><div><b>' + (n7 ? Math.round(ok7 / n7 * 100) + '%' : '—') + '</b><span>giuste in 7 giorni</span></div><div><b>' + serie + '</b><span>giorni di fila</span></div><div><b>' + df + '/' + tot + '</b><span>da ripassare</span></div></div>' +
+      '<div class="card"><b style="font-size:15px">Ultimi 14 giorni</b><div class="chart">' + g.map(x => '<i class="' + (x.n ? '' : 'zero') + '" style="height:' + (x.n ? Math.max(6, x.n / max * 100) : 3) + '%" title="' + x.n + ' risposte, ' + x.ok + ' giuste"></i>').join('') + '</div><div class="small">Ogni barra è un giorno: più è alta, più domande hai fatto.</div></div>';
+  },
+  hBoxes(m) {
+    const n = m.domande.length || 1, c = [0, 0, 0, 0, 0];
+    m.domande.forEach(q => { c[Math.min(5, Math.max(1, q.box || 1)) - 1]++; });
+    return '<div class="boxes">' + c.map((x, i) => x ? '<i style="width:' + (x / n * 100) + '%;background:' + COL_BOX[i] + '"></i>' : '').join('') + '</div><div class="leg">' + c.map((x, i) => '<span style="--c:' + COL_BOX[i] + '">Livello ' + (i + 1) + ': ' + x + '</span>').join('') + '</div>' +
+      '<p class="small">Ripetizione dilazionata: ogni risposta giusta fa salire la domanda di livello e la ripresenta più tardi (1, 3, 7, 14 giorni); una sbagliata la riporta al livello 1.</p>';
+  },
+  hMazzo() {
+    const m = this.mazzo(); if (!m) { this.vista = 'home'; return this.hHome(); }
+    const df = m.domande.filter(daFare).length, n = m.domande.length;
+    const viste = m.domande.reduce((p, q) => p + (q.viste || 0), 0), giuste = m.domande.reduce((p, q) => p + (q.giuste || 0), 0);
+    return '<button class="btn sm" type="button" data-a="home">‹ Allenamenti</button><div class="h2">' + esc(m.titolo) + '</div>' +
+      '<div class="num4"><div><b>' + n + '</b><span>domande</span></div><div><b>' + df + '</b><span>da ripassare</span></div><div><b>' + (viste ? Math.round(giuste / viste * 100) + '%' : '—') + '</b><span>risposte giuste</span></div></div>' +
+      '<div class="card">' + this.hBoxes(m) + '</div>' +
+      '<div class="btns"><button class="btn pri" type="button" data-a="ripassa"' + (n ? '' : ' disabled') + '>' + (df ? 'Ripassa (' + df + ')' : 'Ripassa') + '</button><button class="btn" type="button" data-a="tutte"' + (n ? '' : ' disabled') + '>Tutte le domande</button><button class="btn" type="button" data-a="mano">+ Domanda</button><button class="btn" type="button" data-a="esporta">Esporta</button><button class="btn" type="button" data-a="elimina-mazzo">Elimina</button></div>' +
+      '<div class="list">' + (n ? m.domande.map(q => '<div class="qrow"><i class="pill" style="flex:none">' + (q.tipo === 'crocette' ? 'Crocette' : 'Aperta') + '</i><div class="tx">' + esc(q.domanda) + '<span>Livello ' + (q.box || 1) + ' · ' + (q.viste ? (q.giuste || 0) + '/' + q.viste + ' giuste' : 'mai provata') + (daFare(q) ? ' · da ripassare' : ' · prossimo ripasso ' + new Date(q.prossima).toLocaleDateString('it-IT', {day: 'numeric', month: 'short'})) + '</span></div><button class="btn sm" type="button" data-a="del-q" data-q="' + q.id + '">Elimina</button></div>').join('') : '<p class="vuoto">Nessuna domanda.</p>') + '</div>';
+  },
+  avvia(ids, titolo) {
+    if (!ids.length) { toast('Niente da ripassare adesso'); return; }
+    this.sess = {mazzo: this.mazzoId, coda: ids, i: 0, giuste: 0, fatte: 0, sbagliate: [], risposto: false, titolo, inizio: Date.now()};
+    this.vista = 'quiz'; this.disegna();
+  },
+  hQuiz() {
+    const s = this.sess, m = this.mazzo(s.mazzo);
+    const q = m && m.domande.find(x => x.id === s.coda[s.i]);
+    if (!q) { this.vista = 'mazzo'; return this.hMazzo(); }
+    let h = '<div class="qhead"><button class="btn sm" type="button" data-a="esci">‹ Esci</button><span class="small">' + (s.i + 1) + ' di ' + s.coda.length + ' · ' + s.giuste + ' giuste</span></div>' +
+      '<div class="prog"><i style="width:' + (s.i / s.coda.length * 100) + '%"></i></div>' +
+      '<i class="pill">Livello ' + (q.box || 1) + '</i><div class="qtext">' + esc(q.domanda) + '</div>';
+    if (q.tipo === 'crocette') {
+      h += q.opzioni.map((o, k) => '<button class="opt' + (s.risposto ? (k === q.corretta ? ' giusta' : k === s.scelta ? ' sbagliata' : '') : '') + '" type="button" data-a="scegli" data-k="' + k + '"' + (s.risposto ? ' disabled' : '') + '><b>' + String.fromCharCode(65 + k) + '</b><span>' + esc(o) + '</span></button>').join('');
+      if (s.risposto) h += '<div class="note ' + (s.esatta ? 'ok' : 'bad') + '"><b>' + (s.esatta ? 'Giusto!' : 'Sbagliato: la risposta è ' + String.fromCharCode(65 + q.corretta) + '.') + '</b>' + (q.spiegazione ? ' ' + esc(q.spiegazione) : '') + '</div><button class="btn pri full" type="button" data-a="avanti">' + (s.i + 1 < s.coda.length ? 'Avanti' : 'Fine') + '</button>';
+    } else {
+      h += '<textarea class="in" id="qRisp" placeholder="Scrivi la tua risposta (anche solo i punti principali)"' + (s.mostrata ? ' readonly' : '') + '>' + esc(s.testo || '') + '</textarea>';
+      if (!s.mostrata) h += '<button class="btn pri full" type="button" data-a="mostra" style="margin-top:10px">Mostra la risposta</button>';
+      else {
+        h += '<div class="card"><b>Risposta modello</b><p style="margin:6px 0;white-space:pre-wrap">' + esc(q.risposta) + '</p>' + (q.punti && q.punti.length ? '<b style="font-size:15px">Punti chiave</b><ul class="passi">' + q.punti.map(p => '<li>' + esc(p) + '</li>').join('') + '</ul>' : '') + '</div>';
+        if (s.giudizio) h += '<div class="note ' + (s.giudizio.voto >= 6 ? 'ok' : 'warn') + '"><b>Correzione dell\'IA: ' + s.giudizio.voto + '/10 (' + esc(s.giudizio.esito) + ').</b> ' + esc(s.giudizio.commento) + '</div>';
+        else if (IA.st && IA.st.attiva && (s.testo || '').trim().length > 2) h += '<button class="btn full" type="button" data-a="correggi"' + (s.correggendo ? ' disabled' : '') + '>' + (s.correggendo ? 'L\'IA sta correggendo…' : 'Correggi la mia risposta con l\'IA') + '</button>';
+        if (!s.risposto) h += '<p class="small" style="margin-top:12px">Com\'è andata?</p><div class="row2" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><button class="btn" type="button" data-a="auto" data-v="0">Da ripassare ✗</button><button class="btn pri" type="button" data-a="auto" data-v="1">L\'ho saputa ✓</button></div>';
+        else h += '<div class="note ' + (s.esatta ? 'ok' : 'bad') + '">' + (s.esatta ? 'Segnata come saputa.' : 'Segnata da ripassare.') + '</div><button class="btn pri full" type="button" data-a="avanti">' + (s.i + 1 < s.coda.length ? 'Avanti' : 'Fine') + '</button>';
+      }
+    }
+    return h;
+  },
+  registra(esatta) {
+    const s = this.sess; const mm = this.mazzi(); const m = mm.find(x => x.id === s.mazzo); if (!m) return;
+    const q = m.domande.find(x => x.id === s.coda[s.i]); if (!q) return;
+    q.viste = (q.viste || 0) + 1;
+    if (esatta) { q.giuste = (q.giuste || 0) + 1; q.box = Math.min(5, (q.box || 1) + 1); } else q.box = 1;
+    q.prossima = oggi() + GIORNI[q.box - 1] * 864e5;
+    q.ultima = Date.now();
+    this.salva(mm);
+    s.risposto = true; s.esatta = esatta; s.fatte++; if (esatta) s.giuste++; else s.sbagliate.push(q.id);
+  },
+  chiudiSessione() {
+    const s = this.sess; if (!s || !s.fatte || s.loggata) return;
+    s.loggata = true;
+    const log = AX.store.get('studio-log', []);
+    log.push({t: Date.now(), mazzo: s.mazzo, n: s.fatte, giuste: s.giuste});
+    AX.store.set('studio-log', log.slice(-400));
+  },
+  hFine() {
+    const s = this.sess;
+    const p = s.fatte ? Math.round(s.giuste / s.fatte * 100) : 0;
+    return '<div class="h2">Allenamento finito</div><div class="num4"><div><b>' + s.giuste + '/' + s.fatte + '</b><span>giuste</span></div><div><b>' + p + '%</b><span>risultato</span></div><div><b>' + Math.max(1, Math.round((Date.now() - s.inizio) / 60000)) + '\'</b><span>minuti</span></div></div>' +
+      '<div class="note ' + (p >= 80 ? 'ok' : p >= 50 ? 'warn' : 'bad') + '">' + (p >= 80 ? 'Ottimo lavoro!' : p >= 50 ? 'Bene, ripassa quelle sbagliate.' : 'Ripassa con calma: le domande sbagliate torneranno presto.') + '</div>' +
+      '<div class="btns">' + (s.sbagliate.length ? '<button class="btn pri" type="button" data-a="errori">Ripassa gli errori (' + s.sbagliate.length + ')</button>' : '') + '<button class="btn" type="button" data-a="torna-mazzo">Torna all\'allenamento</button></div>';
+  },
+  hMano() {
+    const mm = this.mazzi();
+    const t = this.manoTipo || 'crocette';
+    return '<button class="btn sm" type="button" data-a="' + (this.ritorno === 'mazzo' ? 'torna-mazzo' : 'home') + '">‹ Indietro</button><div class="h2">Nuova domanda</div>' +
+      '<div class="field"><label for="mMazzo">Allenamento</label><select class="in" id="mMazzo">' + mm.map(m => '<option value="' + m.id + '"' + (m.id === this.mazzoId ? ' selected' : '') + '>' + esc(m.titolo) + '</option>').join('') + '<option value=""' + (mm.some(m => m.id === this.mazzoId) ? '' : ' selected') + '>Nuovo allenamento…</option></select></div>' +
+      '<div class="field" id="mNuovoW"><input class="in" id="mNuovo" placeholder="Titolo del nuovo allenamento" autocomplete="off"></div>' +
+      '<div class="seg"><button type="button" data-a="mtipo" data-v="crocette" class="' + (t === 'crocette' ? 'on' : '') + '">Crocette</button><button type="button" data-a="mtipo" data-v="aperta" class="' + (t === 'aperta' ? 'on' : '') + '">Aperta</button></div>' +
+      '<div class="field"><label for="mDom">Domanda</label><textarea class="in" id="mDom" style="min-height:80px"></textarea></div>' +
+      (t === 'crocette' ? '<div class="field"><label>Opzioni (segna quella giusta)</label><div id="mOpz">' + [0, 1, 2, 3].map(i => this.hOpz(i)).join('') + '</div><button class="btn sm" type="button" data-a="mpiu">+ Opzione</button></div><div class="field"><label for="mSpieg">Spiegazione (facoltativa)</label><textarea class="in" id="mSpieg" style="min-height:60px"></textarea></div>'
+        : '<div class="field"><label for="mRisp">Risposta</label><textarea class="in" id="mRisp" style="min-height:80px"></textarea></div><div class="field"><label for="mPunti">Punti chiave (uno per riga, facoltativi)</label><textarea class="in" id="mPunti" style="min-height:60px"></textarea></div>') +
+      '<button class="btn pri full" type="button" data-a="msalva">Salva la domanda</button><p class="small">Dopo il salvataggio puoi scriverne subito un\'altra.</p>' +
+      (this.mazzo() ? '<button class="btn full" type="button" data-a="torna-mazzo">Vai all\'allenamento «' + esc(this.mazzo().titolo) + '» (' + this.mazzo().domande.length + ' domande) ›</button>' : '');
+  },
+  hOpz(i) { return '<div class="opz-in"><input type="radio" name="mGiusta" value="' + i + '"' + (i === 0 ? ' checked' : '') + ' aria-label="Opzione giusta"><input class="in" data-opz="' + i + '" placeholder="Opzione ' + String.fromCharCode(65 + i) + '" autocomplete="off"></div>'; },
+  dopoMano() { const s = $('mMazzo'); const w = () => { $('mNuovoW').hidden = !!s.value; }; s.onchange = w; w(); },
+  salvaManuale() {
+    const mm = this.mazzi();
+    let mid = $('mMazzo').value, m = mm.find(x => x.id === mid);
+    if (!m) {
+      const tit = $('mNuovo').value.trim(); if (!tit) { toast('Scrivi il titolo del nuovo allenamento'); $('mNuovo').focus(); return; }
+      m = {id: uid(), titolo: tit.slice(0, 80), creato: Date.now(), fonte: 'mano', domande: []}; mm.unshift(m); mid = m.id;
+    }
+    const domanda = $('mDom').value.trim();
+    if (domanda.length < 3) { toast('Scrivi la domanda'); $('mDom').focus(); return; }
+    let q;
+    if ((this.manoTipo || 'crocette') === 'crocette') {
+      const campi = qsa('[data-opz]', $('mOpz'));
+      const g = +((qsa('input[name="mGiusta"]', $('mOpz')).find(r => r.checked) || {}).value || 0);
+      const op = []; let corr = -1;
+      campi.forEach((c, i) => { const v = c.value.trim(); if (v) { if (i === g) corr = op.length; op.push(v); } });
+      if (op.length < 2) { toast('Servono almeno due opzioni'); return; }
+      if (corr < 0) { toast('Segna l\'opzione giusta (deve essere compilata)'); return; }
+      q = {id: uid(), tipo: 'crocette', domanda, opzioni: op, corretta: corr, spiegazione: $('mSpieg').value.trim(), box: 1, prossima: 0, viste: 0, giuste: 0};
+    } else {
+      const r = $('mRisp').value.trim(); if (!r) { toast('Scrivi la risposta'); return; }
+      q = {id: uid(), tipo: 'aperta', domanda, risposta: r, punti: $('mPunti').value.split('\n').map(x => x.trim()).filter(Boolean), box: 1, prossima: 0, viste: 0, giuste: 0};
+    }
+    m.domande.push(q); this.salva(mm); this.mazzoId = mid;
+    toast('Domanda salvata (' + m.domande.length + ' in «' + m.titolo + '»)');
+    this.disegna(); const s = $('mMazzo'); if (s) s.value = mid; this.dopoMano();
+  },
+  async crea() {
+    const st = await IA.verifica();
+    if (!st.attiva) { this.disegna(); return; }
+    let fonte = '', argomento = '';
+    if (this.fonte === 'arg') { argomento = ($('aArg').value || '').trim(); if (argomento.length < 3) { toast('Scrivi un argomento'); $('aArg').focus(); return; } }
+    else if (this.fonte === 'testo') { fonte = ($('aTesto').value || '').trim(); if (fonte.length < 80) { toast('Incolla un testo un po\' più lungo'); return; } }
+    else { fonte = this.fileTesto; if (!fonte) { toast('Scegli un file .txt'); return; } }
+    const n = +$('aN').value, tipo = $('aTipo').value, liv = $('aLiv').value;
+    this.opz = {n: String(n), tipo, liv};
+    const troppo = fonte.length > 12000;
+    if (troppo) fonte = fonte.slice(0, 12000);
+    const tipoTx = tipo === 'crocette' ? 'tutte a scelta multipla (4 opzioni)' : tipo === 'aperte' ? 'tutte a risposta aperta' : 'miste: circa due terzi a scelta multipla (4 opzioni) e un terzo a risposta aperta';
+    const sistema = 'Sei un insegnante esperto che prepara quiz di allenamento in italiano. Le domande devono essere corrette, verificabili, chiare e non ambigue. Per le crocette una sola opzione giusta e distrattori plausibili. Non inventare fatti: se l\'argomento è vago resta su conoscenze generali solide; se c\'è un testo, usa SOLO quel testo. Rispondi SOLO con JSON valido.';
+    const prompt = 'Crea ' + n + ' domande ' + tipoTx + ', di livello ' + liv + ', ' + (argomento ? 'sull\'argomento: ' + argomento : 'basate SOLO su questo testo:\n"""\n' + fonte + '\n"""') + '\n\nFormato JSON esatto:\n{"titolo":"titolo breve del quiz","domande":[\n {"tipo":"crocette","domanda":"…","opzioni":["…","…","…","…"],"corretta":0,"spiegazione":"perché è la risposta giusta"},\n {"tipo":"aperta","domanda":"…","risposta":"risposta modello in 2-4 frasi","punti":["punto chiave","punto chiave"]}\n]}\n"corretta" è la posizione (da 0) dell\'opzione giusta.';
+    this.creando = true; this.disegna();
+    const box = $('aCreaStato'); const t0 = Date.now();
+    const tick = setInterval(() => { const b = $('aCreaStato'); if (b) b.innerHTML = '<p class="small">L\'IA sul Mac sta preparando le domande… ' + Math.round((Date.now() - t0) / 1000) + ' s (può servire un minuto o due)</p>'; }, 1000);
+    if (box) box.innerHTML = '<p class="small">L\'IA sul Mac sta preparando le domande…</p>';
+    try {
+      const o = await IA.json(prompt, sistema, r => {
+        if (!Array.isArray(r.domande)) return 'manca l\'elenco "domande"';
+        let v = r.domande.map(normalizzaDomanda).filter(Boolean);
+        if (tipo === 'crocette' && v.some(q => q.tipo === 'crocette')) v = v.filter(q => q.tipo === 'crocette');
+        if (tipo === 'aperte' && v.some(q => q.tipo === 'aperta')) v = v.filter(q => q.tipo === 'aperta');
+        if (!v.length) return 'nessuna domanda valida';
+        r._valide = v.slice(0, n); return '';
+      });
+      const mm = this.mazzi();
+      const titolo = String(o.titolo || argomento || (this.fonte === 'file' ? this.fileNome : 'Allenamento sul testo')).trim().slice(0, 80) || 'Allenamento';
+      const m = {id: uid(), titolo, creato: Date.now(), fonte: 'ia', argomento: argomento || '', domande: o._valide};
+      mm.unshift(m); this.salva(mm);
+      this.mazzoId = m.id; this.vista = 'mazzo';
+      toast('Create ' + m.domande.length + ' domande' + (m.domande.length < n ? ' valide su ' + n + ' richieste' : '') + (troppo ? ' (usati i primi 12.000 caratteri)' : ''));
+    } catch (err) {
+      this.erroreCrea = err.message;
+    } finally {
+      clearInterval(tick); this.creando = false; this.disegna();
+      if (this.erroreCrea) { const b = $('aCreaStato'); if (b) b.innerHTML = '<div class="note bad">' + esc(this.erroreCrea) + '</div>'; this.erroreCrea = ''; }
+    }
+  },
+  async correggi() {
+    const s = this.sess, q = this.mazzo(s.mazzo).domande.find(x => x.id === s.coda[s.i]);
+    s.correggendo = true; this.disegna();
+    try {
+      s.giudizio = await IA.json('Domanda: ' + q.domanda + '\nRisposta modello: ' + q.risposta + (q.punti && q.punti.length ? '\nPunti chiave: ' + q.punti.join('; ') : '') + '\n\nRisposta dello studente: ' + s.testo + '\n\nValuta e rispondi con il JSON.',
+        'Sei un insegnante giusto e incoraggiante. Confronta la risposta dello studente con la risposta modello e i punti chiave, badando al contenuto e non allo stile. Rispondi SOLO con JSON: {"voto":0-10,"esito":"corretta|parziale|errata","commento":"1-3 frasi in italiano: cosa va bene e cosa manca"}',
+        r => { const v = Number(r.voto); if (!isFinite(v) || v < 0 || v > 10) return 'voto non valido'; if (typeof r.commento !== 'string' || !r.commento.trim()) return 'manca il commento'; r.voto = Math.round(v); r.esito = /^(corretta|parziale|errata)$/i.test(r.esito || '') ? r.esito.toLowerCase() : (v >= 6 ? 'corretta' : 'errata'); return ''; });
+    } catch (err) { toast(err.message); }
+    s.correggendo = false; this.disegna();
+  },
+  esporta() {
+    const m = this.mazzo(); if (!m) return;
+    const t = m.titolo + '\n' + '='.repeat(Math.min(60, m.titolo.length)) + '\n\n' + m.domande.map((q, i) => (i + 1) + '. ' + q.domanda + '\n' + (q.tipo === 'crocette' ? q.opzioni.map((o, k) => '   ' + String.fromCharCode(65 + k) + ') ' + o + (k === q.corretta ? '  ✓' : '')).join('\n') + (q.spiegazione ? '\n   Spiegazione: ' + q.spiegazione : '') : '   Risposta: ' + q.risposta + (q.punti && q.punti.length ? '\n   Punti chiave: ' + q.punti.join('; ') : ''))).join('\n\n') + '\n';
+    scarica(m.titolo.replace(/[^\wÀ-ſ -]+/g, '').trim().slice(0, 50) + '.txt', t);
+  },
+  clic(e) {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const a = b.dataset.a, s = this.sess;
+    if (a === 'riprova-ia') { IA.verifica(true).then(() => this.disegna()); return; }
+    if (a === 'fonte') { this.fonte = b.dataset.v; qsa('#aFonte button').forEach(x => x.classList.toggle('on', x === b)); qsa('[data-f]', $('aCorpo')).forEach(x => { x.hidden = x.dataset.f !== this.fonte; }); return; }
+    if (a === 'crea') { this.crea(); return; }
+    if (a === 'mod-agg') { IA.verifica(true).then(() => { this.modelliAperti = true; this.disegna(); }); return; }
+    if (a === 'mano') { this.ritorno = this.vista === 'mazzo' ? 'mazzo' : 'home'; if (this.ritorno === 'home') this.mazzoId = ''; this.vista = 'mano'; this.disegna(); return; }
+    if (a === 'mtipo') { this.manoTipo = b.dataset.v; const keep = {mazzo: $('mMazzo').value, nuovo: $('mNuovo').value, dom: $('mDom').value}; this.disegna(); $('mMazzo').value = keep.mazzo; $('mNuovo').value = keep.nuovo; $('mDom').value = keep.dom; this.dopoMano(); return; }
+    if (a === 'mpiu') { const n = qsa('[data-opz]', $('mOpz')).length; if (n >= 6) { toast('Al massimo 6 opzioni'); return; } $('mOpz').insertAdjacentHTML('beforeend', this.hOpz(n)); return; }
+    if (a === 'msalva') { this.salvaManuale(); return; }
+    if (a === 'home') { this.vista = 'home'; this.disegna(); return; }
+    if (a === 'apri') { this.mazzoId = b.dataset.id; this.vista = 'mazzo'; this.disegna(); return; }
+    if (a === 'torna-mazzo') { this.vista = this.mazzo() ? 'mazzo' : 'home'; this.disegna(); return; }
+    if (a === 'ripassa') { const m = this.mazzo(); let ids = m.domande.filter(daFare).map(q => q.id); if (!ids.length) { ids = m.domande.slice().sort((x, y) => (x.box || 1) - (y.box || 1) || (x.prossima || 0) - (y.prossima || 0)).slice(0, 10).map(q => q.id); toast('Niente in scadenza: ripassi le domande meno sicure'); } this.avvia(mescola(ids).slice(0, 20), 'Ripasso'); return; }
+    if (a === 'tutte') { this.avvia(mescola(this.mazzo().domande.map(q => q.id)), 'Tutte'); return; }
+    if (a === 'esporta') { this.esporta(); return; }
+    if (a === 'elimina-mazzo') { conferma(b, () => { this.salva(this.mazzi().filter(m => m.id !== this.mazzoId)); this.vista = 'home'; this.disegna(); toast('Allenamento eliminato'); }, 'Tocca di nuovo per eliminare'); return; }
+    if (a === 'del-q') { conferma(b, () => { const mm = this.mazzi(); const m = mm.find(x => x.id === this.mazzoId); m.domande = m.domande.filter(q => q.id !== b.dataset.q); this.salva(mm); this.disegna(); }, 'Conferma'); return; }
+    if (!s) return;
+    if (a === 'scegli' && !s.risposto) { const q = this.mazzo(s.mazzo).domande.find(x => x.id === s.coda[s.i]); s.scelta = +b.dataset.k; this.registra(s.scelta === q.corretta); this.disegna(); return; }
+    if (a === 'mostra') { s.testo = ($('qRisp').value || ''); s.mostrata = true; this.disegna(); return; }
+    if (a === 'correggi') { this.correggi(); return; }
+    if (a === 'auto' && !s.risposto) { this.registra(b.dataset.v === '1'); this.disegna(); return; }
+    if (a === 'avanti') {
+      if (s.i + 1 < s.coda.length) { s.i++; s.risposto = false; s.scelta = null; s.mostrata = false; s.testo = ''; s.giudizio = null; this.disegna(); }
+      else { this.chiudiSessione(); this.vista = 'fine'; this.disegna(); }
+      return;
+    }
+    if (a === 'esci') { this.chiudiSessione(); this.vista = 'mazzo'; this.disegna(); return; }
+    if (a === 'errori') { this.avvia(mescola(s.sbagliate.slice()), 'Errori'); return; }
+  },
+  cambia(e) { if (e.target.name === 'aMod') { AX.store.set('ia-modello', e.target.value); toast(e.target.value ? 'Modello: ' + e.target.value : 'Modello automatico'); } }
+};
+
+/* =====================================================================
+   ASSISTENTE IDEE
+   ===================================================================== */
+const MODI = {
+  idee: {n: 'Brainstorming', d: 'Tante idee diverse, raggruppate, con le 3 più promettenti.', s: 'Sei un facilitatore creativo. Aiuti a sviluppare idee e richieste. Genera molte idee diverse e concrete (almeno 8), raggruppate per tema, ognuna con una riga di spiegazione; poi indica le 3 più promettenti e perché. Se mancano informazioni importanti fai al massimo 2 domande alla fine.'},
+  piano: {n: 'Piano in passi', d: 'Obiettivo, passi numerati con tempi, risorse, rischi e primo passo da fare oggi.', s: 'Sei un project manager pratico. Trasforma l\'idea o la richiesta in un piano: obiettivo in una frase, passi numerati con durata stimata, risorse necessarie, rischi principali con contromisure, e il primo passo concreto da fare oggi.'},
+  procontro: {n: 'Pro e contro', d: 'Analisi equilibrata con pesi, alternative e una raccomandazione.', s: 'Sei un consulente imparziale. Analizza la scelta: elenca i pro e i contro, ognuno con peso (alto, medio, basso), poi le alternative possibili e infine una raccomandazione motivata, dicendo da cosa dipende.'},
+  libero: {n: 'Libero', d: 'Conversazione aperta per chiarire e sviluppare.', s: 'Sei un assistente che aiuta a sviluppare idee e richieste in modo chiaro, concreto e onesto.'}
+};
+const COMUNE = ' Rispondi sempre in italiano. Usa titoli brevi ed elenchi in Markdown semplice. Non inventare dati, prezzi o fatti specifici: se non li sai, dillo.';
+const Idee = {
+  chatId: '', modo: 'idee', inviando: false,
+  chats() { return AX.store.get('idee-chat', []); },
+  salva(c) { AX.store.set('idee-chat', c.slice(0, 60)); },
+  chat() { return this.chats().find(c => c.id === this.chatId); },
+  async init() {
+    this.modo = AX.store.get('idee-modo', 'idee');
+    const ultima = this.chats()[0]; if (ultima) { this.chatId = ultima.id; this.modo = ultima.modo || this.modo; }
+    $('iModo').onclick = e => { const b = e.target.closest('button'); if (!b) return; this.modo = b.dataset.m; AX.store.set('idee-modo', this.modo); this.disegnaModo(); };
+    $('iInvia').onclick = () => this.invia();
+    $('iIn').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); this.invia(); } });
+    $('iIn').addEventListener('input', () => { const t = $('iIn'); t.style.height = '44px'; t.style.height = Math.min(160, t.scrollHeight) + 'px'; });
+    $('iNuova').onclick = () => { this.chatId = ''; $('iStorico').hidden = true; this.disegna(); $('iIn').focus(); };
+    $('iStoricoBtn').onclick = () => { $('iStorico').hidden = !$('iStorico').hidden; this.disegnaStorico(); };
+    $('iStorico').onclick = e => { const b = e.target.closest('[data-id]'); if (!b) return; this.chatId = b.dataset.id; const c = this.chat(); if (c) this.modo = c.modo || this.modo; $('iStorico').hidden = true; this.disegna(); };
+    $('iAz').onclick = e => this.azione(e);
+    $('iMsg').onclick = e => { const b = e.target.closest('[data-sugg]'); if (b) { $('iIn').value = b.dataset.sugg; $('iIn').focus(); } if (e.target.closest('[data-a="riprova"]')) this.invia(this.ultimoTesto); };
+    $('iIa').onclick = e => { if (e.target.closest('[data-a="riprova-ia"]')) this.statoIA(true); };
+    if (!navigator.share) $('iShare').hidden = true;
+    this.disegna();
+    await this.statoIA();
+  },
+  async statoIA(force) {
+    const st = await IA.verifica(force);
+    $('iIa').innerHTML = IA.nota(st, 'Le conversazioni salvate restano leggibili ed esportabili anche senza IA.');
+    this.pulsante();
+  },
+  pulsante() { const ok = IA.st && IA.st.attiva; $('iInvia').disabled = this.inviando || !ok; $('iInvia').textContent = this.inviando ? '…' : 'Invia'; },
+  disegnaModo() {
+    qsa('#iModo button').forEach(b => b.classList.toggle('on', b.dataset.m === this.modo));
+    $('iModoDesc').textContent = MODI[this.modo].d;
+  },
+  disegnaStorico() {
+    const cc = this.chats();
+    $('iStoricoBtn').textContent = 'Conversazioni' + (cc.length ? ' (' + cc.length + ')' : '');
+    $('iStorico').innerHTML = cc.length ? '<div class="list">' + cc.map(c => '<button class="row" type="button" data-id="' + c.id + '"><div class="tx"><b>' + esc(c.titolo) + '</b><span>' + esc((MODI[c.modo] || MODI.libero).n) + ' · ' + c.msg.length + ' messaggi · ' + esc(fa(c.agg)) + '</span></div></button>').join('') + '</div>' : '<p class="vuoto">Nessuna conversazione salvata.</p>';
+  },
+  disegna() {
+    this.disegnaModo(); this.disegnaStorico(); this.pulsante();
+    const c = this.chat();
+    $('iAz').hidden = !c;
+    if (!c) {
+      $('iMsg').innerHTML = '<p class="small" style="margin:6px 4px">Scrivi un\'idea, un progetto o una decisione da prendere. L\'IA gira sul tuo Mac: niente va su Internet. Alcuni esempi:</p><div class="sugg">' +
+        ['Idee per un regalo di compleanno a un amico appassionato di ciclismo', 'Voglio organizzare un viaggio in bici di 3 giorni in Toscana', 'Meglio una bici gravel o una da corsa per iniziare?', 'Come trasformo la mia playlist preferita in una piccola radio per amici?'].map(s => '<button type="button" data-sugg="' + esc(s) + '">' + esc(s) + '</button>').join('') + '</div>';
+      return;
+    }
+    $('iMsg').innerHTML = c.msg.map(m => m.r === 'u' ? '<div class="bub u">' + esc(m.t) + '</div>' : '<div class="bub a">' + md(m.t) + '</div>').join('') +
+      (this.inviando ? '<div class="bub a" id="iAttesa"><span class="small">Sto pensando…</span></div>' : '') +
+      (this.errore ? '<div class="bub a err">' + esc(this.errore) + '<div class="btns"><button class="btn sm" type="button" data-a="riprova">Riprova</button></div></div>' : '');
+  },
+  async invia(testo) {
+    testo = (testo != null ? testo : $('iIn').value).trim();
+    if (!testo || this.inviando) return;
+    const st = await IA.verifica();
+    if (!st.attiva) { $('iIa').innerHTML = IA.nota(st); this.pulsante(); toast(st.mac ? 'L\'IA non è attiva sul Mac' : 'Il Mac non risponde'); return; }
+    let cc = this.chats(); let c = cc.find(x => x.id === this.chatId);
+    if (!c) { c = {id: uid(), titolo: testo.replace(/\s+/g, ' ').slice(0, 60), modo: this.modo, creata: Date.now(), agg: Date.now(), msg: []}; cc.unshift(c); this.chatId = c.id; }
+    // contesto: gli ultimi messaggi (l'IA del Mac riceve un solo testo)
+    const ripeti = !!this.errore && this.ultimoTesto === testo && c.msg.length && c.msg[c.msg.length - 1].r === 'u' && c.msg[c.msg.length - 1].t === testo;
+    const prec = ripeti ? c.msg.slice(0, -1) : c.msg;
+    let storia = prec.slice(-12).map(m => (m.r === 'u' ? 'Utente: ' : 'Assistente: ') + m.t).join('\n\n');
+    if (storia.length > 8000) storia = '…' + storia.slice(-8000);
+    if (!ripeti) c.msg.push({r: 'u', t: testo, ts: Date.now()});
+    c.modo = this.modo; c.agg = Date.now();
+    cc = [c].concat(cc.filter(x => x.id !== c.id)); this.salva(cc);
+    $('iIn').value = ''; $('iIn').style.height = '44px';
+    this.inviando = true; this.errore = ''; this.ultimoTesto = testo; this.disegna();
+    const t0 = Date.now(); const tick = setInterval(() => { const a = $('iAttesa'); if (a) a.innerHTML = '<span class="small">Sto pensando… ' + Math.round((Date.now() - t0) / 1000) + ' s</span>'; }, 1000);
+    window.scrollTo(0, document.body.scrollHeight);
+    try {
+      const prompt = (storia ? 'Conversazione finora:\n' + storia + '\n\n' : '') + 'Nuovo messaggio dell\'utente:\n' + testo + '\n\nRispondi come Assistente al nuovo messaggio, tenendo conto della conversazione.';
+      const r = await IA.testo(prompt, MODI[this.modo].s + COMUNE, 180000);
+      if (!r) throw new Error('L\'IA ha dato una risposta vuota.');
+      cc = this.chats(); c = cc.find(x => x.id === this.chatId);
+      if (c) { c.msg.push({r: 'a', t: r, ts: Date.now()}); c.agg = Date.now(); this.salva(cc); }
+    } catch (err) {
+      this.errore = 'Risposta non arrivata: ' + (err.name === 'AbortError' ? 'il Mac ci ha messo troppo' : err.message);
+    } finally {
+      clearInterval(tick); this.inviando = false; this.disegna();
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+  },
+  testoChat(c) {
+    return 'Atlante · Assistente idee\n' + c.titolo + '\nModalità: ' + (MODI[c.modo] || MODI.libero).n + '\n' + new Date(c.creata).toLocaleString('it-IT') + '\n\n' +
+      c.msg.map(m => (m.r === 'u' ? 'Tu' : 'Assistente') + ':\n' + m.t).join('\n\n') + '\n';
+  },
+  azione(e) {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const c = this.chat(); if (!c) return;
+    if (b.dataset.a === 'esporta') scarica('Idee - ' + c.titolo.replace(/[^\wÀ-ſ -]+/g, '').trim().slice(0, 40) + '.txt', this.testoChat(c));
+    else if (b.dataset.a === 'copia') copia(this.testoChat(c));
+    else if (b.dataset.a === 'condividi') navigator.share({title: c.titolo, text: this.testoChat(c)}).catch(() => {});
+    else if (b.dataset.a === 'elimina') conferma(b, () => { this.salva(this.chats().filter(x => x.id !== c.id)); this.chatId = ''; this.errore = ''; this.disegna(); toast('Conversazione eliminata'); }, 'Tocca di nuovo per eliminare');
+  }
+};
+
+/* =====================================================================
+   SCHEDE
+   ===================================================================== */
+const TABS = {uci: Uci, notizie: Notizie, allenati: Allena, idee: Idee};
+const inizializzato = {};
+function mostra(t) {
+  if (!TABS[t]) t = 'uci';
+  qsa('#tabs button').forEach(b => { const on = b.dataset.t === t; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+  Object.keys(TABS).forEach(x => { $('s-' + x).hidden = x !== t; });
+  if (!inizializzato[t]) { inizializzato[t] = true; try { TABS[t].init(); } catch (e) { console.error(e); toast('Errore: ' + e.message); } }
+  AX.store.set('studio-tab', t);
+  try { history.replaceState(null, '', '#' + t); } catch (e) {}
+}
+AX.header('Studio');
+$('tabs').onclick = e => { const b = e.target.closest('button[data-t]'); if (b) { mostra(b.dataset.t); window.scrollTo(0, 0); } };
+mostra((location.hash || '').slice(1) || AX.store.get('studio-tab', 'uci'));
+window.addEventListener('hashchange', () => mostra(location.hash.slice(1)));
+// per le prove automatiche
+window.STUDIO = {Notizie, Allena, Idee, IA, leggiFeed, normalizzaDomanda, md};
+})();
+</script>
+</body>
+</html>

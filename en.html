@@ -28,10 +28,10 @@ h1{font-size:21px;margin:0 0 6px}
     <p>Questo indirizzo non è più attivo. Atlante ora si usa con un codice di attivazione personale: chiedilo a chi ti ha inviato questo link.</p></div>
 </main>
 <script>
-// supprime la copie hors ligne de l'ancienne version (service worker et caches)
+// supprime la copie hors ligne de l'ancienne version (service worker et caches), sauf celle de l'app Musica (/musica/)
 (function(){
-  try{if('serviceWorker' in navigator)navigator.serviceWorker.getRegistrations().then(function(rs){rs.forEach(function(r){r.unregister()})}).catch(function(){})}catch(e){}
-  try{if(window.caches)caches.keys().then(function(ks){ks.forEach(function(k){caches.delete(k)})}).catch(function(){})}catch(e){}
+  try{if('serviceWorker' in navigator)navigator.serviceWorker.getRegistrations().then(function(rs){rs.forEach(function(r){if(r.scope.indexOf('/musica/')<0)r.unregister()})}).catch(function(){})}catch(e){}
+  try{if(window.caches)caches.keys().then(function(ks){ks.forEach(function(k){if(k.indexOf('atlante-musica-')!==0)caches.delete(k)})}).catch(function(){})}catch(e){}
 })();
 </script>
 </body>
