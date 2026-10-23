@@ -155,10 +155,19 @@ img{max-width:100%;display:block}
 
 /* barra schede */
 #tabs{position:fixed;z-index:31;left:0;right:0;bottom:0;padding:0 env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);background:var(--bar);-webkit-backdrop-filter:blur(24px) saturate(180%);backdrop-filter:blur(24px) saturate(180%);border-top:.5px solid var(--sep)}
-#tabs .in{display:grid;grid-template-columns:repeat(3,1fr);max-width:640px;margin:0 auto;height:52px}
-#tabs button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;color:var(--tab);font-size:10.5px;font-weight:500}
+#tabs .in{display:grid;grid-template-columns:repeat(var(--n,3),1fr);max-width:640px;margin:0 auto;height:52px}
+#tabs button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;color:var(--tab);font-size:10.5px;font-weight:500;min-width:0}
+#tabs button span{max-width:100%;padding:0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #tabs button svg{font-size:25px}
 #tabs button.on{color:var(--accent)}
+
+/* schede collegate (es. Benessere): pagina in un iframe sopra la barra; resta viva quando cambi scheda */
+#frames{position:fixed;z-index:20;left:0;right:0;top:env(safe-area-inset-top,0px);bottom:calc(52px + env(safe-area-inset-bottom,0px));background:var(--bg);overflow:hidden;visibility:hidden;pointer-events:none}
+#frames.on{visibility:visible;pointer-events:auto}
+#frames iframe{position:absolute;left:0;top:0;width:100%;height:100%;border:0;background:var(--bg);visibility:hidden}
+#frames.on iframe.show{visibility:visible}
+body.hasmini #frames iframe{height:calc(100% - 64px)}
+html.framed{overflow:hidden}
 
 /* player a tutto schermo */
 #np{position:fixed;inset:0;z-index:50;color:#fff;background:var(--npbg,#2c2c2e);transform:translateY(100%);visibility:hidden;transition:transform .48s cubic-bezier(.32,.72,0,1),visibility 0s .48s;display:flex;flex-direction:column;align-items:center;padding:calc(env(safe-area-inset-top,0px) + 8px) max(26px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 14px) max(26px,env(safe-area-inset-left,0px));touch-action:none}
@@ -262,6 +271,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 </head>
 <body>
 <main id="view"></main>
+<div id="frames"></div>
 
 <div id="mini" hidden>
   <button class="tap" data-a="opennp" style="display:contents"><span class="art" id="miniArt"></span><span class="mt"><b id="miniT"></b><span id="miniA"></span></span></button>
@@ -351,7 +361,9 @@ const I = {
   close:'<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   down:'<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></g>',
   ok:'<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zm4.2 6.3-5.4 5.7-2.9-2.8-1.2 1.3 4.1 4 6.6-7z"/>',
-  xc:'<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zm-3 5.4L7.9 9l3 3-3 3 1.1 1.1 3-3 3 3 1.1-1.1-3-3 3-3L15 7.9l-3 3z"/>'
+  xc:'<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zm-3 5.4L7.9 9l3 3-3 3 1.1 1.1 3-3 3 3 1.1-1.1-3-3 3-3L15 7.9l-3 3z"/>',
+  heart:'<path d="M12 20.8c-.3 0-.6-.1-.8-.3C6.3 16.2 2.6 13 2.6 8.8 2.6 5.9 4.8 3.6 7.6 3.6c1.8 0 3.3.9 4.4 2.3 1.1-1.4 2.6-2.3 4.4-2.3 2.8 0 5 2.3 5 5.2 0 4.2-3.7 7.4-8.6 11.7-.2.2-.5.3-.8.3z"/>',
+  globe:'<g fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.6 3.7 5.6 3.7 9s-1.3 6.4-3.7 9c-2.4-2.6-3.7-5.6-3.7-9S9.6 5.6 12 3z"/></g>'
 };
 const ic = (n, cls) => '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' + I[n] + '</svg>';
 
@@ -404,6 +416,7 @@ let q = '';
 let lists = [];
 const au = $('au');
 let curUrl = null, curId = null;
+let dlAfter = null;        // brano in streaming da mettere in coda download appena il Mac comincia a mandarlo
 
 /* ---------- lettura dei tag ---------- */
 const td = (enc, b) => { try { return new TextDecoder(enc).decode(b); } catch (e) { return ''; } };
@@ -529,7 +542,10 @@ async function readTags(file) {
 }
 function fromName(name) {
   let n = name.replace(/\.[^.]+$/, '').replace(/_/g, ' ').trim();
-  n = n.replace(/^\d{1,3}\s*[-._)]\s*/, '').replace(/^\d{1,3}\s+(?=\D)/, '');
+  // il numero all'inizio si toglie solo se è il numero della traccia: «883 - …», «50 Cent - …» restano artisti
+  const m = n.match(/^(\d{1,3})\s*([-.)])\s*(\S.*)$/);
+  if (m && (m[3].indexOf(' - ') >= 0 || m[1][0] === '0' || m[2] !== '-')) n = m[3];
+  else n = n.replace(/^0\d{0,2}\s+(?=\D)/, '');
   const i = n.indexOf(' - ');
   if (i > 0) return {artist:n.slice(0, i).trim(), title:n.slice(i + 3).trim()};
   return {title:n};
@@ -603,8 +619,9 @@ async function importFiles(list) {
 }
 
 /* ---------- libreria del Mac (disco di backup) e brani salvati sull'iPhone ---------- */
-// Se l'app è aperta dal Mac, la libreria arriva da api/musica/ (server/musica_libreria.py): catalogo,
-// file/<id>, copertina/<chiave>, aggiorna. Indirizzi relativi alla pagina: vanno bene anche sotto /musica/.
+// Se l'app è aperta dal Mac, la libreria arriva da api/musica/ (server/musica_libreria.py): catalogo (brani,
+// playlist del Mac, collegamenti), stato, aggiorna, file/<id>, copertina/<chiave>. Indirizzi relativi alla pagina:
+// funzionano alla radice come sotto /benessere/musica/.
 // Ogni brano ascoltato o scaricato col tasto finisce nell'archivio del telefono (IndexedDB) e non si riscarica più.
 const API = 'api/musica/';
 const NOMAC = 'Il Mac non risponde: puoi ascoltare solo i brani già sull\'iPhone';
@@ -612,9 +629,27 @@ let SRV = false;           // il Mac ha risposto
 let srvWait = true;        // primo collegamento al Mac in corso
 let SRVN = 0;              // brani nel catalogo del Mac
 let srvLast = 0;           // ultimo tentativo di collegamento
+let SRVA = 0;              // brani del catalogo che stanno su un disco ora scollegato
+let SCAN = null;           // {letti} mentre il Mac rilegge il disco
+let CATV = 0;              // cresce quando il catalogo cambia davvero: solo allora si ridisegna la pagina
+let CATAGG = 0;            // «aggiornato» dell'ultimo catalogo: se «stato» ne dice un altro, il catalogo sul Mac è cambiato
+let scanRun = false;       // si sta seguendo una rilettura del disco
+let LINKS = cleanLinks(ls.get('am-links', []));   // schede in più dal catalogo del Mac (es. Benessere)
+let FT = -1;               // scheda collegata aperta (indice in LINKS), -1 = la musica
+const FR = new Map();      // indirizzo -> iframe già creato: resta vivo quando cambi scheda
+const NODISK = 'Questo brano è su un disco scollegato dal Mac';
 const saved = new Set();   // id dei brani già sull'iPhone
 const GONE = new Map();    // brani spariti dal catalogo (disco scollegato?): preferiti, ascolti e playlist restano per quando tornano
 const SC = new Map();      // colore delle copertine del Mac non ancora salvate (sfondo del lettore)
+const ORPH = new Set();    // file salvati di brani uniti a un doppione mentre suonavano: si tolgono appena cambia brano
+function dropOrph() {
+  for (const o of [...ORPH]) if (o !== curId) { ORPH.delete(o); if (!T.has(o) && !GONE.has(o)) { saved.delete(o); dbDel('files', o).catch(() => {}); } }
+}
+// all'avvio, dopo il catalogo: file dell'archivio che non appartengono più a nessun brano (spazio sprecato e invisibile)
+async function dropOrphFiles() {
+  if (!DB) return;
+  try { for (const k of await rq(st('files').getAllKeys())) if (!T.has(k) && !GONE.has(k) && k !== curId) { saved.delete(k); await dbDel('files', k); } } catch (e) {}
+}
 const DLQ = ls.get('am-dlq', []);   // coda download: sopravvive a ricarica e aggiornamenti
 let dlBusy = false, dlCur = null, dlWait = false;
 function fetchT(url, opt, ms) {   // fetch con limite d'attesa: se il Mac non risponde non si resta appesi
@@ -626,11 +661,13 @@ async function loadServer() {
   srvLast = Date.now();
   let j = null;
   try {
-    const r = await fetchT(API + 'catalogo', {cache:'no-store'}, 8000);
+    const r = await fetchT(API + 'catalogo', {cache:'no-store'}, 15000);
     if (r.ok && (r.headers.get('content-type') || '').indexOf('json') >= 0) j = await r.json();
   } catch (e) {}
-  if (!j || !Array.isArray(j.brani)) { SRV = false; return false; }
-  SRV = true; SRVN = j.brani.length;
+  if (!j || !Array.isArray(j.brani)) { if (SRV) CATV++; SRV = false; return false; }
+  if (!SRV) CATV++;
+  SRV = true; SRVN = j.brani.length; SRVA = 0; CATAGG = j.aggiornato || 0;
+  await applyAlias(j.alias);
   const now = new Set(), put = [], del = [];
   for (const b of j.brani) {
     const id = 'r' + b.id; now.add(id);
@@ -640,31 +677,188 @@ async function loadServer() {
       year:b.year || '', genre:b.genre || '', duration:b.duration || (old && old.duration) || 0, added:b.added || (old && old.added) || Date.now(),
       cover: old && old.cover && !old.cover.startsWith('s:') ? old.cover : (b.cover ? 's:' + b.cover : null)});
     delete m.gone;
+    // sta su un disco ora scollegato: se non è già sull'iPhone è grigio, come quando il Mac non risponde
+    if (b.assente) { m.absent = true; SRVA++; } else delete m.absent;
     if (!old || JSON.stringify(old) !== JSON.stringify(m)) put.push(m);
     T.set(id, m);
   }
   // brani non più nel catalogo: restano in libreria solo se già sull'iPhone; gli altri si nascondono,
   // ma se hanno preferito, ascolti o playlist se ne tiene nota per quando il disco torna
-  const inPl = new Set(); P.forEach(p => p.ids.forEach(x => inPl.add(x)));
+  const inPl = new Set(); P.forEach(p => { if (!p.mac) p.ids.forEach(x => inPl.add(x)); });
   for (const t of [...T.values()]) if (t.remote && !now.has(t.id) && !saved.has(t.id)) {
     T.delete(t.id);
     if (t.fav || t.plays || inPl.has(t.id)) { t.gone = true; GONE.set(t.id, t); put.push(t); } else del.push(t.id);
   }
+  if (put.length || del.length) CATV++;
   dbBatch('meta', put, del).catch(() => {});
+  syncMacPl(j.playlist);
+  setLinks(j.collegamenti);
+  const sc = j.scansione;   // il Mac sta rileggendo il disco (per esempio appena acceso): lo si segue in silenzio
+  if (sc && sc.in_corso && !scanRun) { SCAN = {letti:sc.letti || 0}; watchScan(false); }
   return true;
 }
-// il Mac torna raggiungibile (rete attiva, app riaperta): si rilegge il catalogo e riprendono i download
+// il Mac ha unito due copie dello stesso brano (stesso artista, titolo e durata): preferiti, ascolti,
+// file salvati sull'iPhone, playlist e coda passano alla copia tenuta
+async function applyAlias(al) {
+  if (!al || typeof al !== 'object') return;
+  const ren = new Map();
+  for (const a of Object.keys(al)) { const o = 'r' + a, n = 'r' + al[a]; if (o !== n && (T.has(o) || GONE.has(o))) ren.set(o, n); }
+  if (!ren.size) return;
+  CATV++;
+  const put = [];
+  for (const [o, n] of ren) {
+    const t = T.get(o) || GONE.get(o); T.delete(o); GONE.delete(o);
+    let nt = T.get(n) || GONE.get(n);
+    if (nt) { nt.fav = nt.fav || t.fav; nt.plays = (nt.plays || 0) + (t.plays || 0); nt.last = Math.max(nt.last || 0, t.last || 0); }
+    else { nt = Object.assign({}, t, {id:n, sid:n.slice(1), src:'srv|' + n.slice(1)}); T.set(n, nt); }
+    put.push(nt);
+    if (saved.has(o)) {
+      if (!saved.has(n)) { try { const f = await dbGet('files', o); if (f) { await dbPut('files', f, n); saved.add(n); } } catch (e) {} }
+      // il file del vecchio id si toglie; se sta suonando proprio ora, appena cambia brano (vedi dropOrph)
+      if (saved.has(n)) { if (o !== curId) { saved.delete(o); dbDel('files', o).catch(() => {}); } else ORPH.add(o); }
+    }
+  }
+  const re = x => ren.get(x) || x;
+  // nelle mie playlist due brani diversi diventati uno solo restano una volta; le ripetizioni volute
+  // (lo stesso brano messo più volte, anche copiato da una cartella del Mac) restano com'erano
+  for (const p of P) if (!p.mac && p.ids.some(x => ren.has(x))) {
+    const da = new Map();   // id nuovo -> id di partenza della prima copia
+    p.ids = p.ids.filter(x => { const n = re(x); if (!da.has(n)) { da.set(n, x); return true; } return da.get(n) === x; }).map(re);
+    savePl(p);
+  }
+  S.queue = S.queue.map(re); S.orig = S.orig.map(re); if (ren.has(curId)) curId = ren.get(curId);
+  const dq = [...new Set(DLQ.map(re))]; DLQ.length = 0; DLQ.push(...dq); ls.set('am-dlq', DLQ);
+  dbBatch('meta', put, [...ren.keys()]).catch(() => {});
+  saveState();
+}
+// playlist del Mac (cartelle del disco e vecchia radio): arrivano col catalogo, si aggiornano da sole
+// e non si modificano qui (c'è «Copia nelle mie playlist»). Restano sul telefono per quando il Mac non risponde.
+function syncMacPl(list) {
+  if (!Array.isArray(list)) return;
+  const seen = new Set(), put = [], del = [];
+  list.forEach((s, n) => {
+    if (!s || !s.id || !Array.isArray(s.brani)) return;
+    const id = 'm' + s.id; if (seen.has(id)) return; seen.add(id);
+    // un brano ripetuto nella cartella resta ripetuto, come in Apple Music
+    const v = {id, mac:s.fonte === 'radio' ? 'radio' : 'cartella', sid:String(s.id), name:String(s.nome || 'Playlist'), ids:s.brani.map(x => 'r' + x), created:n};
+    const p = P.find(x => x.id === id);
+    if (!p) { P.push(v); put.push(v); }
+    else if (JSON.stringify(p) !== JSON.stringify(v)) { Object.assign(p, v); put.push(p); }
+  });
+  P = P.filter(p => { if (p.mac && !seen.has(p.id)) { del.push(p.id); return false; } return true; });
+  if (put.length || del.length) CATV++;
+  dbBatch('playlists', put, del).catch(() => {});
+}
+/* ---------- schede collegate (es. Benessere) ---------- */
+function cleanLinks(a) {
+  return (Array.isArray(a) ? a : []).filter(l => l && typeof l.nome === 'string' && typeof l.url === 'string' && l.nome.trim() && l.url.trim())
+    .map(l => ({nome:l.nome.trim().slice(0, 24), url:l.url.trim()}))
+    .filter(l => { try { return /^https?:$/.test(new URL(l.url, location.href).protocol); } catch (e) { return false; } });
+}
+const linkUrl = l => new URL(l.url, location.href).href;
+function setLinks(a) {   // senza collegamenti nel catalogo la barra resta di 3 schede
+  const nl = cleanLinks(a);
+  if (JSON.stringify(nl) === JSON.stringify(LINKS)) return;
+  LINKS = nl; ls.set('am-links', nl);
+  const keep = new Set(nl.map(linkUrl));
+  FR.forEach((f, u) => { if (!keep.has(u)) { f.remove(); FR.delete(u); } });
+  if (FT >= 0) { closeLinks(); render(); }
+  buildTabs();
+}
+function buildTabs() {
+  const items = [['home', 'home', 'Home'], ['lib', 'lib', 'Libreria'], ['search', 'search', 'Cerca']]
+    .concat(LINKS.map((l, i) => ['ln' + i, /benessere/i.test(l.nome) ? 'heart' : 'globe', l.nome]));
+  const box = document.querySelector('#tabs .in');
+  box.style.setProperty('--n', items.length);
+  box.innerHTML = items.map(([k, n, t]) => '<button data-tab="' + k + '" aria-label="' + esc(t) + '">' + ic(n) + '<span>' + esc(t) + '</span></button>').join('');
+  markTabs();
+}
+function markTabs() { document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === (FT >= 0 ? 'ln' + FT : tab))); }
+// una scheda aperta quando il Mac non rispondeva resta sulla pagina d'errore: si riconosce e si ricarica
+function frameOk(f) {
+  try { const d = f.contentDocument; return !!d && d.URL !== 'about:blank' && /html/i.test(d.contentType || '') && !!d.body && d.body.childElementCount > 0; }
+  catch (e) { return false; }   // pagina d'errore del browser (altra origine)
+}
+const frameBusy = f => !f._done && Date.now() - (f._t || 0) < 15000;   // ancora in caricamento
+function loadFrame(f, u) { f._t = Date.now(); f._done = false; f.src = u; }
+function fixFrames() { FR.forEach((f, u) => { if (!frameOk(f) && !frameBusy(f)) loadFrame(f, u); }); }
+function openLink(i) {
+  const l = LINKS[i]; if (!l) return;
+  if (FT < 0) { const st = tabs[tab]; st[st.length - 1].y = scrollY; }
+  FT = i;
+  const u = linkUrl(l); let f = FR.get(u);
+  if (!f) { f = document.createElement('iframe'); f.title = l.nome; f.setAttribute('allow', 'autoplay; fullscreen'); f.addEventListener('load', () => { f._done = true; }); loadFrame(f, u); FR.set(u, f); $('frames').appendChild(f); }
+  else if (!frameOk(f) && !frameBusy(f)) loadFrame(f, u);
+  FR.forEach(x => x.classList.toggle('show', x === f));
+  $('frames').classList.add('on'); $('view').hidden = true; document.documentElement.classList.add('framed');
+  markTabs();
+}
+function closeLinks() { FT = -1; $('frames').classList.remove('on'); $('view').hidden = false; document.documentElement.classList.remove('framed'); markTabs(); }
+// il Mac torna raggiungibile (rete attiva, app riaperta): si rilegge il catalogo e riprendono i download.
+// Entro i 10 minuti si chiede solo «stato» (piccolo): il catalogo si riscarica se sul Mac è cambiato (disco ricollegato)
 async function reconnect(force) {
-  if (!force && Date.now() - srvLast < (SRV ? 600000 : 30000)) { runDl(); return SRV; }
-  const ok = await loadServer(); render(true); runDl(); return ok;
+  if (!force && Date.now() - srvLast < (SRV ? 600000 : 30000) && !(SRV && await catChanged())) { runDl(); fixFrames(); return SRV; }
+  const v = CATV, ok = await loadServer();
+  if (CATV !== v) render(true); else dlMark();   // catalogo uguale: niente da ridisegnare
+  if (ok) fixFrames();
+  runDl(); return ok;
 }
-async function rescan() {   // tasto «Aggiorna»: il Mac rilegge subito il disco di backup
-  toast('Rileggo il disco di backup…', true);
-  let msg = 'Il Mac non risponde';
-  try { const r = await fetchT(API + 'aggiorna', {cache:'no-store'}, 120000); if (r.ok && await loadServer()) msg = 'Libreria aggiornata: ' + SRVN + ' brani'; }
-  catch (e) { if (e && e.name === 'AbortError') msg = 'Il Mac sta ancora leggendo il disco: riprova tra qualche minuto'; }
-  render(true); runDl(); toast(msg);
+async function catChanged() {
+  if (noStato) return false;
+  try {
+    const r = await fetchT(API + 'stato', {cache:'no-store'}, 10000); if (!r.ok) return false;
+    const s = await r.json(), sc = s && s.scansione;
+    if (sc && sc.in_corso && !scanRun) { SCAN = {letti:sc.letti || 0}; watchScan(false); }   // a fine lettura arriva il catalogo
+    return !!s && typeof s.aggiornato === 'number' && s.aggiornato !== CATAGG;
+  } catch (e) { return false; }
 }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let scanLoud = false;      // alla fine della rilettura si dice com'è andata (solo se l'ha chiesta Samuele)
+async function rescan() {   // tasto «Aggiorna»: il Mac rilegge i dischi in sottofondo, l'app segue a che punto è
+  if (scanRun) { scanLoud = true; toast(srvText(), true); return; }
+  toast('Rileggo il disco…', true);
+  let ok = false;
+  try { const r = await fetchT(API + 'aggiorna', {cache:'no-store'}, 15000); ok = r.ok; } catch (e) {}
+  if (!ok) { toast('Il Mac non risponde'); return; }
+  SCAN = {letti:0}; scanUI();
+  watchScan(true);
+}
+// ogni 3 s chiede al Mac a che punto è (stato: risposta piccola; il catalogo intero si scarica solo alla fine), al massimo 10 minuti
+let noStato = false;
+async function watchScan(loud) {
+  if (loud) scanLoud = true;
+  if (scanRun) return; scanRun = true;
+  const t0 = Date.now(); let fails = 0, end = 'done', err = '';
+  SCAN = SCAN || {letti:0};
+  for (;;) {
+    if (Date.now() - t0 > 600000) { end = 'slow'; break; }
+    await sleep(3000);
+    let s = null;
+    try {
+      const r = await fetchT(API + (noStato ? 'catalogo' : 'stato'), {cache:'no-store'}, 10000);
+      if (r.status === 404 && !noStato) { noStato = true; continue; }
+      if (r.ok) s = (await r.json()).scansione;
+    } catch (e) {}
+    if (!s) { if (++fails >= 4) { end = 'lost'; break; } continue; }
+    fails = 0;
+    if (!s.in_corso) { err = typeof s.errore === 'string' ? s.errore : ''; break; }   // errore: la lettura non è riuscita
+    SCAN = {letti:s.letti || 0}; scanUI();
+    if (scanLoud) toast('Rileggo il disco… ' + SCAN.letti + ' brani', true);
+  }
+  scanRun = false; SCAN = null;
+  const v = CATV, ok = end !== 'lost' && await loadServer();
+  if (CATV !== v) render(true); else { scanUI(); dlMark(); }
+  runDl();
+  const said = scanLoud; scanLoud = false;
+  if (said) toast(!ok ? 'Il Mac non risponde' : err ? err : end === 'slow' ? 'Il Mac sta ancora leggendo il disco: la libreria si aggiornerà da sola' : 'Libreria aggiornata: ' + SRVN + ' brani');
+}
+function srvText() {
+  if (SCAN) return 'Rileggo il disco… ' + SCAN.letti + ' brani';
+  if (!SRVN) return 'I dischi della musica sul Mac sembrano scollegati.';
+  if (SRVA >= SRVN) return 'I dischi della musica sul Mac sono scollegati: ascolti i brani già sull\'iPhone.';
+  return 'Musica del Mac: ' + SRVN + ' brani' + (SRVA ? ' · ' + SRVA + ' su un disco scollegato' : '');
+}
+function scanUI() { const b = $('srvban'); if (b) b.textContent = srvText(); else if (!T.size) render(true); }
 async function keepCover(t) {   // la copertina del Mac resta sul telefono insieme al brano
   if (!t.cover || !t.cover.startsWith('s:') || !SRV) return;
   try { const r = await fetchT(coverUrl(t.cover), {}, 15000); if (!r.ok) return; const c = await makeCover(await r.blob()); if (!c) return;
@@ -678,6 +872,7 @@ async function fetchTrack(id) {
   const t = T.get(id); if (!t || !t.remote || saved.has(id)) return 'ok';
   try {
     const r = await fetchT(API + 'file/' + encodeURIComponent(t.sid), {}, 20000);
+    if (r.status === 404) return 'gone';   // il Mac risponde ma il brano non c'è (disco scollegato): non è colpa della rete
     if (!r.ok) return 'net';
     const b = await r.blob();
     await dbPut('files', b, id); saved.add(id); keepCover(t);
@@ -686,12 +881,13 @@ async function fetchTrack(id) {
 }
 function queueDl(ids, quiet) {
   if (!DB) { if (!quiet) toast('Archivio del telefono non disponibile'); return; }
-  let n = 0; const q = new Set(DLQ);
-  for (const id of ids) { const t = T.get(id); if (t && t.remote && !saved.has(id) && !q.has(id) && dlCur !== id) { DLQ.push(id); q.add(id); n++; } }
+  let n = 0, off = 0; const q = new Set(DLQ);
+  for (const id of ids) { const t = T.get(id); if (!t || !t.remote || saved.has(id)) continue; if (t.absent) { off++; continue; }
+    if (!q.has(id) && dlCur !== id) { DLQ.push(id); q.add(id); n++; } }
   ls.set('am-dlq', DLQ);
-  if (!quiet) toast(n ? (n === 1 ? '1 brano in download' : n + ' brani in download') : 'Già salvati sull\'iPhone');
+  if (!quiet) toast(n ? (n === 1 ? '1 brano in download' : n + ' brani in download') + (off ? ' · ' + off + ' su un disco scollegato' : '') : off ? 'Questi brani sono su un disco scollegato' : 'Già salvati sull\'iPhone');
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
-  runDl(); if (quiet) dlMark(); else render(true);
+  runDl(); dlMark();   // solo i segni «…»: ridisegnare tutta la pagina con migliaia di brani la bloccherebbe
 }
 async function runDl() {
   if (dlBusy || !SRV || !DLQ.length) return; dlBusy = true; dlWait = false;
@@ -700,24 +896,34 @@ async function runDl() {
     const id = DLQ[0]; dlCur = id; dlMark();
     const r = await fetchTrack(id);
     dlCur = null;
-    if (r === 'ok') { DLQ.shift(); fails = 0; }
+    if (r === 'ok' || r === 'gone') { DLQ.shift(); fails = 0; }
     else if (r === 'full') { DLQ.length = 0; toast('Spazio esaurito sull\'iPhone: download fermati'); }
     else { DLQ.push(DLQ.shift()); if (++fails >= 3) { dlWait = true; } else await new Promise(res => setTimeout(res, 4000)); }
     ls.set('am-dlq', DLQ); dlMark();
     if (dlWait) break;   // il Mac non risponde: si riprende da soli più tardi (vedi reconnect)
   }
-  dlBusy = false; render(true);
+  dlBusy = false; afterSaved();
 }
 const isSaved = t => !t.remote || saved.has(t.id);
-const canPlay = id => { const t = T.get(id); return !!t && (!t.remote || saved.has(id) || SRV); };
+// un brano del Mac non ancora sull'iPhone si ascolta solo se il Mac risponde e il suo disco è collegato
+const canPlay = id => { const t = T.get(id); return !!t && (!t.remote || saved.has(id) || (SRV && !t.absent)); };
+const isOff = t => t.remote && !saved.has(t.id) && (!SRV || !!t.absent);
+const offMsg = t => t && t.remote && SRV && t.absent ? NODISK : NOMAC;
 function hasRemote() { if (SRVN) return true; for (const t of T.values()) if (t.remote) return true; return false; }
 const dlSign = (id, q) => saved.has(id) ? ic('ok') : dlCur === id || q.has(id) ? '…' : '';
 const dlText = () => (dlWait ? 'Download in pausa, il Mac non risponde: riprendono da soli. Restano ' : 'Download in corso: restano ') + DLQ.length + (DLQ.length === 1 ? ' brano.' : ' brani.') + (dlWait ? '' : ' Se chiudi l\'app, riprendono alla riapertura.');
-function dlMark() {   // aggiorna solo i segni ✓ / … e la riga di avanzamento, senza ridisegnare la pagina
+function dlMark() {   // aggiorna solo i segni ✓ / …, i grigi, il tasto «Scarica» e la riga di avanzamento, senza ridisegnare la pagina
   const q = new Set(DLQ);
-  document.querySelectorAll('.trk[data-id] .dl').forEach(el => { const id = el.closest('.trk').dataset.id; el.innerHTML = dlSign(id, q); el.setAttribute('aria-label', saved.has(id) ? 'Sull\'iPhone' : 'Sul Mac'); });
-  const b = $('dlbar'); if (b) b.textContent = dlText();
+  document.querySelectorAll('.trk[data-id] .dl').forEach(el => { const r = el.closest('.trk'), id = r.dataset.id, t = T.get(id);
+    const s = dlSign(id, q); if (el.innerHTML !== s) el.innerHTML = s; el.setAttribute('aria-label', saved.has(id) ? 'Sull\'iPhone' : 'Sul Mac'); if (t) r.classList.toggle('off', isOff(t)); });
+  document.querySelectorAll('#view .dlp[data-l]').forEach(el => { const h = dlBtn(+el.dataset.l); if (el.innerHTML !== h) el.innerHTML = h; });
+  const b = $('dlbar'); if (b) { if (DLQ.length) b.textContent = dlText(); else b.remove(); }
 }
+// dopo un download o «Togli dall'iPhone»: si ridisegna solo la pagina «Sull'iPhone» (che cambia elenco), altrimenti bastano i segni
+const route = () => { const st = tabs[tab]; return st[st.length - 1]; };
+function afterSaved() { if (route().v === 'saved') render(true); else dlMark(); }
+// preferito messo o tolto: la pagina «Preferiti» cambia elenco, altrove basta la stella sulle righe di quel brano
+function favChanged(id) { if (route().v === 'favs') render(true); else markRow(id); }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !srvWait) reconnect(); });
 addEventListener('online', () => { if (!srvWait) reconnect(true); });
 
@@ -815,6 +1021,10 @@ function artists() {
 const songs = () => [...T.values()].sort((a, b) => coll.compare(a.title, b.title));
 const albumByKey = k => albums().find(a => a.key === k);
 const plTracks = p => p.ids.map(id => T.get(id)).filter(Boolean);
+// prima le playlist fatte qui, poi quelle del Mac (cartelle del disco, poi la vecchia radio)
+const plOrder = () => P.filter(p => !p.mac).sort((a, b) => a.created - b.created).concat(P.filter(p => p.mac).sort((a, b) => a.created - b.created));
+const plFrom = p => p.mac === 'radio' ? 'Dalla radio' : p.mac ? 'Dal disco' : '';
+const nBrani = n => n + (n === 1 ? ' brano' : ' brani');
 const coverUrl = k => k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
 
 /* ---------- pezzi di interfaccia ---------- */
@@ -825,23 +1035,56 @@ function art(key, cls) {
 function mosaic(tr, cls) {
   const ks = []; for (const t of tr) { if (t.cover && ks.indexOf(t.cover) < 0) ks.push(t.cover); if (ks.length === 4) break; }
   if (ks.length < 4) return art(ks[0], cls);
-  return '<span class="art ' + (cls || '') + '"><span class="mosaic">' + ks.map(k => '<img src="' + coverUrl(k) + '" alt="">').join('') + '</span></span>';
+  return '<span class="art ' + (cls || '') + '"><span class="mosaic">' + ks.map(k => '<img src="' + coverUrl(k) + '" alt="" loading="lazy" decoding="async">').join('') + '</span></span>';
 }
 function regList(ids, label) { lists.push({ids, label}); return lists.length - 1; }
+// liste lunghe (Brani, Album, Artisti: anche 9.000 righe): si disegnano a pezzi mentre si scorre, così la pagina non si blocca
+let LZ = [];
+const LZN = 80;
+function lazyList(items, row, cls) {
+  const k = LZ.length, n = Math.min(items.length, LZN), c = {};
+  LZ.push({items, row, n});
+  let h = '<div class="' + cls + '" data-lz="' + k + '">';
+  for (let i = 0; i < n; i++) h += row(items[i], i, c);
+  return h + '</div>';
+}
+function lazyMore(minY) {   // aggiunge righe finché la pagina va un po' oltre lo schermo (o oltre minY, per ritrovare il punto)
+  if (FT >= 0) return;
+  for (let k = 0; k < LZ.length; k++) {
+    const z = LZ[k], el = z.n < z.items.length && document.querySelector('[data-lz="' + k + '"]');
+    while (el && z.n < z.items.length && document.documentElement.scrollHeight < Math.max(minY || 0, scrollY) + innerHeight * 3) {
+      const e = Math.min(z.items.length, z.n + LZN), c = {}; let h = '';
+      for (let i = z.n; i < e; i++) h += z.row(z.items[i], i, c);
+      z.n = e; el.insertAdjacentHTML('beforeend', h);
+    }
+  }
+}
+let lzPend = false;
+const lazyTick = () => { if (!lzPend && LZ.length) { lzPend = true; requestAnimationFrame(() => { lzPend = false; lazyMore(); }); } };
+addEventListener('scroll', lazyTick, {passive:true});
+addEventListener('resize', lazyTick);
+const t1Html = t => esc(t.title) + (t.fav ? ' <span class="fav">' + ic('star') + '</span>' : '');
 function trackRows(tr, opt) {
   opt = opt || {};
-  const l = regList(tr.map(t => t.id), opt.label || ''), q = new Set(DLQ);
-  return '<div class="trks">' + tr.map((t, i) => {
+  const l = regList(tr.map(t => t.id), opt.label || '');
+  return lazyList(tr, (t, i, c) => {
+    const q = c.q || (c.q = new Set(DLQ));
     const lead = opt.num ? '<span class="num"><span class="nn">' + (t.track || i + 1) + '</span><span class="eq"><i></i><i></i><i></i></span></span>' : art(t.cover);
     const sub = opt.num ? (t.artist && t.artist !== opt.albumArtist ? esc(t.artist) : '') : esc((t.artist || UNK_ART) + (opt.noAlbum || !t.album ? '' : ' · ' + t.album));
-    return '<div class="trk' + (t.id === curId ? ' cur' : '') + (t.remote && !SRV && !saved.has(t.id) ? ' off' : '') + '" data-id="' + t.id + '"><button class="tap" style="display:contents" data-a="play" data-l="' + l + '" data-i="' + i + '">' + lead +
-      '</button><div class="rt"><button class="tx" data-a="play" data-l="' + l + '" data-i="' + i + '" style="text-align:left"><span class="t1">' + esc(t.title) + (t.fav ? ' <span class="fav">' + ic('star') + '</span>' : '') + '</span>' + (sub ? '<span class="t2">' + sub + '</span>' : '') +
-      '</button>' + (t.remote ? '<span class="dl" aria-label="' + (saved.has(t.id) ? 'Sull\'iPhone' : 'Sul Mac') + '">' + dlSign(t.id, q) + '</span>' : '') + '<button class="more" data-a="more" data-id="' + t.id + '"' + (opt.pl ? ' data-pl="' + opt.pl + '" data-pi="' + i + '"' : '') + ' aria-label="Altre azioni">' + ic('more') + '</button></div></div>';
-  }).join('') + '</div>';
+    // nelle playlist dell'iPhone data-pi è la posizione vera in p.ids (opt.pidx), anche se qualche brano manca
+    return '<div class="trk' + (t.id === curId ? ' cur' : '') + (isOff(t) ? ' off' : '') + '" data-id="' + t.id + '"><button class="tap" style="display:contents" data-a="play" data-l="' + l + '" data-i="' + i + '">' + lead +
+      '</button><div class="rt"><button class="tx" data-a="play" data-l="' + l + '" data-i="' + i + '" style="text-align:left"><span class="t1">' + t1Html(t) + '</span>' + (sub ? '<span class="t2">' + sub + '</span>' : '') +
+      '</button>' + (t.remote ? '<span class="dl" aria-label="' + (saved.has(t.id) ? 'Sull\'iPhone' : 'Sul Mac') + '">' + dlSign(t.id, q) + '</span>' : '') + '<button class="more" data-a="more" data-id="' + t.id + '"' + (opt.pl ? ' data-pl="' + opt.pl + '" data-pi="' + (opt.pidx ? opt.pidx[i] : i) + '"' : '') + ' aria-label="Altre azioni">' + ic('more') + '</button></div></div>';
+  }, 'trks');
 }
-const pbtns = (l) => { const L = lists[l], todo = L ? L.ids.filter(id => { const t = T.get(id); return t && !isSaved(t); }).length : 0;
-  return '<div class="pbtns"><button data-a="playall" data-l="' + l + '">' + ic('play') + 'Riproduci</button><button data-a="shufall" data-l="' + l + '">' + ic('shuf') + 'Casuale</button></div>' +
-    (SRV && L && L.ids.some(id => (T.get(id) || {}).remote) ? '<div class="pbtns" style="grid-template-columns:1fr"><button data-a="dlall" data-l="' + l + '">' + ic(todo ? 'down' : 'ok') + (todo ? 'Scarica sull\'iPhone (' + todo + ')' : 'Tutto sull\'iPhone') + '</button></div>' : ''); };
+// solo le righe di un brano (stella dei preferiti), senza ridisegnare la pagina
+function markRow(id) { document.querySelectorAll('#view .trk[data-id="' + CSS.escape(id) + '"] button.tx .t1').forEach(el => { const t = T.get(id); if (t) el.innerHTML = t1Html(t); }); }
+function dlBtn(l) {
+  const L = lists[l], miss = L ? L.ids.map(id => T.get(id)).filter(t => t && !isSaved(t)) : [], todo = miss.filter(t => !t.absent).length;
+  return SRV && L && (todo || !miss.length) && L.ids.some(id => (T.get(id) || {}).remote) ? '<div class="pbtns" style="grid-template-columns:1fr"><button data-a="dlall" data-l="' + l + '">' + ic(todo ? 'down' : 'ok') + (todo ? 'Scarica sull\'iPhone (' + todo + ')' : 'Tutto sull\'iPhone') + '</button></div>' : '';
+}
+const pbtns = (l) => '<div class="pbtns"><button data-a="playall" data-l="' + l + '">' + ic('play') + 'Riproduci</button><button data-a="shufall" data-l="' + l + '">' + ic('shuf') + 'Casuale</button></div>' +
+  '<div class="dlp" data-l="' + l + '">' + dlBtn(l) + '</div>';
 function tile(a) { return '<button class="tile" data-a="go" data-v="album" data-k="' + esc(a.key) + '">' + art(a.cover) + '<div class="n">' + esc(a.name) + '</div><div class="a">' + esc(a.artist) + '</div></button>'; }
 function topBar(right) {
   const st = tabs[tab];
@@ -854,6 +1097,7 @@ function routeTitle(r) {
 }
 function emptyState() {
   if (srvWait) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Carico la musica…</h3><p>Sto chiedendo la libreria al Mac.</p></div>';
+  if (SRV && SCAN) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Il Mac sta leggendo il disco…</h3><p>' + nBrani(SCAN.letti) + ' trovati finora. Tra poco compaiono qui.</p></div>';
   return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Aggiungi la tua musica</h3><p>' + (SRV ? 'Il disco di musica sul Mac è vuoto o non è collegato. ' : '') + 'Scegli i file audio dal dispositivo: MP3, M4A, FLAC, WAV. Restano salvati qui e si ascoltano anche senza connessione.</p><button class="cta" data-a="add">' + ic('plus') + 'Aggiungi musica</button>' +
     (SRV ? '<button class="ba" data-a="rescan" style="color:var(--accent);font-weight:600;margin-top:8px">Rileggi il disco del Mac</button>' : '') + '</div>';
 }
@@ -873,7 +1117,8 @@ const pages = {
     const rec = al.filter(a => a.last).sort((a, b) => b.last - a.last).slice(0, 12);
     if (rec.length) h += '<h2 class="h2">Ascoltati di recente</h2><div class="shelf">' + rec.map(tile).join('') + '</div>';
     h += '<h2 class="h2"><button data-a="go" data-v="albums" style="display:flex;align-items:center;gap:4px">Aggiunti di recente<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' + al.sort((a, b) => b.added - a.added).slice(0, 12).map(tile).join('') + '</div>';
-    if (P.length) h += '<h2 class="h2">Le tue playlist</h2><div class="shelf">' + P.map(p => { const tr = plTracks(p); return '<button class="tile" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<div class="n">' + esc(p.name) + '</div><div class="a">' + tr.length + ' brani</div></button>'; }).join('') + '</div>';
+    const pls = plOrder().filter(p => !p.mac || plTracks(p).length).slice(0, 12);   // tutte in «Playlist ›»
+    if (pls.length) h += '<h2 class="h2"><button data-a="go" data-v="playlists" style="display:flex;align-items:center;gap:4px">Playlist<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' + pls.map(p => { const tr = plTracks(p); return '<button class="tile" data-a="go" data-v="playlist" data-k="' + esc(p.id) + '">' + mosaic(tr) + '<div class="n">' + esc(p.name) + '</div><div class="a">' + (p.mac ? plFrom(p) : nBrani(tr.length)) + '</div></button>'; }).join('') + '</div>';
     const top = [...T.values()].filter(t => t.plays).sort((a, b) => b.plays - a.plays).slice(0, 8);
     if (top.length) h += '<h2 class="h2">I più ascoltati</h2>' + trackRows(top, {label:'I più ascoltati'});
     return h;
@@ -883,7 +1128,7 @@ const pages = {
     if (!T.size) return h + installBanner() + emptyState();
     const row = (v, icon, t) => '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(icon) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>';
     const rem = hasRemote();
-    if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span><button class="ba" data-a="rescan">Aggiorna</button></div>';
+    if (SRV) h += '<div class="banner"><span class="bt" id="srvban">' + esc(srvText()) + '</span><button class="ba" data-a="rescan">Aggiorna</button></div>';
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
     h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
@@ -905,11 +1150,11 @@ const pages = {
   },
   albums() {
     const al = albums().sort((a, b) => (a.name === UNK_ALB) - (b.name === UNK_ALB) || coll.compare(a.name, b.name));
-    return topBar() + '<h1 class="lt">Album</h1>' + (al.length ? '<div class="grid">' + al.map(tile).join('') + '</div>' : emptyState());
+    return topBar() + '<h1 class="lt">Album</h1>' + (al.length ? lazyList(al, tile, 'grid') : emptyState());
   },
   artists() {
     const ar = artists();
-    return topBar() + '<h1 class="lt">Artisti</h1>' + (ar.length ? '<div>' + ar.map(a => '<button class="trk" data-a="go" data-v="artist" data-k="' + esc(a.name) + '">' + art(a.cover, 'av') + '<span class="rt"><span class="tx"><span class="t1">' + esc(a.name) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' : emptyState());
+    return topBar() + '<h1 class="lt">Artisti</h1>' + (ar.length ? lazyList(ar, a => '<button class="trk" data-a="go" data-v="artist" data-k="' + esc(a.name) + '">' + art(a.cover, 'av') + '<span class="rt"><span class="tx"><span class="t1">' + esc(a.name) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>', 'arts') : emptyState());
   },
   artist(r) {
     const tr = [...T.values()].filter(t => primary(t) === r.k || t.artist === r.k);
@@ -934,25 +1179,30 @@ const pages = {
     let h = topBar() + '<h1 class="lt">Playlist</h1><div>';
     h += '<button class="trk" data-a="newpl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:24px">' + ic('plus') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Nuova playlist…</span></span></span></button>';
     h += '<button class="trk" data-a="impl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('down') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Importa da Apple Music…</span><span class="t2">File esportato da Musica sul Mac</span></span></span></button>';
-    h += P.map(p => { const tr = plTracks(p); return '<button class="trk" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>'; }).join('');
+    h += plOrder().map(p => { const tr = plTracks(p); return '<button class="trk" data-a="go" data-v="playlist" data-k="' + esc(p.id) + '">' + mosaic(tr) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">' + (p.mac ? plFrom(p) + ' · ' : '') + nBrani(tr.length) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>'; }).join('');
     return h + '</div>';
   },
   playlist(r) {
     const p = P.find(x => x.id === r.k);
-    if (!p) return topBar() + '<div class="empty"><h3>Playlist eliminata</h3></div>';
-    const tr = plTracks(p), l = regList(tr.map(t => t.id), p.name);
+    if (!p) return topBar() + '<div class="empty"><h3>Playlist non più disponibile</h3></div>';
+    const tr = [], pidx = [];   // pidx: posizione di ogni riga in p.ids (che può contenere brani ora assenti)
+    p.ids.forEach((id, j) => { const t = T.get(id); if (t) { tr.push(t); pidx.push(j); } });
+    const l = regList(tr.map(t => t.id), p.name);
     const tot = tr.reduce((s, t) => s + (t.duration || 0), 0);
-    let h = topBar('<button class="round" data-a="plmenu" data-k="' + p.id + '" aria-label="Opzioni playlist">' + ic('more') + '</button>') +
-      '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(p.name) + '</div><div class="hm">' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + (tot ? ' · ' + Math.round(tot / 60) + ' min' : '') + '</div></div></div>';
+    let h = topBar('<button class="round" data-a="plmenu" data-k="' + esc(p.id) + '" aria-label="Opzioni playlist">' + ic('more') + '</button>') +
+      '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(p.name) + '</div><div class="hm">' + (p.mac ? plFrom(p) + ' · ' : '') + nBrani(tr.length) + (tot ? ' · ' + Math.round(tot / 60) + ' min' : '') + '</div></div></div>';
     if (tr.length) h += pbtns(l);
-    h += '<button class="trk" data-a="go" data-v="pick" data-k="' + p.id + '"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('plus') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Aggiungi brani</span></span></span></button>';
-    return h + trackRows(tr, {label:p.name, pl:p.id});
+    const addRow = (a, t, sub) => '<button class="trk" ' + a + '><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('plus') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">' + t + '</span>' + (sub ? '<span class="t2">' + sub + '</span>' : '') + '</span></span></button>';
+    // le playlist del Mac si aggiornano da sole e non si cambiano qui: se ne fa una copia da modificare
+    h += p.mac ? addRow('data-a="plcopy" data-k="' + esc(p.id) + '"', 'Copia nelle mie playlist', 'Questa playlist arriva dal Mac: la copia la puoi modificare') :
+      addRow('data-a="go" data-v="pick" data-k="' + esc(p.id) + '"', 'Aggiungi brani');
+    return h + trackRows(tr, {label:p.name, pl:p.mac ? '' : p.id, pidx});
   },
   pick(r) {
-    const p = P.find(x => x.id === r.k); if (!p) return topBar();
+    const p = P.find(x => x.id === r.k && !x.mac); if (!p) return topBar();
     const has = new Set(p.ids);
     return topBar('<button class="back" data-a="back" style="font-weight:600;margin:0;padding-right:0">Fine</button>') + '<h1 class="lt">Aggiungi a «' + esc(p.name) + '»</h1>' +
-      songs().map(t => '<button class="trk' + (has.has(t.id) ? ' on' : '') + '" data-a="pickt" data-k="' + p.id + '" data-id="' + t.id + '">' + art(t.cover) + '<span class="rt"><span class="tx"><span class="t1">' + esc(t.title) + '</span><span class="t2">' + esc(t.artist || UNK_ART) + '</span></span><span class="pickc">' + ic('check') + '</span></span></button>').join('');
+      lazyList(songs(), t => '<button class="trk' + (has.has(t.id) ? ' on' : '') + '" data-a="pickt" data-k="' + p.id + '" data-id="' + t.id + '">' + art(t.cover) + '<span class="rt"><span class="tx"><span class="t1">' + esc(t.title) + '</span><span class="t2">' + esc(t.artist || UNK_ART) + '</span></span><span class="pickc">' + ic('check') + '</span></span></button>', 'picks');
   },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
@@ -972,69 +1222,97 @@ function searchResults() {
   const ar = artists().filter(a => hit(a.name)).slice(0, 6);
   const al = albums().filter(a => hit(a.name + ' ' + a.artist)).slice(0, 8);
   const tr = songs().filter(t => hit(t.title + ' ' + t.artist + ' ' + t.album)).slice(0, 50);
-  const pl = P.filter(p => hit(p.name));
+  const pl = plOrder().filter(p => hit(p.name));
   let h = '';
   if (ar.length) h += '<h2 class="h2" style="margin-top:12px">Artisti</h2>' + ar.map(a => '<button class="trk" data-a="go" data-v="artist" data-k="' + esc(a.name) + '">' + art(a.cover, 'av') + '<span class="rt"><span class="tx"><span class="t1">' + esc(a.name) + '</span><span class="t2">Artista</span></span></span></button>').join('');
   if (al.length) h += '<h2 class="h2">Album</h2><div class="shelf">' + al.map(tile).join('') + '</div>';
-  if (pl.length) h += '<h2 class="h2">Playlist</h2>' + pl.map(p => '<button class="trk" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(plTracks(p)) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">Playlist</span></span></span></button>').join('');
+  if (pl.length) h += '<h2 class="h2">Playlist</h2>' + pl.map(p => '<button class="trk" data-a="go" data-v="playlist" data-k="' + esc(p.id) + '">' + mosaic(plTracks(p)) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">Playlist' + (p.mac ? ' · ' + plFrom(p) : '') + '</span></span></span></button>').join('');
   if (tr.length) h += '<h2 class="h2">Brani</h2>' + trackRows(tr, {label:'Risultati'});
   return h || '<div class="empty"><h3>Nessun risultato</h3><p>Prova con un altro nome di brano, artista o album.</p></div>';
 }
 
 /* ---------- rendering e navigazione ---------- */
+let viewDirty = false;     // la pagina della musica è cambiata mentre era aperta una scheda collegata
 function render(keepScroll) {
+  if (FT >= 0) { viewDirty = true; markTabs(); return; }   // è aperta una scheda collegata: la musica si ridisegna quando ci torni
   const st = tabs[tab], r = st[st.length - 1];
   const y = scrollY;
-  if (tab === 'search' && r.v === 'search' && keepScroll && $('sres')) { lists = []; $('sres').innerHTML = searchResults(); return; }
-  lists = [];
+  if (tab === 'search' && r.v === 'search' && keepScroll && $('sres')) { lists = []; LZ = []; $('sres').innerHTML = searchResults(); return; }
+  lists = []; LZ = []; viewDirty = false;
   $('view').innerHTML = (pages[r.v] || pages.lib)(r);
-  if (keepScroll) scrollTo(0, y); else scrollTo(0, r.y || 0);
-  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  const to = keepScroll ? y : r.y || 0;
+  lazyMore(to);   // abbastanza righe per tornare allo stesso punto
+  scrollTo(0, to);
+  markTabs();
   markCur();
 }
-function go(v, k) { const st = tabs[tab]; st[st.length - 1].y = scrollY; st.push({v, k}); render(); }
+function go(v, k) { const st = tabs[tab]; if (FT >= 0) closeLinks(); else st[st.length - 1].y = scrollY; st.push({v, k}); render(); }
 function back() { const st = tabs[tab]; if (st.length > 1) { st.pop(); render(); } }
 function setTab(t) {
+  if (/^ln\d+$/.test(t)) { openLink(+t.slice(2)); return; }   // l'iframe resta vivo, la musica continua
+  const fromLink = FT >= 0;
+  if (fromLink) closeLinks();
+  if (t === tab && fromLink) {   // si torna alla pagina lasciata: è ancora pronta, basta mostrarla (ridisegnarla bloccherebbe)
+    const r = route(); ls.set('am-tab', t);
+    if (viewDirty) render(); else { scrollTo(0, r.y || 0); lazyMore(); markCur(); }
+    return;
+  }
   if (t === tab) { const st = tabs[t]; if (st.length > 1) tabs[t] = [st[0]]; else st[0].y = 0; render(); if (t === 'search') { const i = $('sq'); i && i.focus(); } return; }
-  tabs[tab][tabs[tab].length - 1].y = scrollY; tab = t; ls.set('am-tab', t); render();
+  if (!fromLink) tabs[tab][tabs[tab].length - 1].y = scrollY;
+  tab = t; ls.set('am-tab', t); render();
 }
-function markCur() {
-  document.querySelectorAll('.trk[data-id]').forEach(el => { if (!el.querySelector('.pickc')) el.classList.toggle('cur', el.dataset.id === curId); });
+let markedId = null;
+function markCur() {   // tocca solo le righe del brano di prima e di quello nuovo, non tutte
+  if (markedId !== curId) document.querySelectorAll('#view .trk.cur').forEach(el => el.classList.remove('cur'));
+  if (curId) document.querySelectorAll('#view .trk[data-id="' + CSS.escape(curId) + '"]:not(.cur)').forEach(el => { if (!el.querySelector('.pickc')) el.classList.add('cur'); });
+  markedId = curId;
   document.body.classList.toggle('paused', au.paused);
 }
 
 /* ---------- riproduzione ---------- */
-function saveState() { ls.set('am-play', {queue:S.queue, orig:S.orig, qi:S.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:au.currentTime || 0}); }
+function saveState() { ls.set('am-play', {queue:S.queue, orig:S.orig, qo:S.qo, qi:S.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:au.currentTime || 0}); }
+// S.qo[k] = posizione in S.orig del brano S.queue[k]: con un brano messo più volte nella playlist, togliendo
+// Casuale si riprende dalla copia che stava suonando (non dalla prima)
+const qoOk = () => Array.isArray(S.qo) && S.qo.length === S.queue.length && S.qo.every((j, k) => S.orig[j] === S.queue[k]);
+function qoFix() {   // coda cambiata per altre vie (brani tolti): a ogni copia la prima posizione libera
+  if (qoOk()) return;
+  const pos = new Map(); S.orig.forEach((x, j) => { if (!pos.has(x)) pos.set(x, []); pos.get(x).push(j); });
+  S.qo = S.queue.map(x => { const l = pos.get(x); return l && l.length ? l.shift() : -1; });
+}
 async function getFile(id) { if (memFiles.has(id)) return memFiles.get(id); try { return await dbGet('files', id); } catch (e) { return null; } }
 async function load(i, play, at) {
   if (i < 0 || i >= S.queue.length) return;
   const id = S.queue[i], t = T.get(id);
   if (!t) { S.queue.splice(i, 1); S.orig = S.orig.filter(x => x !== id); if (S.queue.length) return load(Math.min(i, S.queue.length - 1), play); return stop(); }
   const f = await getFile(id);
-  if (!f && !(t.remote && SRV)) {   // brano del Mac non ancora sull'iPhone e Mac non raggiungibile: si passa al primo ascoltabile
+  if (!f && !(t.remote && SRV && !t.absent)) {   // brano del Mac non ancora sull'iPhone e Mac (o disco) non raggiungibile: si passa al primo ascoltabile
     if (play) {
       const j = S.queue.findIndex((x, k) => k > i && canPlay(x));
       if (j > 0) return load(j, true);
-      toast(t.remote ? NOMAC : 'File non trovato: ' + t.title);
+      toast(t.remote ? offMsg(t) : 'File non trovato: ' + t.title);
     }
     return;
   }
   S.qi = i;
   if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null;
+  // in streaming dal Mac, intanto si salva: in coda download appena il Mac lo manda davvero (vedi loadedmetadata),
+  // così un brano che non c'è non si chiede due volte
+  dlAfter = null;
   if (f) { saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
-  else { au.src = API + 'file/' + encodeURIComponent(t.sid); if (play) queueDl([id], true); }   // in streaming dal Mac, intanto si salva
-  curId = id;
+  else { au.src = API + 'file/' + encodeURIComponent(t.sid); if (play) dlAfter = id; }
+  curId = id; dropOrph();
   if (at) au.addEventListener('loadedmetadata', function h() { au.removeEventListener('loadedmetadata', h); try { au.currentTime = at; } catch (e) {} }, {once:true});
   if (play) { au.play().catch(() => {}); t.plays = (t.plays || 0) + 1; t.last = Date.now(); dbPut('meta', t).catch(() => {}); }
   updateNow(); saveState();
 }
-function stop() { au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} curId = null; S.queue = []; S.orig = []; S.qi = -1; if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null; updateNow(); saveState(); }
+function stop() { au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} curId = null; dropOrph(); S.queue = []; S.orig = []; S.qi = -1; if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null; updateNow(); saveState(); }
 function playList(ids, start, shuf, from) {
   if (!ids.length) return;
-  if (!ids.some(canPlay)) { toast(NOMAC); return; }   // niente di ascoltabile ora: resta com'è il brano in corso
+  if (!ids.some(canPlay)) { toast(offMsg(T.get(ids[start || 0]))); return; }   // niente di ascoltabile ora: resta com'è il brano in corso
   S.orig = ids.slice(); S.from = from || '';
-  if (shuf) { const first = start == null ? null : ids[start]; let rest = shuffleArr(ids.filter((x, j) => j !== start || first == null)); if (first != null) rest = [first].concat(rest); S.queue = rest; S.shuffle = true; load(0, true); }
-  else { S.queue = ids.slice(); S.shuffle = false; load(start || 0, true); }
+  const all = ids.map((x, j) => j);
+  if (shuf) { let rest = shuffleArr(all.filter(j => start == null || j !== start)); if (start != null) rest = [start].concat(rest); S.qo = rest; S.queue = rest.map(j => ids[j]); S.shuffle = true; load(0, true); }
+  else { S.qo = all; S.queue = ids.slice(); S.shuffle = false; load(start || 0, true); }
 }
 function toggle() { if (!curId) { if (T.size) playList(songs().map(t => t.id), 0, true, 'Tutti i brani'); return; } if (au.paused) au.play().catch(() => {}); else au.pause(); }
 function next(auto) {
@@ -1048,14 +1326,24 @@ function next(auto) {
 function prev() { if (au.currentTime > 3 || S.qi <= 0) { au.currentTime = 0; if (au.paused && S.qi <= 0) au.play().catch(() => {}); return; } load(S.qi - 1, true); }
 function setShuffle(on) {
   if (on === S.shuffle) return;
-  S.shuffle = on;
-  if (on) { S.queue = S.queue.slice(0, S.qi + 1).concat(shuffleArr(S.queue.slice(S.qi + 1))); }
-  else if (S.orig.length) { const i = S.orig.indexOf(curId); if (i >= 0) { S.queue = S.orig.slice(); S.qi = i; } }
+  S.shuffle = on; qoFix();
+  if (on) {   // si mescolano i successivi, ognuno con la sua posizione
+    const k = S.qi + 1, q0 = S.queue, o0 = S.qo, p = shuffleArr(q0.slice(k).map((x, n) => n + k));
+    S.queue = q0.slice(0, k).concat(p.map(n => q0[n])); S.qo = o0.slice(0, k).concat(p.map(n => o0[n]));
+  } else if (S.orig.length) {
+    let i = S.qo[S.qi]; if (S.orig[i] !== curId) i = S.orig.indexOf(curId);
+    if (i >= 0) { S.queue = S.orig.slice(); S.qo = S.queue.map((x, j) => j); S.qi = i; }
+  }
   updateNow(); saveState();
 }
 function cycleRepeat() { S.repeat = S.repeat === 'off' ? 'all' : S.repeat === 'all' ? 'one' : 'off'; updateNow(); saveState(); toast(S.repeat === 'off' ? 'Ripeti disattivato' : S.repeat === 'all' ? 'Ripeti tutto' : 'Ripeti questo brano'); }
-function playNext(id) { if (!curId) return playList([id], 0, false, ''); S.queue.splice(S.qi + 1, 0, id); const oi = S.orig.indexOf(curId); S.orig.splice(oi + 1, 0, id); updateNow(); saveState(); toast('Verrà riprodotto dopo'); }
-function playLast(id) { if (!curId) return playList([id], 0, false, ''); S.queue.push(id); S.orig.push(id); updateNow(); saveState(); toast('Aggiunto alla coda'); }
+function playNext(id) {
+  if (!curId) return playList([id], 0, false, ''); qoFix();
+  const oi = S.qo[S.qi] >= 0 ? S.qo[S.qi] : S.orig.indexOf(curId);   // dopo la copia che sta suonando
+  S.qo = S.qo.map(j => j > oi ? j + 1 : j); S.orig.splice(oi + 1, 0, id); S.queue.splice(S.qi + 1, 0, id); S.qo.splice(S.qi + 1, 0, oi + 1);
+  updateNow(); saveState(); toast('Verrà riprodotto dopo');
+}
+function playLast(id) { if (!curId) return playList([id], 0, false, ''); qoFix(); S.queue.push(id); S.orig.push(id); S.qo.push(S.orig.length - 1); updateNow(); saveState(); toast('Aggiunto alla coda'); }
 
 /* ---------- aggiornamento interfaccia lettore ---------- */
 function npColor(key) {
@@ -1144,16 +1432,31 @@ if ('mediaSession' in navigator) {
 au.addEventListener('play', () => { updateNow(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
 au.addEventListener('pause', () => { updateNow(); saveState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 au.addEventListener('timeupdate', tick);
-au.addEventListener('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
+au.addEventListener('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); }
+  if (dlAfter && dlAfter === curId) { const x = dlAfter; dlAfter = null; queueDl([x], true); } });
 au.addEventListener('ended', () => next(true));
 au.addEventListener('error', async () => {
-  if (!au.getAttribute('src')) return; const t = T.get(curId);
-  // brano in streaming che non arriva: se il Mac non risponde più si passa ai brani già sull'iPhone
-  const lost = t && t.remote && !saved.has(t.id) && !(await loadServer());
-  if (lost) render(true);
-  toast(lost ? NOMAC : 'Impossibile riprodurre ' + (t ? '«' + t.title + '»' : 'il brano'));
+  if (!au.getAttribute('src')) return; const t = T.get(curId); dlAfter = null;
+  let msg = 'Impossibile riprodurre ' + (t ? '«' + t.title + '»' : 'il brano');
+  if (t && t.remote && !saved.has(t.id)) {
+    // brano in streaming che non arriva: si chiede al Mac il primo byte (non il catalogo intero) per capire perché
+    let st = 0;
+    try { const r = await fetchT(API + 'file/' + encodeURIComponent(t.sid), {headers:{Range:'bytes=0-0'}, cache:'no-store'}, 10000); st = r.status; } catch (e) {}
+    if (st === 404) { t.absent = true; dlMark(); msg = NODISK; macRecheck(); }   // il Mac c'è, il file no (disco appena staccato)
+    else if (st !== 200 && st !== 206) { if (SRV) { SRV = false; CATV++; render(true); } msg = NOMAC; }   // il Mac non risponde: restano i brani sull'iPhone
+  }
+  toast(msg);
   if (S.qi < S.queue.length - 1) setTimeout(() => next(false), 600);
 });
+// un brano che il Mac non trova più: il Mac rilegge i dischi (al massimo ogni 2 minuti) e a fine lettura arriva
+// il catalogo nuovo, una volta sola, con i brani mancanti in grigio
+let fixAt = 0;
+async function macRecheck() {
+  if (scanRun || Date.now() - fixAt < 120000) return; fixAt = Date.now();
+  if (await catChanged()) { const v = CATV; await loadServer(); if (CATV !== v) render(true); return; }   // se n'era già accorto
+  if (scanRun) return;
+  try { const r = await fetchT(API + 'aggiorna', {cache:'no-store'}, 15000); if (r.ok && !scanRun) { SCAN = {letti:0}; watchScan(false); } } catch (e) {}
+}
 
 const seek = $('seek');
 seek.addEventListener('input', () => { dragging = true; const p = seek.value / 1000; seek.style.setProperty('--p', (p * 100) + '%'); const d = au.duration || 0; $('tCur').textContent = fmt(p * d); $('tRem').textContent = '-' + fmt(d - p * d); });
@@ -1191,11 +1494,11 @@ function trackMenu(id, pl, pi) {
     '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' +
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
     '<button data-a="m-artist" data-k="' + esc(primary(t)) + '"><span class="l">Vai all\'artista</span>' + ic('person') + '</button>' +
-    (t.remote && !saved.has(id) && SRV ? '<button data-a="m-dl" data-id="' + id + '"><span class="l">Scarica sull\'iPhone</span>' + ic('down') + '</button>' : '') +
+    (t.remote && !saved.has(id) && SRV && !t.absent ? '<button data-a="m-dl" data-id="' + id + '"><span class="l">Scarica sull\'iPhone</span>' + ic('down') + '</button>' : '') +
     (t.remote && saved.has(id) ? '<button data-a="m-undl" data-id="' + id + '"><span class="l">Togli dall\'iPhone</span>' + ic('trash') + '</button>' : '') +
     // i brani del Mac si modificano e si eliminano sul disco: qui le modifiche verrebbero sovrascritte dal catalogo
     (t.remote ? '' : '<button data-a="m-edit" data-id="' + id + '"><span class="l">Modifica informazioni</span>' + ic('edit') + '</button>') + '</div>' +
-    (pl || !t.remote ? '<div class="grp">' + (pl ? '<button class="red" data-a="m-unpl" data-k="' + pl + '" data-pi="' + pi + '"><span class="l">Rimuovi dalla playlist</span>' + ic('close') + '</button>' : '') +
+    (pl || !t.remote ? '<div class="grp">' + (pl ? '<button class="red" data-a="m-unpl" data-k="' + pl + '" data-pi="' + pi + '" data-id="' + id + '"><span class="l">Rimuovi dalla playlist</span>' + ic('close') + '</button>' : '') +
     (t.remote ? '' : '<button class="red" data-a="m-del" data-id="' + id + '"><span class="l">Elimina dalla libreria</span>' + ic('trash') + '</button>') + '</div>' : '') + cancel);
 }
 function addSheet() {
@@ -1228,7 +1531,7 @@ async function savePl(p) { await dbPut('playlists', p).catch(() => {}); }
 async function delTrack(id) {
   const t = T.get(id); if (!t) return;
   saved.delete(id); T.delete(id); await dbDel('meta', id).catch(() => {}); await dbDel('files', id).catch(() => {}); memFiles.delete(id);
-  for (const p of P) if (p.ids.indexOf(id) >= 0) { p.ids = p.ids.filter(x => x !== id); savePl(p); }
+  for (const p of P) if (!p.mac && p.ids.indexOf(id) >= 0) { p.ids = p.ids.filter(x => x !== id); savePl(p); }
   if (t.cover && ![...T.values()].some(x => x.cover === t.cover)) { const c = C.get(t.cover); if (c) URL.revokeObjectURL(c.url); C.delete(t.cover); dbDel('covers', t.cover).catch(() => {}); }
   const wasCur = id === curId;
   const ci = S.queue.indexOf(id);
@@ -1252,7 +1555,10 @@ document.addEventListener('click', e => {
     case 'add': addSheet(); break;
     case 'pickfiles': closeSheet(); $('fileIn').click(); break;
     case 'pickdir': closeSheet(); $('dirIn').click(); break;
-    case 'play': { const L = lists[+d.l]; if (!L) break; if (!canPlay(L.ids[+d.i])) { toast(NOMAC); break; } playList(L.ids, +d.i, S.shuffle, L.label); break; }
+    case 'play': { const L = lists[+d.l]; if (!L) break;
+      // brano grigio: intanto si chiede al Mac se il disco è tornato (se sì, la libreria si aggiorna da sola)
+      if (!canPlay(L.ids[+d.i])) { toast(offMsg(T.get(L.ids[+d.i]))); if (!srvWait) reconnect(); break; }
+      playList(L.ids, +d.i, S.shuffle, L.label); break; }
     case 'playall': { const L = lists[+d.l]; if (L) playList(L.ids, 0, false, L.label); break; }
     case 'shufall': { const L = lists[+d.l]; if (L) playList(L.ids, null, true, L.label); break; }
     case 'more': trackMenu(d.id, d.pl, d.pi); break;
@@ -1265,37 +1571,50 @@ document.addEventListener('click', e => {
     case 'repeat': cycleRepeat(); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': load(+d.i, true); break;
-    case 'favcur': if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); render(true); } break;
+    case 'favcur': if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favChanged(t.id); } break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'closesheet': closeSheet(); break;
     case 'm-next': closeSheet(); playNext(d.id); break;
     case 'm-last': closeSheet(); playLast(d.id); break;
-    case 'm-fav': { const t = T.get(d.id); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); closeSheet(); updateNow(); render(true); toast(t.fav ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti'); break; }
+    case 'm-fav': { const t = T.get(d.id); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); closeSheet(); updateNow(); favChanged(t.id); toast(t.fav ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti'); break; }
     case 'm-addpl': {
       const id = d.id;
       openSheet('<div class="grp scroll"><div class="smsg"><b>Aggiungi a una playlist</b></div><button class="acc" data-a="m-newpl" data-id="' + id + '"><span class="l">Nuova playlist…</span>' + ic('plus') + '</button>' +
-        P.map(p => '<button data-a="m-topl" data-k="' + p.id + '" data-id="' + id + '"><span class="l">' + esc(p.name) + '</span><span class="sub">' + p.ids.length + '</span></button>').join('') + '</div>' + cancel);
+        plOrder().filter(p => !p.mac).map(p => '<button data-a="m-topl" data-k="' + p.id + '" data-id="' + id + '"><span class="l">' + esc(p.name) + '</span><span class="sub">' + p.ids.length + '</span></button>').join('') + '</div>' + cancel);
       break;
     }
     case 'm-newpl': nameSheet('Nuova playlist', '', 'newpl', d.id); break;
-    case 'm-topl': { const p = P.find(x => x.id === d.k); if (p) { if (p.ids.indexOf(d.id) < 0) { p.ids.push(d.id); savePl(p); toast('Aggiunto a «' + p.name + '»'); } else toast('Già presente in «' + p.name + '»'); } closeSheet(); render(true); break; }
+    case 'm-topl': { const p = P.find(x => x.id === d.k && !x.mac); if (p) { if (p.ids.indexOf(d.id) < 0) { p.ids.push(d.id); savePl(p); toast('Aggiunto a «' + p.name + '»'); } else toast('Già presente in «' + p.name + '»'); } closeSheet(); render(true); break; }
     case 'm-album': closeSheet(); closeNP(); if (tab === 'search') tab = 'lib'; go('album', d.k); break;
     case 'm-artist': closeSheet(); closeNP(); if (tab === 'search') tab = 'lib'; go('artist', d.k); break;
     case 'm-edit': editSheet(d.id); break;
     case 'm-dl': closeSheet(); queueDl([d.id]); break;
-    case 'm-undl': closeSheet(); if (d.id !== curId) { dbDel('files', d.id).catch(() => {}); saved.delete(d.id); render(true); toast('Tolto dall\'iPhone: resta sul Mac'); } else toast('Prima ferma il brano'); break;
+    case 'm-undl': closeSheet(); if (d.id !== curId) { dbDel('files', d.id).catch(() => {}); saved.delete(d.id); afterSaved(); toast('Tolto dall\'iPhone: resta sul Mac'); } else toast('Prima ferma il brano'); break;
     case 'dlall': { const L = lists[+d.l]; if (L) queueDl(L.ids); break; }
     case 'impl': closeSheet(); $('plIn').click(); break;
-    case 'm-unpl': { const p = P.find(x => x.id === d.k); if (p) { p.ids.splice(+d.pi, 1); savePl(p); } closeSheet(); render(true); break; }
+    case 'm-unpl': {   // data-pi è la posizione in p.ids; se nel frattempo la playlist è cambiata, si cerca il brano
+      const p = P.find(x => x.id === d.k && !x.mac);
+      if (p) { let i = +d.pi; if (p.ids[i] !== d.id) i = p.ids.indexOf(d.id); if (i >= 0) { p.ids.splice(i, 1); savePl(p); } }
+      closeSheet(); render(true); break;
+    }
     case 'm-del': { const t = T.get(d.id); openSheet('<div class="grp"><div class="smsg"><b>Eliminare «' + esc(t.title) + '»?</b>Il brano verrà tolto dalla libreria e da tutte le playlist su questo dispositivo.</div><button class="red cancel" data-a="m-del2" data-id="' + d.id + '">Elimina brano</button></div>' + cancel); break; }
     case 'm-del2': closeSheet(); delTrack(d.id); break;
     case 'newpl': nameSheet('Nuova playlist', '', 'newpl'); break;
-    case 'plmenu': openSheet('<div class="grp"><button data-a="plren" data-k="' + d.k + '"><span class="l">Rinomina</span>' + ic('edit') + '</button><button data-a="go-pick" data-k="' + d.k + '"><span class="l">Aggiungi brani</span>' + ic('plus') + '</button><button class="red" data-a="pldel" data-k="' + d.k + '"><span class="l">Elimina playlist</span>' + ic('trash') + '</button></div>' + cancel); break;
+    case 'plmenu': { const p = P.find(x => x.id === d.k); if (!p) break;
+      if (p.mac) { openSheet('<div class="grp"><div class="smsg"><b>' + esc(p.name) + '</b>' + (p.mac === 'radio' ? 'Playlist della radio' : 'Playlist del disco') + ' sul Mac: si aggiorna da sola. Per cambiarla, fanne una copia.</div><button class="acc" data-a="plcopy" data-k="' + esc(p.id) + '"><span class="l">Copia nelle mie playlist</span>' + ic('plus') + '</button></div>' + cancel); break; }
+      openSheet('<div class="grp"><button data-a="plren" data-k="' + d.k + '"><span class="l">Rinomina</span>' + ic('edit') + '</button><button data-a="go-pick" data-k="' + d.k + '"><span class="l">Aggiungi brani</span>' + ic('plus') + '</button><button class="red" data-a="pldel" data-k="' + d.k + '"><span class="l">Elimina playlist</span>' + ic('trash') + '</button></div>' + cancel); break; }
+    case 'plcopy': {   // una playlist del Mac diventa una delle mie: questa si può modificare, l'originale resta com'è
+      const p = P.find(x => x.id === d.k); if (!p) break;
+      const c = {id:uid(), name:p.name, ids:p.ids.slice(), created:Date.now()}; P.push(c); savePl(c);
+      closeSheet(); toast('Copiata nelle tue playlist: ora la puoi modificare'); go('playlist', c.id); break;
+    }
     case 'go-pick': closeSheet(); go('pick', d.k); break;
     case 'plren': { const p = P.find(x => x.id === d.k); nameSheet('Rinomina playlist', p ? p.name : '', 'renpl', d.k); break; }
     case 'pldel': { const p = P.find(x => x.id === d.k); openSheet('<div class="grp"><div class="smsg"><b>Eliminare «' + esc(p.name) + '»?</b>I brani restano nella libreria.</div><button class="red cancel" data-a="pldel2" data-k="' + d.k + '">Elimina playlist</button></div>' + cancel); break; }
     case 'pldel2': { P = P.filter(x => x.id !== d.k); dbDel('playlists', d.k).catch(() => {}); closeSheet(); back(); toast('Playlist eliminata'); break; }
-    case 'pickt': { const p = P.find(x => x.id === d.k); if (!p) break; const i = p.ids.indexOf(d.id); if (i >= 0) p.ids.splice(i, 1); else p.ids.push(d.id); b.classList.toggle('on', i < 0); savePl(p); break; }
+    case 'pickt': {   // la spunta dice se il brano è nella playlist: toglierla toglie tutte le sue copie
+      const p = P.find(x => x.id === d.k && !x.mac); if (!p) break; const has = p.ids.indexOf(d.id) >= 0;
+      if (has) p.ids = p.ids.filter(x => x !== d.id); else p.ids.push(d.id); b.classList.toggle('on', !has); savePl(p); break; }
     case 'sclear': q = ''; $('sq').value = ''; b.hidden = true; render(true); $('sq').focus(); break;
     case 'install': installSheet(); break;
     case 'noinstall': ls.set('am-noinstall', true); render(true); break;
@@ -1339,9 +1658,10 @@ let toastT = 0;
 function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), sticky ? 8000 : 2400); }
 
 /* ---------- avvio ---------- */
-(function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; })();
+buildTabs();   // Home, Libreria, Cerca e le schede collegate dell'ultima volta (es. Benessere)
 $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list');
 (async function boot() {
+  let metaOk = false;
   try { DB = await openDB(); } catch (e) { DB = null; toast('Archivio non disponibile: la musica non verrà salvata'); }
   try {
     const [m, cv, pl] = await Promise.all([dbAll('meta'), dbAll('covers'), dbAll('playlists')]);
@@ -1360,12 +1680,14 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
       S.queue = (S.queue || []).map(re); S.orig = (S.orig || []).map(re);
     }
     if (DB) (await rq(st('files').getAllKeys())).forEach(k => saved.add(k));
+    metaOk = true;
   } catch (e) {}
   const lt = ls.get('am-tab', null); tab = lt && tabs[lt] ? lt : (T.size ? 'home' : 'lib');
   render();   // subito la musica già sul telefono, poi quella del Mac
   if (window.PWA && 'serviceWorker' in navigator) { try { navigator.serviceWorker.register('sw.js'); } catch (e) {} }
   await loadServer();
   srvWait = false;
+  if (metaOk) await dropOrphFiles();   // solo se i brani dell'archivio si sono letti davvero
   render(true);
   runDl();
   const ps = ls.get('am-play', {}), was = (S.queue || [])[S.qi];
