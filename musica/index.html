@@ -160,10 +160,22 @@ img{max-width:100%;display:block}
 
 /* barra schede */
 #tabs{position:fixed;z-index:31;left:0;right:0;bottom:0;padding:0 env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);background:var(--bar);-webkit-backdrop-filter:blur(24px) saturate(180%);backdrop-filter:blur(24px) saturate(180%);border-top:.5px solid var(--sep)}
-#tabs .in{display:grid;grid-template-columns:repeat(3,1fr);max-width:640px;margin:0 auto;height:52px}
+#tabs .in{display:grid;grid-template-columns:repeat(4,1fr);max-width:640px;margin:0 auto;height:52px}
 #tabs button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;color:var(--tab);font-size:10.5px;font-weight:500}
 #tabs button svg{font-size:25px}
 #tabs button.on{color:var(--accent)}
+
+/* moduli extra (scheda Altro): riquadro sopra la pagina, sotto mini player e schede; la musica continua */
+#xp{position:fixed;z-index:29;left:0;right:0;top:0;bottom:calc(52px + env(safe-area-inset-bottom,0px));background:var(--bg)}
+body.hasmini #xp{bottom:calc(122px + env(safe-area-inset-bottom,0px))}
+#xp iframe{width:100%;height:100%;border:0;display:block;background:var(--bg)}
+.xgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
+.xtile{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:14px;background:var(--bg2);text-align:left;min-height:118px}
+.xtile .xi{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px}
+.xtile b{font-weight:600;font-size:16px}
+.xtile span{font-size:13px;color:var(--fg2);line-height:1.25}
+#dlpill{position:fixed;z-index:32;right:max(8px,env(safe-area-inset-right,0px));top:calc(env(safe-area-inset-top,0px) + 54px);display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:99px;background:var(--bar);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);box-shadow:0 2px 10px rgba(0,0,0,.16),inset 0 0 0 .5px var(--sep);font-size:13px;font-weight:600;color:var(--accent)}
+#dlpill svg{font-size:15px}
 
 /* player a tutto schermo */
 #np{position:fixed;inset:0;z-index:50;color:#fff;background:var(--npbg,#2c2c2e);transform:translateY(100%);visibility:hidden;transition:transform .48s cubic-bezier(.32,.72,0,1),visibility 0s .48s;display:flex;flex-direction:column;align-items:center;padding:calc(env(safe-area-inset-top,0px) + 8px) max(26px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 14px) max(26px,env(safe-area-inset-left,0px));touch-action:none}
@@ -278,6 +290,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
   <button data-tab="home" aria-label="Home"></button>
   <button data-tab="lib" aria-label="Libreria"></button>
   <button data-tab="search" aria-label="Cerca"></button>
+  <button data-tab="altro" aria-label="Altro"></button>
 </div></nav>
 
 <section id="np" class="paused" aria-label="In riproduzione">
@@ -308,6 +321,9 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
     <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bCast" data-a="cast" aria-label="AirPlay: ascolta su un altro dispositivo" hidden></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bShare" data-a="sharecur" aria-label="Condividi"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
   </div>
 </section>
+
+<div id="xp" hidden><iframe id="xf" title="Modulo" allow="camera; microphone; geolocation; clipboard-read; clipboard-write; screen-wake-lock; web-share; fullscreen"></iframe></div>
+<button id="dlpill" data-a="dlpill" hidden aria-label="Download"></button>
 
 <div id="sh"><div class="scrim" data-a="closesheet"></div><div class="sheet" id="sheet"></div></div>
 <div id="toast" role="status"></div>
@@ -354,6 +370,7 @@ const I = {
   spkHi:'<path d="M3 9.5h3.5L11 5.5v13l-4.5-4H3z"/><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M14.5 9a4.2 4.2 0 0 1 0 6M17.3 6.5a8 8 0 0 1 0 11"/></g>',
   share:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M7 10.5H6a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V12A1.5 1.5 0 0 0 18 10.5h-1"/></g>',
   cast:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/></g><path d="M12 14.5l5 6H7z"/>',
+  grid:'<path d="M4.5 3h5A1.5 1.5 0 0 1 11 4.5v5A1.5 1.5 0 0 1 9.5 11h-5A1.5 1.5 0 0 1 3 9.5v-5A1.5 1.5 0 0 1 4.5 3zm10 0h5A1.5 1.5 0 0 1 21 4.5v5a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 13 9.5v-5A1.5 1.5 0 0 1 14.5 3zm-10 10h5a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 9.5 21h-5A1.5 1.5 0 0 1 3 19.5v-5A1.5 1.5 0 0 1 4.5 13zm10 0h5a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5h-5a1.5 1.5 0 0 1-1.5-1.5v-5a1.5 1.5 0 0 1 1.5-1.5z"/>',
   close:'<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   down:'<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></g>',
   ok:'<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zm4.2 6.3-5.4 5.7-2.9-2.8-1.2 1.3 4.1 4 6.6-7z"/>',
@@ -404,7 +421,7 @@ const T = new Map();      // brani: id -> meta
 let P = [];               // playlist
 const C = new Map();      // copertine: key -> {url, color}
 const S = Object.assign({queue:[], orig:[], qi:-1, shuffle:false, repeat:'off', from:''}, ls.get('am-play', {}));
-const tabs = {home:[{v:'home'}], lib:[{v:'lib'}], search:[{v:'search'}]};
+const tabs = {home:[{v:'home'}], lib:[{v:'lib'}], search:[{v:'search'}], altro:[{v:'altro'}]};
 let tab = 'lib';
 let q = '';
 let lists = [];
@@ -826,7 +843,7 @@ async function runDl() {
 }
 const isSaved = t => !t.remote || saved.has(t.id);
 // appena aperta l'app il catalogo può metterci qualche secondo: intanto i brani del Mac si provano lo stesso (srvWait)
-const canPlay = id => { const t = T.get(id); return !!t && (!t.remote || saved.has(id) || SRV || srvWait); };
+const canPlay = id => { const t = TT(id); return !!t && (!!t.ext || !t.remote || saved.has(id) || SRV || srvWait); };
 function hasRemote() { if (SRVN) return true; for (const t of T.values()) if (t.remote) return true; return false; }
 const dlSign = (id, q) => saved.has(id) ? ic('ok') : dlCur === id || grabbing.has(id) || q.has(id) ? '…' : '';
 const dlText = () => { const n = DLQ.length, rest = n + (n === 1 ? ' brano.' : ' brani.');
@@ -1030,7 +1047,7 @@ function artists() {
 const songs = () => [...T.values()].sort((a, b) => coll.compare(a.title, b.title));
 const albumByKey = k => albums().find(a => a.key === k);
 const plTracks = p => p.ids.map(id => T.get(id)).filter(Boolean);
-const coverUrl = k => k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
+const coverUrl = k => k && k.startsWith('u:') ? k.slice(2) : k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
 
 /* ---------- pezzi di interfaccia ---------- */
 function art(key, cls) {
@@ -1246,6 +1263,11 @@ const pages = {
     return topBar('<button class="back" data-a="back" style="font-weight:600;margin:0;padding-right:0">Fine</button>') + '<h1 class="lt">Aggiungi a «' + esc(p.name) + '»</h1>' +
       chunk(songs(), t => '<button class="trk' + (p.ids.indexOf(t.id) >= 0 ? ' on' : '') + '" data-a="pickt" data-k="' + p.id + '" data-id="' + t.id + '">' + art(t.cover) + '<span class="rt"><span class="tx"><span class="t1">' + esc(t.title) + '</span><span class="t2">' + esc(t.artist || UNK_ART) + '</span></span><span class="pickc">' + ic('check') + '</span></span></button>', true);
   },
+  altro() {
+    return '<div class="top"><span></span></div><h1 class="lt">Altro</h1>' +
+      XMODS.map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
+        '<button class="xtile" data-a="xopen" data-k="' + m.k + '"><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span></button>').join('') + '</div>').join('');
+  },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
   }
@@ -1313,11 +1335,11 @@ function seekOnLoad(at) {
 let loadTok = 0, keptFor = null;
 async function load(i, play, at) {
   if (i < 0 || i >= S.queue.length) return;
-  const id = S.queue[i], t = T.get(id), tok = ++loadTok;
+  const id = S.queue[i], t = TT(id), tok = ++loadTok;
   if (!t) { S.queue.splice(i, 1); S.orig = S.orig.filter(x => x !== id); if (S.queue.length) return load(Math.min(i, S.queue.length - 1), play); return stop(); }
-  const f = await getFile(id);
+  const f = t.ext ? null : await getFile(id);
   if (tok !== loadTok) return;   // nel frattempo è stato scelto un altro brano
-  if (!f && !(t.remote && (SRV || srvWait))) {   // brano del Mac non ancora sull'iPhone e Mac non raggiungibile: si passa al primo ascoltabile
+  if (!f && !t.ext && !(t.remote && (SRV || srvWait))) {   // brano del Mac non ancora sull'iPhone e Mac non raggiungibile: si passa al primo ascoltabile
     if (play) {
       const j = S.queue.findIndex((x, k) => k > i && canPlay(x));
       if (j > 0) return load(j, true);
@@ -1327,7 +1349,8 @@ async function load(i, play, at) {
   }
   S.qi = i;
   if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null;
-  if (f) { saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
+  if (t.ext) au.src = t.url;
+  else if (f) { saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
   else au.src = API + 'file/' + encodeURIComponent(t.sid);   // in streaming dal Mac: si salva sull'iPhone se suona davvero (keep)
   curId = id; keptFor = null;
   seekOnLoad(at);
@@ -1385,7 +1408,7 @@ function ensureColor(key) {   // copertina del Mac non ancora salvata: il colore
 }
 let lastNowKey = '';
 function updateNow() {
-  const t = curId && T.get(curId);
+  const t = curId && TT(curId);
   $('mini').hidden = !t;
   document.body.classList.toggle('hasmini', !!t);
   const playing = !au.paused;
@@ -1421,7 +1444,7 @@ function updateNow() {
 }
 function renderQueue() {
   const up = S.queue.slice(S.qi + 1);
-  $('qlist').innerHTML = up.length ? up.slice(0, 200).map((id, j) => { const t = T.get(id); if (!t) return ''; return '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
+  $('qlist').innerHTML = up.length ? up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; return '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
     '<div class="qempty">Nessun brano in coda.' + (S.repeat === 'all' ? ' Si ricomincia dall\'inizio.' : '') + '</div>';
 }
 let dragging = false, lastSave = 0, lastPos = 0;
@@ -1476,7 +1499,7 @@ async function streamWhy(t) {
 }
 au.addEventListener('error', async () => {
   if (!au.getAttribute('src')) return;
-  const id = curId, t = T.get(id), stream = !!t && t.remote && !saved.has(t.id);
+  const id = curId, t = TT(id), stream = !!t && t.remote && !saved.has(t.id);
   countFor = null; errRun++;
   const why = stream ? await streamWhy(t) : 'ok';
   if (why === 'mac') { await loadServer(); render(true); }   // il Mac non risponde più: si passa ai brani già sull'iPhone
@@ -1593,7 +1616,7 @@ async function delTrack(id) {
 
 /* ---------- eventi ---------- */
 document.addEventListener('click', e => {
-  const tb = e.target.closest('[data-tab]'); if (tb) { setTab(tb.dataset.tab); return; }
+  const tb = e.target.closest('[data-tab]'); if (tb) { closeX(); setTab(tb.dataset.tab); return; }
   const b = e.target.closest('[data-a]'); if (!b) return;
   const a = b.dataset.a, d = b.dataset;
   switch (a) {
@@ -1615,9 +1638,11 @@ document.addEventListener('click', e => {
     case 'repeat': cycleRepeat(); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': load(+d.i, true); break;
-    case 'favcur': if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
+    case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
+    case 'xopen': openX(d.k); break;
+    case 'dlpill': closeX(); setTab('lib'); toast(dlText()); break;
     case 'sharecur': if (curId) shareTrack(curId); else toast('Nessun brano in riproduzione'); break;
     case 'm-share': closeSheet(); shareTrack(d.id); break;
     case 'closesheet': closeSheet(); break;
@@ -1698,6 +1723,55 @@ addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => { e.preventDefault(); dragN = 0; $('drop').hidden = true; if (e.dataTransfer && e.dataTransfer.files.length) importFiles(e.dataTransfer.files); });
 
 let toastT = 0;
+/* ---------- moduli extra (scheda Altro) ---------- */
+// ogni modulo è una pagina in x/, aperta in un riquadro: la musica continua e i suoi comandi restano qui sotto
+const XMODS = [
+  {g:'Ascolta', m:[
+    {k:'podcast', t:'Podcast', d:'Cerca, iscriviti, ascolta e scarica', i:'🎙️', c:'#8e44ec'},
+    {k:'libri', t:'Libri e audiolibri', d:'Leggi, fatti leggere, crea audiolibri', i:'📚', c:'#ff9500'},
+    {k:'video', t:'Video e streaming', d:'Servizi di streaming e download', i:'🎬', c:'#ff3b30'},
+    {k:'live', t:'Vai in diretta', d:'Social e piattaforme audio e video', i:'🔴', c:'#e0245e'}]},
+  {g:'In viaggio', m:[
+    {k:'naviga', t:'Navigatore', d:'GPS con la tua musica, vignette, veicolo', i:'🧭', c:'#007aff'}]},
+  {g:'Per te', m:[
+    {k:'benessere', t:'Benessere', d:'Calorie, Settimana, Trainer', i:'💪', c:'#34c759'},
+    {k:'studio', t:'Studio e idee', d:'Atlante UCI, ciclismo, allenamenti, idee', i:'🚴', c:'#5856d6'},
+    {k:'strumenti', t:'Strumenti', d:'Prezzi, negozi, test, carte, dispositivo', i:'🧰', c:'#8e8e93'}]}
+];
+const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entrano in libreria né in «Brani»
+const TT = id => T.get(id) || EXT.get(id);
+let xCur = '';
+function openX(k, q) {
+  const m = XMODS.flatMap(g => g.m).find(x => x.k === k); if (!m) return;
+  closeNP(); xCur = k;
+  const f = $('xf'), src = 'x/' + k + '.html' + (q || '');
+  if (f.getAttribute('src') !== src) f.setAttribute('src', src);
+  $('xp').hidden = false; ls.set('am-x', k);
+}
+function closeX() { $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); }
+const xSubs = new Set();
+function xNotify() { const n = AM.now(); xSubs.forEach(cb => { try { cb(n); } catch (e) {} }); }
+window.AM = {
+  playExternal(items, start, from) {
+    if (!items || !items.length) return;
+    const ids = items.map(it => { const id = 'x:' + (it.id || it.url); EXT.set(id, {id, ext:true, url:it.url, title:it.title || 'Senza titolo', artist:it.artist || '', album:it.album || '', cover:it.cover ? 'u:' + it.cover : null}); return id; });
+    errRun = 0; S.orig = ids.slice(); S.queue = ids.slice(); S.shuffle = false; S.from = from || ''; load(Math.max(0, Math.min(start || 0, ids.length - 1)), true);
+  },
+  toggle() { toggle(); }, next() { next(false); }, prev() { prev(); },
+  seek(t) { try { au.currentTime = t; } catch (e) {} },
+  now() { const t = curId && TT(curId); return t ? {id:t.ext ? t.id.slice(2) : t.id, title:t.title, artist:t.artist || '', album:t.album || '', cover:coverUrl(t.cover) ? new URL(coverUrl(t.cover), location.href).href : '', playing:!au.paused, ext:!!t.ext, t:au.currentTime || 0, d:isFinite(au.duration) ? au.duration : 0} : null; },
+  onChange(cb) { xSubs.add(cb); return () => xSubs.delete(cb); },
+  toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }
+};
+['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => au.addEventListener(n, xNotify));
+setInterval(() => { if (xSubs.size && !au.paused) xNotify(); }, 1000);
+function dlPill() {   // contatore dei download sull'iPhone, fisso a destra
+  const p = $('dlpill'), n = DLQ.length, done = saved.size;
+  p.hidden = !n;
+  if (n) p.innerHTML = ic('down') + '<span>' + n + ' · ✓ ' + done + '</span>';
+}
+setInterval(dlPill, 1500);
+
 /* ---------- AirPlay e condivisione ---------- */
 function castPick() {
   if (au.webkitShowPlaybackTargetPicker) { try { au.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso'); } return; }
@@ -1712,7 +1786,7 @@ $('bCast').hidden = !(au.webkitShowPlaybackTargetPicker || au.remote);
 au.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', castMark);
 if (au.remote) ['connect', 'connecting', 'disconnect'].forEach(n => au.remote.addEventListener(n, castMark));
 async function shareTrack(id) {
-  const t = T.get(id); if (!t) return;
+  const t = TT(id); if (!t) return;
   const who = t.artist || UNK_ART, url = 'https://music.apple.com/it/search?term=' + encodeURIComponent(t.title + ' ' + (t.artist || ''));
   const text = (id === curId && !au.paused ? 'Sto ascoltando «' : 'Ascolta «') + t.title + '» di ' + who + (t.album ? ' (' + t.album + ')' : '');
   if (navigator.share) {
@@ -1725,7 +1799,7 @@ async function shareTrack(id) {
 function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), sticky ? 8000 : 2400); }
 
 /* ---------- avvio ---------- */
-(function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; })();
+(function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; b[3].innerHTML = ic('grid') + 'Altro'; })();
 $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list'); $('bCast').innerHTML = ic('cast'); $('bShare').innerHTML = ic('share');
 (async function boot() {
   try { DB = await openDB(); } catch (e) { DB = null; toast('Archivio non disponibile: la musica non verrà salvata'); }
@@ -1766,6 +1840,11 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
     if (S.queue.length) { const k = S.queue.indexOf(was), i = k >= 0 ? k : Math.min(Math.max(0, S.qi), S.queue.length - 1); await load(i, false, k >= 0 ? ps.t || 0 : 0); }
   }
   updateNow();
+  // modulo aperto l'ultima volta, o richiesto dall'indirizzo (?x=video&url=… da Condividi / Comandi Rapidi)
+  const qs = new URLSearchParams(location.search), qx = qs.get('x');
+  if (qx) { qs.delete('x'); const rest = qs.toString(); setTab('altro'); openX(qx, rest ? '?' + rest : ''); }
+  else if (tab === 'altro' && ls.get('am-x', '')) openX(ls.get('am-x', ''));
+  dlPill();
 })();
 </script>
 </body>

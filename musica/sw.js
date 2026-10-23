@@ -1,9 +1,12 @@
 // Atlante Musica: copia offline dell'app (la musica è salvata a parte, in IndexedDB).
-const CACHE = 'atlante-musica-v3';
+const CACHE = 'atlante-musica-v4';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
+// moduli della scheda Altro: si mettono in copia uno per uno (se uno manca, gli altri restano)
+const MODULI = ['x/kit.css', 'x/kit.js'].concat(['podcast', 'libri', 'video', 'live', 'naviga', 'benessere', 'strumenti', 'studio'].map(m => 'x/' + m + '.html'));
 const ATTESA = 3000;   // se il Mac non risponde entro 3 s l'app si apre dalla copia offline
 // 'reload': la copia offline si prende dal Mac, non da una vecchia copia nella cache del browser
-self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES.map(f => new Request(f, {cache:'reload'})))).then(() => self.skipWaiting())); });
+self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES.map(f => new Request(f, {cache:'reload'})))
+  .then(() => Promise.all(MODULI.map(f => c.add(new Request(f, {cache:'reload'})).catch(() => {}))))).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('atlante-musica-') && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
@@ -16,6 +19,13 @@ self.addEventListener('fetch', e => {
     // solo la pagina dell'app (./ o ./index.html, anche con ?…): le altre pagine dello stesso indirizzo (un'icona, una cartella)
     // passano senza toccare la copia offline, che altrimenti verrebbe sostituita da loro
     const base = new URL('./', self.registration.scope).pathname;
+    // pagine dei moduli (x/…): prima la rete, se il Mac non risponde la copia offline
+    if (u.pathname.startsWith(base + 'x/') && u.pathname.endsWith('.html')) {
+      const k = new Request(u.origin + u.pathname);
+      e.respondWith(fetch(r).then(res => { if (res.ok) { const cp = res.clone(); caches.open(CACHE).then(c => c.put(k, cp)); } return res; })
+        .catch(() => caches.match(k).then(hit => hit || Response.error())));
+      return;
+    }
     if (u.pathname !== base && u.pathname !== base + 'index.html') return;
     // prima la rete (versione nuova), ma con un limite d'attesa: un Mac in stop o fuori rete può tenere
     // la connessione aperta senza rispondere, e la pagina resterebbe bianca. La rete aggiorna comunque la copia.
@@ -32,6 +42,12 @@ self.addEventListener('fetch', e => {
       const tm = setTimeout(() => usa(copia()), ATTESA);
       net.then(res => usa(buona(res) || res.type === 'opaqueredirect' ? res : copia()), () => usa(copia()));
     }));
+    return;
+  }
+  // file comuni dei moduli (x/kit.*): prima la rete, così un aggiornamento arriva insieme alle pagine
+  if (u.pathname.startsWith(new URL('./x/', self.registration.scope).pathname)) {
+    e.respondWith(fetch(r).then(res => { if (res.ok) { const cp = res.clone(); caches.open(CACHE).then(c => c.put(r, cp)); } return res; })
+      .catch(() => caches.match(r).then(hit => hit || Response.error())));
     return;
   }
   e.respondWith(caches.match(r).then(hit => hit || fetch(r).then(res => {
