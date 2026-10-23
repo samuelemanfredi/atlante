@@ -51,18 +51,25 @@ def _ss32(b, p=0):
     return ((b[p] & 127) << 21) | ((b[p + 1] & 127) << 14) | ((b[p + 2] & 127) << 7) | (b[p + 3] & 127)
 
 
+def _utf16(b, be=False):
+    """UTF-16 dei tag ID3 (con o senza BOM). Un byte in più in fondo (terminatore scritto male) o un carattere rovinato
+    non fanno perdere il titolo: si legge il resto, come fa l'app nel browser."""
+    if b[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        be, b = b[:2] == b"\xfe\xff", b[2:]
+    b = b[:len(b) - len(b) % 2]
+    return b.decode("utf-16-be" if be else "utf-16-le", "replace")
+
+
 def _testo(enc, b):
-    try:
-        if enc == 0:
-            t = b.decode("latin-1")
-        elif enc == 1:
-            t = b.decode("utf-16")
-        elif enc == 2:
-            t = b.decode("utf-16-be")
-        else:
+    if enc == 0:
+        t = b.decode("latin-1")
+    elif enc in (1, 2):
+        t = _utf16(b, enc == 2)
+    else:
+        try:
             t = b.decode("utf-8")
-    except UnicodeDecodeError:
-        t = b.decode("latin-1", "replace")
+        except UnicodeDecodeError:   # dichiarato UTF-8 ma scritto in latin-1 da qualche programma
+            t = b.decode("latin-1")
     return t.split("\x00")[0].strip()
 
 
@@ -107,10 +114,10 @@ def tag_id3(f):
             if t and nomi[fid] not in o:
                 o[nomi[fid]] = t
         elif fid in ("TXXX", "TXX") and fr:   # alcuni programmi scrivono la compilation come TXXX:TCMP / COMPILATION
-            try:
-                parti = fr[1:].decode({0: "latin-1", 1: "utf-16", 2: "utf-16-be"}.get(fr[0], "utf-8")).split("\x00")
-            except UnicodeDecodeError:
-                parti = []
+            if fr[0] in (1, 2):
+                parti = _utf16(fr[1:], fr[0] == 2).split("\x00")
+            else:
+                parti = fr[1:].decode("latin-1" if fr[0] == 0 else "utf-8", "replace").split("\x00")
             if len(parti) > 1 and parti[0].strip("\ufeff ").upper() in ("TCMP", "COMPILATION") and "compilation" not in o:
                 o["compilation"] = parti[1].strip("\ufeff ")
         elif fid in ("APIC", "PIC") and fr:
@@ -865,6 +872,14 @@ def main():
         def do_HEAD(self):
             if not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
+
+        def end_headers(self):
+            # pagina, service worker e manifest: il browser chiede sempre al Mac se sono cambiati (304 se no). Senza, con un
+            # index.html vecchio di settimane terrebbe la sua copia per giorni e un aggiornamento dell'app non arriverebbe.
+            p = urlsplit(self.path).path
+            if not PREFISSO.match(unquote(p)) and (p.endswith("/") or p.endswith((".html", ".js", ".webmanifest"))):
+                self.send_header("Cache-Control", "no-cache")
+            super().end_headers()
 
         def log_message(self, *x):
             pass
