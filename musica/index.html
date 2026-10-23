@@ -305,7 +305,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
       <button class="sk" data-a="next" id="bNext" aria-label="Successivo"></button>
     </div>
     <div class="vol" id="volRow"><span id="vLo"></span><input type="range" class="rg" id="vol" min="0" max="100" value="100" aria-label="Volume"><span id="vHi"></span></div>
-    <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
+    <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bCast" data-a="cast" aria-label="AirPlay: ascolta su un altro dispositivo" hidden></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bShare" data-a="sharecur" aria-label="Condividi"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
   </div>
 </section>
 
@@ -315,7 +315,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 <input type="file" id="fileIn" multiple accept="audio/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.oga,.opus,.aif,.aiff,.alac,.webm" hidden>
 <input type="file" id="plIn" multiple accept=".txt,.m3u,.m3u8,.xml,text/plain,text/xml" hidden>
 <input type="file" id="dirIn" multiple webkitdirectory hidden>
-<audio id="au" preload="auto"></audio>
+<audio id="au" preload="auto" x-webkit-airplay="allow"></audio>
 
 <script>
 'use strict';
@@ -353,6 +353,7 @@ const I = {
   spkLo:'<path d="M3 9.5h3.5L11 5.5v13l-4.5-4H3z"/>',
   spkHi:'<path d="M3 9.5h3.5L11 5.5v13l-4.5-4H3z"/><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M14.5 9a4.2 4.2 0 0 1 0 6M17.3 6.5a8 8 0 0 1 0 11"/></g>',
   share:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M7 10.5H6a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V12A1.5 1.5 0 0 0 18 10.5h-1"/></g>',
+  cast:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/></g><path d="M12 14.5l5 6H7z"/>',
   close:'<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   down:'<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></g>',
   ok:'<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zm4.2 6.3-5.4 5.7-2.9-2.8-1.2 1.3 4.1 4 6.6-7z"/>',
@@ -1526,6 +1527,7 @@ function trackMenu(id, pl) {
     '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' +
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
     '<button data-a="m-artist" data-k="' + esc(primary(t)) + '"><span class="l">Vai all\'artista</span>' + ic('person') + '</button>' +
+    '<button data-a="m-share" data-id="' + id + '"><span class="l">Condividi brano…</span>' + ic('share') + '</button>' +
     (t.remote && !saved.has(id) && SRV ? '<button data-a="m-dl" data-id="' + id + '"><span class="l">Scarica sull\'iPhone</span>' + ic('down') + '</button>' : '') +
     (t.remote && saved.has(id) ? '<button data-a="m-undl" data-id="' + id + '"><span class="l">Togli dall\'iPhone</span>' + ic('trash') + '</button>' : '') +
     // i brani del Mac si modificano e si eliminano sul disco: qui le modifiche verrebbero sovrascritte dal catalogo
@@ -1615,6 +1617,9 @@ document.addEventListener('click', e => {
     case 'qjump': load(+d.i, true); break;
     case 'favcur': if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
     case 'morecur': if (curId) trackMenu(curId); break;
+    case 'cast': castPick(); break;
+    case 'sharecur': if (curId) shareTrack(curId); else toast('Nessun brano in riproduzione'); break;
+    case 'm-share': closeSheet(); shareTrack(d.id); break;
     case 'closesheet': closeSheet(); break;
     case 'm-next': closeSheet(); playNext(d.id); break;
     case 'm-last': closeSheet(); playLast(d.id); break;
@@ -1693,11 +1698,34 @@ addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => { e.preventDefault(); dragN = 0; $('drop').hidden = true; if (e.dataTransfer && e.dataTransfer.files.length) importFiles(e.dataTransfer.files); });
 
 let toastT = 0;
+/* ---------- AirPlay e condivisione ---------- */
+function castPick() {
+  if (au.webkitShowPlaybackTargetPicker) { try { au.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso'); } return; }
+  if (au.remote) au.remote.prompt().catch(e => { if (e && e.name !== 'AbortError') toast('Nessun dispositivo trovato per la riproduzione'); });
+}
+function castMark() {
+  const on = !!au.webkitCurrentPlaybackTargetIsWireless || (au.remote && au.remote.state === 'connected');
+  $('bCast').classList.toggle('on', on);
+}
+au.addEventListener('webkitplaybacktargetavailabilitychanged', e => { $('bCast').hidden = e.availability !== 'available'; });
+au.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', castMark);
+if (au.remote) { ['connect', 'connecting', 'disconnect'].forEach(n => au.remote.addEventListener(n, castMark)); $('bCast').hidden = false; }
+async function shareTrack(id) {
+  const t = T.get(id); if (!t) return;
+  const who = t.artist || UNK_ART, url = 'https://music.apple.com/it/search?term=' + encodeURIComponent(t.title + ' ' + (t.artist || ''));
+  const text = (id === curId && !au.paused ? 'Sto ascoltando «' : 'Ascolta «') + t.title + '» di ' + who + (t.album ? ' (' + t.album + ')' : '');
+  if (navigator.share) {
+    try { await navigator.share({title: t.title + ' – ' + who, text, url}); } catch (e) { if (e && e.name !== 'AbortError') toast('Condivisione non riuscita'); }
+    return;
+  }
+  try { await navigator.clipboard.writeText(text + '\n' + url); toast('Copiato: incollalo dove vuoi'); } catch (e) { toast('Condivisione non disponibile su questo browser'); }
+}
+
 function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), sticky ? 8000 : 2400); }
 
 /* ---------- avvio ---------- */
 (function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; })();
-$('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list');
+$('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list'); $('bCast').innerHTML = ic('cast'); $('bShare').innerHTML = ic('share');
 (async function boot() {
   try { DB = await openDB(); } catch (e) { DB = null; toast('Archivio non disponibile: la musica non verrà salvata'); }
   try {
