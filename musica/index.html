@@ -1701,15 +1701,16 @@ let toastT = 0;
 /* ---------- AirPlay e condivisione ---------- */
 function castPick() {
   if (au.webkitShowPlaybackTargetPicker) { try { au.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso'); } return; }
-  if (au.remote) au.remote.prompt().catch(e => { if (e && e.name !== 'AbortError') toast('Nessun dispositivo trovato per la riproduzione'); });
+  if (au.remote) au.remote.prompt().catch(e => { if (e && e.name !== 'AbortError') toast(isIOS || /Mac/.test(navigator.platform) ? 'Scegli l\'uscita dal Centro di Controllo (icona AirPlay)' : 'Nessun dispositivo trovato per la riproduzione'); });
 }
 function castMark() {
   const on = !!au.webkitCurrentPlaybackTargetIsWireless || (au.remote && au.remote.state === 'connected');
   $('bCast').classList.toggle('on', on);
 }
-au.addEventListener('webkitplaybacktargetavailabilitychanged', e => { $('bCast').hidden = e.availability !== 'available'; });
+// tasto sempre visibile dove il browser sa scegliere l'uscita (Safari su iPhone, iPad e Mac; Chrome): l'elenco mostra anche questo dispositivo
+$('bCast').hidden = !(au.webkitShowPlaybackTargetPicker || au.remote);
 au.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', castMark);
-if (au.remote) { ['connect', 'connecting', 'disconnect'].forEach(n => au.remote.addEventListener(n, castMark)); $('bCast').hidden = false; }
+if (au.remote) ['connect', 'connecting', 'disconnect'].forEach(n => au.remote.addEventListener(n, castMark));
 async function shareTrack(id) {
   const t = T.get(id); if (!t) return;
   const who = t.artist || UNK_ART, url = 'https://music.apple.com/it/search?term=' + encodeURIComponent(t.title + ' ' + (t.artist || ''));
