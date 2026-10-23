@@ -166,9 +166,12 @@ img{max-width:100%;display:block}
 #tabs button.on{color:var(--accent)}
 
 /* moduli extra (scheda Altro): riquadro sopra la pagina, sotto mini player e schede; la musica continua */
-#xp{position:fixed;z-index:29;left:0;right:0;top:0;bottom:calc(52px + env(safe-area-inset-bottom,0px));background:var(--bg)}
-body.hasmini #xp{bottom:calc(122px + env(safe-area-inset-bottom,0px))}
-#xp iframe{width:100%;height:100%;border:0;display:block;background:var(--bg)}
+#xp{position:fixed;z-index:29;inset:0;background:var(--bg)}
+#xp iframe{width:100%;height:calc(100% - 52px - env(safe-area-inset-bottom,0px));border:0;display:block;background:var(--bg)}
+body.hasmini #xp iframe{height:calc(100% - 122px - env(safe-area-inset-bottom,0px))}
+/* il navigatore ha già i suoi comandi della musica, grandi per l'auto */
+body.xnav #mini{display:none}
+body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .xgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
 .xtile{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:14px;background:var(--bg2);text-align:left;min-height:118px}
 .xtile .xi{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px}
@@ -1746,9 +1749,9 @@ function openX(k, q) {
   closeNP(); xCur = k;
   const f = $('xf'), src = 'x/' + k + '.html' + (q || '');
   if (f.getAttribute('src') !== src) f.setAttribute('src', src);
-  $('xp').hidden = false; ls.set('am-x', k);
+  $('xp').hidden = false; ls.set('am-x', k); document.body.classList.toggle('xnav', k === 'naviga');
 }
-function closeX() { $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); }
+function closeX() { document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); }
 const xSubs = new Set();
 function xNotify() { const n = AM.now(); xSubs.forEach(cb => { try { cb(n); } catch (e) {} }); }
 window.AM = {

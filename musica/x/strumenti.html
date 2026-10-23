@@ -1,0 +1,1590 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Strumenti</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.tabs{overflow-x:auto;scrollbar-width:none;margin:2px 0 14px}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:1 0 auto;padding:0 10px;font-size:13px;white-space:nowrap}
+.chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:2px 0 6px;margin:6px 0}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;min-height:32px;padding:0 12px;border-radius:99px;background:var(--fill);font-size:14px;font-weight:600;white-space:nowrap}
+.chip.on{background:var(--accent);color:var(--onaccent)}
+.av{width:40px;height:40px;border-radius:10px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:17px;text-transform:uppercase}
+.btn.danger{background:var(--bad);color:#fff}
+i.pill{font-style:normal}
+.btn.full{width:100%}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.hint{font-size:13px;color:var(--fg2);margin:4px 4px 0}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:var(--fill);padding:1px 5px;border-radius:5px;word-break:break-word}
+ol.passi,ul.passi{margin:6px 0;padding-left:22px}
+ol.passi li,ul.passi li{margin:5px 0}
+.note b{color:var(--fg)}
+.note.warn{background:rgba(255,159,10,.14)}
+.note.bad{background:rgba(255,59,48,.12)}
+.note.ok{background:rgba(52,199,89,.13)}
+/* prezzi */
+a.tile{color:inherit}
+a.tile .top{display:flex;align-items:center;gap:10px}
+a.tile .top b{line-height:1.2}
+a.tile span.av{width:34px;height:34px;border-radius:9px;font-size:15px;color:#fff}
+a.neg{display:flex;gap:12px;align-items:center;flex:1;min-width:0;color:inherit}
+a.tile .pills{display:flex;gap:4px;flex-wrap:wrap;margin-top:auto}
+a.tile:active{opacity:.6}
+.rowbtn{flex:none;min-width:36px;min-height:36px;border-radius:9px;color:var(--fg2);font-size:17px}
+.row a.tx{color:inherit}
+.star{flex:none;width:36px;height:36px;font-size:20px;color:var(--warn)}
+/* test */
+.dom{background:var(--bg2);border-radius:12px;padding:12px 14px;margin:10px 0}
+.dom .testa{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dom .testa b{flex:1}
+.dom .qt{white-space:pre-wrap;margin:8px 0;font-size:15px}
+.dom ol.op{list-style:none;padding:0;margin:6px 0}
+.dom ol.op li{padding:6px 10px;border-radius:8px;background:var(--fill);margin:4px 0;font-size:15px}
+.dom ol.op li.giusta{background:rgba(52,199,89,.2);font-weight:600}
+.seg.mini{margin:0;max-width:220px}
+.seg.mini button{min-height:28px;font-size:13px;padding:0 8px}
+.lung{display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:14px;color:var(--fg2)}
+.lung input{width:76px;min-height:36px}
+.lung select{width:auto;min-height:36px}
+.ris{display:flex;gap:12px;margin-top:10px;padding:10px;border-radius:10px;background:var(--card);border:1px solid var(--sep)}
+.ris .lett{flex:none;width:44px;height:44px;border-radius:50%;background:var(--ok);color:#fff;font-size:22px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.ris p{margin:6px 0;white-space:pre-wrap}
+.prog{height:6px;border-radius:3px;background:var(--fill);overflow:hidden;margin:8px 0}
+.prog>i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.anteprima{max-height:220px;border-radius:10px;margin:8px 0;object-fit:contain;background:var(--fill)}
+/* carte */
+.carte{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:10px 0}
+.cartaf{aspect-ratio:1.586;border-radius:14px;padding:12px;display:flex;flex-direction:column;justify-content:space-between;text-align:left;box-shadow:var(--shadow);overflow:hidden;width:100%}
+.cartaf b{font-size:17px;line-height:1.2;word-break:break-word}
+.cartaf span{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;opacity:.85}
+.cartaf.vuota{background:var(--fill);color:var(--fg2);box-shadow:none;align-items:center;justify-content:center;font-weight:600;color:var(--accent)}
+.swatch{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+.swatch button{width:32px;height:32px;border-radius:50%;border:2px solid transparent}
+.swatch button.on{border-color:var(--fg)}
+.codebox{background:#fff;border-radius:10px;padding:10px;display:flex;justify-content:center;min-height:60px;color:#000}
+.codebox svg{max-width:100%;height:auto}
+.overlay{position:fixed;inset:0;z-index:60;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:calc(16px + env(safe-area-inset-top,0px)) 16px calc(16px + env(safe-area-inset-bottom,0px));overflow:auto}
+#full{background:#fff;color:#000;color-scheme:light;justify-content:flex-start}
+#full.rot{justify-content:center}
+#full .nome{font-size:24px;font-weight:700;text-align:center}
+#full .code{width:100%;max-width:560px;display:flex;justify-content:center;flex:none}
+#full .code svg{width:100%;height:auto;max-height:48vh}
+#full>:first-child{margin-top:auto}
+#full>:last-child{margin-bottom:auto}
+#full.rot .code{transform:rotate(90deg);width:min(64vh,820px);max-width:none}
+#full.rot .code svg{max-height:none}
+#full.rot .nome,#full.rot #fInfo,#full.rot img.foto{display:none}
+#full .num{font:600 22px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1px;text-align:center;word-break:break-all}
+#full .btn{background:#f2f2f7;color:#007aff}
+#full .btn.danger{background:#ff3b30;color:#fff}
+#full .small{color:#555}
+#full img.foto{max-height:30vh;border-radius:12px}
+#scan{background:#000;color:#fff;padding:0;justify-content:flex-end}
+#scan video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#scan .guida{position:absolute;left:8%;right:8%;top:34%;height:24%;border:3px solid rgba(255,255,255,.9);border-radius:14px;box-shadow:0 0 0 100vmax rgba(0,0,0,.35)}
+#scan .basso{position:relative;width:100%;padding:16px 16px calc(20px + env(safe-area-inset-bottom,0px));text-align:center;background:linear-gradient(transparent,rgba(0,0,0,.7))}
+#scan .btn{background:rgba(255,255,255,.2);color:#fff}
+/* dispositivo */
+.kv{display:flex;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:.5px solid var(--sep);font-size:15px}
+.kv:last-child{border-bottom:0}
+.kv span:first-child{color:var(--fg2);flex:none}
+.kv span:last-child{text-align:right;word-break:break-word}
+.bar.big{height:10px;border-radius:5px;margin:6px 0}
+.bar>i.warn{background:var(--warn)}
+.bar>i.bad{background:var(--bad)}
+.bar>i.ok{background:var(--ok)}
+.pul{padding:10px 14px;border-bottom:.5px solid var(--sep)}
+.pul:last-child{border-bottom:0}
+.pul .t{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.pul .t b{word-break:break-word}
+.pul .p{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--fg2);word-break:break-all;margin:3px 0}
+.pul .c{font-size:13px;color:var(--fg2)}
+.cons{background:var(--bg2);border-radius:12px;margin:10px 0;overflow:hidden}
+.cons li{padding:4px 0}
+.cons .in{padding:12px 14px 12px 34px;margin:0}
+.lnk{display:inline-block;margin:4px 6px 0 0;font-size:14px;font-weight:600}
+.cmd{display:flex;gap:6px;align-items:center;margin:4px 0}
+.cmd code{flex:1;padding:6px 8px;display:block}
+.vuoto{color:var(--fg2);text-align:center;padding:18px 10px;font-size:15px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="seg tabs" id="tabs" role="tablist">
+    <button data-t="prezzi" role="tab">Prezzi</button>
+    <button data-t="negozi" role="tab">Negozi</button>
+    <button data-t="test" role="tab">Risolvi test</button>
+    <button data-t="carte" role="tab">Carte</button>
+    <button data-t="disp" role="tab">Dispositivo</button>
+  </div>
+
+  <!-- ===================== PREZZO MIGLIORE ===================== -->
+  <section id="s-prezzi" hidden>
+    <form id="fPrezzi" autocomplete="off">
+      <div class="field"><label for="pQ" id="pQl">Cosa cerchi</label>
+        <input class="in" id="pQ" type="search" enterkeyhint="search" placeholder="Es. iPhone 15 128 GB"></div>
+      <div class="field"><label for="pCat">Categoria</label>
+        <select class="in" id="pCat"></select></div>
+      <div class="seg" id="pContratto" hidden><button type="button" data-v="vendita" class="on">Comprare</button><button type="button" data-v="affitto">Affittare</button></div>
+      <button class="btn pri full" type="submit">Trova il prezzo migliore</button>
+    </form>
+    <div id="pRis"></div>
+    <div id="pStorico"></div>
+  </section>
+
+  <!-- ===================== NEGOZI ===================== -->
+  <section id="s-negozi" hidden>
+    <input class="in" id="nQ" type="search" placeholder="Cerca un negozio o un servizio" autocomplete="off">
+    <div class="chips" id="nChips"></div>
+    <div id="nLista"></div>
+    <p class="small">Link ai siti ufficiali. Le app si aprono nel browser; da lì puoi scaricare l'app del negozio se preferisci.</p>
+  </section>
+
+  <!-- ===================== RISOLVI TEST ===================== -->
+  <section id="s-test" hidden>
+    <div id="tIa"></div>
+    <div class="field"><label for="tTesto">Domanda o domande (anche più di una, numerate)</label>
+      <textarea class="in" id="tTesto" placeholder="Incolla qui il testo. Esempio:&#10;1. Qual è la capitale dell'Australia?&#10;A) Sydney&#10;B) Canberra&#10;C) Melbourne&#10;D) Perth&#10;&#10;2. Spiega cos'è la fotosintesi."></textarea></div>
+    <div class="btns">
+      <label class="btn" for="tFoto">Foto della domanda</label>
+      <input id="tFoto" type="file" accept="image/*" capture="environment" hidden>
+      <button class="btn" id="tPulisci" type="button">Svuota</button>
+    </div>
+    <div id="tOcr"></div>
+    <div id="tDomande"></div>
+    <div class="field" id="tModWrap" hidden><label for="tModello">Modello dell'IA</label><select class="in" id="tModello"></select></div>
+    <button class="btn pri full" id="tRisolvi" type="button" disabled>Risolvi</button>
+    <div class="prog" id="tProg" hidden><i></i></div>
+    <p class="small">Le risposte arrivano dall'IA sul tuo Mac: usale per studiare e verificale. L'IA può sbagliare, soprattutto con testi letti male dalla foto.</p>
+  </section>
+
+  <!-- ===================== CARTE ===================== -->
+  <section id="s-carte" hidden>
+    <div class="h2">Carte fedeltà</div>
+    <div class="carte" id="cLista"></div>
+    <div class="card" id="cForm" hidden>
+      <b id="cFormTit">Nuova carta fedeltà</b>
+      <div class="field"><label for="cNome">Negozio</label>
+        <input class="in" id="cNome" list="cNomi" placeholder="Es. Esselunga Fidaty" autocomplete="off"></div>
+      <datalist id="cNomi"></datalist>
+      <div class="btns">
+        <button class="btn" id="cScan" type="button">Scansiona il codice</button>
+        <label class="btn" for="cFotoIn">Fotografa la carta</label>
+        <input id="cFotoIn" type="file" accept="image/*" capture="environment" hidden>
+      </div>
+      <img class="anteprima" id="cFotoPrev" alt="Foto della carta" hidden>
+      <div class="field"><label for="cNum">Numero (letto dal codice a barre o scritto a mano)</label>
+        <input class="in mono" id="cNum" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Es. 2000123456789"></div>
+      <div class="field"><label for="cFmt">Tipo di codice</label>
+        <select class="in" id="cFmt">
+          <option value="auto">Automatico</option>
+          <option value="EAN13">EAN-13 (13 cifre)</option>
+          <option value="EAN8">EAN-8 (8 cifre)</option>
+          <option value="UPC">UPC-A (12 cifre)</option>
+          <option value="CODE128">Code 128 (lettere e numeri)</option>
+          <option value="CODE39">Code 39</option>
+          <option value="ITF">ITF (Interleaved 2 of 5)</option>
+          <option value="QR">Codice QR</option>
+        </select></div>
+      <div class="field"><label>Colore</label><div class="swatch" id="cColori"></div></div>
+      <div class="codebox" id="cPrev"><span class="small">Anteprima del codice</span></div>
+      <p class="hint" id="cPrevInfo"></p>
+      <div class="btns"><button class="btn pri" id="cSalva" type="button">Salva</button><button class="btn" id="cAnnulla" type="button">Annulla</button></div>
+    </div>
+
+    <div class="h2">Carte di pagamento</div>
+    <div class="note">
+      <b>Dal web non si può pagare con il telefono (NFC).</b> Né Safari né Chrome permettono a un sito di usare il chip NFC per i pagamenti: lo fanno solo i Wallet del sistema, che proteggono la carta con Face ID, impronta o codice. Aggiungi la carta lì, con la fotocamera:
+    </div>
+    <div class="list">
+      <details class="pul" id="wApple"><summary><b>iPhone · Apple Wallet</b></summary>
+        <ol class="passi">
+          <li>Apri l'app <b>Wallet</b> e tocca <b>+</b>.</li>
+          <li>Scegli <b>Carta di debito o di credito</b> › <b>Continua</b>.</li>
+          <li>Inquadra la carta con la fotocamera: numero e scadenza si compilano da soli. Il codice di sicurezza lo scrivi tu, solo lì.</li>
+          <li>Conferma con la tua banca (SMS, app o chiamata). Poi paghi avvicinando l'iPhone al POS (doppio clic sul tasto laterale).</li>
+        </ol>
+        <a class="lnk" href="https://support.apple.com/it-it/108398" target="_blank" rel="noopener">Guida Apple: configurare Apple Pay</a>
+        <a class="lnk" href="https://www.apple.com/it/apple-pay/" target="_blank" rel="noopener">Banche che supportano Apple Pay</a>
+      </details>
+      <details class="pul" id="wGoogle"><summary><b>Android · Google Wallet</b></summary>
+        <ol class="passi">
+          <li>Installa e apri <b>Google Wallet</b>.</li>
+          <li>Tocca <b>Aggiungi a Wallet</b> › <b>Carta di pagamento</b> › <b>Nuova carta di credito o di debito</b>.</li>
+          <li>Inquadra la carta con la fotocamera, controlla i dati e accetta le condizioni della banca.</li>
+          <li>Verifica la carta (SMS o app della banca). Attiva NFC: Impostazioni › Dispositivi connessi › NFC.</li>
+        </ol>
+        <p class="small">In Google Wallet puoi aggiungere anche le tessere fedeltà (Aggiungi a Wallet › Tessera fedeltà). Su iPhone il Wallet accetta solo le tessere distribuite dai negozi tramite le loro app.</p>
+        <a class="lnk" href="https://play.google.com/store/apps/details?id=com.google.android.apps.walletnfcrel" target="_blank" rel="noopener">Google Wallet su Play Store</a>
+        <a class="lnk" href="https://support.google.com/wallet/answer/12058983?hl=it" target="_blank" rel="noopener">Guida Google</a>
+        <a class="lnk" href="https://wallet.google/" target="_blank" rel="noopener">wallet.google</a>
+      </details>
+    </div>
+    <div class="h2" style="font-size:17px">Promemoria delle carte</div>
+    <p class="small">Solo per ricordare quale carta hai nel Wallet: nome, ultime 4 cifre e colore. Atlante non salva mai il numero completo né il codice di sicurezza (CVV).</p>
+    <div class="list" id="pgLista"></div>
+    <div class="card">
+      <div class="row2">
+        <div class="field"><label for="pgNome">Nome</label><input class="in" id="pgNome" placeholder="Es. Visa conto Intesa" autocomplete="off" maxlength="40"></div>
+        <div class="field"><label for="pgUlt">Ultime 4 cifre</label><input class="in mono" id="pgUlt" inputmode="numeric" placeholder="1234" autocomplete="off"></div>
+      </div>
+      <div class="field"><label>Colore</label><div class="swatch" id="pgColori"></div></div>
+      <button class="btn" id="pgAgg" type="button">Aggiungi promemoria</button>
+    </div>
+  </section>
+
+  <!-- ===================== DISPOSITIVO ===================== -->
+  <section id="s-disp" hidden>
+    <div class="h2" style="margin-top:6px">Questo dispositivo</div>
+    <div class="list" id="dInfo"></div>
+    <div id="dSpazio"></div>
+    <div class="h2">Pulizia dei dati dell'app</div>
+    <p class="small">La musica scaricata non si tocca da qui: si gestisce nell'app Musica.</p>
+    <div id="dCache"><div class="vuoto">Calcolo in corso…</div></div>
+    <div class="h2">Il Mac</div>
+    <div id="dMac"><div class="vuoto">Chiedo al Mac…</div></div>
+    <div class="h2">Velocizza</div>
+    <div class="seg tabs" id="vSeg" style="margin-bottom:6px"></div>
+    <div id="vLista"></div>
+  </section>
+</div>
+
+<!-- carta a schermo intero, per il cassiere -->
+<div class="overlay" id="full" hidden role="dialog" aria-label="Carta fedeltà">
+  <div class="nome" id="fNome"></div>
+  <div class="code" id="fCode"></div>
+  <div class="num" id="fNum"></div>
+  <img class="foto" id="fFoto" alt="Foto della carta" hidden>
+  <div class="small" id="fInfo">Alza la luminosità dello schermo al massimo.</div>
+  <div class="btns" style="justify-content:center">
+    <button class="btn pri" id="fChiudi" type="button">Chiudi</button>
+    <button class="btn" id="fRuota" type="button">Ruota</button>
+    <button class="btn" id="fFotoBtn" type="button" hidden>Foto</button>
+    <button class="btn" id="fMod" type="button">Modifica</button>
+    <button class="btn" id="fDel" type="button">Elimina</button>
+  </div>
+</div>
+
+<!-- fotocamera per leggere il codice -->
+<div class="overlay" id="scan" hidden role="dialog" aria-label="Scansiona il codice">
+  <video id="scanV" playsinline muted></video>
+  <div class="guida"></div>
+  <div class="basso"><p id="scanInfo">Inquadra il codice a barre della carta</p><button class="btn" id="scanStop" type="button">Annulla</button></div>
+</div>
+
+<script src="kit.js"></script>
+<script>
+'use strict';
+(function () {
+const {$, esc, toast} = AX;
+const qsa = (s, el) => [...(el || document).querySelectorAll(s)];
+const E = encodeURIComponent;
+const LIB = {
+  tesseract: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+  zxing: 'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js',
+  jsbarcode: 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js',
+  qrcode: 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'
+};
+const caricate = {};
+function carica(url) {
+  return caricate[url] || (caricate[url] = new Promise((ok, ko) => {
+    const s = document.createElement('script');
+    s.src = url; s.async = true; s.crossOrigin = 'anonymous';
+    s.onload = () => ok();
+    s.onerror = () => { delete caricate[url]; s.remove(); ko(new Error('Libreria non raggiungibile: serve la connessione a Internet')); };
+    document.head.appendChild(s);
+  }));
+}
+function fmtB(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return n == null ? '—' : String(n);
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toLocaleString('it-IT', {maximumFractionDigits: n < 10 && i ? 1 : 0}) + ' ' + u[i];
+}
+function colore(s) { let h = 7; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return 'hsl(' + h + ' 52% 44%)'; }
+async function copia(t) {
+  try { await navigator.clipboard.writeText(t); toast('Copiato'); return; } catch (e) {}
+  const a = document.createElement('textarea'); a.value = t; a.style.cssText = 'position:fixed;opacity:0;top:0'; document.body.appendChild(a); a.select();
+  try { document.execCommand('copy'); toast('Copiato'); } catch (e) { toast('Copia non riuscita'); }
+  a.remove();
+}
+// conferma nella pagina: primo tocco arma il pulsante, il secondo esegue
+function conferma(btn, azione, testo) {
+  if (btn.dataset.armato) { delete btn.dataset.armato; clearTimeout(btn._t); btn.textContent = btn.dataset.orig; btn.classList.remove('danger'); azione(); return; }
+  btn.dataset.armato = '1'; btn.dataset.orig = btn.textContent; btn.textContent = testo || 'Tocca di nuovo per confermare'; btn.classList.add('danger');
+  btn._t = setTimeout(() => { if (!btn.dataset.armato) return; delete btn.dataset.armato; btn.textContent = btn.dataset.orig; btn.classList.remove('danger'); }, 4000);
+}
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+/* ---------- IA locale (comune) ---------- */
+const IA = {
+  st: null,
+  async verifica(force) {
+    const s = await AX.stato(force);
+    if (!s.ok) return (this.st = {mac: false, attiva: false, modelli: [], modello: ''});
+    let j = null;
+    try { j = await AX.api('ia', {timeout: 8000}); } catch (e) {}
+    return (this.st = {mac: true, attiva: j ? !!j.attiva : !!s.ollama, modelli: (j && j.modelli) || s.modelli || [], modello: (j && j.modello) || ''});
+  },
+  modello() { const m = AX.store.get('ia-modello', ''); return this.st && this.st.modelli.indexOf(m) >= 0 ? m : ''; },
+  pulisci(t) { return String(t == null ? '' : t).replace(/<think>[\s\S]*?<\/think>/gi, '').trim(); },
+  estrai(t) {
+    t = this.pulisci(t).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+    try { return JSON.parse(t); } catch (e) {}
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch (e) {} }
+    return null;
+  },
+  // chiede un JSON e lo valida (valida → '' se va bene, altrimenti il motivo); un secondo tentativo se non è valido
+  async json(prompt, sistema, valida, tentativi) {
+    let errore = '';
+    for (let i = 0; i < (tentativi || 2); i++) {
+      const p = errore ? prompt + '\n\nATTENZIONE: la risposta precedente non era valida (' + errore + '). Rispondi di nuovo SOLO con il JSON richiesto.' : prompt;
+      const t = await AX.ia(p, {sistema, json: true, modello: this.modello()});
+      const o = this.estrai(t);
+      errore = !o || typeof o !== 'object' ? 'non era JSON' : valida(o);
+      if (!errore) return o;
+    }
+    throw new Error('L\'IA ha risposto in un formato non valido (' + errore + '). Riprova o scegli un altro modello.');
+  },
+  nota(st) {
+    if (!st.mac) return '<div class="note warn"><b>Il Mac non risponde.</b> L\'IA di Atlante gira sul tuo Mac, non su Internet: accendi il Mac, avvia il server della musica e collegati alla stessa rete (o a Tailscale). Finché il Mac non risponde non viene data nessuna risposta: niente viene inventato.<div class="btns"><button class="btn sm" type="button" data-a="riprova-ia">Riprova</button></div></div>';
+    if (!st.attiva) return '<div class="note warn"><b>L\'IA locale non è attiva sul Mac.</b> Per attivarla (una volta sola):<ol class="passi"><li>Sul Mac scarica e installa <a href="https://ollama.com/download" target="_blank" rel="noopener">Ollama</a>, poi aprilo (resta nella barra in alto).</li><li>Nel Terminale scrivi <code>ollama pull qwen3.5:9b</code> (Mac con 16 GB di RAM o più) oppure <code>ollama pull gemma3:4b</code> (Mac con 8 GB).</li><li>Lascia Ollama aperto e premi «Riprova».</li></ol>Finché l\'IA non è attiva non viene data nessuna risposta: niente viene inventato.<div class="btns"><button class="btn sm" type="button" data-a="riprova-ia">Riprova</button></div></div>';
+    return '';
+  }
+};
+
+/* =====================================================================
+   PREZZO MIGLIORE
+   ===================================================================== */
+const P = q => q.trim().split(/\s+/).map(E).join('+');
+const slug = s => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const subito = (cat, tipo) => q => 'https://www.subito.it/annunci-italia/' + (tipo || 'vendita') + '/' + cat + '/?q=' + P(q);
+const viaGoogle = (dom, q) => 'https://www.google.com/search?q=' + E('site:' + dom + ' ' + q);
+const MARCHE2 = ['alfa-romeo', 'land-rover', 'aston-martin', 'rolls-royce', 'mercedes-benz', 'lynk-co', 'harley-davidson', 'mv-agusta', 'royal-enfield', 'moto-guzzi'];
+const ALIAS = {mercedes: 'mercedes-benz', vw: 'volkswagen', alfa: 'alfa-romeo', harley: 'harley-davidson', guzzi: 'moto-guzzi', land: 'land-rover'};
+// marche note (slug come nei siti di annunci): con una marca sconosciuta si apre la ricerca generale
+const MARCHE = ('abarth alfa-romeo alpine aston-martin audi bentley bmw byd cadillac chevrolet chrysler citroen cupra dacia daihatsu dodge ds ferrari fiat ford honda hyundai infiniti isuzu jaguar jeep kia lamborghini lancia land-rover leapmotor lexus lotus lynk-co maserati mazda mclaren mercedes-benz mg mini mitsubishi nissan opel peugeot polestar porsche renault rolls-royce seat skoda smart ssangyong subaru suzuki tesla toyota volkswagen volvo ' +
+  'aprilia benelli beta ducati harley-davidson husqvarna kawasaki ktm kymco moto-guzzi mv-agusta piaggio royal-enfield sym triumph vespa yamaha voge cfmoto fantic').split(' ');
+const NON_MODELLO = /^(classe|serie|range|model|nuova|nuovo|new|usata|usato|benzina|diesel|gpl|metano|ibrida|hybrid|elettrica|automatica|manuale|km0|cv|kw|anno|\d+[.,]\d+)$/;
+function marcaModello(q) {
+  const w = slug(q).split('-').filter(Boolean);
+  if (!w.length) return {};
+  let marca = w[0], i = 1;
+  if (w.length > 1 && MARCHE2.indexOf(w[0] + '-' + w[1]) >= 0) { marca = w[0] + '-' + w[1]; i = 2; }
+  else if (ALIAS[marca]) { marca = ALIAS[marca]; if (w[1] && marca === w[0] + '-' + w[1]) i = 2; }
+  if (MARCHE.indexOf(marca) < 0) return {};
+  // solo il modello «semplice» (una parola: Panda, Golf, 500, Giulia; «Grande Panda»): i nomi composti cambiano da sito a sito
+  let modello = '';
+  const m = w[i];
+  if (m && !NON_MODELLO.test(m)) modello = m === 'grande' && w[i + 1] ? 'grande-' + w[i + 1] : m;
+  return {marca, modello};
+}
+function autoscout(q, tipo, moto) { const m = marcaModello(q); return 'https://www.autoscout24.it/' + tipo + (m.marca ? '/' + m.marca + (m.modello && !moto && tipo === 'lst' ? '/' + m.modello : '') : ''); }
+const MOTO = /\b(moto|scooter|vespa|sh|beverly|tmax|t-max|ducati|kawasaki|ktm|aprilia|benelli|harley|guzzi|triumph|yamaha|suzuki\s*(gsx|v-?strom|burgman)|honda\s*(sh|cb|crf|forza|africa|transalp|nc|x-adv|pcx)|bmw\s*(r|f|gs|s)\s?\d|mt-?\d|cbr|gsx|xmax|nmax|liberty|piaggio|kymco|sym)\b/i;
+function citta(q) { const c = q.replace(/\b(case?|appartament[oi]|bilocal[ei]|trilocal[ei]|quadrilocal[ei]|monolocal[ei]|villa|villetta|attico|loft|stanza|camera|stanze|in|a|ad|di|zona|affitto|vendita|compro|cerco|affittasi|vendesi|comprare|affittare)\b/gi, ' ').replace(/\s+/g, ' ').trim(); return c || q.trim(); }
+const IDEALISTA = 'milano roma torino napoli bologna firenze genova venezia verona padova bari palermo catania trieste brescia bergamo parma modena pisa lucca perugia cagliari trento como varese pavia vicenza treviso udine ancona pescara salerno lecce livorno rimini ravenna ferrara piacenza cremona mantova novara alessandria asti cuneo siena arezzo grosseto latina frosinone viterbo lecco lodi sondrio biella vercelli savona imperia caserta avellino benevento foggia taranto brindisi potenza matera cosenza catanzaro messina siracusa ragusa trapani agrigento sassari'.split(' ');
+
+// t: confronto | negozio | usato | ricondizionato | annunci | offerte | store | viaggi
+const TAG = {confronto: ['Confronto prezzi', 'ok'], negozio: ['Negozio', ''], usato: ['Usato', 'warn'], ricondizionato: ['Ricondizionato', 'warn'], annunci: ['Annunci', ''], offerte: ['Volantini', ''], store: ['Store ufficiale', ''], chiavi: ['Chiavi digitali', ''], viaggi: ['Prenotazioni', '']};
+const SITI = {
+  trovaprezzi: {n: 'Trovaprezzi', d: 'Il comparatore italiano: offerte di centinaia di negozi dal prezzo più basso', t: 'confronto', u: q => 'https://www.trovaprezzi.it/categoria.aspx?id=-1&libera=' + E(q)},
+  idealo: {n: 'idealo', d: 'Confronto prezzi con lo storico del prezzo', t: 'confronto', u: q => 'https://www.idealo.it/risultati.html?q=' + P(q)},
+  gshop: {n: 'Google Shopping', d: 'Le offerte di tutti i negozi trovati da Google', t: 'confronto', u: q => 'https://www.google.com/search?udm=28&hl=it&gl=it&q=' + E(q)},
+  amazon: {n: 'Amazon.it', d: 'Consegna rapida e resi semplici', t: 'negozio', u: q => 'https://www.amazon.it/s?k=' + P(q)},
+  ebay: {n: 'eBay', d: 'Nuovo e usato, aste e «Compralo subito»', t: 'negozio', u: q => 'https://www.ebay.it/sch/i.html?_nkw=' + P(q)},
+  ebayUsato: {n: 'eBay · usato', d: 'Solo oggetti usati, con protezione acquisti', t: 'usato', u: q => 'https://www.ebay.it/sch/i.html?LH_ItemCondition=3000&_nkw=' + P(q)},
+  subito: {n: 'Subito', d: 'Annunci di privati e negozi in tutta Italia', t: 'usato', u: subito('usato')},
+  backmarket: {n: 'Back Market', d: 'Ricondizionato con garanzia di almeno 12 mesi', t: 'ricondizionato', u: q => 'https://www.backmarket.it/it-it/search?q=' + E(q)},
+  refurbed: {n: 'refurbed', d: 'Ricondizionato controllato, garanzia 12 mesi', t: 'ricondizionato', u: q => 'https://www.refurbed.it/search?query=' + E(q)},
+  mediaworld: {n: 'MediaWorld', d: 'Elettronica, anche con ritiro in negozio', t: 'negozio', u: q => 'https://www.mediaworld.it/it/search.html?query=' + E(q)},
+  unieuro: {n: 'Unieuro', d: 'Elettronica, anche con ritiro in negozio', t: 'negozio', u: q => 'https://www.unieuro.it/online/?q=' + E(q)},
+  euronics: {n: 'Euronics', d: 'Elettronica ed elettrodomestici', t: 'negozio', u: q => 'https://www.euronics.it/search?q=' + E(q)},
+  decathlon: {n: 'Decathlon', d: 'Sport, bici e accessori a buon prezzo', t: 'negozio', u: q => 'https://www.decathlon.it/search?Ntt=' + E(q)},
+  bike24: {n: 'BIKE24', d: 'Grande negozio online di ciclismo, spedisce in Italia', t: 'negozio', u: q => 'https://www.bike24.com/search?searchTerm=' + E(q)},
+  buycycle: {n: 'buycycle', d: 'Bici usate controllate, con protezione acquisti', t: 'usato', u: q => 'https://buycycle.com/it-it/shop/search/' + E(q)},
+  subitoBici: {n: 'Subito · Biciclette', d: 'Bici usate di privati vicino a te', t: 'usato', u: subito('biciclette')},
+  ikea: {n: 'IKEA', d: 'Mobili e oggetti per la casa', t: 'negozio', u: q => 'https://www.ikea.com/it/it/search/?q=' + E(q)},
+  leroy: {n: 'Leroy Merlin', d: 'Casa, bricolage e giardino', t: 'negozio', u: q => 'https://www.leroymerlin.it/search?q=' + E(q)},
+  manomano: {n: 'ManoMano', d: 'Fai da te, casa e giardino da molti venditori', t: 'negozio', u: q => 'https://www.manomano.it/ricerca/' + E(q)},
+  esselunga: {n: 'Esselunga', d: 'Spesa online a domicilio o con ritiro', t: 'negozio', u: q => 'https://spesaonline.esselunga.it/commerce/nav/supermercato/store/ricerca/' + E(q)},
+  carrefour: {n: 'Carrefour', d: 'Spesa online a domicilio o con ritiro', t: 'negozio', u: q => 'https://www.carrefour.it/search?q=' + E(q)},
+  amazonSpesa: {n: 'Amazon · Alimentari', d: 'Dispensa, bevande e prodotti per la casa', t: 'negozio', u: q => 'https://www.amazon.it/s?i=grocery&k=' + P(q)},
+  volantini: {n: 'DoveConviene', d: 'Volantini e offerte dei supermercati vicino a te', t: 'offerte', u: () => 'https://www.doveconviene.it/', nq: true},
+  farmae: {n: 'Farmaè', d: 'Farmacia e parafarmacia online', t: 'negozio', u: q => 'https://www.farmae.it/search?q=' + E(q)},
+  redcare: {n: 'Redcare', d: 'Farmacia online (farmaci da banco e parafarmaco)', t: 'negozio', u: q => 'https://www.redcare.it/search.htm?q=' + E(q)},
+  amicafarmacia: {n: 'Amicafarmacia', d: 'Farmacia online', t: 'negozio', u: q => 'https://www.amicafarmacia.com/search?q=' + E(q)},
+  tigota: {n: 'Tigotà', d: 'Igiene, cura della persona e della casa', t: 'negozio', u: q => 'https://www.tigota.it/search/' + E(q)},
+  myprotein: {n: 'Myprotein', d: 'Integratori sportivi, spesso in promozione', t: 'negozio', u: q => 'https://www.myprotein.it/search/?q=' + E(q)},
+  bulk: {n: 'Bulk', d: 'Integratori sportivi e alimenti', t: 'negozio', u: q => 'https://www.bulk.com/it/search?q=' + E(q)},
+  iherb: {n: 'iHerb', d: 'Vitamine e integratori di molte marche', t: 'negozio', u: q => 'https://it.iherb.com/search?kw=' + E(q)},
+  ibs: {n: 'IBS', d: 'Libri, scolastici e cartoleria', t: 'negozio', u: q => 'https://www.ibs.it/search/?ts=as&query=' + E(q)},
+  libraccio: {n: 'Libraccio', d: 'Libri scolastici nuovi e usati', t: 'negozio', u: q => 'https://www.libraccio.it/src/?xy=' + E(q)},
+  feltrinelli: {n: 'laFeltrinelli', d: 'Libri e cartoleria', t: 'negozio', u: q => 'https://www.lafeltrinelli.it/search/?query=' + E(q)},
+  mondadori: {n: 'Mondadori Store', d: 'Libri e scolastica', t: 'negozio', u: q => 'https://www.mondadoristore.it/search/?g=' + E(q)},
+  allkeyshop: {n: 'Allkeyshop', d: 'Confronta i prezzi delle chiavi dei giochi per PC e console', t: 'confronto', u: q => 'https://www.allkeyshop.com/blog/catalogue/search-' + P(q) + '/'},
+  itad: {n: 'IsThereAnyDeal', d: 'Storico prezzi e sconti dei giochi per PC', t: 'confronto', u: q => 'https://isthereanydeal.com/search/?q=' + E(q)},
+  instant: {n: 'Instant Gaming', d: 'Chiavi digitali scontate', t: 'chiavi', u: q => 'https://www.instant-gaming.com/it/ricerca/?q=' + E(q)},
+  eneba: {n: 'Eneba', d: 'Chiavi digitali e carte regalo', t: 'chiavi', u: q => 'https://www.eneba.com/it/store/all?text=' + E(q)},
+  steam: {n: 'Steam', d: 'PC, Mac e Linux', t: 'store', u: q => 'https://store.steampowered.com/search/?term=' + E(q)},
+  psstore: {n: 'PlayStation Store', d: 'PS5 e PS4', t: 'store', u: q => 'https://store.playstation.com/it-it/search/' + E(q)},
+  xbox: {n: 'Xbox / Microsoft Store', d: 'Xbox e PC Windows', t: 'store', u: q => 'https://www.xbox.com/it-IT/search/results?q=' + E(q)},
+  nintendo: {n: 'Nintendo eShop', d: 'Nintendo Switch e Switch 2', t: 'store', u: q => 'https://www.nintendo.com/it-it/Cerca/Cerca-299117.html?q=' + E(q)},
+  epic: {n: 'Epic Games Store', d: 'PC, con giochi gratis ogni settimana', t: 'store', u: q => 'https://store.epicgames.com/it/browse?q=' + E(q) + '&sortBy=relevancy&sortDir=DESC'},
+  gog: {n: 'GOG', d: 'Giochi per PC senza DRM', t: 'store', u: q => 'https://www.gog.com/en/games?query=' + E(q)},
+  appstore: {n: 'App Store', d: 'iPhone e iPad', t: 'store', u: q => 'https://apps.apple.com/it/iphone/search?term=' + E(q)},
+  gplay: {n: 'Google Play', d: 'Android', t: 'store', u: q => 'https://play.google.com/store/search?q=' + E(q) + '&c=apps&hl=it'},
+  zooplus: {n: 'zooplus', d: 'Cibo e accessori per animali, consegna a casa', t: 'negozio', u: q => 'https://www.zooplus.it/search/results?q=' + E(q)},
+  arcaplanet: {n: 'Arcaplanet', d: 'Pet shop online e negozi', t: 'negozio', u: q => 'https://www.arcaplanet.it/s/?q=' + E(q)},
+  isola: {n: 'Isola dei Tesori', d: 'Pet shop online e negozi', t: 'negozio', u: q => 'https://www.isoladeitesori.it/search?q=' + E(q)},
+  robinson: {n: 'Robinson Pet Shop', d: 'Pet shop online', t: 'negozio', u: q => 'https://www.robinsonpetshop.it/?s=' + E(q)},
+  gvoli: {n: 'Google Voli', d: 'Confronta i voli di tutte le compagnie, con grafico dei prezzi', t: 'confronto', u: q => 'https://www.google.com/travel/flights?hl=it&q=' + E('voli per ' + q)},
+  ghotel: {n: 'Google Hotel', d: 'Prezzi degli hotel su tutti i siti di prenotazione', t: 'confronto', u: q => 'https://www.google.com/travel/search?hl=it&q=' + E('hotel ' + q)},
+  booking: {n: 'Booking.com', d: 'Hotel e appartamenti, spesso con cancellazione gratuita', t: 'viaggi', u: q => 'https://www.booking.com/searchresults.it.html?ss=' + E(q)},
+  airbnb: {n: 'Airbnb', d: 'Case e stanze da privati', t: 'viaggi', u: q => 'https://www.airbnb.it/s/' + E(q) + '/homes'},
+  trainline: {n: 'Trainline', d: 'Treni Trenitalia e Italo a confronto (inserisci la tratta)', t: 'viaggi', u: () => 'https://www.thetrainline.com/it', nq: true},
+  flixbus: {n: 'FlixBus', d: 'Autobus economici (inserisci la tratta)', t: 'viaggi', u: () => 'https://www.flixbus.it/', nq: true},
+  skyscanner: {n: 'Skyscanner', d: 'Voli economici, anche «ovunque» (inserisci la tratta)', t: 'confronto', u: () => 'https://www.skyscanner.it/', nq: true},
+  zalando: {n: 'Zalando', d: 'Moda e scarpe, reso gratuito', t: 'negozio', u: q => 'https://www.zalando.it/catalogo/?q=' + E(q)},
+  vinted: {n: 'Vinted', d: 'Abiti usati da privati', t: 'usato', u: q => 'https://www.vinted.it/catalog?search_text=' + E(q)},
+  zara: {n: 'Zara', d: 'Moda', t: 'negozio', u: q => 'https://www.zara.com/it/it/search?searchTerm=' + E(q)},
+  hm: {n: 'H&M', d: 'Moda', t: 'negozio', u: q => 'https://www2.hm.com/it_it/search-results.html?q=' + E(q)},
+  ovs: {n: 'OVS', d: 'Moda per tutta la famiglia', t: 'negozio', u: q => 'https://www.ovs.it/it/it/search/?q=' + E(q)},
+  wallapop: {n: 'Wallapop', d: 'Annunci di usato vicino a te', t: 'usato', u: q => 'https://it.wallapop.com/search?keywords=' + E(q)},
+  fbm: {n: 'Facebook Marketplace', d: 'Usato tra privati nella tua zona', t: 'usato', u: q => 'https://www.facebook.com/marketplace/search/?query=' + E(q)},
+  autoscout: {n: 'AutoScout24', d: 'Auto nuove e usate di concessionari e privati', t: 'annunci', u: (q, o) => autoscout(q, 'lst', o.moto)},
+  subitoAuto: {n: 'Subito · Auto', d: 'Annunci di auto usate', t: 'annunci', u: subito('auto')},
+  automobile: {n: 'Automobile.it', d: 'Annunci di auto usate', t: 'annunci', u: (q, o) => { const m = marcaModello(q); if (!m.marca) return 'https://www.automobile.it/'; if (m.marca.indexOf('-') >= 0) return viaGoogle('automobile.it', q); return 'https://www.automobile.it/' + m.marca + (m.modello && !o.moto ? '-' + m.modello : ''); }, g: q => (marcaModello(q).marca || '').indexOf('-') >= 0},
+  autoscoutMoto: {n: 'AutoScout24 · Moto', d: 'Moto e scooter nuovi e usati (scegli poi il modello)', t: 'annunci', u: q => autoscout(q, 'lst-moto', true), moto: true},
+  motoit: {n: 'Moto.it', d: 'Annunci di moto usate', t: 'annunci', u: q => 'https://www.moto.it/moto-usate/ricerca?q=' + E(q), moto: true},
+  subitoMoto: {n: 'Subito · Moto e scooter', d: 'Annunci di moto e scooter', t: 'annunci', u: subito('moto-e-scooter'), moto: true},
+  immobiliare: {n: 'Immobiliare.it', d: 'Il portale più grande, con prezzi medi della zona', t: 'annunci', u: (q, o) => 'https://www.immobiliare.it/' + (o.affitto ? 'affitto' : 'vendita') + '-case/' + slug(citta(q)) + '/'},
+  idealista: {n: 'idealista', d: 'Annunci con mappa e avvisi', t: 'annunci', u: (q, o) => { const c = slug(citta(q)); return IDEALISTA.indexOf(c) >= 0 ? 'https://www.idealista.it/' + (o.affitto ? 'affitto' : 'vendita') + '-case/' + c + '-' + c + '/' : viaGoogle('idealista.it', (o.affitto ? 'affitto ' : 'vendita ') + citta(q)); }, g: (q) => IDEALISTA.indexOf(slug(citta(q))) < 0},
+  casait: {n: 'Casa.it', d: 'Annunci di agenzie e privati', t: 'annunci', u: (q, o) => 'https://www.casa.it/' + (o.affitto ? 'affitto' : 'vendita') + '/residenziale/' + slug(citta(q)) + '/'},
+  subitoCase: {n: 'Subito · Immobili', d: 'Annunci anche di privati, stanze comprese', t: 'annunci', u: (q, o) => 'https://www.subito.it/annunci-italia/' + (o.affitto ? 'affitto' : 'vendita') + '/immobili/?q=' + P(q)}
+};
+const CATS = [
+  {id: 'auto', n: 'Automatica (la scelgo io)', campo: 'Cosa cerchi', ph: 'Es. iPhone 15 128 GB', siti: []},
+  {id: 'tutto', n: 'Qualsiasi prodotto', siti: ['trovaprezzi', 'idealo', 'gshop', 'amazon', 'ebay', 'subito'], cons: 'Confronta sempre il prezzo con la spedizione e guarda il «prezzo più basso degli ultimi 30 giorni» indicato negli sconti.'},
+  {id: 'veicoli', n: 'Auto e moto', campo: 'Marca e modello', ph: 'Es. Fiat Panda oppure Honda SH 125', siti: ['autoscout', 'subitoAuto', 'automobile', 'autoscoutMoto', 'motoit', 'subitoMoto', 'ebay'], cons: 'Confronta modelli con anno e chilometri simili. Prima di pagare controlla revisioni e chilometri sul <a href="https://www.ilportaledellautomobilista.it/" target="_blank" rel="noopener">Portale dell\'Automobilista</a> e non versare anticipi a chi non ti fa vedere l\'auto.'},
+  {id: 'case', n: 'Case e affitti', campo: 'Città', ph: 'Es. Milano', contratto: true, siti: ['immobiliare', 'idealista', 'casait', 'subitoCase'], cons: 'Diffida degli annunci con prezzo molto più basso della zona o che chiedono caparre prima della visita. Il prezzo medio al m² lo trovi nella sezione «Prezzi» di Immobiliare.it.'},
+  {id: 'elettronica', n: 'Telefoni ed elettronica', siti: ['trovaprezzi', 'idealo', 'gshop', 'amazon', 'backmarket', 'refurbed', 'mediaworld', 'unieuro', 'euronics', 'ebay', 'subito'], cons: 'Lo storico prezzi di idealo dice se lo sconto è vero. Il ricondizionato (Back Market, refurbed) costa spesso il 20–40% in meno con 12 mesi di garanzia.'},
+  {id: 'bici', n: 'Bici', siti: ['trovaprezzi', 'idealo', 'decathlon', 'bike24', 'amazon', 'buycycle', 'subitoBici', 'ebay', 'gshop'], cons: 'Per l\'usato chiedi la fattura (furti) e controlla telaio, trasmissione e misura. Su buycycle il pagamento è protetto.'},
+  {id: 'casa', n: 'Casa', siti: ['trovaprezzi', 'idealo', 'ikea', 'leroy', 'manomano', 'amazon', 'gshop', 'subito'], cons: 'Per gli elettrodomestici guarda anche la classe energetica: consuma meno chi costa un po\' di più.'},
+  {id: 'spesa', n: 'Spesa', siti: ['esselunga', 'carrefour', 'amazonSpesa', 'trovaprezzi', 'gshop', 'volantini'], cons: 'Confronta il prezzo al kg o al litro, non a confezione, e guarda i volantini della settimana.'},
+  {id: 'farmacia', n: 'Farmacia e salute', siti: ['trovaprezzi', 'farmae', 'redcare', 'amicafarmacia', 'idealo', 'tigota', 'gshop'], cons: 'Online si comprano solo farmaci da banco e parafarmaci, da siti con il logo comune europeo (cliccabile, porta al sito del Ministero della Salute). Per i dubbi chiedi al farmacista.'},
+  {id: 'integratori', n: 'Integratori', siti: ['trovaprezzi', 'idealo', 'myprotein', 'bulk', 'iherb', 'farmae', 'amazon', 'decathlon', 'gshop'], cons: 'Confronta il prezzo per dose o per 100 g, e i codici sconto: Myprotein e Bulk hanno promozioni quasi ogni settimana.'},
+  {id: 'scuola', n: 'Scuola', siti: ['amazon', 'ibs', 'libraccio', 'feltrinelli', 'mondadori', 'trovaprezzi', 'subito', 'gshop'], cons: 'Per i libri scolastici cerca con il codice ISBN della lista: su Libraccio e Subito trovi anche l\'usato.'},
+  {id: 'giochi', n: 'Giochi', siti: ['allkeyshop', 'itad', 'instant', 'eneba', 'steam', 'psstore', 'xbox', 'nintendo', 'epic', 'gog', 'appstore', 'gplay', 'amazon', 'trovaprezzi'], cons: 'Le chiavi dei rivenditori costano meno ma controlla la regione (EU) e la piattaforma; gli store ufficiali hanno saldi stagionali.'},
+  {id: 'animali', n: 'Animali', siti: ['zooplus', 'arcaplanet', 'isola', 'robinson', 'amazon', 'trovaprezzi', 'idealo'], cons: 'Per il cibo conviene il formato grande e la consegna periodica (spesso con sconto).'},
+  {id: 'viaggi', n: 'Viaggi', campo: 'Destinazione', ph: 'Es. Parigi', siti: ['gvoli', 'ghotel', 'booking', 'airbnb', 'skyscanner', 'trainline', 'flixbus'], cons: 'Prenota con cancellazione gratuita e confronta il prezzo finale con tasse e bagagli. Google Voli avvisa quando il prezzo scende.'},
+  {id: 'abbigliamento', n: 'Abbigliamento', siti: ['zalando', 'vinted', 'amazon', 'decathlon', 'zara', 'hm', 'ovs', 'trovaprezzi', 'gshop'], cons: 'Controlla tabella taglie e costi di reso prima di ordinare.'},
+  {id: 'usato', n: 'Usato', siti: ['subito', 'vinted', 'ebayUsato', 'wallapop', 'fbm', 'backmarket', 'refurbed'], cons: 'Paga solo con metodi protetti (pagamento integrato, PayPal «beni e servizi») o di persona dopo aver visto l\'oggetto.'}
+];
+const INDOVINA = [
+  ['case', /\b(affitt|vendesi|appartament|bilocal|trilocal|monolocal|quadrilocal|villett?a|attico|immobil|stanza in|camera in)/i],
+  ['viaggi', /\b(vol[oi]|hotel|albergo|treno|biglietto aereo|vacanz|viaggio|b&b|weekend a|weekend in)\b/i],
+  ['veicoli', /\b(auto|macchina|fiat|panda|punto|golf|polo|bmw|audi|mercedes|toyota|yaris|renault|clio|peugeot|citroen|opel|ford|fiesta|kia|hyundai|dacia|sandero|volkswagen|skoda|seat|tesla|lancia|ypsilon|jeep|suzuki|nissan|mazda|volvo|mini cooper)\b/i],
+  ['bici', /\b(bici|bicicletta|mtb|gravel|e-?bike|ciclismo|pedali|sella|copertoncin|ciclocomputer|garmin edge|casco bici)/i],
+  ['giochi', /\b(gioco|videogioco|videogame|ps5|ps4|playstation|xbox|nintendo|switch|steam|minecraft|fifa|ea fc|zelda|mario|pokemon|pokémon|gta|call of duty|fortnite)\b/i],
+  ['elettronica', /\b(iphone|ipad|macbook|mac mini|imac|samsung|galaxy|pixel|xiaomi|smartphone|telefono|cellulare|tv|televisore|oled|notebook|laptop|portatile|tablet|cuffie|airpods|auricolari|monitor|stampante|fotocamera|smartwatch|apple watch|ssd|router|console|kindle|caricabatterie|powerbank)\b/i],
+  ['integratori', /\b(protein|whey|creatin|magnesio|vitamin|omega ?3|integrator|collagen|melatonin|bcaa|ferro|zinco|multivitamin)/i],
+  ['farmacia', /\b(tachipirina|paracetamolo|ibuprofene|moment|oki|aspirina|farmac|termometro|cerott|collirio|sciroppo|crema solare|antistaminic|mascherin|test (covid|gravidanza))/i],
+  ['animali', /\b(cane|cani|gatto|gatti|crocchett|lettiera|acquario|guinzaglio|antiparassitar|cuccia|criceto|coniglio|pappagall|scatolette per)/i],
+  ['spesa', /\b(pasta|latte|caff[eè]|biscotti|acqua minerale|olio|vino|birra|detersivo|carta igienica|pannolini|uova|farina|zucchero|tonno|passata)\b/i],
+  ['scuola', /\b(zaino|astuccio|quadern|diario|calcolatrice|penne|evidenziator|vocabolario|dizionario|libro di|libri scolastici|isbn|righello|compasso)/i],
+  ['abbigliamento', /\b(scarpe|sneakers|giacca|giubbott|piumino|jeans|maglia|maglion|felpa|vestito|camicia|pantalon|cappotto|borsa|stivali|t-?shirt|costume)/i],
+  ['casa', /\b(divano|letto|materasso|tavolo|sedia|lampada|armadio|cucina|frigorifero|lavatrice|lavastoviglie|aspirapolvere|forno|friggitrice|trapano|tenda|tappeto|scaffale|libreria|condizionatore|stufa)/i],
+  ['usato', /\b(usat[oa]|second hand|seconda mano)\b/i]
+];
+const Prezzi = {
+  contratto: 'vendita',
+  init() {
+    const sel = $('pCat');
+    sel.innerHTML = CATS.map(c => '<option value="' + c.id + '">' + esc(c.n) + '</option>').join('');
+    sel.value = AX.store.get('prezzi-cat', 'auto');
+    if (!CATS.some(c => c.id === sel.value)) sel.value = 'auto';
+    sel.onchange = () => { AX.store.set('prezzi-cat', sel.value); this.campo(); };
+    qsa('#pContratto button').forEach(b => b.onclick = () => { this.contratto = b.dataset.v; qsa('#pContratto button').forEach(x => x.classList.toggle('on', x === b)); });
+    $('fPrezzi').onsubmit = e => { e.preventDefault(); this.cerca(); };
+    $('pRis').addEventListener('click', e => { const a = e.target.closest('a.tile'); if (a) this.clic(a.dataset.k); });
+    $('pStorico').addEventListener('click', e => this.azStorico(e));
+    this.campo(); this.storico();
+  },
+  campo() {
+    const c = CATS.find(x => x.id === $('pCat').value) || CATS[0];
+    $('pQl').textContent = c.campo || 'Cosa cerchi';
+    $('pQ').placeholder = c.ph || 'Es. iPhone 15 128 GB';
+    $('pContratto').hidden = !c.contratto;
+  },
+  indovina(q) { for (const [id, re] of INDOVINA) if (re.test(q)) return id; return 'tutto'; },
+  // ordine per utilità: quello scelto per la categoria, poi salgono un po' i siti che apri più spesso
+  ordina(cat, q) {
+    const clic = AX.store.get('prezzi-clic', {});
+    const moto = cat.id === 'veicoli' && MOTO.test(q);
+    return cat.siti.map((k, i) => ({k, s: SITI[k], v: i + (moto && !SITI[k].moto ? 3.5 : 0) - Math.min(clic[k] || 0, 6) * 0.5}))
+      .sort((a, b) => a.v - b.v);
+  },
+  cerca(q, catId, contratto) {
+    q = (q == null ? $('pQ').value : q).trim();
+    if (!q) { toast('Scrivi cosa cerchi'); $('pQ').focus(); return; }
+    catId = catId || $('pCat').value;
+    if (contratto) this.contratto = contratto;
+    let auto = false;
+    if (catId === 'auto') { catId = this.indovina(q); auto = true; }
+    const cat = CATS.find(c => c.id === catId) || CATS[1];
+    const o = {affitto: this.contratto === 'affitto', moto: MOTO.test(q)};
+    const lista = this.ordina(cat, q);
+    const tiles = lista.map(({k, s}) => {
+      let url = ''; try { url = s.u(q, o); } catch (e) { return ''; }
+      const tag = TAG[s.t] || ['', ''];
+      const g = typeof s.g === 'function' ? s.g(q) : s.g;
+      return '<a class="tile" href="' + esc(url) + '" target="_blank" rel="noopener" data-k="' + k + '">' +
+        '<div class="top"><span class="av" style="background:' + colore(s.n) + '">' + esc(s.n.replace(/[^A-Za-z0-9]/g, '')[0] || '?') + '</span><b>' + esc(s.n) + '</b></div>' +
+        '<span>' + esc(s.d) + '</span><div class="pills"><i class="pill ' + tag[1] + '">' + tag[0] + '</i>' + (g ? '<i class="pill">tramite Google</i>' : '') + (s.nq ? '<i class="pill">ricerca da fare sul sito</i>' : '') + '</div></a>';
+    }).join('');
+    const extra = cat.contratto ? (o.affitto ? ' · in affitto' : ' · in vendita') : '';
+    $('pRis').innerHTML = '<div class="h2">Dove cercare «' + esc(q) + '»</div>' +
+      '<p class="sub" style="margin:-4px 0 6px">' + esc(cat.n) + extra + (auto ? ' <span class="small">(categoria riconosciuta: cambiala sopra se non è giusta)</span>' : '') + '</p>' +
+      '<p class="small" style="margin:0">Ordinati per utilità: prima i comparatori, poi i negozi e l\'usato; i siti che apri più spesso salgono. Ogni link apre la ricerca già compilata.</p>' +
+      '<div class="grid">' + tiles + '</div>' + (cat.cons ? '<div class="note">' + cat.cons + '</div>' : '');
+    // storico
+    const cc = cat.contratto ? this.contratto : '';
+    const st = AX.store.get('prezzi-storico', []).filter(h => !(h.q.toLowerCase() === q.toLowerCase() && h.cat === catId && (h.c || '') === cc));
+    st.unshift({q, cat: catId, c: cc || undefined, t: Date.now()});
+    AX.store.set('prezzi-storico', st.slice(0, 30));
+    this.storico();
+    $('pRis').scrollIntoView({behavior: 'smooth', block: 'start'});
+  },
+  clic(k) { const c = AX.store.get('prezzi-clic', {}); c[k] = (c[k] || 0) + 1; AX.store.set('prezzi-clic', c); },
+  storico() {
+    const st = AX.store.get('prezzi-storico', []);
+    if (!st.length) { $('pStorico').innerHTML = ''; return; }
+    $('pStorico').innerHTML = '<div class="h2">Ricerche recenti</div><div class="list">' + st.map((h, i) => {
+      const c = CATS.find(x => x.id === h.cat);
+      return '<div class="row"><button class="tx" type="button" data-a="rifai" data-i="' + i + '" style="text-align:left"><b>' + esc(h.q) + '</b><span>' + esc(c ? c.n : '') + (h.c === 'affitto' ? ' · affitto' : '') + ' · ' + new Date(h.t).toLocaleDateString('it-IT', {day: 'numeric', month: 'short'}) + '</span></button>' +
+        '<button class="rowbtn" type="button" data-a="togli" data-i="' + i + '" aria-label="Togli dallo storico">✕</button></div>';
+    }).join('') + '</div><div class="btns"><button class="btn sm" type="button" data-a="svuota">Cancella lo storico</button></div>';
+  },
+  azStorico(e) {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const st = AX.store.get('prezzi-storico', []);
+    const h = st[+b.dataset.i];
+    if (b.dataset.a === 'rifai' && h) {
+      $('pQ').value = h.q; $('pCat').value = h.cat; this.campo();
+      if (h.c) qsa('#pContratto button').forEach(x => x.classList.toggle('on', x.dataset.v === h.c));
+      this.cerca(h.q, h.cat, h.c);
+    } else if (b.dataset.a === 'togli') { st.splice(+b.dataset.i, 1); AX.store.set('prezzi-storico', st); this.storico(); }
+    else if (b.dataset.a === 'svuota') conferma(b, () => { AX.store.set('prezzi-storico', []); this.storico(); toast('Storico cancellato'); }, 'Tocca di nuovo per cancellare');
+  }
+};
+
+/* =====================================================================
+   NEGOZI
+   ===================================================================== */
+const NEGOZI = [
+  {id: 'spesa', n: 'Spesa a domicilio', v: [
+    ['Esselunga', 'https://spesaonline.esselunga.it/', 'Spesa online a casa o ritiro nei locker'],
+    ['Carrefour', 'https://www.carrefour.it/spesa-online.html', 'Spesa online a domicilio o drive'],
+    ['Coop · EasyCoop', 'https://www.easycoop.com/', 'Spesa online Coop (Coop Alleanza 3.0)'],
+    ['Coop · CoopShop', 'https://www.coopshop.it/', 'Spesa online Coop Lombardia'],
+    ['Conad', 'https://spesaonline.conad.it/', 'Spesa online a domicilio o ritiro'],
+    ['Everli', 'https://it.everli.com/', 'Spesa da più supermercati in poche ore'],
+    ['Amazon Fresh', 'https://www.amazon.it/fresh', 'Spesa con consegna in giornata (città servite)'],
+    ['Cortilia', 'https://www.cortilia.it/', 'Prodotti freschi delle aziende agricole'],
+    ['Glovo', 'https://glovoapp.com/it/it/', 'Supermercati, farmacie e ristoranti'],
+    ['Deliveroo', 'https://deliveroo.it/it/', 'Ristoranti e spesa veloce'],
+    ['Just Eat', 'https://www.justeat.it/', 'Ristoranti a domicilio'],
+    ['DoveConviene', 'https://www.doveconviene.it/', 'Volantini dei negozi vicino a te']]},
+  {id: 'salute', n: 'Farmacia e salute', v: [
+    ['Farmaè', 'https://www.farmae.it/', 'Farmacia e parafarmacia online'],
+    ['Redcare', 'https://www.redcare.it/', 'Farmacia online'],
+    ['Atida eFarma', 'https://www.efarma.com/', 'Parafarmacia online'],
+    ['Amicafarmacia', 'https://www.amicafarmacia.com/', 'Farmacia online'],
+    ['Tigotà', 'https://www.tigota.it/', 'Igiene e cura della persona'],
+    ['Acqua & Sapone', 'https://www.acquaesapone.it/', 'Igiene e cura della persona'],
+    ['Farmacie di turno', 'https://www.farmaciediturno.org/', 'Trova la farmacia aperta più vicina'],
+    ['Fascicolo Sanitario Elettronico', 'https://www.fascicolosanitario.gov.it/', 'Ricette, referti e vaccinazioni (accesso con SPID/CIE)'],
+    ['Ministero della Salute', 'https://www.salute.gov.it/', 'Informazioni ufficiali e farmacie online autorizzate']]},
+  {id: 'integratori', n: 'Integratori e sport', v: [
+    ['Myprotein', 'https://www.myprotein.it/', 'Proteine, creatina, vitamine'],
+    ['Prozis', 'https://www.prozis.com/it/it', 'Integratori e alimenti sportivi'],
+    ['Bulk', 'https://www.bulk.com/it/', 'Integratori sportivi'],
+    ['Yamamoto Nutrition', 'https://www.yamamotonutrition.com/it_it', 'Integratori sportivi italiani'],
+    ['Nutritioncenter', 'https://www.nutritioncenter.it/', 'Negozio di integratori di molte marche'],
+    ['iHerb', 'https://it.iherb.com/', 'Vitamine e integratori di molte marche'],
+    ['Enervit', 'https://www.enervit.com/', 'Integrazione per sport di resistenza'],
+    ['Named Sport', 'https://www.namedsport.com/', 'Integrazione sportiva italiana'],
+    ['Decathlon', 'https://www.decathlon.it/', 'Sport e nutrizione sportiva']]},
+  {id: 'svago', n: 'Svago e tempo libero', v: [
+    ['TicketOne', 'https://www.ticketone.it/', 'Concerti, teatro, sport'],
+    ['Ticketmaster', 'https://www.ticketmaster.it/', 'Concerti ed eventi'],
+    ['Vivaticket', 'https://www.vivaticket.com/it', 'Eventi, musei e parchi'],
+    ['Eventbrite', 'https://www.eventbrite.it/', 'Eventi e corsi vicino a te'],
+    ['GetYourGuide', 'https://www.getyourguide.it/', 'Tour, musei ed esperienze'],
+    ['Musement', 'https://www.musement.com/it/', 'Attrazioni e biglietti salta-fila'],
+    ['Smartbox', 'https://www.smartbox.com/it/', 'Cofanetti regalo ed esperienze'],
+    ['The Space Cinema', 'https://www.thespacecinema.it/', 'Programmazione e biglietti'],
+    ['UCI Cinemas', 'https://ucicinemas.it/', 'Programmazione e biglietti']]},
+  {id: 'casa', n: 'Casa e arredamento', v: [
+    ['IKEA', 'https://www.ikea.com/it/it/', 'Mobili e accessori'],
+    ['Leroy Merlin', 'https://www.leroymerlin.it/', 'Casa, bricolage e giardino'],
+    ['Mondo Convenienza', 'https://www.mondoconvenienza.it/', 'Mobili con montaggio'],
+    ['Maisons du Monde', 'https://www.maisonsdumonde.com/IT/it', 'Arredo e decorazione'],
+    ['Westwing', 'https://www.westwing.it/', 'Arredo e design'],
+    ['Kasanova', 'https://www.kasanova.com/', 'Casalinghi e cucina'],
+    ['Bricocenter', 'https://www.bricocenter.it/', 'Bricolage e casa'],
+    ['Brico io', 'https://www.bricoio.it/', 'Bricolage e casa']]},
+  {id: 'brico', n: 'Bricolage e fai da te', v: [
+    ['Leroy Merlin', 'https://www.leroymerlin.it/', 'Attrezzi, materiali, noleggio'],
+    ['Bricoman', 'https://www.bricoman.it/', 'Materiali per professionisti e privati'],
+    ['OBI', 'https://www.obi-italia.it/', 'Bricolage e giardino'],
+    ['Bricocenter', 'https://www.bricocenter.it/', 'Bricolage'],
+    ['Brico io', 'https://www.bricoio.it/', 'Bricolage'],
+    ['ManoMano', 'https://www.manomano.it/', 'Fai da te da molti venditori']]},
+  {id: 'scuola', n: 'Scuola e cartoleria', v: [
+    ['Libraccio', 'https://www.libraccio.it/', 'Libri scolastici nuovi e usati, cartoleria'],
+    ['IBS', 'https://www.ibs.it/', 'Libri scolastici e cartoleria'],
+    ['laFeltrinelli', 'https://www.lafeltrinelli.it/', 'Libri e cartoleria'],
+    ['Mondadori Store', 'https://www.mondadoristore.it/', 'Libri e scolastica'],
+    ['Buffetti', 'https://www.buffetti.it/', 'Cartoleria e ufficio'],
+    ['HUB Scuola', 'https://www.hubscuola.it/', 'Libri digitali Mondadori e Rizzoli Education'],
+    ['MyZanichelli', 'https://my.zanichelli.it/', 'Libri digitali Zanichelli'],
+    ['Amazon', 'https://www.amazon.it/', 'Cartoleria e zaini']]},
+  {id: 'animali', n: 'Animali', v: [
+    ['zooplus', 'https://www.zooplus.it/', 'Cibo e accessori, consegna a casa'],
+    ['Arcaplanet', 'https://www.arcaplanet.it/', 'Pet shop online e negozi'],
+    ['Isola dei Tesori', 'https://www.isoladeitesori.it/', 'Pet shop online e negozi'],
+    ['Maxi Zoo', 'https://www.maxizoo.it/', 'Pet shop'],
+    ['Bitiba', 'https://www.bitiba.it/', 'Cibo per animali a buon prezzo'],
+    ['Robinson Pet Shop', 'https://www.robinsonpetshop.it/', 'Pet shop online']]},
+  {id: 'giochi', n: 'Giochi (store per piattaforma)', v: [
+    ['App Store', 'https://apps.apple.com/it/iphone/today', 'iPhone e iPad'],
+    ['Apple Arcade', 'https://www.apple.com/it/apple-arcade/', 'Abbonamento giochi Apple'],
+    ['Mac App Store', 'https://apps.apple.com/it/mac/discover', 'Mac'],
+    ['Google Play', 'https://play.google.com/store/games?hl=it', 'Android'],
+    ['Steam', 'https://store.steampowered.com/?l=italian', 'PC, Mac e Linux'],
+    ['Epic Games Store', 'https://store.epicgames.com/it/', 'PC e Mac, giochi gratis ogni settimana'],
+    ['GOG', 'https://www.gog.com/', 'PC e Mac, senza DRM'],
+    ['PlayStation Store', 'https://store.playstation.com/it-it/', 'PS5 e PS4'],
+    ['Xbox Store', 'https://www.xbox.com/it-IT/games', 'Xbox Series X|S, Xbox One, Game Pass'],
+    ['Microsoft Store', 'https://apps.microsoft.com/home?hl=it-it', 'PC Windows'],
+    ['Nintendo eShop', 'https://www.nintendo.com/it-it/Cerca/Cerca-299117.html', 'Nintendo Switch e Switch 2'],
+    ['My Nintendo Store', 'https://store.nintendo.com/it-it/', 'Giochi fisici e accessori Nintendo'],
+    ['itch.io', 'https://itch.io/', 'Giochi indipendenti per PC, Mac, Linux e browser'],
+    ['Humble Bundle', 'https://www.humblebundle.com/', 'Pacchetti scontati per PC'],
+    ['Ubisoft Store', 'https://store.ubisoft.com/it/', 'PC'],
+    ['EA app', 'https://www.ea.com/it/ea-app', 'PC'],
+    ['Battle.net', 'https://shop.battle.net/it-it', 'Blizzard, PC']]},
+  {id: 'viaggi', n: 'Viaggi e trasporti', v: [
+    ['Trenitalia', 'https://www.trenitalia.com/', 'Treni Frecce e regionali'],
+    ['Italo', 'https://www.italotreno.com/it', 'Alta velocità'],
+    ['Trainline', 'https://www.thetrainline.com/it', 'Treni a confronto'],
+    ['FlixBus', 'https://www.flixbus.it/', 'Autobus'],
+    ['Google Voli', 'https://www.google.com/travel/flights?hl=it', 'Confronto voli e avvisi di prezzo'],
+    ['Skyscanner', 'https://www.skyscanner.it/', 'Voli economici'],
+    ['ITA Airways', 'https://www.ita-airways.com/it_it', 'Compagnia aerea'],
+    ['Ryanair', 'https://www.ryanair.com/it/it', 'Voli low cost'],
+    ['easyJet', 'https://www.easyjet.com/it', 'Voli low cost'],
+    ['Booking.com', 'https://www.booking.com/index.it.html', 'Hotel e appartamenti'],
+    ['Airbnb', 'https://www.airbnb.it/', 'Case e stanze'],
+    ['Autostrade per l\'Italia', 'https://www.autostrade.it/', 'Traffico e pedaggi'],
+    ['Viaggiare Sicuri', 'https://www.viaggiaresicuri.it/', 'Avvisi della Farnesina per l\'estero']]},
+  {id: 'moda', n: 'Abbigliamento', v: [
+    ['Zalando', 'https://www.zalando.it/', 'Moda e scarpe'],
+    ['Vinted', 'https://www.vinted.it/', 'Abiti usati'],
+    ['Zara', 'https://www.zara.com/it/', 'Moda'],
+    ['H&M', 'https://www2.hm.com/it_it/index.html', 'Moda'],
+    ['OVS', 'https://www.ovs.it/it/it/', 'Moda per tutta la famiglia'],
+    ['Uniqlo', 'https://www.uniqlo.com/it/it/', 'Abbigliamento essenziale'],
+    ['Decathlon', 'https://www.decathlon.it/', 'Abbigliamento sportivo'],
+    ['YOOX', 'https://www.yoox.com/it', 'Firme scontate'],
+    ['Nike', 'https://www.nike.com/it/', 'Sport'],
+    ['adidas', 'https://www.adidas.it/', 'Sport']]},
+  {id: 'elettronica', n: 'Elettronica', v: [
+    ['MediaWorld', 'https://www.mediaworld.it/', 'Elettronica ed elettrodomestici'],
+    ['Unieuro', 'https://www.unieuro.it/online/', 'Elettronica ed elettrodomestici'],
+    ['Euronics', 'https://www.euronics.it/', 'Elettronica ed elettrodomestici'],
+    ['Apple Store', 'https://www.apple.com/it/store', 'Prodotti Apple, anche ricondizionati'],
+    ['Samsung', 'https://www.samsung.com/it/', 'Store ufficiale'],
+    ['Back Market', 'https://www.backmarket.it/it-it', 'Ricondizionato garantito'],
+    ['refurbed', 'https://www.refurbed.it/', 'Ricondizionato garantito'],
+    ['Amazon', 'https://www.amazon.it/', 'Di tutto']]},
+  {id: 'libri', n: 'Libri e audiolibri', v: [
+    ['IBS', 'https://www.ibs.it/', 'Libri ed ebook'],
+    ['laFeltrinelli', 'https://www.lafeltrinelli.it/', 'Libri ed ebook'],
+    ['Mondadori Store', 'https://www.mondadoristore.it/', 'Libri ed ebook'],
+    ['Libraccio', 'https://www.libraccio.it/', 'Nuovo e usato'],
+    ['Hoepli', 'https://www.hoepli.it/', 'Libri tecnici e universitari'],
+    ['Kobo', 'https://www.kobo.com/it/it', 'Ebook e audiolibri'],
+    ['Apple Libri', 'https://www.apple.com/it/apple-books/', 'Ebook e audiolibri su iPhone, iPad e Mac'],
+    ['Audible', 'https://www.audible.it/', 'Audiolibri e podcast'],
+    ['Storytel', 'https://www.storytel.com/it', 'Audiolibri in abbonamento'],
+    ['MLOL', 'https://www.medialibrary.it/', 'Prestito digitale gratuito delle biblioteche'],
+    ['Liber Liber', 'https://www.liberliber.it/', 'Classici gratuiti'],
+    ['LibriVox', 'https://librivox.org/', 'Audiolibri gratuiti']]},
+  {id: 'usato', n: 'Mercati e usato', v: [
+    ['Subito', 'https://www.subito.it/', 'Annunci in tutta Italia'],
+    ['eBay', 'https://www.ebay.it/', 'Aste e usato'],
+    ['Vinted', 'https://www.vinted.it/', 'Abiti e oggetti usati'],
+    ['Wallapop', 'https://it.wallapop.com/', 'Usato vicino a te'],
+    ['Facebook Marketplace', 'https://www.facebook.com/marketplace/', 'Usato tra privati'],
+    ['Mercatino dell\'Usato', 'https://www.mercatinousato.com/', 'Negozi dell\'usato in conto vendita'],
+    ['rebuy', 'https://www.rebuy.it/', 'Elettronica, libri e giochi usati garantiti'],
+    ['Amazon', 'https://www.amazon.it/', 'Di tutto']]},
+  {id: 'auto', n: 'Auto, moto e case', v: [
+    ['AutoScout24', 'https://www.autoscout24.it/', 'Auto e moto'],
+    ['Automobile.it', 'https://www.automobile.it/', 'Auto usate'],
+    ['Subito Motori', 'https://www.subito.it/annunci-italia/vendita/motori/', 'Auto, moto, ricambi'],
+    ['Moto.it', 'https://www.moto.it/', 'Moto nuove e usate'],
+    ['Autodoc', 'https://www.autodoc.it/', 'Ricambi auto'],
+    ['Portale dell\'Automobilista', 'https://www.ilportaledellautomobilista.it/', 'Revisioni, punti patente, veicoli'],
+    ['Immobiliare.it', 'https://www.immobiliare.it/', 'Case in vendita e affitto'],
+    ['idealista', 'https://www.idealista.it/', 'Case in vendita e affitto'],
+    ['Casa.it', 'https://www.casa.it/', 'Case in vendita e affitto']]}
+];
+const Negozi = {
+  cat: 'tutti',
+  init() {
+    $('nChips').innerHTML = '<button class="chip on" data-c="tutti" type="button">Tutti</button><button class="chip" data-c="pref" type="button">★ Preferiti</button>' + NEGOZI.map(c => '<button class="chip" data-c="' + c.id + '" type="button">' + esc(c.n) + '</button>').join('');
+    $('nChips').onclick = e => { const b = e.target.closest('.chip'); if (!b) return; this.cat = b.dataset.c; qsa('.chip', $('nChips')).forEach(x => x.classList.toggle('on', x === b)); this.disegna(); };
+    $('nQ').oninput = () => this.disegna();
+    $('nLista').onclick = e => {
+      const s = e.target.closest('.star'); if (!s) return;
+      const pref = AX.store.get('negozi-preferiti', []); const u = s.dataset.u; const i = pref.indexOf(u);
+      if (i >= 0) pref.splice(i, 1); else pref.push(u);
+      AX.store.set('negozi-preferiti', pref); this.disegna();
+    };
+    this.disegna();
+  },
+  riga(v, pref) {
+    const host = v[1].replace(/^https?:\/\/(www\d?\.)?/, '').replace(/\/.*$/, '');
+    const on = pref.indexOf(v[1]) >= 0;
+    return '<div class="row"><a class="neg" href="' + esc(v[1]) + '" target="_blank" rel="noopener"><span class="av" style="background:' + colore(v[0]) + '">' + esc(v[0].replace(/[^A-Za-z0-9]/g, '')[0] || '?') + '</span><span class="tx"><b>' + esc(v[0]) + '</b><span>' + esc(v[2]) + ' · ' + esc(host) + '</span></span></a>' +
+      '<button class="star" type="button" data-u="' + esc(v[1]) + '" aria-label="' + (on ? 'Togli dai preferiti' : 'Aggiungi ai preferiti') + '">' + (on ? '★' : '☆') + '</button></div>';
+  },
+  disegna() {
+    const q = $('nQ').value.trim().toLowerCase();
+    const pref = AX.store.get('negozi-preferiti', []);
+    const filtra = v => !q || (v[0] + ' ' + v[2] + ' ' + v[1]).toLowerCase().indexOf(q) >= 0;
+    let h = '';
+    if (this.cat === 'pref' || (this.cat === 'tutti' && pref.length && !q)) {
+      const visti = {}; const vp = [];
+      NEGOZI.forEach(c => c.v.forEach(v => { if (pref.indexOf(v[1]) >= 0 && !visti[v[1]] && filtra(v)) { visti[v[1]] = 1; vp.push(v); } }));
+      h += '<div class="h2">★ Preferiti</div>' + (vp.length ? '<div class="list">' + vp.map(v => this.riga(v, pref)).join('') + '</div>' : '<p class="vuoto">Tocca ☆ accanto a un negozio per averlo qui.</p>');
+    }
+    if (this.cat !== 'pref') NEGOZI.forEach(c => {
+      if (this.cat !== 'tutti' && this.cat !== c.id) return;
+      const vv = c.v.filter(filtra); if (!vv.length) return;
+      h += '<div class="h2">' + esc(c.n) + '</div><div class="list">' + vv.map(v => this.riga(v, pref)).join('') + '</div>';
+    });
+    $('nLista').innerHTML = h || '<p class="vuoto">Nessun negozio trovato.</p>';
+  }
+};
+
+/* =====================================================================
+   RISOLVI TEST
+   ===================================================================== */
+const RE_NUM = /^\s*(?:domanda|quesito|esercizio|question|q)?\s*(\d{1,3})\s*[.)\]:°]\s*(?=\S)/i;
+const RE_OPT = /^\s*[([]?\s*([A-Ha-h])\s*(?:[).\]:]|\s[-–—])\s*(.+)$/;
+const RE_BUL = /^\s*(?:□|☐|○|◯|◻|▢|●|•|▪|-|–|\*)\s+(.+)$/;
+function analizzaTesto(t) {
+  t = String(t || '').replace(/\r/g, '').replace(/ /g, ' ').trim();
+  if (!t) return [];
+  const righe = t.split('\n');
+  const inizi = [];
+  righe.forEach((r, i) => { const m = r.match(RE_NUM); if (m) inizi.push({i, n: +m[1]}); });
+  // domande numerate 1, 2, 3… (numeri in sequenza): una per blocco
+  let ok = inizi.length >= 2;
+  for (let k = 1; ok && k < inizi.length; k++) if (inizi[k].n !== inizi[k - 1].n + 1) ok = false;
+  let blocchi, premessa = '';
+  if (ok) {
+    premessa = righe.slice(0, inizi[0].i).join('\n').trim();
+    blocchi = inizi.map((s, k) => righe.slice(s.i, k + 1 < inizi.length ? inizi[k + 1].i : righe.length).join('\n'));
+  } else blocchi = [t];
+  return blocchi.map(b => analizzaBlocco(b, premessa)).filter(d => d.domanda);
+}
+function analizzaBlocco(b, premessa) {
+  const righe = b.split('\n').map(r => r.trim()).filter(Boolean);
+  if (righe.length) righe[0] = righe[0].replace(RE_NUM, '');
+  let opzioni = [], domanda = '';
+  // 1) opzioni su righe separate: A) … B) … (anche a. / (a) / A -)
+  const linee = righe.map(r => { const m = r.match(RE_OPT); return m ? {l: m[1].toUpperCase(), t: m[2].trim()} : null; });
+  const start = linee.findIndex(x => x && x.l === 'A');
+  if (start >= 0) {
+    let atteso = 65; const o = [];
+    for (let k = start; k < righe.length; k++) {
+      const x = linee[k];
+      if (x && x.l.charCodeAt(0) === atteso) { o.push({l: x.l, t: x.t}); atteso++; }
+      else if (o.length && !x && o.length < 8) o[o.length - 1].t += ' ' + righe[k];
+      else break;
+    }
+    if (o.length >= 2) { opzioni = o; domanda = righe.slice(0, start).join('\n'); }
+  }
+  // 2) opzioni tutte su una riga: «A) uno B) due C) tre»
+  if (!opzioni.length) {
+    for (let k = 0; k < righe.length && !opzioni.length; k++) {
+      const r = righe[k]; const re = /(?:^|\s)[([]?([A-Ha-h])[).\]]\s+/g; const pos = []; let m;
+      while ((m = re.exec(r))) pos.push({l: m[1], i: m.index, f: re.lastIndex});
+      // lettere in sequenza (a, b, c… oppure A, B, C…), tutte minuscole o tutte maiuscole
+      if (pos.length >= 2 && /^[aA]$/.test(pos[0].l) && pos.every((p, j) => p.l.toUpperCase().charCodeAt(0) === 65 + j && (p.l === p.l.toUpperCase()) === (pos[0].l === pos[0].l.toUpperCase()))) {
+        opzioni = pos.map((p, j) => ({l: p.l.toUpperCase(), t: r.slice(p.f, j + 1 < pos.length ? pos[j + 1].i : r.length).trim()}));
+        domanda = righe.slice(0, k).concat(r.slice(0, pos[0].i).trim() ? [r.slice(0, pos[0].i).trim()] : []).join('\n');
+      }
+    }
+  }
+  // 3) caselle o elenchi puntati dopo la domanda
+  if (!opzioni.length) {
+    const bi = righe.findIndex(r => RE_BUL.test(r));
+    if (bi > 0) {
+      const o = []; for (let k = bi; k < righe.length; k++) { const m = righe[k].match(RE_BUL); if (!m) break; o.push({l: String.fromCharCode(65 + o.length), t: m[1].trim()}); }
+      if (o.length >= 2 && o.length <= 8) { opzioni = o; domanda = righe.slice(0, bi).join('\n'); }
+    }
+  }
+  if (!opzioni.length) domanda = righe.join('\n');
+  return {domanda: domanda.trim(), opzioni, tipo: opzioni.length >= 2 ? 'crocette' : 'aperta', premessa};
+}
+const Test = {
+  domande: [], scelte: {}, risultati: {}, ocrWorker: null, lavoro: false,
+  async init() {
+    $('tTesto').value = AX.store.get('test-bozza', '');
+    let tm = 0;
+    $('tTesto').oninput = () => { clearTimeout(tm); tm = setTimeout(() => { AX.store.set('test-bozza', $('tTesto').value.slice(0, 20000)); this.analizza(); }, 350); };
+    $('tPulisci').onclick = () => { $('tTesto').value = ''; AX.store.set('test-bozza', ''); this.risultati = {}; this.scelte = {}; $('tOcr').innerHTML = ''; this.analizza(); };
+    $('tFoto').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) this.foto(f); };
+    $('tDomande').addEventListener('click', e => this.azione(e));
+    $('tDomande').addEventListener('change', e => this.cambia(e));
+    $('tRisolvi').onclick = () => this.risolvi();
+    $('tIa').addEventListener('click', e => { if (e.target.closest('[data-a="riprova-ia"]')) this.statoIA(true); });
+    $('tModello').onchange = () => AX.store.set('ia-modello', $('tModello').value);
+    this.analizza();
+    await this.statoIA();
+  },
+  async statoIA(force) {
+    $('tIa').innerHTML = '<p class="small">Controllo l\'IA sul Mac…</p>';
+    const st = await IA.verifica(force);
+    $('tIa').innerHTML = IA.nota(st);
+    const mod = st.modelli || [];
+    $('tModWrap').hidden = !(st.attiva && mod.length > 1);
+    $('tModello').innerHTML = '<option value="">Predefinito del Mac' + (st.modello ? ' (' + esc(st.modello) + ')' : '') + '</option>' + mod.map(m => '<option>' + esc(m) + '</option>').join('');
+    $('tModello').value = IA.modello();
+    this.pulsante();
+  },
+  pulsante() {
+    const st = IA.st;
+    $('tRisolvi').disabled = this.lavoro || !this.domande.length || !(st && st.attiva);
+    $('tRisolvi').textContent = this.lavoro ? 'Sto risolvendo…' : !st ? 'Risolvi' : !st.attiva ? 'Risolvi (serve l\'IA sul Mac)' : this.domande.length > 1 ? 'Risolvi ' + this.domande.length + ' domande' : 'Risolvi';
+  },
+  analizza() {
+    const prima = this.domande.length;
+    this.domande = analizzaTesto($('tTesto').value);
+    if (this.domande.length !== prima) { this.scelte = {}; this.risultati = {}; }
+    this.disegna(); this.pulsante();
+  },
+  lung(i) { return this.scelte[i] && this.scelte[i].lung || AX.store.get('test-lung', {u: 'righe', n: 5}); },
+  tipo(i) { return this.scelte[i] && this.scelte[i].tipo || this.domande[i].tipo; },
+  disegna() {
+    if (!this.domande.length) { $('tDomande').innerHTML = ''; return; }
+    $('tDomande').innerHTML = '<div class="h2">' + (this.domande.length === 1 ? 'Domanda riconosciuta' : this.domande.length + ' domande riconosciute') + '</div>' + this.domande.map((d, i) => {
+      const tipo = this.tipo(i), l = this.lung(i);
+      let h = '<div class="dom" data-i="' + i + '"><div class="testa"><b>Domanda ' + (i + 1) + '</b>' +
+        '<div class="seg mini"><button type="button" data-a="tipo" data-v="crocette" class="' + (tipo === 'crocette' ? 'on' : '') + '">Crocette</button><button type="button" data-a="tipo" data-v="aperta" class="' + (tipo === 'aperta' ? 'on' : '') + '">Aperta</button></div></div>' +
+        '<div class="qt">' + esc(d.domanda) + '</div>';
+      if (tipo === 'crocette') {
+        h += d.opzioni.length >= 2 ? '<ol class="op">' + d.opzioni.map(o => '<li data-l="' + o.l + '"><b>' + o.l + ')</b> ' + esc(o.t) + '</li>').join('') + '</ol>'
+          : '<p class="hint">Nessuna opzione riconosciuta: scrivile su righe separate come «A) …», «B) …».</p>';
+      } else {
+        h += '<div class="lung">Lunghezza: circa <input class="in" type="number" min="1" max="2000" data-a="n" value="' + l.n + '" inputmode="numeric"> <select class="in" data-a="u"><option value="righe"' + (l.u === 'righe' ? ' selected' : '') + '>righe</option><option value="parole"' + (l.u === 'parole' ? ' selected' : '') + '>parole</option></select></div>';
+      }
+      h += '<div class="esito">' + (this.risultati[i] || '') + '</div></div>';
+      return h;
+    }).join('');
+    this.domande.forEach((d, i) => { if (this.risultati[i] && this.risultati[i].indexOf('data-giusta') >= 0) this.evidenzia(i); });
+  },
+  evidenzia(i) {
+    const box = qsa('.dom', $('tDomande'))[i]; if (!box) return;
+    const g = (box.querySelector('[data-giusta]') || {}).dataset; if (!g) return;
+    const lett = (g.giusta || '').split(',');
+    qsa('ol.op li', box).forEach(li => li.classList.toggle('giusta', lett.indexOf(li.dataset.l) >= 0));
+  },
+  azione(e) {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const i = +b.closest('.dom').dataset.i;
+    if (b.dataset.a === 'tipo') { this.scelte[i] = Object.assign({}, this.scelte[i], {tipo: b.dataset.v}); delete this.risultati[i]; this.disegna(); }
+    else if (b.dataset.a === 'copia') copia(b.closest('.ris').dataset.testo || '');
+  },
+  cambia(e) {
+    const el = e.target; if (!el.dataset.a) return;
+    const i = +el.closest('.dom').dataset.i;
+    const l = Object.assign({}, this.lung(i));
+    if (el.dataset.a === 'n') l.n = Math.max(1, Math.min(2000, parseInt(el.value, 10) || 5));
+    if (el.dataset.a === 'u') { l.u = el.value; if (l.u === 'parole' && l.n < 20) l.n = 80; if (l.u === 'righe' && l.n > 60) l.n = 5; }
+    this.scelte[i] = Object.assign({}, this.scelte[i], {lung: l});
+    AX.store.set('test-lung', l);
+    this.disegna();
+  },
+  async foto(file) {
+    const url = URL.createObjectURL(file);
+    $('tOcr').innerHTML = '<img class="anteprima" src="' + url + '" alt="Foto della domanda"><div class="btns"><button class="btn pri" type="button" id="tLeggi">Leggi il testo dalla foto</button><button class="btn" type="button" id="tFotoVia">Togli</button></div><p class="small">La lettura (italiano e inglese) avviene sul telefono; la prima volta scarica circa 4 MB.</p>';
+    $('tFotoVia').onclick = () => { URL.revokeObjectURL(url); $('tOcr').innerHTML = ''; };
+    $('tLeggi').onclick = () => this.ocr(file, url);
+  },
+  async ocr(file, url) {
+    const box = $('tOcr');
+    box.querySelector('.btns').innerHTML = '<div style="flex:1"><div class="prog"><i id="tOcrBar"></i></div><p class="small" id="tOcrTx">Preparo la lettura…</p></div>';
+    try {
+      await carica(LIB.tesseract);
+      const bar = $('tOcrBar'), tx = $('tOcrTx');
+      const fasi = {'loading tesseract core': 'Carico il motore di lettura', 'initializing tesseract': 'Avvio', 'loading language traineddata': 'Scarico le lingue (italiano e inglese)', 'initializing api': 'Avvio', 'recognizing text': 'Leggo il testo'};
+      if (!this.ocrWorker) {
+        this.ocrWorker = await Tesseract.createWorker(['ita', 'eng'], 1, {
+          workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
+          logger: m => { if (bar) bar.style.width = Math.round((m.progress || 0) * 100) + '%'; if (tx) tx.textContent = (fasi[m.status] || m.status) + '…'; }
+        });
+      }
+      const img = await this.riduci(file, 2200);
+      const r = await this.ocrWorker.recognize(img);
+      const testo = (r.data.text || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      if (!testo) throw new Error('Nessun testo trovato nella foto');
+      const ta = $('tTesto');
+      ta.value = (ta.value.trim() ? ta.value.trim() + '\n\n' : '') + testo;
+      AX.store.set('test-bozza', ta.value);
+      this.analizza();
+      box.innerHTML = '<div class="note ok">Testo letto e aggiunto qui sopra (affidabilità media ' + Math.round(r.data.confidence || 0) + '%). <b>Controllalo e correggi gli errori</b> prima di risolvere.</div>';
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      box.innerHTML = '<div class="note bad">Lettura non riuscita: ' + esc(err.message || err) + '. Puoi scrivere o incollare il testo a mano.</div>';
+    }
+  },
+  riduci(file, max) {
+    return new Promise((ok, ko) => {
+      const im = new Image();
+      im.onload = () => { const s = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight)); const c = document.createElement('canvas'); c.width = Math.round(im.naturalWidth * s); c.height = Math.round(im.naturalHeight * s); c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); URL.revokeObjectURL(im.src); ok(c); };
+      im.onerror = () => ko(new Error('Immagine non leggibile'));
+      im.src = URL.createObjectURL(file);
+    });
+  },
+  async risolvi() {
+    const st = await IA.verifica();
+    if (!st.attiva) { $('tIa').innerHTML = IA.nota(st); this.pulsante(); return; }
+    this.lavoro = true; this.pulsante();
+    const prog = $('tProg'); prog.hidden = false;
+    const n = this.domande.length;
+    for (let i = 0; i < n; i++) {
+      prog.firstElementChild.style.width = Math.round(i / n * 100) + '%';
+      this.risultati[i] = '<p class="small">Sto risolvendo…</p>'; this.disegna();
+      try { this.risultati[i] = await this.una(i); }
+      catch (err) { this.risultati[i] = '<div class="note bad">' + esc(err.message || 'Errore') + '</div>'; }
+      this.disegna();
+    }
+    prog.firstElementChild.style.width = '100%';
+    setTimeout(() => { prog.hidden = true; }, 600);
+    this.lavoro = false; this.pulsante();
+  },
+  async una(i) {
+    const d = this.domande[i], tipo = this.tipo(i);
+    const contesto = d.premessa ? 'Istruzioni o testo di riferimento:\n' + d.premessa + '\n\n' : '';
+    if (tipo === 'crocette') {
+      if (d.opzioni.length < 2) throw new Error('Mancano le opzioni A, B, C… per questa domanda.');
+      const lettere = d.opzioni.map(o => o.l);
+      const sistema = 'Sei un insegnante esperto e preciso. Rispondi in italiano. Risolvi la domanda a scelta multipla: scegli l\'opzione corretta (più di una solo se la domanda chiede esplicitamente più risposte). Ragiona sui fatti e non inventare: se la domanda è ambigua o mancano dati, dillo nella spiegazione e metti sicurezza "bassa". Rispondi SOLO con un oggetto JSON: {"lettere":["B"],"spiegazione":"perché è giusta e perché le altre no, in 2-5 frasi","sicurezza":"alta|media|bassa"}';
+      const prompt = contesto + 'Domanda:\n' + d.domanda + '\n\nOpzioni:\n' + d.opzioni.map(o => o.l + ') ' + o.t).join('\n') + '\n\nLettere valide: ' + lettere.join(', ') + '. Rispondi con il JSON.';
+      const o = await IA.json(prompt, sistema, r => {
+        let l = r.lettere != null ? r.lettere : r.lettera != null ? r.lettera : r.risposta;
+        if (typeof l === 'string') l = l.split(/[\s,;]+/);
+        if (!Array.isArray(l)) return 'manca "lettere"';
+        l = l.map(x => { const m = String(x).trim().toUpperCase().match(/^[([]?\s*([A-H])(?![A-Z])/); return m ? m[1] : ''; }).filter(Boolean);
+        if (!l.length) return 'nessuna lettera';
+        if (l.some(x => lettere.indexOf(x) < 0)) return 'lettera non tra ' + lettere.join(', ');
+        if (typeof r.spiegazione !== 'string' || r.spiegazione.trim().length < 8) return 'manca la spiegazione';
+        r.lettere = [...new Set(l)]; r.sicurezza = /^(alta|media|bassa)$/i.test(r.sicurezza || '') ? r.sicurezza.toLowerCase() : 'media';
+        return '';
+      });
+      const testi = o.lettere.map(l => l + ') ' + (d.opzioni.find(x => x.l === l) || {}).t).join('\n');
+      const copiaTx = 'Risposta: ' + testi + '\n\nPerché: ' + o.spiegazione;
+      return '<div class="ris" data-giusta="' + o.lettere.join(',') + '" data-testo="' + esc(copiaTx) + '"><div class="lett">' + o.lettere.join('') + '</div><div style="flex:1;min-width:0"><b>' + esc(testi) + '</b><p>' + esc(o.spiegazione.trim()) + '</p>' + this.sicurezza(o.sicurezza) + ' <button class="btn sm" type="button" data-a="copia">Copia</button></div></div>';
+    }
+    const l = this.lung(i);
+    const quanto = l.u === 'parole' ? 'circa ' + l.n + ' parole' : 'circa ' + l.n + ' righe di quaderno (circa ' + l.n * 12 + ' parole)';
+    const sistema = 'Sei un insegnante esperto. Rispondi in italiano alla domanda aperta in modo corretto, chiaro e motivato, rispettando la lunghezza richiesta. Non inventare dati, date o citazioni: se non sei sicuro, dillo. Rispondi SOLO con un oggetto JSON: {"risposta":"il testo della risposta","motivazione":"su cosa si basa la risposta, in 1-3 frasi","sicurezza":"alta|media|bassa"}';
+    const prompt = contesto + 'Domanda:\n' + d.domanda + '\n\nLunghezza della risposta: ' + quanto + '.\nRispondi con il JSON.';
+    const o = await IA.json(prompt, sistema, r => {
+      if (typeof r.risposta !== 'string' || r.risposta.trim().length < 3) return 'manca la risposta';
+      if (r.motivazione != null && typeof r.motivazione !== 'string') return 'motivazione non valida';
+      r.sicurezza = /^(alta|media|bassa)$/i.test(r.sicurezza || '') ? r.sicurezza.toLowerCase() : 'media';
+      return '';
+    });
+    const parole = o.risposta.trim().split(/\s+/).length;
+    return '<div class="ris" data-testo="' + esc(o.risposta.trim()) + '"><div style="flex:1;min-width:0"><b>Risposta</b> <span class="small">(' + parole + ' parole)</span><p>' + esc(o.risposta.trim()) + '</p>' + (o.motivazione ? '<p class="small"><b>Motivazione:</b> ' + esc(o.motivazione) + '</p>' : '') + this.sicurezza(o.sicurezza) + ' <button class="btn sm" type="button" data-a="copia">Copia</button></div></div>';
+  },
+  sicurezza(s) { return '<i class="pill ' + (s === 'alta' ? 'ok' : s === 'bassa' ? 'bad' : 'warn') + '">sicurezza ' + esc(s) + '</i>'; }
+};
+
+/* =====================================================================
+   CARTE
+   ===================================================================== */
+const IDB = {
+  p: null,
+  db() { return this.p || (this.p = new Promise((ok, ko) => { const r = indexedDB.open('ax-strumenti', 1); r.onupgradeneeded = () => r.result.createObjectStore('file'); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); })); },
+  async op(mode, fn) { const db = await this.db(); return new Promise((ok, ko) => { const tx = db.transaction('file', mode); const rq = fn(tx.objectStore('file')); tx.oncomplete = () => ok(rq && rq.result); tx.onerror = () => ko(tx.error); tx.onabort = () => ko(tx.error); }); },
+  get(k) { return this.op('readonly', s => s.get(k)); },
+  put(k, v) { return this.op('readwrite', s => s.put(v, k)); },
+  del(k) { return this.op('readwrite', s => s.delete(k)); }
+};
+const COLORI = ['#fa2d48', '#ff9500', '#ffcc00', '#34c759', '#00a86b', '#007aff', '#1c3f94', '#5856d6', '#af52de', '#8e8e93', '#1c1c1e', '#a2845e'];
+const NOMI_CARTE = ['Esselunga Fidaty', 'Carrefour', 'Coop', 'Conad', 'Pam Panorama', 'Lidl Plus', 'Eurospin', 'Iper', 'Famila', 'Despar', 'Bennet', 'Tigotà', 'Acqua & Sapone', 'Sephora', 'Douglas', 'Kiko', 'IKEA Family', 'Leroy Merlin', 'Decathlon', 'MediaWorld', 'Unieuro', 'Euronics', 'laFeltrinelli', 'Mondadori', 'Giunti al Punto', 'Arcaplanet', 'Isola dei Tesori', 'OVS', 'Coin', 'Feltrinelli', 'Q8', 'Eni Live', 'IP', 'Trenitalia CartaFRECCIA', 'Italo Più', 'Biblioteca'];
+const FMT_BD = {ean_13: 'EAN13', ean_8: 'EAN8', upc_a: 'UPC', upc_e: 'UPCE', code_128: 'CODE128', code_39: 'CODE39', code_93: 'CODE128', itf: 'ITF', codabar: 'codabar', qr_code: 'QR', data_matrix: 'QR', pdf417: 'QR', aztec: 'QR'};
+const FMT_ZX = {EAN_13: 'EAN13', EAN_8: 'EAN8', UPC_A: 'UPC', UPC_E: 'UPCE', CODE_128: 'CODE128', CODE_39: 'CODE39', CODE_93: 'CODE128', ITF: 'ITF', CODABAR: 'codabar', QR_CODE: 'QR'};
+function controllo(s, pesoPrimo) { // cifra di controllo EAN/UPC
+  let t = 0; const d = s.slice(0, -1);
+  for (let i = 0; i < d.length; i++) t += +d[i] * ((d.length - i) % 2 ? 3 : 1);
+  return (10 - t % 10) % 10 === +s[s.length - 1];
+}
+function formatoAuto(n) {
+  const s = n.replace(/\s/g, '');
+  if (/^\d{13}$/.test(s) && controllo(s)) return 'EAN13';
+  if (/^\d{8}$/.test(s) && controllo(s)) return 'EAN8';
+  if (/^\d{12}$/.test(s) && controllo(s)) return 'UPC';
+  if (s.length > 60 || /[^\x20-\x7e]/.test(s)) return 'QR';
+  return 'CODE128';
+}
+function testoSu(bg) { const m = /^#?([0-9a-f]{6})$/i.exec(bg || ''); if (!m) return '#fff'; const v = parseInt(m[1], 16), r = v >> 16, g = v >> 8 & 255, b = v & 255; return (r * 299 + g * 587 + b * 114) / 1000 > 160 ? '#000' : '#fff'; }
+// disegna il codice nel contenitore; true se riuscito (usa il formato richiesto, altrimenti Code 128)
+async function disegnaCodice(box, numero, formato) {
+  const s = String(numero || '').trim();
+  if (!s) { box.innerHTML = '<span class="small">Anteprima del codice</span>'; return {ok: false}; }
+  if (formato === 'auto' || !formato) formato = formatoAuto(s);
+  if (formato === 'QR') {
+    await carica(LIB.qrcode);
+    const q = qrcode(0, 'M'); q.addData(s); q.make();
+    box.innerHTML = q.createSvgTag({cellSize: 6, margin: 24, scalable: true});   // margine in unità: 24 = 4 moduli di zona bianca
+    const svg = box.querySelector('svg'); if (svg) { svg.style.width = '100%'; svg.style.maxWidth = '320px'; }
+    return {ok: true, formato};
+  }
+  await carica(LIB.jsbarcode);
+  const prova = f => {
+    box.innerHTML = '';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); box.appendChild(svg);
+    let valido = true;
+    try { JsBarcode(svg, f === 'EAN13' || f === 'EAN8' || f === 'UPC' || f === 'ITF' ? s.replace(/\s/g, '') : s, {format: f, width: 2, height: 110, margin: 24, displayValue: true, fontSize: 18, background: '#ffffff', lineColor: '#000000', valid: v => { valido = v; }}); }
+    catch (e) { valido = false; }
+    return valido && svg.childNodes.length > 0;
+  };
+  if (prova(formato)) return {ok: true, formato};
+  if (formato !== 'CODE128' && prova('CODE128')) return {ok: true, formato: 'CODE128', ripiego: formato};
+  box.innerHTML = '<span class="small">Codice non disegnabile</span>';
+  return {ok: false};
+}
+const Carte = {
+  bozza: null, wl: null, aperta: null,
+  init() {
+    $('cNomi').innerHTML = NOMI_CARTE.map(n => '<option value="' + esc(n) + '">').join('');
+    $('cColori').innerHTML = COLORI.map(c => '<button type="button" style="background:' + c + '" data-c="' + c + '" aria-label="Colore"></button>').join('');
+    $('pgColori').innerHTML = $('cColori').innerHTML;
+    $('cColori').onclick = e => { const b = e.target.closest('button'); if (!b || !this.bozza) return; this.bozza.colore = b.dataset.c; this.coloriOn('cColori', b.dataset.c); };
+    this.pgColore = COLORI[5];
+    $('pgColori').onclick = e => { const b = e.target.closest('button'); if (!b) return; this.pgColore = b.dataset.c; this.coloriOn('pgColori', b.dataset.c); };
+    this.coloriOn('pgColori', this.pgColore);
+    $('cLista').onclick = e => { const b = e.target.closest('[data-id]'); if (!b) return; if (b.dataset.id === 'nuova') this.nuova(); else this.apri(b.dataset.id); };
+    let tm = 0;
+    $('cNum').oninput = () => { clearTimeout(tm); tm = setTimeout(() => this.anteprima(), 250); };
+    $('cFmt').onchange = () => this.anteprima();
+    $('cSalva').onclick = () => this.salva();
+    $('cAnnulla').onclick = () => { this.bozza = null; $('cForm').hidden = true; };
+    $('cFotoIn').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) this.foto(f); };
+    $('cScan').onclick = () => this.scansiona();
+    $('scanStop').onclick = () => this.fermaScan();
+    $('fChiudi').onclick = () => this.chiudi();
+    // ruotato: il riquadro occupa in altezza quanto era largo, quindi si riserva lo spazio con i margini
+    $('fRuota').onclick = () => {
+      const f = $('full'), c = $('fCode');
+      f.classList.toggle('rot'); c.style.margin = '';
+      if (f.classList.contains('rot')) { const r = c.getBoundingClientRect(); c.style.margin = Math.max(0, (r.height - c.offsetHeight) / 2 + 6) + 'px 0'; }
+    };
+    $('fFotoBtn').onclick = () => { $('fFoto').hidden = !$('fFoto').hidden; };
+    $('fMod').onclick = () => { const id = this.aperta; this.chiudi(); this.modifica(id); };
+    $('fDel').onclick = () => conferma($('fDel'), () => this.elimina(this.aperta), 'Tocca di nuovo per eliminare');
+    $('pgAgg').onclick = () => this.aggPag();
+    // niente maxlength: incollando il numero intero il browser terrebbe le PRIME 4 cifre; qui si tengono le ultime 4
+    $('pgUlt').oninput = () => { const v = $('pgUlt').value, d = v.replace(/\D/g, ''); if (v !== d.slice(-4)) { if (d.length > 4) toast('Salvo solo le ultime 4 cifre'); $('pgUlt').value = d.slice(-4); } };
+    $('pgLista').onclick = e => { const b = e.target.closest('button[data-id]'); if (b) conferma(b, () => { AX.store.set('carte-pag', AX.store.get('carte-pag', []).filter(c => c.id !== b.dataset.id)); this.lista(); }, 'Elimina?'); };
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (!$('full').hidden) this.chiudi(); if (!$('scan').hidden) this.fermaScan(); } });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !$('full').hidden) this.tieniAcceso(); });
+    this.lista();
+  },
+  coloriOn(id, c) { qsa('button', $(id)).forEach(b => b.classList.toggle('on', b.dataset.c === c)); },
+  carte() { return AX.store.get('carte', []); },
+  lista() {
+    const cc = this.carte();
+    $('cLista').innerHTML = cc.map(c => {
+      const fg = testoSu(c.colore), n = String(c.numero);
+      return '<button class="cartaf" type="button" data-id="' + c.id + '" style="background:' + esc(c.colore) + ';color:' + fg + '"><b>' + esc(c.nome) + '</b><span>' + (n.length > 4 ? '•••• ' + esc(n.slice(-4)) : esc(n)) + '</span></button>';
+    }).join('') + '<button class="cartaf vuota" type="button" data-id="nuova">+ Aggiungi carta</button>';
+    const pg = AX.store.get('carte-pag', []);
+    $('pgLista').innerHTML = pg.length ? pg.map(c => '<div class="row"><span class="av" style="background:' + esc(c.colore) + ';color:' + testoSu(c.colore) + '">' + esc((c.nome[0] || '?')) + '</span><div class="tx"><b>' + esc(c.nome) + '</b><span class="mono">•••• ' + esc(c.ultime4) + '</span></div><button class="btn sm" type="button" data-id="' + c.id + '">Elimina</button></div>').join('')
+      : '<div class="vuoto">Nessun promemoria.</div>';
+  },
+  nuova() {
+    this.bozza = {id: '', nome: '', numero: '', formato: 'auto', colore: COLORI[Math.floor(Math.random() * 8)], foto: null};
+    this.form('Nuova carta fedeltà');
+  },
+  modifica(id) {
+    const c = this.carte().find(x => x.id === id); if (!c) return;
+    this.bozza = Object.assign({}, c, {foto: null, fotoVecchia: c.foto});
+    this.form('Modifica carta');
+    if (c.foto) IDB.get('foto-' + c.id).then(f => { if (f) { const u = URL.createObjectURL(new Blob([f.buf], {type: f.type})); $('cFotoPrev').src = u; $('cFotoPrev').hidden = false; } }).catch(() => {});
+  },
+  form(tit) {
+    const b = this.bozza;
+    $('cFormTit').textContent = tit; $('cNome').value = b.nome; $('cNum').value = b.numero; $('cFmt').value = b.formato || 'auto';
+    $('cFotoPrev').hidden = true; $('cFotoPrev').removeAttribute('src');
+    this.coloriOn('cColori', b.colore);
+    $('cForm').hidden = false; this.anteprima();
+    $('cForm').scrollIntoView({behavior: 'smooth', block: 'start'});
+  },
+  async anteprima() {
+    const n = $('cNum').value.trim();
+    $('cPrevInfo').textContent = '';
+    try {
+      const r = await disegnaCodice($('cPrev'), n, $('cFmt').value);
+      if (r.ok) $('cPrevInfo').textContent = 'Tipo: ' + r.formato + (r.ripiego ? ' (il numero non è un ' + r.ripiego + ' valido: uso Code 128)' : '') + (n && $('cFmt').value === 'auto' && r.formato === 'CODE128' && /^\d{13}$/.test(n.replace(/\s/g, '')) ? ' — se il cassiere non lo legge, controlla il numero: la cifra di controllo EAN-13 non torna' : '');
+    } catch (e) { $('cPrev').innerHTML = '<span class="small">' + esc(e.message) + '</span>'; }
+  },
+  async foto(file) {
+    try {
+      const c = await Test.riduci(file, 1200);
+      const blob = await new Promise(ok => c.toBlob(ok, 'image/jpeg', 0.82));
+      if (this.bozza) { this.bozza.foto = blob; }
+      $('cFotoPrev').src = URL.createObjectURL(blob); $('cFotoPrev').hidden = false;
+      toast('Cerco il codice nella foto…');
+      const r = await this.leggi(c);
+      if (r) { $('cNum').value = r.testo; $('cFmt').value = r.formato || 'auto'; this.anteprima(); toast('Codice letto: controlla il numero'); }
+      else toast('Codice non trovato nella foto: scrivi il numero a mano');
+    } catch (e) { toast(e.message || 'Foto non leggibile'); }
+  },
+  async leggi(canvas) {
+    if ('BarcodeDetector' in window) {
+      try {
+        const sup = await BarcodeDetector.getSupportedFormats();
+        const d = new BarcodeDetector({formats: sup.filter(f => FMT_BD[f])});
+        const r = await d.detect(canvas);
+        if (r && r[0]) return {testo: r[0].rawValue, formato: FMT_BD[r[0].format] || 'CODE128'};
+      } catch (e) {}
+    }
+    try {
+      await carica(LIB.zxing);
+      const rd = new ZXingBrowser.BrowserMultiFormatReader();
+      const res = rd.decodeFromCanvas(canvas);
+      return {testo: res.getText(), formato: FMT_ZX[ZXingBrowser.BarcodeFormat[res.getBarcodeFormat()]] || 'CODE128'};
+    } catch (e) { return null; }
+  },
+  async scansiona() {
+    const v = $('scanV'); $('scanInfo').textContent = 'Inquadra il codice a barre della carta';
+    $('scan').hidden = false;
+    const trovato = (testo, formato) => { this.fermaScan(); $('cNum').value = testo; $('cFmt').value = formato || 'auto'; this.anteprima(); toast('Codice letto: controlla il numero'); };
+    try {
+      if ('BarcodeDetector' in window) {
+        const sup = await BarcodeDetector.getSupportedFormats();
+        const d = new BarcodeDetector({formats: sup.filter(f => FMT_BD[f])});
+        this.stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment', width: {ideal: 1280}}, audio: false});
+        v.srcObject = this.stream; await v.play();
+        const giro = async () => {
+          if ($('scan').hidden) return;
+          try { const r = await d.detect(v); if (r && r[0]) return trovato(r[0].rawValue, FMT_BD[r[0].format]); } catch (e) {}
+          this.giroT = setTimeout(giro, 200);
+        };
+        giro();
+      } else {
+        await carica(LIB.zxing);
+        const rd = new ZXingBrowser.BrowserMultiFormatReader();
+        this.zx = await rd.decodeFromConstraints({video: {facingMode: 'environment'}}, v, (res) => {
+          if (res) trovato(res.getText(), FMT_ZX[ZXingBrowser.BarcodeFormat[res.getBarcodeFormat()]]);
+        });
+      }
+    } catch (e) {
+      this.fermaScan();
+      toast(e && e.name === 'NotAllowedError' ? 'Fotocamera non consentita: usa «Fotografa la carta»' : 'Fotocamera non disponibile qui: usa «Fotografa la carta»');
+    }
+  },
+  fermaScan() {
+    clearTimeout(this.giroT);
+    try { if (this.zx) this.zx.stop(); } catch (e) {}
+    this.zx = null;
+    if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
+    const v = $('scanV'); try { v.pause(); } catch (e) {} v.srcObject = null;
+    $('scan').hidden = true;
+  },
+  async salva() {
+    const b = this.bozza; if (!b) return;
+    b.nome = $('cNome').value.trim(); b.numero = $('cNum').value.trim(); b.formato = $('cFmt').value;
+    if (!b.nome) { toast('Scrivi il nome del negozio'); $('cNome').focus(); return; }
+    if (!b.numero) { toast('Manca il numero della carta'); $('cNum').focus(); return; }
+    if (/^\d{15,19}$/.test(b.numero.replace(/[\s-]/g, '')) && /^[3-6]/.test(b.numero.replace(/[\s-]/g, '')) && luhn(b.numero.replace(/[\s-]/g, ''))) {
+      toast('Sembra il numero di una carta di pagamento: non lo salvo. Usa il Wallet.'); return;
+    }
+    const cc = this.carte();
+    const id = b.id || uid();
+    const box = document.createElement('div');
+    let svg = '';
+    try { const r = await disegnaCodice(box, b.numero, b.formato); if (r.ok) { svg = box.innerHTML; if (b.formato === 'auto') b.formato = r.formato; } } catch (e) {}
+    let foto = !!b.fotoVecchia;
+    if (b.foto) { try { await IDB.put('foto-' + id, {type: b.foto.type, buf: await b.foto.arrayBuffer()}); foto = true; } catch (e) { toast('Foto non salvata (spazio?)'); } }
+    const rec = {id, nome: b.nome.slice(0, 60), numero: b.numero.slice(0, 200), formato: b.formato, colore: b.colore, foto, svg, creata: b.creata || Date.now()};
+    const i = cc.findIndex(c => c.id === id);
+    if (i >= 0) cc[i] = rec; else cc.push(rec);
+    AX.store.set('carte', cc);
+    this.bozza = null; $('cForm').hidden = true; this.lista();
+    toast(svg ? 'Carta salvata' : 'Carta salvata (il codice si disegnerà quando c\'è connessione)');
+  },
+  async apri(id) {
+    const c = this.carte().find(x => x.id === id); if (!c) return;
+    this.aperta = id;
+    $('fNome').textContent = c.nome; $('fNum').textContent = String(c.numero).replace(/(\S{4})(?=\S)/g, '$1 ');
+    $('full').classList.remove('rot'); $('fCode').style.margin = '';
+    const box = $('fCode');
+    if (c.svg) box.innerHTML = c.svg;
+    else {
+      box.innerHTML = '<span class="small">Disegno il codice…</span>';
+      try { const r = await disegnaCodice(box, c.numero, c.formato); if (r.ok) { const cc = this.carte(); const k = cc.findIndex(x => x.id === id); if (k >= 0) { cc[k].svg = box.innerHTML; cc[k].formato = r.formato; AX.store.set('carte', cc); } } }
+      catch (e) { box.innerHTML = '<p class="small">Senza connessione non posso disegnare il codice: mostra il numero o la foto della carta.</p>'; }
+    }
+    $('fFoto').hidden = true; $('fFotoBtn').hidden = !c.foto;
+    if (c.foto) IDB.get('foto-' + id).then(f => { if (f) $('fFoto').src = URL.createObjectURL(new Blob([f.buf], {type: f.type})); else $('fFotoBtn').hidden = true; }).catch(() => { $('fFotoBtn').hidden = true; });
+    $('full').hidden = false;
+    this.tieniAcceso();
+  },
+  async tieniAcceso() {
+    let acceso = false;
+    try { if ('wakeLock' in navigator) { this.wl = await navigator.wakeLock.request('screen'); acceso = true; } } catch (e) {}
+    $('fInfo').textContent = 'Alza la luminosità al massimo' + (/iPhone|iPad/.test(navigator.userAgent) ? ' (Centro di Controllo)' : '') + ' e avvicina lo schermo allo scanner.' + (acceso ? ' Lo schermo resta acceso.' : '');
+  },
+  chiudi() {
+    $('full').hidden = true; this.aperta = null;
+    try { if (this.wl) this.wl.release(); } catch (e) {}
+    this.wl = null;
+  },
+  elimina(id) {
+    AX.store.set('carte', this.carte().filter(c => c.id !== id));
+    IDB.del('foto-' + id).catch(() => {});
+    this.chiudi(); this.lista(); toast('Carta eliminata');
+  },
+  aggPag() {
+    const nome = $('pgNome').value.trim(), u = $('pgUlt').value.trim();
+    if (!nome) { toast('Scrivi un nome per la carta'); return; }
+    if (/\d{6,}/.test(nome.replace(/[\s-]/g, ''))) { toast('Non scrivere il numero della carta nel nome'); return; }
+    if (!/^\d{4}$/.test(u)) { toast('Servono esattamente le ultime 4 cifre'); return; }
+    const pg = AX.store.get('carte-pag', []);
+    pg.push({id: uid(), nome: nome.slice(0, 40), ultime4: u, colore: this.pgColore});
+    AX.store.set('carte-pag', pg);
+    $('pgNome').value = ''; $('pgUlt').value = ''; this.lista(); toast('Promemoria aggiunto');
+  }
+};
+function luhn(s) { let t = 0; for (let i = 0; i < s.length; i++) { let d = +s[s.length - 1 - i]; if (i % 2) { d *= 2; if (d > 9) d -= 9; } t += d; } return t % 10 === 0; }
+
+/* =====================================================================
+   DISPOSITIVO
+   ===================================================================== */
+function rilevaSistema() {
+  const ua = navigator.userAgent;
+  const iosVer = () => { const m = ua.match(/OS (\d+)[_.](\d+)/); return m ? m[1] + '.' + m[2] : ''; };
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return {id: 'ipados', nome: 'iPadOS', ver: /iPad/.test(ua) ? iosVer() : ''};
+  if (/iPhone|iPod/.test(ua)) return {id: 'ios', nome: 'iOS', ver: iosVer()};
+  if (/Android/.test(ua)) return {id: 'android', nome: 'Android', ver: (ua.match(/Android\s([\d.]+)/) || [])[1] || ''};
+  if (/Windows/.test(ua)) return {id: 'windows', nome: 'Windows', ver: ''};
+  if (/CrOS/.test(ua)) return {id: 'linux', nome: 'ChromeOS', ver: ''};
+  if (/Macintosh|Mac OS X/.test(ua)) return {id: 'macos', nome: 'macOS', ver: ''};
+  if (/Linux/.test(ua)) return {id: 'linux', nome: 'Linux', ver: ''};
+  return {id: '', nome: 'Sistema non riconosciuto', ver: ''};
+}
+function rilevaBrowser() {
+  const ua = navigator.userAgent; let m;
+  if ((m = ua.match(/Edg(?:iOS|A)?\/(\d+)/))) return 'Edge ' + m[1];
+  if ((m = ua.match(/(?:OPR|OPiOS)\/(\d+)/))) return 'Opera ' + m[1];
+  if ((m = ua.match(/SamsungBrowser\/(\d+)/))) return 'Samsung Internet ' + m[1];
+  if ((m = ua.match(/(?:Firefox|FxiOS)\/(\d+)/))) return 'Firefox ' + m[1];
+  if ((m = ua.match(/(?:Chrome|CriOS)\/(\d+)/))) return 'Chrome ' + m[1];
+  if ((m = ua.match(/Version\/([\d.]+).*Safari/))) return 'Safari ' + m[1];
+  return 'Browser';
+}
+const ESSENZIALI = ['', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'];
+const NOMI_DATI = {'ax-carte': 'Carte fedeltà', 'ax-carte-pag': 'Promemoria carte di pagamento', 'ax-prezzi-storico': 'Storico ricerche dei prezzi', 'ax-prezzi-clic': 'Siti più usati (prezzi)', 'ax-negozi-preferiti': 'Negozi preferiti', 'ax-test-bozza': 'Testo del test', 'ax-test-lung': 'Lunghezza risposte del test', 'ax-ia-modello': 'Modello dell\'IA scelto', 'ax-notizie-cache': 'Notizie salvate', 'ax-notizie-riassunti': 'Riassunti delle notizie', 'ax-studio-mazzi': 'Allenamenti (domande)', 'ax-studio-log': 'Statistiche degli allenamenti', 'ax-idee-chat': 'Conversazioni dell\'Assistente idee', 'ax-idee-modo': 'Modalità dell\'Assistente idee', 'ax-strumenti-tab': 'Ultima scheda aperta (Strumenti)', 'ax-studio-tab': 'Ultima scheda aperta (Studio)', 'ax-prezzi-cat': 'Categoria scelta (prezzi)', 'ax-notizie-fonti': 'Fonti delle notizie scelte', 'ax-notizie-extra': 'Fonti delle notizie aggiunte', 'ax-notizie-auto': 'Riassunti automatici (sì/no)'};
+const CONSIGLI_PULIZIA = [
+  [/Trash|Cestino/i, 'Svuota il Cestino dal Finder (⇧⌘⌫).'],
+  [/ollama/i, 'Modelli dell\'IA: elimina quelli che non usi con «ollama rm nome» (l\'elenco con «ollama list»).'],
+  [/DerivedData|Xcode|CoreSimulator|DeviceSupport/i, 'File di Xcode: si possono eliminare, si ricreano quando servono.'],
+  [/MobileSync|Backup/i, 'Backup di iPhone/iPad: eliminali dal Finder (seleziona il dispositivo › Gestisci backup) solo se ne hai uno più recente o su iCloud.'],
+  [/Mail|Messages|Messaggi|Photos|Foto|Mobile Documents|iCloud|Music|Musica/i, 'Dati personali: non eliminarli a mano, gestiscili dall\'app che li usa.'],
+  [/Caches?/i, 'Cache: si ricreano da sole. Chiudi le app, poi elimina il contenuto della cartella (non la cartella).'],
+  [/Logs?/i, 'Registri (log): si possono eliminare, servono solo a diagnosticare problemi.'],
+  [/Downloads|Download|Scaricati/i, 'Download: guarda cosa ti serve prima di eliminare.'],
+  [/npm|yarn|pnpm|node_modules/i, 'Cache di sviluppo: «npm cache clean --force» (o l\'equivalente).'],
+  [/Homebrew|brew/i, 'Homebrew: «brew cleanup» nel Terminale.'],
+  [/video|yt-dlp|audiolibr/i, 'File scaricati con Atlante: eliminali dalla scheda del modulo (Video, Libri) se non ti servono.']
+];
+const VELOCIZZA = {
+  ios: {n: 'iOS', v: [
+    ['Riavvia ogni tanto', 'Tieni premuti il tasto laterale e un tasto del volume, poi scorri. Una volta a settimana basta.'],
+    ['Aggiorna iOS', 'Impostazioni › Generali › Aggiornamento software. Attiva gli aggiornamenti automatici.'],
+    ['Libera spazio', 'Impostazioni › Generali › Spazio iPhone: attiva «Rimuovi app che non usi» e segui i consigli. Lascia libero almeno il 10%.'],
+    ['Foto su iCloud', 'Impostazioni › [il tuo nome] › iCloud › Foto › «Ottimizza spazio iPhone».'],
+    ['Aggiornamento in background', 'Impostazioni › Generali › Aggiorna app in background: disattivalo per le app che non ne hanno bisogno (anche la batteria ringrazia).'],
+    ['Interfaccia più rapida', 'Impostazioni › Accessibilità › Movimento › «Riduci movimento» (utile sugli iPhone meno recenti).'],
+    ['Stato della batteria', 'Impostazioni › Batteria › Stato della batteria: sotto l\'80% l\'iPhone può rallentare. Valuta la sostituzione da Apple.'],
+    ['Safari', 'Impostazioni › App › Safari › «Cancella cronologia e dati dei siti web». Attenzione: se usi Atlante da Safari (e non dalla schermata Home) cancelli anche la musica scaricata.'],
+    ['Non serve chiudere le app', 'Chiudere le app dal multitasking non velocizza: iOS le gestisce da solo. Chiudi solo quelle bloccate.']]},
+  ipados: {n: 'iPadOS', v: [
+    ['Riavvia ogni tanto', 'Tieni premuti il tasto superiore e un tasto del volume, poi scorri.'],
+    ['Aggiorna iPadOS', 'Impostazioni › Generali › Aggiornamento software.'],
+    ['Libera spazio', 'Impostazioni › Generali › Spazio iPad: «Rimuovi app che non usi» e i consigli suggeriti.'],
+    ['Multitasking più leggero', 'Impostazioni › Multitasking e gesti: se l\'iPad è datato usa una sola app a schermo intero invece di Stage Manager o finestre multiple.'],
+    ['Aggiornamento in background', 'Impostazioni › Generali › Aggiorna app in background: disattivalo per le app che non servono.'],
+    ['Riduci movimento e trasparenza', 'Impostazioni › Accessibilità › Movimento › «Riduci movimento»; Accessibilità › Schermo e dimensioni del testo › «Riduci trasparenza».'],
+    ['Foto su iCloud', 'Impostazioni › [il tuo nome] › iCloud › Foto › «Ottimizza spazio iPad».']]},
+  macos: {n: 'macOS', v: [
+    ['Aggiornamenti', 'Impostazioni di Sistema › Generali › Aggiornamento software.', [['Apri Aggiornamento software', 'x-apple.systempreferences:com.apple.Software-Update-Settings.extension']]],
+    ['App all\'avvio', 'Impostazioni di Sistema › Generali › Elementi login ed estensioni: togli le app che non ti servono all\'accensione.', [['Apri Elementi login', 'x-apple.systempreferences:com.apple.LoginItems-Settings.extension']]],
+    ['Spazio sul disco', 'Impostazioni di Sistema › Generali › Archiviazione: segui i consigli (Ottimizza, Svuota il Cestino automaticamente). Tieni libero almeno il 15% del disco.', [['Apri Archiviazione', 'x-apple.systempreferences:com.apple.settings.Storage']]],
+    ['Cosa rallenta il Mac', 'Apri Monitoraggio Attività (Applicazioni › Utility): ordina per «% CPU» e «Memoria» e chiudi ciò che pesa. Se la «Pressione memoria» è gialla o rossa servono meno app aperte (o più RAM).'],
+    ['Browser', 'Poche schede aperte e poche estensioni: ogni scheda occupa memoria.'],
+    ['Riavvia', 'Menu  › Riavvia una volta a settimana libera memoria e completa gli aggiornamenti.'],
+    ['Modelli dell\'IA', 'I modelli di Ollama occupano molti GB: «ollama list» per vederli, «ollama rm nome» per eliminare quelli che non usi.'],
+    ['Mac datati', 'Impostazioni di Sistema › Accessibilità › Monitor › «Riduci trasparenza» e «Riduci movimento».']]},
+  windows: {n: 'Windows', v: [
+    ['File temporanei e Sensore memoria', 'Impostazioni › Sistema › Archiviazione: attiva «Sensore memoria» e in «File temporanei» elimina ciò che non serve.', [['Apri Archiviazione', 'ms-settings:storagesense']]],
+    ['App all\'avvio', 'Impostazioni › App › Avvio: disattiva le app che non servono all\'accensione (anche da Gestione attività, Ctrl+Maiusc+Esc).', [['Apri App di avvio', 'ms-settings:startupapps']]],
+    ['Aggiornamenti', 'Impostazioni › Windows Update: installa gli aggiornamenti e riavvia.', [['Apri Windows Update', 'ms-settings:windowsupdate']]],
+    ['Programmi inutili', 'Impostazioni › App › App installate: disinstalla i programmi che non usi (soprattutto quelli preinstallati).', [['Apri App installate', 'ms-settings:appsfeatures']]],
+    ['Risparmio energia', 'Impostazioni › Sistema › Alimentazione: con il PC in carica scegli «Prestazioni ottimali».', [['Apri Alimentazione', 'ms-settings:powersleep']]],
+    ['Effetti visivi', 'Impostazioni › Accessibilità › Effetti visivi: disattiva animazioni e trasparenza sui PC lenti.', [['Apri Effetti visivi', 'ms-settings:easeofaccess-visualeffects']]],
+    ['Riavvia davvero', 'Usa «Riavvia» e non solo «Arresta»: con l\'avvio rapido lo spegnimento non svuota la memoria.'],
+    ['Niente «ottimizzatori»', 'Microsoft Defender basta come antivirus; evita programmi «pulisci registro» e ottimizzatori: spesso rallentano.']]},
+  android: {n: 'Android', v: [
+    ['Libera spazio', 'Impostazioni › Archiviazione: elimina file grandi, foto già salvate e app inutilizzate. L\'app «Files by Google» lo fa in pochi tocchi.', [['Files by Google', 'https://play.google.com/store/apps/details?id=com.google.android.apps.nbu.files']]],
+    ['App inutili', 'Impostazioni › App: disinstalla o disattiva le app che non usi; per le app grandi Archiviazione › «Svuota cache».'],
+    ['Aggiornamenti', 'Impostazioni › Sistema › Aggiornamento software, e Play Store › Gestisci app e dispositivo › Aggiorna tutto.'],
+    ['Samsung', 'Impostazioni › Assistenza dispositivo › «Ottimizza ora».'],
+    ['Animazioni più veloci', 'Attiva le Opzioni sviluppatore (Impostazioni › Info telefono › tocca 7 volte «Numero build»), poi metti le tre «Scala animazione» a 0,5x.'],
+    ['Batteria', 'Impostazioni › Batteria: guarda quali app consumano di più e limita l\'attività in background.'],
+    ['Riavvia', 'Una volta a settimana.']]},
+  linux: {n: 'Linux', v: [
+    ['Aggiornamenti', 'Debian/Ubuntu e derivate:', null, ['sudo apt update && sudo apt upgrade']],
+    ['Pacchetti inutili e cache', '', null, ['sudo apt autoremove --purge && sudo apt clean', 'flatpak uninstall --unused']],
+    ['Registri di sistema', 'Guarda quanto occupano e tieni solo le ultime due settimane:', null, ['journalctl --disk-usage', 'sudo journalctl --vacuum-time=14d']],
+    ['Cache dell\'utente', 'Le cartelle più grandi (chiudi le app prima di cancellare):', null, ['du -sh ~/.cache/* | sort -h | tail']],
+    ['Avvio lento', 'Quali servizi rallentano l\'avvio:', null, ['systemd-analyze blame | head -20']],
+    ['Memoria e disco', '', null, ['free -h', 'df -h']]]}
+};
+const Disp = {
+  sis: null,
+  async init() {
+    this.sis = rilevaSistema();
+    this.info();
+    this.cache();
+    this.mac();
+    this.velocizza();
+    $('dCache').addEventListener('click', e => this.azCache(e));
+    $('dMac').addEventListener('click', e => { const b = e.target.closest('button[data-a]'); if (!b) return; if (b.dataset.a === 'copia') copia(b.dataset.p); if (b.dataset.a === 'riprova') this.mac(true); });
+    $('dSpazio').addEventListener('click', e => { if (e.target.closest('[data-a="persist"]')) this.persisti(); });
+  },
+  async info() {
+    const s = this.sis;
+    const kv = (k, v) => '<div class="kv"><span>' + esc(k) + '</span><span>' + v + '</span></div>';
+    let ver = s.ver;
+    try {
+      if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+        const h = await navigator.userAgentData.getHighEntropyValues(['platformVersion', 'model']);
+        if (s.id === 'windows' && h.platformVersion) ver = parseInt(h.platformVersion, 10) >= 13 ? '11' : '10';
+        else if (s.id === 'macos' && h.platformVersion) ver = h.platformVersion.split('.').slice(0, 2).join('.');
+        else if (s.id === 'android' && h.model) ver = (ver ? ver + ' · ' : '') + h.model;
+      }
+    } catch (e) {}
+    const inst = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone || (AX.host && (() => { try { return parent.matchMedia('(display-mode: standalone)').matches || parent.navigator.standalone; } catch (e) { return false; } })());
+    const scr = screen.width + '×' + screen.height + ' · densità ' + (window.devicePixelRatio || 1) + 'x';
+    let h = kv('Sistema', esc(s.nome + (ver ? ' ' + ver : ''))) + kv('Browser', esc(rilevaBrowser())) +
+      kv('Atlante', inst ? 'Installata (schermata Home)' : 'Aperta nel browser') +
+      kv('Schermo', esc(scr)) + kv('Finestra', esc(innerWidth + '×' + innerHeight)) +
+      (navigator.hardwareConcurrency ? kv('Processore', navigator.hardwareConcurrency + ' core') : '') +
+      (navigator.deviceMemory ? kv('Memoria', 'almeno ' + navigator.deviceMemory + ' GB') : '');
+    const c = navigator.connection;
+    h += kv('Connessione', navigator.onLine ? 'In linea' + (c && c.effectiveType ? ' · ' + esc(c.effectiveType.toUpperCase()) + (c.downlink ? ' · ~' + c.downlink + ' Mbit/s' : '') + (c.saveData ? ' · risparmio dati' : '') : '') : 'Non in linea');
+    h += '<div id="dBatt"></div>';
+    h += kv('Lingua e fuso', esc((navigator.language || '') + ' · ' + (Intl.DateTimeFormat().resolvedOptions().timeZone || '')));
+    $('dInfo').innerHTML = h;
+    if (navigator.getBattery) {
+      try { const b = await navigator.getBattery(); $('dBatt').outerHTML = kv('Batteria', Math.round(b.level * 100) + '%' + (b.charging ? ' · in carica' : '')); } catch (e) {}
+    }
+    this.spazio();
+  },
+  async spazio() {
+    if (!navigator.storage || !navigator.storage.estimate) { $('dSpazio').innerHTML = '<p class="small">Questo browser non dice quanto spazio usa l\'app.</p>'; return; }
+    try {
+      const e = await navigator.storage.estimate();
+      const pers = navigator.storage.persisted ? await navigator.storage.persisted() : null;
+      const p = e.quota ? Math.min(100, e.usage / e.quota * 100) : 0;
+      const det = e.usageDetails ? Object.entries(e.usageDetails).filter(x => x[1] > 0).map(([k, v]) => ({indexedDB: 'database (musica e dati)', caches: 'cache', serviceWorkerRegistrations: 'service worker'}[k] || k) + ' ' + fmtB(v)).join(' · ') : '';
+      $('dSpazio').innerHTML = '<div class="card"><b>Spazio usato da Atlante su questo dispositivo</b><div class="bar big"><i style="width:' + Math.max(p, 0.5) + '%"></i></div>' +
+        '<div class="small">' + fmtB(e.usage) + ' usati su ' + fmtB(e.quota) + ' disponibili per l\'app' + (det ? '<br>' + esc(det) : '') + '</div>' +
+        (pers === true ? '<div class="note ok">Archiviazione protetta: il browser non cancella da solo la musica scaricata.</div>'
+          : pers === false ? '<div class="note">Archiviazione non protetta: se lo spazio scarseggia il browser può cancellare i dati dell\'app (musica scaricata compresa). Safari li cancella anche dopo 7 giorni senza aprire il sito, se l\'app non è installata nella schermata Home.<div class="btns"><button class="btn sm" type="button" data-a="persist">Proteggi i dati dell\'app</button></div></div>' : '') + '</div>';
+    } catch (err) { $('dSpazio').innerHTML = ''; }
+  },
+  async persisti() {
+    try { const ok = await navigator.storage.persist(); toast(ok ? 'Dati protetti' : 'Il browser non l\'ha concesso: installa l\'app nella schermata Home e riprova'); } catch (e) { toast('Non disponibile in questo browser'); }
+    this.spazio();
+  },
+  superfluo(nome, url) {
+    if (nome.indexOf('atlante-musica-') !== 0) return true;
+    try {
+      const base = new URL('../', location.href).pathname, p = new URL(url).pathname;
+      if (p.indexOf(base) !== 0) return true;
+      return ESSENZIALI.indexOf(p.slice(base.length)) < 0;
+    } catch (e) { return false; }
+  },
+  async cache() {
+    const box = $('dCache');
+    let h = '';
+    if ('caches' in window) {
+      try {
+        const nomi = await caches.keys(); const info = [];
+        for (const n of nomi) {
+          const c = await caches.open(n); const reqs = await c.keys();
+          let tot = 0, sup = 0, nsup = 0;
+          for (const r of reqs.slice(0, 600)) {
+            let sz = 0; try { const res = await c.match(r); if (res) sz = (await res.clone().blob()).size; } catch (e) {}
+            tot += sz; if (this.superfluo(n, r.url)) { sup += sz; nsup++; }
+          }
+          info.push({n, file: reqs.length, tot, sup, nsup});
+        }
+        this.infoCache = info;
+        const app = info.filter(x => x.n.indexOf('atlante-musica-') === 0);
+        const altre = info.filter(x => x.n.indexOf('atlante-musica-') !== 0);
+        const sup = app.reduce((a, x) => a + x.sup, 0), nsup = app.reduce((a, x) => a + x.nsup, 0), tot = app.reduce((a, x) => a + x.tot, 0);
+        h += '<div class="card"><b>Copia offline dell\'app</b><div class="small">' + (app.length ? fmtB(tot) + ' in ' + app.reduce((a, x) => a + x.file, 0) + ' file · ' + nsup + ' file non essenziali (' + fmtB(sup) + ')' : 'Nessuna copia offline su questo dispositivo') + '</div>' +
+          (nsup ? '<div id="dConf"></div><div class="btns"><button class="btn sm" type="button" data-a="pulisci">Pulisci la cache</button></div>' : '') + '</div>';
+        if (altre.length) h += '<div class="list">' + altre.map(x => '<div class="row"><div class="tx"><b>' + esc(x.n) + '</b><span>' + fmtB(x.tot) + ' · ' + x.file + ' file' + (/^ax-/.test(x.n) ? ' · dati di un modulo (es. contenuti scaricati)' : '') + '</span></div><button class="btn sm" type="button" data-a="svuota" data-n="' + esc(x.n) + '">Svuota</button></div>').join('') + '</div>';
+      } catch (e) { h += '<p class="small">Cache non leggibile: ' + esc(e.message) + '</p>'; }
+    } else h += '<p class="small">Questo browser non ha la cache delle app.</p>';
+    // dati dei moduli (localStorage ax-*)
+    const dati = [];
+    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.indexOf('ax-') === 0) dati.push({k, sz: (k.length + (localStorage.getItem(k) || '').length) * 2}); } } catch (e) {}
+    dati.sort((a, b) => b.sz - a.sz);
+    h += '<div class="h2" style="font-size:17px">Dati dei moduli</div>' + (dati.length ? '<div class="list">' + dati.map(d => '<div class="row"><div class="tx"><b>' + esc(NOMI_DATI[d.k] || d.k.slice(3)) + '</b><span>' + fmtB(d.sz) + '</span></div><button class="btn sm" type="button" data-a="dato" data-k="' + esc(d.k) + '">Elimina</button></div>').join('') + '</div><p class="small">Le carte fedeltà e gli allenamenti sono qui: eliminali solo se sei sicuro.</p>' : '<p class="vuoto">Nessun dato salvato dai moduli.</p>');
+    // database (solo informazione)
+    if (indexedDB && indexedDB.databases) {
+      try {
+        const dbs = await indexedDB.databases();
+        if (dbs.length) h += '<p class="small">Database su questo dispositivo: ' + dbs.map(d => esc(d.name) + (/^ax-/.test(d.name) ? '' : ' (musica e app: non si tocca da qui)')).join(', ') + '.</p>';
+      } catch (e) {}
+    }
+    box.innerHTML = h;
+  },
+  async azCache(e) {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const a = b.dataset.a;
+    if (a === 'pulisci') {
+      const app = (this.infoCache || []).filter(x => x.n.indexOf('atlante-musica-') === 0);
+      const nsup = app.reduce((s, x) => s + x.nsup, 0), sup = app.reduce((s, x) => s + x.sup, 0);
+      $('dConf').innerHTML = '<div class="note warn">Elimino <b>' + nsup + ' file (' + fmtB(sup) + ')</b> dalla cache: pagine dei moduli e file vecchi, che si riscaricano dal Mac alla prossima apertura. Restano la copia essenziale dell\'app (si apre anche offline), la musica scaricata, le carte e i dati dei moduli.<div class="btns"><button class="btn sm danger" type="button" data-a="pulisci-ok">Elimina</button><button class="btn sm" type="button" data-a="annulla">Annulla</button></div></div>';
+      b.hidden = true;
+    } else if (a === 'annulla') this.cache();
+    else if (a === 'pulisci-ok') {
+      let n = 0;
+      for (const nome of await caches.keys()) {
+        if (nome.indexOf('atlante-musica-') !== 0) continue;
+        const c = await caches.open(nome);
+        for (const r of await c.keys()) if (this.superfluo(nome, r.url)) { await c.delete(r); n++; }
+      }
+      toast('Eliminati ' + n + ' file dalla cache'); this.cache(); this.spazio();
+    } else if (a === 'svuota') conferma(b, async () => { await caches.delete(b.dataset.n); toast('Cache svuotata'); this.cache(); this.spazio(); }, 'Conferma');
+    else if (a === 'dato') conferma(b, () => { try { localStorage.removeItem(b.dataset.k); } catch (err) {} toast('Eliminato'); this.cache(); if (b.dataset.k === 'ax-carte' || b.dataset.k === 'ax-carte-pag') Carte.lista && inizializzato.carte && Carte.lista(); }, 'Conferma');
+  },
+  async mac(force) {
+    const box = $('dMac');
+    box.innerHTML = '<div class="vuoto">Chiedo al Mac…</div>';
+    const st = await AX.stato(force);
+    if (!st.ok) { box.innerHTML = '<div class="note warn"><b>Il Mac non risponde.</b> Questa parte mostra dischi, memoria e file da pulire del Mac dove gira il server della musica: accendilo e collegati alla stessa rete (o a Tailscale).<div class="btns"><button class="btn sm" type="button" data-a="riprova">Riprova</button></div></div>'; return; }
+    let d;
+    try { d = await AX.api('dispositivo', {timeout: 20000}); }
+    catch (e) { box.innerHTML = '<div class="note warn">Il Mac non ha dato le informazioni: ' + esc(e.message) + '<div class="btns"><button class="btn sm" type="button" data-a="riprova">Riprova</button></div></div>'; return; }
+    const kv = (k, v) => '<div class="kv"><span>' + esc(k) + '</span><span>' + v + '</span></div>';
+    const barra = (usato, totale) => { const p = totale ? Math.min(100, usato / totale * 100) : 0; return '<div class="bar big"><i class="' + (p > 95 ? 'bad' : p > 85 ? 'warn' : '') + '" style="width:' + p.toFixed(1) + '%"></i></div>'; };
+    let h = '<div class="list">' + kv('Nome', esc(d.nome || '—')) + kv('Sistema', esc([d.sistema, d.versione].filter(Boolean).join(' ') || '—')) + kv('Acceso', esc(this.avvio(d.avvio))) + '</div>';
+    const m = d.memoria || {};
+    if (typeof m.totale === 'number') h += '<div class="card"><b>Memoria</b>' + barra(m.totale - (m.libera || 0), m.totale) + '<div class="small">' + fmtB(m.totale - (m.libera || 0)) + ' usati su ' + fmtB(m.totale) + ' · ' + fmtB(m.libera) + ' liberi</div></div>';
+    (d.dischi || []).forEach(k => {
+      const usato = (k.totale || 0) - (k.libero || 0), p = k.totale ? usato / k.totale * 100 : 0;
+      h += '<div class="card"><b>' + esc(k.nome || k.percorso || 'Disco') + '</b>' + barra(usato, k.totale) + '<div class="small">' + fmtB(k.libero) + ' liberi su ' + fmtB(k.totale) + (k.percorso ? ' · ' + esc(k.percorso) : '') + '</div>' + (p > 85 ? '<div class="note ' + (p > 95 ? 'bad' : 'warn') + '">Disco quasi pieno: sotto il 10–15% libero il Mac rallenta e gli aggiornamenti possono fallire.</div>' : '') + '</div>';
+    });
+    const pul = (d.pulizia || []).slice().sort((a, b) => (b.dimensione || 0) - (a.dimensione || 0));
+    if (pul.length) {
+      const tot = pul.reduce((a, x) => a + (typeof x.dimensione === 'number' ? x.dimensione : 0), 0);
+      h += '<div class="h2" style="font-size:17px">Pulizia · ' + fmtB(tot) + ' recuperabili</div><p class="small">Solo informazione: Atlante non cancella nulla sul Mac. Ecco cosa occupa spazio e come liberarlo a mano.</p><div class="list">' + pul.map(x => {
+        const c = CONSIGLI_PULIZIA.find(r => r[0].test((x.nome || '') + ' ' + (x.percorso || '')));
+        return '<div class="pul"><div class="t"><b>' + esc(x.nome || 'Elemento') + '</b><span class="mono">' + fmtB(x.dimensione) + '</span></div>' + (x.percorso ? '<div class="p">' + esc(x.percorso) + '</div>' : '') + (c ? '<div class="c">' + esc(c[1]) + '</div>' : '') + (x.percorso ? '<button class="btn sm" type="button" data-a="copia" data-p="' + esc(x.percorso) + '" style="margin-top:6px">Copia percorso</button>' : '') + '</div>';
+      }).join('') + '</div>' +
+      '<div class="card"><b>Come cancellare a mano, in sicurezza</b><ol class="passi"><li>Chiudi le app che usano quei file.</li><li>Nel Finder scegli Vai › Vai alla cartella (⇧⌘G) e incolla il percorso copiato.</li><li>Seleziona il <b>contenuto</b> della cartella (non la cartella stessa) e trascinalo nel Cestino.</li><li>Svuota il Cestino solo quando sei sicuro: dopo non si recupera.</li></ol>' +
+      '<div class="note warn">Non cancellare mai a mano Libreria Foto, Mail, Messaggi, iCloud Drive («Mobile Documents») o la libreria musicale: usa le rispettive app. Se hai dubbi su un file, non cancellarlo.</div></div>';
+    }
+    box.innerHTML = h;
+  },
+  avvio(a) {
+    if (a == null || a === '') return '—';
+    let t = null;
+    if (typeof a === 'number') t = a < 1e9 ? Date.now() - a * 1000 : a < 1e11 ? a * 1000 : a;
+    else if (!isNaN(Date.parse(a))) t = Date.parse(a);
+    if (t == null) return String(a);
+    const s = Math.max(0, (Date.now() - t) / 1000), g = Math.floor(s / 86400), o = Math.floor(s % 86400 / 3600);
+    return 'da ' + (g ? g + (g === 1 ? ' giorno ' : ' giorni ') : '') + o + (o === 1 ? ' ora' : ' ore') + ' (dal ' + new Date(t).toLocaleString('it-IT', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}) + ')' + (g >= 14 ? ' · riavvialo ogni tanto' : '');
+  },
+  velocizza() {
+    const ordine = ['ios', 'ipados', 'macos', 'windows', 'android', 'linux'];
+    const mio = this.sis.id;
+    const lista = mio && ordine.indexOf(mio) >= 0 ? [mio].concat(ordine.filter(x => x !== mio)) : ordine;
+    $('vSeg').innerHTML = lista.map((k, i) => '<button type="button" data-k="' + k + '" class="' + (i === 0 ? 'on' : '') + '">' + VELOCIZZA[k].n + (k === mio ? ' ✓' : '') + '</button>').join('');
+    $('vSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; qsa('button', $('vSeg')).forEach(x => x.classList.toggle('on', x === b)); this.consigli(b.dataset.k); };
+    $('vLista').onclick = e => { const b = e.target.closest('button[data-cmd]'); if (b) copia(b.dataset.cmd); };
+    this.consigli(lista[0]);
+  },
+  consigli(k) {
+    const v = VELOCIZZA[k], mio = this.sis.id === k;
+    $('vLista').innerHTML = (mio ? '<p class="small">Stai usando ' + esc(v.n) + ': questi consigli valgono per questo dispositivo.</p>' : '') +
+      (k === 'ios' || k === 'ipados' ? '<p class="small">Da una pagina web non si possono aprire direttamente le Impostazioni di iPhone e iPad: segui il percorso indicato.</p>' : '') +
+      (k === 'android' ? '<p class="small">Le voci possono cambiare un po\' da marca a marca.</p>' : '') +
+      '<div class="cons"><ol class="passi in">' + v.v.map(x => '<li><b>' + esc(x[0]) + '.</b> ' + esc(x[1]) +
+        (x[2] ? '<br>' + x[2].map(l => '<a class="lnk" href="' + esc(l[1]) + '"' + (/^https/.test(l[1]) ? ' target="_blank" rel="noopener"' : '') + '>' + esc(l[0]) + ' ›</a>').join('') +
+          (/^https/.test(x[2][0][1]) ? '' : ' <span class="small">(' + (mio ? '' : 'funziona solo su ' + esc(v.n) + ', ') + (k === 'macos' ? 'macOS 13 o successivo; ' : '') + 'il browser chiede conferma)</span>') : '') +
+        (x[3] ? x[3].map(c => '<div class="cmd"><code>' + esc(c) + '</code><button class="btn sm" type="button" data-cmd="' + esc(c) + '">Copia</button></div>').join('') : '') + '</li>').join('') + '</ol></div>';
+  }
+};
+
+/* =====================================================================
+   SCHEDE
+   ===================================================================== */
+const TABS = {prezzi: Prezzi, negozi: Negozi, test: Test, carte: Carte, disp: Disp};
+const inizializzato = {};
+function mostra(t) {
+  if (!TABS[t]) t = 'prezzi';
+  qsa('#tabs button').forEach(b => { const on = b.dataset.t === t; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+  Object.keys(TABS).forEach(x => { $('s-' + x).hidden = x !== t; });
+  if (!inizializzato[t]) { inizializzato[t] = true; try { TABS[t].init(); } catch (e) { console.error(e); toast('Errore: ' + e.message); } }
+  AX.store.set('strumenti-tab', t);
+  try { history.replaceState(null, '', '#' + t); } catch (e) {}
+}
+AX.header('Strumenti');
+$('tabs').onclick = e => { const b = e.target.closest('button[data-t]'); if (b) { mostra(b.dataset.t); window.scrollTo(0, 0); } };
+mostra((location.hash || '').slice(1) || AX.store.get('strumenti-tab', 'prezzi'));
+window.addEventListener('hashchange', () => mostra(location.hash.slice(1)));
+window.addEventListener('pagehide', () => { Carte.fermaScan && Carte.fermaScan(); if (Test.ocrWorker) { try { Test.ocrWorker.terminate(); } catch (e) {} } });
+// per le prove automatiche
+window.STRUMENTI = {Prezzi, Negozi, Test, Carte, Disp, analizzaTesto, formatoAuto, marcaModello, SITI, CATS};
+})();
+</script>
+</body>
+</html>
