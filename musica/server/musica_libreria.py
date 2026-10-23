@@ -13,7 +13,15 @@ Solo libreria standard di Python. Uso da solo:
 
     python3 musica_libreria.py "/Volumes/Backup/Musica" --porta 8790
 
-poi apri http://<mac>:8790/ (anche dal telefono, con Tailscale).
+Sul Mac stesso l'app si apre da http://localhost:8790/. Dal telefono serve un indirizzo
+HTTPS (Safari e Chrome tengono l'app offline e la lasciano installare solo così). Con Tailscale:
+
+    tailscale serve --bg 8790            # una volta sola: resta attivo anche dopo un riavvio
+    python3 musica_libreria.py "/Volumes/Backup/Musica" --indirizzo https://<mac>.<tailnet>.ts.net/
+
+e sull'iPhone si apre sempre e solo https://<mac>.<tailnet>.ts.net/ (un indirizzo fisso: brani
+salvati e playlist stanno con l'indirizzo). Con --indirizzo chi apre la vecchia http://<mac>:8790/
+da un altro dispositivo viene mandato lì. In alternativa: `tailscale cert` e --cert/--chiave.
 Per unirlo a un server esistente basta chiamare `gestisci(handler)` dentro do_GET:
 restituisce True se la richiesta era per la musica.
 """
@@ -23,7 +31,9 @@ import json
 import mimetypes
 import os
 import re
+import ssl
 import struct
+import tempfile
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -73,7 +83,8 @@ def tag_id3(f):
         p = _ss32(d) if v == 4 else struct.unpack(">I", d[:4])[0] + 4
     nomi = {"TIT2": "title", "TT2": "title", "TPE1": "artist", "TP1": "artist", "TALB": "album", "TAL": "album",
             "TPE2": "albumArtist", "TP2": "albumArtist", "TRCK": "track", "TRK": "track", "TPOS": "disc", "TPA": "disc",
-            "TYER": "year", "TYE": "year", "TDRC": "year", "TCON": "genre", "TCO": "genre"}
+            "TYER": "year", "TYE": "year", "TDRC": "year", "TCON": "genre", "TCO": "genre",
+            "TCMP": "compilation", "TCP": "compilation", "TLEN": "_tlen", "TLE": "_tlen"}
     o, pic, tipo_pic = {}, None, -1
     hs = 6 if v == 2 else 10
     while p + hs <= len(d):
@@ -95,6 +106,13 @@ def tag_id3(f):
             t = _testo(fr[0], fr[1:])
             if t and nomi[fid] not in o:
                 o[nomi[fid]] = t
+        elif fid in ("TXXX", "TXX") and fr:   # alcuni programmi scrivono la compilation come TXXX:TCMP / COMPILATION
+            try:
+                parti = fr[1:].decode({0: "latin-1", 1: "utf-16", 2: "utf-16-be"}.get(fr[0], "utf-8")).split("\x00")
+            except UnicodeDecodeError:
+                parti = []
+            if len(parti) > 1 and parti[0].strip("\ufeff ").upper() in ("TCMP", "COMPILATION") and "compilation" not in o:
+                o["compilation"] = parti[1].strip("\ufeff ")
         elif fid in ("APIC", "PIC") and fr:
             enc, i = fr[0], 1
             if fid == "APIC":
@@ -120,6 +138,7 @@ def tag_id3(f):
                 pic, tipo_pic = (fr[i:], mime), tipo
         p += hs + sz
     o["pic"] = pic
+    o["_audio"] = 10 + size + (10 if fl & 0x10 else 0)   # dove cominciano i frame MPEG
     return o
 
 
@@ -209,6 +228,8 @@ def tag_mp4(f):
                 o["disc"] = str(int.from_bytes(val[2:4], "big"))
             elif ty == "covr" and "pic" not in o:
                 o["pic"] = (val, "image/png" if tipo == 14 else "image/jpeg")
+            elif ty == "cpil" and val:
+                o["compilation"] = "1" if val[-1] else "0"
             break
     return o
 
@@ -235,7 +256,7 @@ def tag_flac(f):
             n = struct.unpack("<I", d[p:p + 4])[0]
             p += 4
             nomi = {"TITLE": "title", "ARTIST": "artist", "ALBUM": "album", "ALBUMARTIST": "albumArtist", "ALBUM ARTIST": "albumArtist",
-                    "TRACKNUMBER": "track", "DISCNUMBER": "disc", "DATE": "year", "GENRE": "genre"}
+                    "TRACKNUMBER": "track", "DISCNUMBER": "disc", "DATE": "year", "GENRE": "genre", "COMPILATION": "compilation"}
             for _ in range(n):
                 if p + 4 > len(d):
                     break
@@ -263,14 +284,163 @@ def tag_flac(f):
     return o
 
 
+# ---------- durata (MP3, WAV, AIFF, OGG: per MP4 e FLAC la danno già i tag) ----------
+
+_KBPS = {(1, 1): (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+         (1, 2): (0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+         (1, 3): (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+         (2, 1): (0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+         (2, 2): (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)}
+_KBPS[(2, 3)] = _KBPS[(2, 2)]
+_HZ = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+
+
+def _frame_mpeg(b, i):
+    """(byte del frame, campioni per frame, frequenza, kbps, mono, mpeg1) se in b[i:] c'è un'intestazione MPEG valida."""
+    if i + 4 > len(b) or b[i] != 0xFF or (b[i + 1] & 0xE0) != 0xE0:
+        return None
+    ver, lay, bri, sri = (b[i + 1] >> 3) & 3, (b[i + 1] >> 1) & 3, b[i + 2] >> 4, (b[i + 2] >> 2) & 3
+    if ver == 1 or lay == 0 or bri in (0, 15) or sri == 3:
+        return None
+    mpeg1, layer = ver == 3, 4 - lay
+    kbps, hz, pad = _KBPS[(1 if mpeg1 else 2, layer)][bri], _HZ[ver][sri], (b[i + 2] >> 1) & 1
+    if layer == 1:
+        spf, lun = 384, (12 * kbps * 1000 // hz + pad) * 4
+    else:
+        spf = 1152 if (layer == 2 or mpeg1) else 576
+        lun = spf // 8 * kbps * 1000 // hz + pad
+    return lun, spf, hz, kbps, (b[i + 3] >> 6) == 3, mpeg1
+
+
+def durata_mp3(f, inizio, dim):
+    f.seek(inizio)
+    b = f.read(128 * 1024)
+    fine = dim
+    if dim >= 128:
+        f.seek(dim - 128)
+        if f.read(3) == b"TAG":
+            fine -= 128
+    for i in range(len(b) - 4):
+        fr = _frame_mpeg(b, i)
+        if not fr:
+            continue
+        lun, spf, hz, kbps, mono, mpeg1 = fr
+        if i + lun + 4 <= len(b) and not _frame_mpeg(b, i + lun):
+            continue   # falso inizio di frame (dentro dati che non sono audio)
+        x = i + 4 + ((17 if mono else 32) if mpeg1 else (9 if mono else 17))
+        if b[x:x + 4] in (b"Xing", b"Info") and struct.unpack(">I", b[x + 4:x + 8])[0] & 1:
+            n = struct.unpack(">I", b[x + 8:x + 12])[0]
+            if n:
+                return n * spf / hz
+        if b[i + 36:i + 40] == b"VBRI":
+            n = struct.unpack(">I", b[i + 50:i + 54])[0]
+            if n:
+                return n * spf / hz
+        return max(0, fine - inizio - i) * 8 / (kbps * 1000)
+    return 0
+
+
+def durata_riff(f, dim):
+    f.seek(0)
+    h = f.read(12)
+    if h[:4] not in (b"RIFF", b"RF64") or h[8:12] != b"WAVE":
+        return 0
+    al_secondo = 0
+    while True:
+        c = f.read(8)
+        if len(c) < 8:
+            return 0
+        cid, sz = c[:4], struct.unpack("<I", c[4:])[0]
+        if cid == b"fmt ":
+            d = f.read(sz + (sz & 1))
+            al_secondo = struct.unpack("<I", d[8:12])[0]
+        elif cid == b"data":
+            resto = dim - f.tell()
+            return (resto if sz in (0, 0xFFFFFFFF) else min(sz, resto)) / al_secondo if al_secondo else 0
+        else:
+            f.seek(sz + (sz & 1), 1)
+
+
+def durata_aiff(f):
+    f.seek(0)
+    h = f.read(12)
+    if h[:4] != b"FORM" or h[8:12] not in (b"AIFF", b"AIFC"):
+        return 0
+    while True:
+        c = f.read(8)
+        if len(c) < 8:
+            return 0
+        cid, sz = c[:4], struct.unpack(">I", c[4:])[0]
+        if cid == b"COMM":
+            d = f.read(sz)
+            campioni = struct.unpack(">I", d[2:6])[0]
+            esp, mant = ((d[8] & 0x7F) << 8) | d[9], int.from_bytes(d[10:18], "big")
+            hz = mant * 2.0 ** (esp - 16383 - 63) if mant else 0
+            return campioni / hz if hz else 0
+        f.seek(sz + (sz & 1), 1)
+
+
+def durata_ogg(f, dim):
+    f.seek(0)
+    b = f.read(4096)
+    if b[:4] != b"OggS":
+        return 0
+    hz, salta = 0, 0
+    k = b.find(b"\x01vorbis")
+    if k >= 0:
+        hz = struct.unpack("<I", b[k + 12:k + 16])[0]
+    else:
+        k = b.find(b"OpusHead")
+        if k >= 0:
+            hz, salta = 48000, struct.unpack("<H", b[k + 10:k + 12])[0]
+    if not hz:
+        return 0
+    f.seek(max(0, dim - 65536))
+    t = f.read()
+    j = t.rfind(b"OggS")
+    while j >= 0:
+        if j + 14 <= len(t):
+            g = struct.unpack("<q", t[j + 6:j + 14])[0]
+            if g > 0:
+                return max(0, g - salta) / hz
+        j = t.rfind(b"OggS", 0, j)
+    return 0
+
+
+def _durata(f, est, o):
+    try:
+        if o.get("_tlen"):
+            ms = _intero(o["_tlen"])
+            if ms > 0:
+                return ms / 1000
+        f.seek(0, 2)
+        dim = f.tell()
+        if est == ".mp3" or "_audio" in o:
+            return durata_mp3(f, o.get("_audio", 0), dim)
+        if est == ".wav":
+            return durata_riff(f, dim)
+        if est in (".aif", ".aiff"):
+            return durata_aiff(f)
+        if est in (".ogg", ".oga", ".opus"):
+            return durata_ogg(f, dim)
+    except (OSError, ValueError, struct.error, IndexError, ZeroDivisionError, OverflowError):
+        pass
+    return 0
+
+
 def leggi_tag(percorso):
     try:
         with open(percorso, "rb") as f:
+            o = None
             for lettore in (tag_id3, tag_mp4, tag_flac):
                 f.seek(0)
                 o = lettore(f)
                 if o is not None:
-                    return o
+                    break
+            o = o or {}
+            if not o.get("duration"):
+                o["duration"] = _durata(f, os.path.splitext(percorso)[1].lower(), o)
+            return o
     except (OSError, ValueError, struct.error, IndexError):
         pass
     return {}
@@ -293,6 +463,17 @@ def _intero(s):
 
 # ---------- la libreria ----------
 
+VERSIONE = 2   # versione delle voci dell'indice: le più vecchie si rileggono una volta (durata MP3/WAV, compilation)
+
+
+def _dentro(p, radice):
+    return p.startswith(radice.rstrip(os.sep) + os.sep)
+
+
+def _parole(s):
+    return " " + re.sub(r"\W+", " ", (s or "").lower()).strip() + " "
+
+
 class Libreria:
     def __init__(self, cartelle, cache):
         self.cartelle = [os.path.abspath(os.path.expanduser(c)) for c in cartelle]
@@ -300,23 +481,70 @@ class Libreria:
         self.dir_copertine = os.path.join(self.cache, "copertine")
         os.makedirs(self.dir_copertine, exist_ok=True)
         self.file_indice = os.path.join(self.cache, "indice.json")
-        self.blocco = threading.Lock()
+        self.blocco = threading.Lock()           # brani, percorsi, compilation
+        self.blocco_lettura = threading.Lock()   # una sola lettura del disco alla volta
+        self.letture = 0                         # letture del disco finite
+        self._presto = 0
         self.brani = {}       # id -> voce del catalogo
         self.percorsi = {}    # id -> percorso sul disco
+        self.compilation = set()
         self.ultima = 0
         try:
             with open(self.file_indice, encoding="utf-8") as f:
                 salvato = json.load(f)
-            self.vecchie = {v["_p"]: v for v in salvato.get("brani", [])}
-        except (OSError, ValueError):
+            self.vecchie = {v["_p"]: v for v in salvato.get("brani", []) if v.get("_p") and v.get("id")}
+            self.ultima = os.path.getmtime(self.file_indice)
+        except (OSError, ValueError, AttributeError, TypeError):
             self.vecchie = {}
+        # Dopo un riavvio si serve subito l'indice salvato (la lettura di un disco USB può durare minuti):
+        # solo le voci delle cartelle raggiungibili. La lettura in sottofondo poi lo aggiorna.
+        radici = [r for r in self.cartelle if os.path.isdir(r)]
+        for v in self.vecchie.values():
+            if any(_dentro(v["_p"], r) for r in radici):
+                self.brani[v["id"]] = v
+                self.percorsi[v["id"]] = v["_p"]
+        self.compilation = self._compilation(self.brani.values())
+        self._mancanti = {r for r in self.cartelle if r not in radici}   # cartelle non raggiungibili all'ultima lettura
+        if not self.brani:
+            self.ultima = 0   # «aggiornato: 0» = il Mac sta ancora leggendo il disco
 
     def scansiona(self):
-        """Rilegge le cartelle. I file già visti (stesso percorso, dimensione, data) non vengono riletti."""
-        nuovi, percorsi = {}, {}
+        """Rilegge le cartelle. Una lettura alla volta: chi arriva mentre una è in corso ne aspetta la fine
+        e ne usa il risultato. I file già visti (stesso percorso, dimensione, data) non vengono riletti."""
+        prima = self.letture
+        with self.blocco_lettura:
+            if self.letture != prima:
+                return len(self.brani)
+            try:
+                return self._scansiona()
+            finally:
+                self.letture += 1
+
+    def rileggi_presto(self, subito=False, attendi=0):
+        """Rilettura in sottofondo quando il disco cambia stato: un brano del catalogo non c'è più (disco scollegato?,
+        al più una volta al minuto) oppure una cartella mancante è tornata (subito). Con attendi=N si aspetta la fine per N s."""
+        prima = self.letture
+        if not self.blocco_lettura.locked():
+            if not subito and time.time() - self._presto < 60:
+                return
+            self._presto = time.time()
+
+            def leggi():
+                try:
+                    self.scansiona()
+                except Exception as e:   # noqa: BLE001
+                    print("Musica: lettura non riuscita:", e, flush=True)
+            threading.Thread(target=leggi, daemon=True).start()
+        fine = time.time() + attendi
+        while self.letture == prima and time.time() < fine:
+            time.sleep(0.05)
+
+    def _scansiona(self):
+        trovati, radici_ok = [], []
         for radice in self.cartelle:
             if not os.path.isdir(radice):
                 continue
+            qui = []
             for cart, sotto, files in os.walk(radice):
                 sotto[:] = [s for s in sotto if not s.startswith(".")]
                 for nome in files:
@@ -327,21 +555,86 @@ class Libreria:
                         st = os.stat(p)
                     except OSError:
                         continue
-                    firma = "%d:%d" % (st.st_size, int(st.st_mtime))
-                    v = self.vecchie.get(p)
-                    if not v or v.get("_f") != firma:
-                        v = self._voce(p, st, firma)
-                    nuovi[v["id"]] = v
-                    percorsi[v["id"]] = p
+                    qui.append((p, st, "%d:%d" % (st.st_size, int(st.st_mtime))))
+            if not qui and any(_dentro(p, radice) for p in self.vecchie):
+                continue   # cartella rimasta vuota (disco smontato male): si tengono le voci di prima
+            radici_ok.append(radice)
+            trovati += qui
+        letti = {p for p, _, _ in trovati}
+        raggiungibile = lambda p: any(_dentro(p, r) for r in radici_ok)   # noqa: E731
+        # disco scollegato: le sue voci restano nell'indice (al ritorno non si rilegge niente), fuori dal catalogo
+        tenute = [v for v in self.vecchie.values() if not raggiungibile(v["_p"]) and any(_dentro(v["_p"], r) for r in self.cartelle)]
+        # file spariti: uno «nuovo» con la stessa firma (dimensione e data) è lo stesso file rinominato o spostato
+        # (es. Musica che riordina la cartella) e tiene il suo id, così preferiti, playlist e copie sull'iPhone restano
+        sparite = {}
+        for v in self.vecchie.values():
+            if v["_p"] not in letti and raggiungibile(v["_p"]):
+                sparite.setdefault(v.get("_f"), []).append(v)
+        usati = {v["id"] for v in tenute} | {self.vecchie[p]["id"] for p in letti if p in self.vecchie}
+        nuovi, percorsi = {}, {}
+        a_pezzi, t_pezzo = not self.brani and not self.ultima, time.time()   # prima lettura: catalogo man mano
+        for p, st, firma in trovati:
+            v = self.vecchie.get(p)
+            if not v or v.get("_f") != firma or v.get("_v") != VERSIONE:
+                nuova = self._voce(p, st, firma)
+                nuova["id"] = v["id"] if v else self._id_nuovo(p, nuova, sparite.get(firma), usati)
+                v = nuova
+            nuovi[v["id"]] = v
+            percorsi[v["id"]] = p
+            if a_pezzi and time.time() - t_pezzo > 1:
+                t_pezzo = time.time()
+                with self.blocco:
+                    self.brani, self.percorsi = dict(nuovi), dict(percorsi)
+        comp = self._compilation(nuovi.values())
+        indice = list(nuovi.values()) + tenute
+        self._mancanti = set(self.cartelle) - set(radici_ok)
         with self.blocco:
-            self.brani, self.percorsi = nuovi, percorsi
-            self.vecchie = {v["_p"]: v for v in nuovi.values()}
+            self.brani, self.percorsi, self.compilation = nuovi, percorsi, comp
+            self.vecchie = {v["_p"]: v for v in indice}
             self.ultima = time.time()
-        tmp = self.file_indice + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"brani": list(nuovi.values())}, f, ensure_ascii=False)
-        os.replace(tmp, self.file_indice)
+        fd, tmp = tempfile.mkstemp(dir=self.cache, prefix="indice.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"versione": VERSIONE, "brani": indice}, f, ensure_ascii=False)
+            os.replace(tmp, self.file_indice)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         return len(nuovi)
+
+    @staticmethod
+    def _id_nuovo(p, voce, candidati, usati):
+        if candidati:
+            v = max(candidati, key=lambda c: sum(c.get(k) == voce.get(k) for k in ("title", "artist", "album", "track")))
+            candidati.remove(v)
+            if v["id"] not in usati:
+                usati.add(v["id"])
+                return v["id"]
+        i, n = hashlib.sha1(p.encode("utf-8")).hexdigest()[:16], 0
+        while i in usati:
+            n += 1
+            i = hashlib.sha1(("%s\n%d" % (p, n)).encode("utf-8")).hexdigest()[:16]
+        usati.add(i)
+        return i
+
+    @staticmethod
+    def _compilation(voci):
+        """id dei brani di compilation: segnati nei tag (TCMP, cpil, COMPILATION) oppure, senza «artista album»,
+        stessa cartella e stesso album con artisti diversi (se uno compare in tutti, es. «X» e «X feat. Y», non lo è)."""
+        si, gruppi = set(), {}
+        for v in voci:
+            if v.get("_comp"):
+                si.add(v["id"])
+            elif v.get("album") and not v.get("albumArtist"):
+                gruppi.setdefault((os.path.dirname(v["_p"]), v["album"].lower()), []).append(v)
+        for g in gruppi.values():
+            artisti = {_parole(v.get("artist")) for v in g} - {"  "}
+            if len(artisti) > 1 and not any(all(a in b for b in artisti) for a in artisti):
+                si.update(v["id"] for v in g)
+        return si
 
     def _voce(self, p, st, firma):
         t = leggi_tag(p)
@@ -388,17 +681,30 @@ class Libreria:
             "cover": copertina,
             "_p": p,
             "_f": firma,
+            "_v": VERSIONE,
+            "_comp": (t.get("compilation") or "").strip().lower() in ("1", "true", "yes"),
         }
 
     def catalogo(self):
+        if any(os.path.isdir(r) for r in self._mancanti):   # disco ricollegato: si rilegge subito (con l'indice è veloce)
+            self.rileggi_presto(subito=True, attendi=5)
         with self.blocco:
-            pubblici = [{k: v for k, v in b.items() if not k.startswith("_")} for b in self.brani.values()]
-        return {"brani": pubblici, "aggiornato": int(self.ultima * 1000)}
+            pubblici = []
+            for b in self.brani.values():
+                x = {k: v for k, v in b.items() if not k.startswith("_")}
+                if b["id"] in self.compilation:
+                    x["compilation"] = True   # solo quando è vero: il catalogo di 10 000 brani resta leggero
+                pubblici.append(x)
+        o = {"brani": pubblici, "aggiornato": int(self.ultima * 1000)}
+        if INDIRIZZO:
+            o["indirizzo"] = INDIRIZZO
+        return o
 
 
 # ---------- risposte HTTP ----------
 
 LIB = None
+INDIRIZZO = ""   # indirizzo https fisso dell'app (facoltativo): l'app lo propone a chi la apre in http
 PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna)(?:/([^/]+))?$")
 
 
@@ -415,22 +721,24 @@ def _invia_file(h, percorso, tipo):
         elif m.group(2):
             inizio = max(0, dim - int(m.group(2)))
         if inizio > fine or inizio >= dim:
+            h._musica_risposto = True
             h.send_response(416)
             h.send_header("Content-Range", "bytes */%d" % dim)
             h.end_headers()
             return
         parziale = True
-    h.send_response(206 if parziale else 200)
-    h.send_header("Content-Type", tipo)
-    h.send_header("Accept-Ranges", "bytes")
-    h.send_header("Content-Length", str(fine - inizio + 1))
-    if parziale:
-        h.send_header("Content-Range", "bytes %d-%d/%d" % (inizio, fine, dim))
-    h.send_header("Cache-Control", "private, max-age=86400")
-    h.end_headers()
-    if h.command == "HEAD":
-        return
     with open(percorso, "rb") as f:
+        h._musica_risposto = True
+        h.send_response(206 if parziale else 200)
+        h.send_header("Content-Type", tipo)
+        h.send_header("Accept-Ranges", "bytes")
+        h.send_header("Content-Length", str(fine - inizio + 1))
+        if parziale:
+            h.send_header("Content-Range", "bytes %d-%d/%d" % (inizio, fine, dim))
+        h.send_header("Cache-Control", "private, max-age=86400")
+        h.end_headers()
+        if h.command == "HEAD":
+            return
         f.seek(inizio)
         resto = fine - inizio + 1
         try:
@@ -440,12 +748,13 @@ def _invia_file(h, percorso, tipo):
                     break
                 h.wfile.write(blocco)
                 resto -= len(blocco)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except OSError:   # telefono che chiude la connessione, o disco scollegato a metà
+            h.close_connection = True
 
 
 def _json(h, dati, stato=200):
     corpo = json.dumps(dati, ensure_ascii=False).encode("utf-8")
+    h._musica_risposto = True
     h.send_response(stato)
     h.send_header("Content-Type", "application/json; charset=utf-8")
     h.send_header("Content-Length", str(len(corpo)))
@@ -461,30 +770,45 @@ def gestisci(h):
     if not m or LIB is None:
         return False
     cosa, arg = m.group(1), m.group(2)
-    if cosa == "catalogo":
-        _json(h, LIB.catalogo())
-    elif cosa == "aggiorna":
-        _json(h, {"brani": LIB.scansiona()})
-    elif cosa == "file":
-        p = LIB.percorsi.get(arg or "")
-        if not p or not os.path.isfile(p):
-            _json(h, {"errore": "Brano non trovato: il disco di backup è collegato?"}, 404)
-        else:
-            _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"))
-    elif cosa == "copertina":
-        nome = os.path.basename(arg or "")
-        p = os.path.join(LIB.dir_copertine, nome)
-        if not nome or not os.path.isfile(p):
-            _json(h, {"errore": "Copertina non trovata"}, 404)
-        else:
-            _invia_file(h, p, mimetypes.guess_type(p)[0] or "image/jpeg")
+    h._musica_risposto = False
+    try:
+        if cosa == "catalogo":
+            _json(h, LIB.catalogo())
+        elif cosa == "aggiorna":
+            _json(h, {"brani": LIB.scansiona()})
+        elif cosa == "file":
+            p = LIB.percorsi.get(arg or "")
+            if not p or not os.path.isfile(p):
+                if p:
+                    LIB.rileggi_presto()   # il file è sparito: disco scollegato? il catalogo si aggiorna da sé
+                _json(h, {"errore": "Brano non trovato: il disco di backup è collegato?"}, 404)
+            else:
+                _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"))
+        elif cosa == "copertina":
+            nome = os.path.basename(arg or "")
+            p = os.path.join(LIB.dir_copertine, nome)
+            if not nome or not os.path.isfile(p):
+                _json(h, {"errore": "Copertina non trovata"}, 404)
+            else:
+                _invia_file(h, p, mimetypes.guess_type(p)[0] or "image/jpeg")
+    except (BrokenPipeError, ConnectionResetError):
+        h.close_connection = True
+    except Exception as e:   # noqa: BLE001  (es. disco che sparisce durante «Aggiorna»): l'app riceve comunque una risposta
+        print("Musica: errore su %s: %s" % (h.path, e), flush=True)
+        if not h._musica_risposto:
+            try:
+                _json(h, {"errore": "Il Mac non è riuscito a leggere la musica: %s" % e}, 500)
+            except OSError:
+                pass
+        h.close_connection = True
     return True
 
 
-def avvia(cartelle, cache, intervallo=600):
+def avvia(cartelle, cache, intervallo=600, indirizzo=""):
     """Prepara la libreria e la tiene aggiornata in sottofondo (nuovi brani, disco ricollegato)."""
-    global LIB
+    global LIB, INDIRIZZO
     LIB = Libreria(cartelle, cache)
+    INDIRIZZO = indirizzo or ""
 
     def ciclo():
         while True:
@@ -505,27 +829,54 @@ def main():
     ap.add_argument("--porta", type=int, default=8790)
     ap.add_argument("--cache", default="~/.atlante-musica", help="dove tenere indice e copertine")
     ap.add_argument("--app", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."), help="cartella dell'app (index.html)")
+    ap.add_argument("--indirizzo", default="", help="indirizzo https fisso dell'app, es. https://mac-mini.tailnet.ts.net/ "
+                    "(con `tailscale serve --bg 8790`): chi apre l'app in http da un altro dispositivo viene mandato lì")
+    ap.add_argument("--cert", help="certificato HTTPS (es. da `tailscale cert`): il server risponde direttamente in https")
+    ap.add_argument("--chiave", help="chiave privata del certificato")
     a = ap.parse_args()
-    avvia(a.cartelle, a.cache)
+    indirizzo = a.indirizzo.strip()
+    if indirizzo and not indirizzo.endswith("/"):
+        indirizzo += "/"
+    avvia(a.cartelle, a.cache, indirizzo=indirizzo)
     app = os.path.abspath(a.app)
+    https = bool(a.cert)
+    host_sicuro = urlsplit(indirizzo).netloc.lower()
 
     class H(SimpleHTTPRequestHandler):
         def __init__(self, *x, **k):
             super().__init__(*x, directory=app, **k)
 
+        def _vai_al_sicuro(self):
+            # la pagina aperta in http da un altro dispositivo non può funzionare offline né essere installata
+            if not indirizzo or https or self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                return False
+            if (self.headers.get("Host") or "").lower() == host_sicuro:
+                return False
+            self.send_response(302)
+            self.send_header("Location", indirizzo + urlsplit(self.path).path.lstrip("/"))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+
         def do_GET(self):
-            if not gestisci(self):
+            if not gestisci(self) and not self._vai_al_sicuro():
                 super().do_GET()
 
         def do_HEAD(self):
-            if not gestisci(self):
+            if not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
 
         def log_message(self, *x):
             pass
 
-    print("Atlante Musica su http://0.0.0.0:%d/  (Ctrl+C per fermare)" % a.porta, flush=True)
-    ThreadingHTTPServer(("0.0.0.0", a.porta), H).serve_forever()
+    srv = ThreadingHTTPServer(("0.0.0.0", a.porta), H)
+    if https:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(a.cert, a.chiave)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+    print("Atlante Musica su %s://0.0.0.0:%d/%s  (Ctrl+C per fermare)" % ("https" if https else "http", a.porta,
+          "  -> dal telefono: " + indirizzo if indirizzo else ""), flush=True)
+    srv.serve_forever()
 
 
 if __name__ == "__main__":
