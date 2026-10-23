@@ -1,5 +1,5 @@
 // Atlante Musica: copia offline dell'app (la musica è salvata a parte, in IndexedDB).
-const CACHE = 'atlante-musica-v3';
+const CACHE = 'atlante-musica-v5';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
 const ATTESA = 3000;   // se il Mac non risponde entro 3 s l'app si apre dalla copia offline
 // 'reload': la copia offline si prende dal Mac, non da una vecchia copia nella cache del browser
