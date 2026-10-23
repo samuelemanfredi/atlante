@@ -523,6 +523,16 @@ class TestProxyInterno(unittest.TestCase):
                     self.send_response(200)
                     self.send_header("Content-Length", str(20 * 1024 * 1024))
                     self.end_headers()
+                elif self.path == "/episodio":   # 20 MB di audio: passa a pezzi, oltre il limite delle pagine
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Content-Length", str(80 * 262144))
+                    self.end_headers()
+                    try:
+                        for _ in range(80):
+                            self.wfile.write(b"a" * 262144)
+                    except OSError:
+                        pass
                 elif self.path == "/ua":
                     corpo = (self.headers.get("User-Agent") or "").encode()
                     self.send_response(200)
@@ -582,6 +592,12 @@ class TestProxyInterno(unittest.TestCase):
     def test_troppo_grande(self):
         self.assertEqual(self.leggi("/grande")[0], 413)
         self.assertEqual(self.leggi("/dichiarato")[0], 413)
+
+    def test_audio_grande_passa(self):
+        st, h, b = self.leggi("/episodio")
+        self.assertEqual(st, 200)
+        self.assertEqual(h["Content-Type"], "audio/mpeg")
+        self.assertEqual(len(b), 80 * 262144)
 
     def test_errore_del_sito(self):
         st, h, b = self.leggi("/manca")

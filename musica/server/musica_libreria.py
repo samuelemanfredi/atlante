@@ -873,6 +873,8 @@ CONF = {"cache": "~/.atlante-musica", "video_dir": "~/Movies/Atlante", "libri_di
 CARTELLE_PROGRAMMI = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/usr/sbin", "/bin", "/sbin")
 MAX_CORPO = 20 * 1024 * 1024    # corpo delle richieste (testo di un audiolibro)
 MAX_PROXY = 15 * 1024 * 1024
+MAX_MEDIA = 1024 * 1024 * 1024   # audio e video (episodi di podcast, capitoli): passano a pezzi, senza tenerli in memoria
+ATTESA_MEDIA = 30                # secondi massimi senza ricevere niente durante un audio o video
 TEMPO_PROXY = 20
 TEMPO_IA = 180
 BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
@@ -1833,6 +1835,10 @@ def _proxy(h):
             lun = int(r.getheader("Content-Length") or 0)
         except ValueError:
             lun = 0
+        tipo = (r.getheader("Content-Type") or "").lower()
+        if tipo.startswith(("audio/", "video/")) or tipo.startswith("application/octet-stream") and lun > MAX_PROXY:
+            _proxy_media(h, r, sock, url, lun)
+            return
         if lun > MAX_PROXY:
             raise ErroreExtra(413, "Contenuto troppo grande (oltre 15 MB)")
         while True:
@@ -1874,6 +1880,44 @@ def _proxy(h):
     h.end_headers()
     if h.command != "HEAD":
         h.wfile.write(corpo)
+
+
+def _proxy_media(h, r, sock, url, lun):
+    """Audio o video letto per l'app (episodio di podcast, capitolo LibriVox): passa a pezzi, fino a 1 GB."""
+    if lun > MAX_MEDIA:
+        raise ErroreExtra(413, "File troppo grande (oltre 1 GB)")
+    h._musica_risposto = True
+    h.send_response(200)
+    h.send_header("Content-Type", r.getheader("Content-Type") or "application/octet-stream")
+    if lun:
+        h.send_header("Content-Length", str(lun))
+    else:
+        h.close_connection = True   # lunghezza ignota: la fine del file è la chiusura della connessione
+    h.send_header("Cache-Control", "no-store")
+    h.send_header("X-Content-Type-Options", "nosniff")
+    h.send_header("X-Url-Finale", quote(url, safe=":/?#[]@!$&'()*+,;=%-._~"))
+    h.end_headers()
+    if h.command == "HEAD":
+        return
+    tot = 0
+    while True:
+        if sock is not None and not r.isclosed():
+            try:
+                sock.settimeout(ATTESA_MEDIA)
+            except OSError:
+                pass
+        try:
+            b = r.read1(262144)
+        except (socket.timeout, OSError, http.client.HTTPException):
+            h.close_connection = True   # intestazioni già mandate: si chiude, l'app vede il file incompleto
+            return
+        if not b:
+            return
+        tot += len(b)
+        if tot > MAX_MEDIA:
+            h.close_connection = True
+            return
+        h.wfile.write(b)
 
 
 # ----- richieste HTTP -----

@@ -1,0 +1,1488 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Naviga</title>
+<link rel="stylesheet" href="kit.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<style>
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+body{position:fixed;inset:0}
+:root{--th:120px;--bh:100px;--mh:84px;--nav:#1c1c1e}
+.glass{background:var(--bg);background:color-mix(in srgb,var(--bg) 90%,transparent);-webkit-backdrop-filter:saturate(1.6) blur(18px);backdrop-filter:saturate(1.6) blur(18px);box-shadow:var(--shadow)}
+#map{position:absolute;inset:0;z-index:0;background:var(--bg2)}
+.leaflet-container{font:12px/1.4 var(--font);background:var(--bg2)}
+.leaflet-bottom.leaflet-right{bottom:var(--bh)}
+.leaflet-top.leaflet-right,.leaflet-top.leaflet-left{top:var(--th)}
+.leaflet-control-attribution{font-size:11px;border-radius:6px 0 0 6px}
+.leaflet-popup-content{margin:10px 12px}
+/* notte senza chiave CARTO: tessere OpenStreetMap scurite */
+#map.scura .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(.85) saturate(.55)}
+#map.scura{background:#1b1d22}
+#fab.stretto #fPiu,#fab.stretto #fMeno{display:none}
+.nomap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:30px;color:var(--fg2)}
+/* in alto */
+#top{position:absolute;left:8px;right:8px;top:calc(env(safe-area-inset-top,0px) + 6px);z-index:10;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:640px;margin:0 auto}
+#top>*{pointer-events:auto}
+#card0{border-radius:18px;padding:0 6px 8px}
+#hdr.wrap{display:flex;align-items:center;gap:4px;padding:0 0 0 8px;margin:0;max-width:none}
+#hdr>div:first-child{flex:none;min-height:44px}
+#hdr .lt{font-size:20px;margin:0;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib{position:relative;width:44px;height:44px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;color:var(--accent);flex:none}
+.ib svg{width:24px;height:24px}
+.ib .dot{position:absolute;top:8px;right:7px;width:10px;height:10px;border-radius:50%;background:var(--bad);border:2px solid var(--bg)}
+#pill{display:flex;align-items:center;gap:10px;width:100%;min-height:50px;padding:0 14px;border-radius:13px;background:var(--fill);color:var(--fg2);font-size:18px;text-align:left}
+#pill svg{width:20px;height:20px;flex:none}
+#pill span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#chips{display:flex;gap:8px;overflow-x:auto;padding:8px 2px 0;scrollbar-width:none}
+#chips:empty{display:none}
+#chips::-webkit-scrollbar{display:none}
+.chip{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:0 14px;border-radius:20px;background:var(--fill);font-weight:600;font-size:15px;color:var(--fg)}
+#resume,#geoNota{border-radius:14px;padding:10px 12px;font-size:15px}
+#resume{display:flex;align-items:center;gap:8px}
+#resume .tx{flex:1;min-width:0}
+#banner{display:flex;gap:12px;align-items:center;padding:12px 14px;border-radius:18px;background:var(--nav);color:#fff;box-shadow:0 6px 20px rgba(0,0,0,.35);text-align:left;width:100%}
+#banner .bi{width:58px;height:58px;flex:none;display:flex;align-items:center;justify-content:center}
+#banner .bi svg{width:54px;height:54px}
+#banner .bt{flex:1;min-width:0}
+#banner .bd{font-size:32px;font-weight:700;line-height:1.05}
+#banner .bx{font-size:19px;font-weight:600;line-height:1.2;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#banner .bp{font-size:14px;opacity:.75;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* tasti mappa */
+#fab{position:absolute;right:10px;top:calc(var(--th) + 10px);z-index:10;display:flex;flex-direction:column;gap:8px}
+.fb{width:50px;height:50px;border-radius:14px;display:flex;align-items:center;justify-content:center;color:var(--link)}
+.fb svg{width:24px;height:24px}
+.fb.on{background:var(--link);color:#fff}
+#vel{position:absolute;left:10px;bottom:calc(var(--bh) + 12px);z-index:10;width:70px;height:70px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;border:3px solid var(--sep)}
+#vel b{font-size:26px;line-height:1;font-variant-numeric:tabular-nums}
+#vel span{font-size:11px;color:var(--fg2)}
+/* in basso: pannello + musica */
+#bottom{position:absolute;left:0;right:0;bottom:0;z-index:20;display:flex;flex-direction:column;pointer-events:none}
+#bottom>*{pointer-events:auto}
+#panel{margin:0 8px 8px;max-height:min(46vh,470px);overflow:auto;-webkit-overflow-scrolling:touch;border-radius:18px;padding:12px 14px;align-self:stretch}
+@media (min-width:700px){#panel{width:min(560px,calc(100% - 16px));align-self:flex-start}}
+#music{display:flex;align-items:center;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px));background:var(--bg2);background:color-mix(in srgb,var(--bg2) 94%,transparent);-webkit-backdrop-filter:saturate(1.6) blur(20px);backdrop-filter:saturate(1.6) blur(20px);border-top:.5px solid var(--sep)}
+#music .cov{width:60px;height:60px;border-radius:10px;object-fit:cover;flex:none;background:var(--fill);display:flex;align-items:center;justify-content:center;color:var(--fg3);overflow:hidden}
+#music .cov img{width:100%;height:100%;object-fit:cover}
+#music .cov svg{width:28px;height:28px}
+#music .mt{flex:1;min-width:0}
+#music .mt b{display:block;font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#music .mt span{display:block;font-size:15px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mb{width:54px;height:58px;border-radius:14px;display:flex;align-items:center;justify-content:center;color:var(--fg);flex:none}
+.mb svg{width:30px;height:30px}
+.mb.pp{width:64px;height:64px;border-radius:50%;background:var(--fill)}
+.mb.pp svg{width:34px;height:34px}
+.mb:active,.fb:active,.ib:active{opacity:.55}
+@media (max-width:380px){#music{gap:4px;padding-left:8px;padding-right:8px}#music .cov{width:48px;height:48px}.mb{width:44px}.mb.pp{width:56px;height:56px}#music .mt b{font-size:16px}#music .mt span{font-size:14px}}
+.mb:disabled{opacity:.3}
+/* pannello percorso */
+.ph{display:flex;align-items:flex-start;gap:8px}
+.ph .tx{flex:1;min-width:0}
+.ph .tx b{display:block;font-size:20px;font-weight:700;line-height:1.2}
+.ph .tx span{display:block;font-size:14px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.alt{display:block;width:100%;text-align:left;padding:10px 12px;border-radius:12px;background:var(--fill);margin:8px 0;border:2px solid transparent}
+.alt.on{border-color:var(--link)}
+.alt b{font-size:20px}
+.alt .ln{display:block;font-size:14px;color:var(--fg2);margin-top:2px}
+.alt .tg{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.big{width:100%;min-height:56px;font-size:19px;border-radius:14px;margin:6px 0}
+.big.go{background:var(--ok);color:#fff}
+.apri{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}
+.apri .lbl{font-size:13px;color:var(--fg2);width:100%}
+.apri a{flex:1 1 auto;white-space:nowrap;padding:0 10px}
+.h3{font-size:17px;font-weight:700;margin:14px 0 6px}
+.vg{display:flex;gap:10px;padding:10px 12px;border-radius:12px;background:var(--fill);margin:6px 0}
+.vg .fl{font-size:28px;line-height:1.1;flex:none}
+.vg .tx{flex:1;min-width:0;font-size:14px;color:var(--fg2)}
+.vg .tx b{display:block;color:var(--fg);font-size:16px;margin-bottom:2px}
+.vg .tx a.btn{margin-top:8px}
+.note.warn{background:rgba(255,159,10,.16);color:var(--fg)}
+.st{display:flex;gap:12px;align-items:center;padding:9px 0;border-bottom:.5px solid var(--sep)}
+.st:last-child{border-bottom:0}
+.st .ic{width:34px;height:34px;flex:none;color:var(--fg2)}
+.st .ic svg{width:34px;height:34px}
+.st .tx{flex:1;min-width:0;font-size:15px}
+.st .tx span{display:block;font-size:13px;color:var(--fg2)}
+.navinfo{display:flex;align-items:center;gap:4px}
+.navinfo>div{flex:1 1 0;text-align:center;min-width:0}
+.navinfo b{display:block;font-size:clamp(18px,5.6vw,24px);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.navinfo span{display:block;font-size:12px;color:var(--fg2);white-space:nowrap}
+.navinfo .btn{flex:none;min-height:52px;min-width:70px;padding:0 12px;background:var(--bad);color:#fff;font-size:18px}
+.navopt{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.navopt .btn{flex:1}
+/* fogli (cerca, veicolo, opzioni) */
+.sheet{position:absolute;left:0;right:0;top:0;bottom:var(--mh);z-index:30;background:var(--bg);overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-top:env(safe-area-inset-top,0px)}
+.w2{max-width:720px;margin:0 auto;padding:6px max(16px,env(safe-area-inset-left,0px)) 30px max(16px,env(safe-area-inset-right,0px))}
+.shh{display:flex;align-items:center;justify-content:space-between;min-height:44px}
+.shh button{color:var(--accent);font-size:17px;padding:8px 8px 8px 0}
+.cbar{display:flex;align-items:center;gap:10px;position:sticky;top:0;background:var(--bg);padding:8px 0;z-index:2}
+.cin{flex:1;min-width:0;display:flex;align-items:center;gap:8px;background:var(--fill);border-radius:12px;padding:0 12px;min-height:48px}
+.cin svg{width:18px;height:18px;color:var(--fg2);flex:none}
+.cin input{flex:1;width:100%;border:0;background:none;outline:none;min-height:46px;font-size:18px;min-width:0}
+.cbar .ann{color:var(--accent);font-size:17px}
+.rrow{display:flex;align-items:center;border-bottom:.5px solid var(--sep)}
+.rrow:last-child{border-bottom:0}
+.rrow .pick{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:11px 0 11px 14px;min-height:56px;text-align:left}
+.rrow .pick .ic{width:36px;height:36px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;background:var(--fill);color:var(--link)}
+.rrow .pick .ic svg{width:18px;height:18px}
+.rrow .pick .tx{flex:1;min-width:0}
+.rrow .pick .tx b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rrow .pick .tx span{display:block;color:var(--fg2);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rrow .ib{color:var(--fg3);margin-right:6px}
+.rrow .ib.on{color:var(--warn)}
+.acts{display:flex;gap:8px;flex-wrap:wrap;padding:6px 14px 12px;border-bottom:.5px solid var(--sep)}
+.sw{appearance:none;-webkit-appearance:none;width:51px;height:31px;border-radius:16px;background:var(--fill);position:relative;flex:none;cursor:pointer;transition:background .2s;margin:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.25);transition:transform .2s}
+.sw:checked{background:var(--ok)}
+.sw:checked::after{transform:translateX(20px)}
+.orow{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:.5px solid var(--sep)}
+.orow:last-child{border-bottom:0}
+.orow .tx{flex:1;min-width:0}
+.orow .tx span{display:block;font-size:13px;color:var(--fg2);margin-top:2px}
+/* veicolo */
+.foto{position:relative;border-radius:14px;overflow:hidden;background:var(--bg2);aspect-ratio:16/10;display:flex;align-items:center;justify-content:center;color:var(--fg2);margin:10px 0}
+.foto img{width:100%;height:100%;object-fit:cover}
+.foto .vuota{text-align:center;padding:20px}
+.foto .vuota svg{width:56px;height:56px;color:var(--fg3);margin:0 auto 6px}
+.targa{display:flex;align-items:stretch;border:2px solid #222;border-radius:8px;overflow:hidden;background:#fff;max-width:280px}
+.targa i{flex:none;width:30px;background:#003399;color:#fff;font:700 13px/1 var(--font);font-style:normal;display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px}
+.targa input{flex:1;min-width:0;border:0;outline:none;background:#fff;color:#111;font:700 30px/1 "Helvetica Neue",Arial,sans-serif;letter-spacing:3px;text-transform:uppercase;padding:10px 10px;min-height:56px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
+@media (max-width:360px){.g2{grid-template-columns:1fr}}
+.sc{display:grid;grid-template-columns:1fr auto;gap:4px 10px;align-items:center;padding:10px 14px;border-bottom:.5px solid var(--sep)}
+.sc:last-child{border-bottom:0}
+.sc label{font-weight:600}
+.sc input{grid-column:1/-1}
+.sc .pill{justify-self:end}
+#axToast{bottom:calc(var(--mh) + 18px)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="top">
+  <div id="card0" class="glass">
+    <div id="hdr" class="wrap"></div>
+    <button id="pill" aria-label="Cerca una destinazione"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span id="pillTx">Dove vuoi andare?</span></button>
+    <div id="chips"></div>
+  </div>
+  <button id="banner" hidden aria-live="polite"><div class="bi" id="bIco"></div><div class="bt"><div class="bd" id="bDist"></div><div class="bx" id="bTxt"></div><div class="bp" id="bPoi" hidden></div></div></button>
+  <div id="resume" class="glass" hidden></div>
+  <div id="geoNota" class="glass" hidden></div>
+</div>
+
+<div id="fab">
+  <button class="fb glass on" id="fSegui" aria-label="Segui la mia posizione"></button>
+  <button class="fb glass" id="fPiu" aria-label="Ingrandisci"></button>
+  <button class="fb glass" id="fMeno" aria-label="Rimpicciolisci"></button>
+  <button class="fb glass" id="fTema" aria-label="Mappa giorno o notte"></button>
+  <button class="fb glass" id="fTutto" aria-label="Vedi tutto il percorso" hidden></button>
+</div>
+<div id="vel" class="glass" aria-label="Velocità"><b id="velN">–</b><span>km/h</span></div>
+
+<div id="bottom">
+  <div id="panel" class="glass" hidden></div>
+  <div id="music">
+    <div class="cov" id="mCov"></div>
+    <div class="mt"><b id="mTit">Musica</b><span id="mArt"></span></div>
+    <button class="mb" id="mPrev" aria-label="Brano precedente"></button>
+    <button class="mb pp" id="mPlay" aria-label="Riproduci o metti in pausa"></button>
+    <button class="mb" id="mNext" aria-label="Brano successivo"></button>
+  </div>
+</div>
+
+<!-- Cerca -->
+<div class="sheet" id="shCerca" hidden>
+  <div class="w2">
+    <form class="cbar" id="fCerca" autocomplete="off">
+      <div class="cin"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><input id="qIn" type="search" enterkeyhint="search" placeholder="Luogo, indirizzo o coordinate" autocorrect="off" spellcheck="false"></div>
+      <button type="button" class="ann" data-chiudi>Annulla</button>
+    </form>
+    <div id="cAvviso" class="note warn" hidden></div>
+    <div id="cStato" class="small"></div>
+    <div id="cRis"></div>
+    <div id="cPref"></div>
+    <div id="cRec"></div>
+    <p class="small">Ricerca con Nominatim, dati © OpenStreetMap. Tieni premuto sulla mappa per scegliere un punto.</p>
+  </div>
+</div>
+
+<!-- Veicolo -->
+<div class="sheet" id="shVei" hidden>
+  <div class="w2">
+    <div class="shh"><button data-chiudi>‹ Mappa</button><span id="vSalvato" class="small"></span></div>
+    <h2 class="lt">Il mio veicolo</h2>
+    <div id="vPromo"></div>
+    <div class="foto" id="vFoto"></div>
+    <div class="btns">
+      <button class="btn" id="vFotoBtn">Foto dell'auto</button>
+      <button class="btn" id="vOcr">Leggi la targa dalla foto</button>
+      <input type="file" id="vFile" accept="image/*" capture="environment" hidden>
+    </div>
+    <div class="small" id="vOcrSt"></div>
+    <div class="field"><label for="vTarga">Targa</label><div class="targa"><i>I</i><input id="vTarga" maxlength="10" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="AA000AA"></div><div class="small" id="vTargaSt" style="margin:4px 4px 0"></div></div>
+    <div class="g2">
+      <div class="field"><label for="vMarca">Marca</label><input class="in" id="vMarca" autocomplete="off" placeholder="es. Fiat"></div>
+      <div class="field"><label for="vModello">Modello</label><input class="in" id="vModello" autocomplete="off" placeholder="es. Panda"></div>
+      <div class="field"><label for="vAnno">Anno di immatricolazione</label><input class="in" id="vAnno" inputmode="numeric" maxlength="4" placeholder="es. 2019"></div>
+      <div class="field"><label for="vAlim">Alimentazione</label><select class="in" id="vAlim"><option value="">—</option><option>Benzina</option><option>Diesel</option><option>GPL</option><option>Metano</option><option>Ibrida</option><option>Ibrida plug-in</option><option>Elettrica</option><option>Altro</option></select></div>
+    </div>
+    <div class="h2">Scadenze</div>
+    <div class="list" id="vScad"></div>
+    <div class="small" id="vHint"></div>
+    <div class="btns">
+      <button class="btn pri" id="vSalva">Salva</button>
+      <button class="btn" id="vIcs">Promemoria nel Calendario</button>
+    </div>
+    <div class="h2">Dati ufficiali dalla targa</div>
+    <div class="note">Questi servizi pubblici non si possono interrogare direttamente da qui (hanno controlli anti-robot e non accettano richieste da altre pagine). Tocca un servizio: la targa viene <b>copiata negli appunti</b> e si apre il sito ufficiale, dove la incolli.</div>
+    <div class="list" id="vServ"></div>
+    <div class="btns" style="margin-top:24px"><button class="btn" id="vElimina" style="color:var(--bad)">Elimina i dati del veicolo</button></div>
+    <p class="small">Dati e foto restano solo su questo dispositivo.</p>
+  </div>
+</div>
+
+<!-- Opzioni -->
+<div class="sheet" id="shOpz" hidden>
+  <div class="w2">
+    <div class="shh"><button data-chiudi>‹ Mappa</button></div>
+    <h2 class="lt">Opzioni di guida</h2>
+    <div class="list">
+      <label class="orow"><div class="tx">Istruzioni vocali<span>Voce italiana del dispositivo a 500 m, 200 m e alla manovra (anche a 2 km in autostrada).</span></div><input type="checkbox" class="sw" id="oVoce"></label>
+      <label class="orow"><div class="tx">Metti in pausa la musica durante le istruzioni<span>Una pagina web non può abbassare il volume della musica: normalmente la voce si sovrappone. Con questa opzione la musica si ferma qualche secondo e poi riparte.</span></div><input type="checkbox" class="sw" id="oPausa"></label>
+      <label class="orow"><div class="tx">Evita autostrade<span id="oEvitaNota">Il servizio di percorsi gratuito (OSRM pubblico) non permette di escluderle: scelgo l'alternativa con meno km in autostrada. Per evitarle del tutto apri il percorso in Apple Mappe o Google Maps.</span></div><input type="checkbox" class="sw" id="oEvita"></label>
+    </div>
+    <div class="h3">Mappa</div>
+    <div class="seg" id="oTema"><button data-t="auto">Automatica</button><button data-t="giorno">Giorno</button><button data-t="notte">Notte</button></div>
+    <div class="small">Automatica: mappa scura dal tramonto all'alba, calcolati sulla tua posizione.</div>
+    <div class="field"><label for="oCarto">Chiave CARTO per la mappa notte (facoltativa)</label><input class="in" id="oCarto" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="incolla qui la chiave"></div>
+    <div class="small" id="oCartoNota">Dal 25 settembre 2026 CARTO fornisce la mappa scura solo con una chiave gratuita (uso personale fino a 5 milioni di tessere al mese), che si chiede con un'e-mail su <a href="https://carto.com/basemaps/apikey/" target="_blank" rel="noopener">carto.com/basemaps/apikey</a>. Senza chiave la mappa notte è quella di OpenStreetMap scurita.</div>
+    <div class="btns"><button class="btn" id="oProva">Prova la voce</button></div>
+    <div class="h3">In auto con CarPlay</div>
+    <div class="note">Le pagine web non possono comparire sullo schermo di CarPlay: lì vedi la musica (Adesso in riproduzione) e l'audio — musica e voce del navigatore — passa all'auto. Tieni l'iPhone sul supporto con questa pagina aperta (lo schermo resta acceso durante la guida). Per la mappa sullo schermo dell'auto usa «Apri in Apple Mappe / Google Maps / Waze»: stessa destinazione, e la musica continua.</div>
+    <div class="h3">Fonti</div>
+    <p class="small">Mappe © OpenStreetMap contributors; mappa notte © CARTO. Percorsi: OSRM (servizio dimostrativo pubblico, senza garanzie di disponibilità). Ricerca: Nominatim. Confini dei paesi semplificati da Natural Earth. Imposta la destinazione da fermo e tieni gli occhi sulla strada: il percorso non conosce ZTL, cantieri e divieti temporanei.</p>
+  </div>
+</div>
+
+<script src="kit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function () {
+  'use strict';
+  const {$, esc, toast} = AX;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const NOM = 'https://nominatim.openstreetmap.org/';
+  const OSRM = 'https://router.project-osrm.org/route/v1/driving/';
+  const TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+
+  /* ---------- icone ---------- */
+  const I = {
+    search: '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
+    car: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5 11l1.6-4.3A2 2 0 0 1 8.5 5.4h7a2 2 0 0 1 1.9 1.3L19 11a2 2 0 0 1 2 2v4a1 1 0 0 1-1 1h-1v1.2a1.3 1.3 0 0 1-2.6 0V18H7.6v1.2a1.3 1.3 0 0 1-2.6 0V18H4a1 1 0 0 1-1-1v-4a2 2 0 0 1 2-2zm2.2 0h9.6l-1.2-3.3a.6.6 0 0 0-.6-.4H9a.6.6 0 0 0-.6.4zM6.5 15.8a1.3 1.3 0 1 0 0-2.6 1.3 1.3 0 0 0 0 2.6zm11 0a1.3 1.3 0 1 0 0-2.6 1.3 1.3 0 0 0 0 2.6z"/></svg>',
+    opz: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg>',
+    segui: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M20.5 3.5L3.5 10.6l7.2 2.7 2.7 7.2z"/></svg>',
+    piu: '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+    meno: '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 12h14"/></svg>',
+    luna: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>',
+    sole: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>',
+    tutto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+    prev: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5.5 5h2.4v14H5.5zM20 5.5v13L9.3 12z"/></svg>',
+    next: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M16.1 5h2.4v14h-2.4zM4 5.5v13L14.7 12z"/></svg>',
+    play: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 4.5v15L19.5 12z"/></svg>',
+    pausa: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M6.5 4.5h4v15h-4zM13.5 4.5h4v15h-4z"/></svg>',
+    nota: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 17.5V6l11-2.5v11.8a2.7 2.7 0 1 1-2-2.6V7.3l-7 1.6v8.6a2.7 2.7 0 1 1-2-2.6z"/></svg>',
+    stella: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3.2l2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 17l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/></svg>',
+    x: '<svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    pin: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>',
+    casa: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3l9 8h-2.5v9h-5v-6h-3v6h-5v-9H3z"/></svg>',
+    lavoro: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 4h6a1 1 0 0 1 1 1v2h4a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h4V5a1 1 0 0 1 1-1zm1 3h4V6h-4z"/></svg>',
+    orologio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+    foto: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M8.5 4h7l1.5 2.5H20a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7.5a1 1 0 0 1 1-1h3zM12 17a4.2 4.2 0 1 0 0-8.4 4.2 4.2 0 0 0 0 8.4z"/></svg>'
+  };
+
+  /* ---------- utilità ---------- */
+  const nf1 = new Intl.NumberFormat('it-IT', {maximumFractionDigits: 1});
+  const RAD = Math.PI / 180;
+  function distLL(lon1, lat1, lon2, lat2) {
+    const dLat = (lat2 - lat1) * RAD, dLon = (lon2 - lon1) * RAD;
+    const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * RAD) * Math.cos(lat2 * RAD) * Math.sin(dLon / 2) ** 2;
+    return 12742000 * Math.asin(Math.min(1, Math.sqrt(x)));
+  }
+  const dist = (a, b) => distLL(a.lon, a.lat, b.lon, b.lat);
+  function bearing(a, b) {
+    const y = Math.sin((b.lon - a.lon) * RAD) * Math.cos(b.lat * RAD);
+    const x = Math.cos(a.lat * RAD) * Math.sin(b.lat * RAD) - Math.sin(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.cos((b.lon - a.lon) * RAD);
+    return (Math.atan2(y, x) / RAD + 360) % 360;
+  }
+  function fmtDist(m) {
+    if (m < 50) return Math.max(0, Math.round(m / 5) * 5) + ' m';
+    if (m < 1000) return Math.round(m / 10) * 10 + ' m';
+    if (m < 10000) return nf1.format(m / 1000) + ' km';
+    return Math.round(m / 1000) + ' km';
+  }
+  function fmtDur(s) {
+    const min = Math.max(1, Math.round(s / 60));
+    if (min < 60) return min + ' min';
+    const h = Math.floor(min / 60), r = min % 60;
+    return h + ' h' + (r ? ' ' + r + ' min' : '');
+  }
+  function fmtDurBreve(s) {   // per la riga della guida: «12 min», «7 h 59»
+    const min = Math.max(1, Math.round(s / 60));
+    return min < 60 ? min + ' min' : Math.floor(min / 60) + ' h ' + String(min % 60).padStart(2, '0');
+  }
+  function giornoDi(ms) {
+    const d = new Date(ms), o = new Date();
+    return Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(o.getFullYear(), o.getMonth(), o.getDate())) / 864e5);
+  }
+  const soloOra = ms => new Date(ms).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit'});
+  function fmtOra(ms) {
+    const g = giornoDi(ms), t = soloOra(ms);
+    return g <= 0 ? t : g === 1 ? 'domani ' + t : new Date(ms).toLocaleDateString('it-IT', {weekday: 'short'}) + ' ' + t;
+  }
+  function oraParlata(ms) {
+    const g = giornoDi(ms), t = soloOra(ms);
+    return g <= 0 ? 'alle ' + t : g === 1 ? 'domani alle ' + t : new Date(ms).toLocaleDateString('it-IT', {weekday: 'long'}) + ' alle ' + t;
+  }
+  function distParlata(m) {
+    if (m < 1000) return Math.max(50, Math.round(m / 50) * 50) + ' metri';
+    const k = m < 10000 ? Math.round(m / 100) / 10 : Math.round(m / 1000);
+    return k === 1 ? '1 chilometro' : String(k).replace('.', ',') + ' chilometri';
+  }
+  const minuscola = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
+  const scripts = {};
+  function caricaScript(src) {
+    return scripts[src] || (scripts[src] = new Promise((res, rej) => {
+      const s = document.createElement('script'); s.src = src; s.async = true;
+      s.onload = res; s.onerror = () => { delete scripts[src]; s.remove(); rej(new Error('libreria non scaricabile (rete assente?)')); };
+      document.head.appendChild(s);
+    }));
+  }
+  async function copia(t) {
+    try { await navigator.clipboard.writeText(t); return true; } catch (e) {
+      const ta = document.createElement('textarea'); ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+      document.body.appendChild(ta); ta.select(); let ok = false; try { ok = document.execCommand('copy'); } catch (e2) {} ta.remove(); return ok;
+    }
+  }
+
+  /* ---------- stato ---------- */
+  const opt = Object.assign({voce: true, pausaMusica: false, evitaAutostrade: false, tema: 'auto'}, AX.store.get('naviga-opzioni', {}));
+  const salvaOpt = () => AX.store.set('naviga-opzioni', opt);
+  const S = {pos: null, acc: null, head: null, speed: null, follow: true, dest: null, routes: [], sel: 0, nav: false, snapIdx: 0,
+    offSince: 0, lastRecalc: 0, annunci: new Set(), navStato: null, escluse: false, esitoVign: null, tokVign: 0, mostraPassi: false};
+
+  /* ---------- intestazione e tasti ---------- */
+  AX.header('Naviga');
+  $('hdr').insertAdjacentHTML('beforeend', '<button class="ib" id="bVei" aria-label="Il mio veicolo">' + I.car + '<i class="dot" id="bVeiDot" hidden></i></button><button class="ib" id="bOpz" aria-label="Opzioni di guida">' + I.opz + '</button>');
+  $('fSegui').innerHTML = I.segui; $('fPiu').innerHTML = I.piu; $('fMeno').innerHTML = I.meno; $('fTutto').innerHTML = I.tutto;
+  $('mPrev').innerHTML = I.prev; $('mNext').innerHTML = I.next; $('mPlay').innerHTML = I.play;
+
+  // altezze dei riquadri sovrapposti alla mappa → variabili CSS
+  const rs = () => {
+    const st = document.documentElement.style, t = $('top').getBoundingClientRect(), b = $('bottom').getBoundingClientRect(), m = $('music').getBoundingClientRect();
+    st.setProperty('--th', Math.round(t.bottom) + 'px'); st.setProperty('--bh', Math.round(b.height) + 'px'); st.setProperty('--mh', Math.round(m.height) + 'px');
+    // tasti della mappa: se tra il riquadro in alto e quello in basso non c'è spazio, tolgo + e − (resta lo zoom con le dita)
+    const fab = $('fab'), nTasti = [...fab.children].filter(x => !x.hidden).length;
+    fab.classList.toggle('stretto', (innerHeight - b.height - t.bottom - 44) < nTasti * 58);
+  };
+  if (window.ResizeObserver) { const ro = new ResizeObserver(rs); ro.observe($('top')); ro.observe($('bottom')); ro.observe($('music')); }
+  window.addEventListener('resize', rs); rs();
+
+  /* ---------- Nominatim: una richiesta alla volta, almeno 1,1 s tra due ---------- */
+  let nomLast = 0, nomChain = Promise.resolve();
+  function nominatim(url) {
+    const p = nomChain.then(async () => {
+      const w = nomLast + 1100 - Date.now(); if (w > 0) await sleep(w);
+      nomLast = Date.now();
+      const r = await AX.fetchT(url, {}, 15000);
+      if (r.status === 429) throw new Error('troppe richieste, riprova tra poco');
+      if (!r.ok) throw new Error('servizio di ricerca: errore ' + r.status);
+      return r.json();
+    });
+    nomChain = p.catch(() => {});
+    return p;
+  }
+
+  /* ---------- mappa ---------- */
+  let map = null, tGiorno = null, tNotte = null, meMk = null, accC = null, destMk = null, linee = [];
+  function initMap() {
+    if (!window.L) { $('map').innerHTML = '<div class="nomap">Mappa non disponibile: controlla la connessione.<br>Puoi comunque cercare, calcolare il percorso e usare la scheda veicolo.</div>'; return; }
+    const last = AX.store.get('naviga-ultima', null);
+    map = L.map('map', {zoomControl: false, center: last ? [last.lat, last.lon] : [42.6, 12.5], zoom: last ? 14 : 6, worldCopyJump: true});
+    map.attributionControl.setPrefix('<a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>');
+    tGiorno = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'});
+    creaNotte();
+    map.on('dragstart', () => setFollow(false));
+    map.on('contextmenu', e => puntoMappa(e.latlng));
+  }
+  // Mappa notte: CARTO dark_all richiede una chiave (gratuita) dal 25/9/2026; senza chiave uso OSM scurita via CSS.
+  function creaNotte() {
+    if (tNotte && map) map.removeLayer(tNotte);
+    tNotte = null;
+    const k = String(AX.store.get('naviga-carto-key', '') || '').trim();
+    if (!k || !window.L) return;
+    tNotte = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=' + encodeURIComponent(k), {maxZoom: 20, subdomains: 'abcd', attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>'});
+    let errori = 0;
+    tNotte.on('tileerror', () => { if (++errori === 4) { toast('Chiave CARTO rifiutata: uso la mappa notte di OpenStreetMap'); tNotte = null; applicaTema(true); } });
+  }
+  function setFollow(on) {
+    S.follow = on; $('fSegui').classList.toggle('on', on);
+    if (on && map && S.pos) segui(true);
+  }
+  function zoomGuida() { const v = S.speed || 0; return v > 25 ? 14 : v > 13 ? 15 : 16; }
+  function segui(forza) {
+    if (!map || !S.pos) return;
+    const z = S.nav ? zoomGuida() : Math.max(map.getZoom(), forza ? 15 : map.getZoom());
+    map.setView([S.pos.lat, S.pos.lon], z, {animate: true});
+  }
+  function disegnaMe() {
+    if (!map || !S.pos) return;
+    const ll = [S.pos.lat, S.pos.lon];
+    if (!meMk) {
+      accC = L.circle(ll, {radius: S.acc || 0, stroke: false, fillColor: '#0a84ff', fillOpacity: .12, interactive: false}).addTo(map);
+      meMk = L.marker(ll, {interactive: false, keyboard: false, zIndexOffset: 1000, icon: L.divIcon({className: 'meic', iconSize: [46, 46], iconAnchor: [23, 23],
+        html: '<div class="me" style="width:46px;height:46px;position:relative"><svg class="arr" viewBox="0 0 46 46" style="position:absolute;inset:0;display:none"><path d="M23 4 L37 39 L23 31 L9 39 Z" fill="#0a84ff" stroke="#fff" stroke-width="3.5" stroke-linejoin="round"/></svg><i class="dt" style="position:absolute;left:13px;top:13px;width:20px;height:20px;border-radius:50%;background:#0a84ff;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.45)"></i></div>'})}).addTo(map);
+    } else { meMk.setLatLng(ll); accC.setLatLng(ll).setRadius(Math.min(S.acc || 0, 2000)); }
+    const el = meMk.getElement(); if (!el) return;
+    const me = el.querySelector('.me'), dir = S.head != null;
+    el.querySelector('.arr').style.display = dir ? 'block' : 'none';
+    el.querySelector('.dt').style.display = dir ? 'none' : 'block';
+    me.style.transform = dir ? 'rotate(' + Math.round(S.head) + 'deg)' : '';
+  }
+  function disegnaDest() {
+    if (!map) return;
+    if (destMk) { map.removeLayer(destMk); destMk = null; }
+    if (!S.dest) return;
+    destMk = L.marker([S.dest.lat, S.dest.lon], {keyboard: false, icon: L.divIcon({className: 'dsic', iconSize: [34, 42], iconAnchor: [17, 40],
+      html: '<svg viewBox="0 0 24 30" width="34" height="42"><path d="M12 1C6 1 1.5 5.4 1.5 11.2 1.5 19 12 29 12 29s10.5-10 10.5-17.8C22.5 5.4 18 1 12 1z" fill="#fa2d48" stroke="#fff" stroke-width="2"/><circle cx="12" cy="11" r="4" fill="#fff"/></svg>'})}).addTo(map);
+  }
+  function disegnaRotte() {
+    if (!map) return;
+    linee.forEach(l => map.removeLayer(l)); linee = [];
+    S.routes.forEach((R, i) => {
+      if (i === S.sel || S.nav) return;
+      const pl = L.polyline(R.ll, {color: '#8e8e93', weight: 7, opacity: .85}).addTo(map);
+      pl.on('click', () => scegliRotta(i)); linee.push(pl);
+    });
+    const R = S.routes[S.sel]; if (!R) return;
+    linee.push(L.polyline(R.ll, {color: '#ffffff', weight: 11, opacity: .9, interactive: false}).addTo(map));
+    linee.push(L.polyline(R.ll, {color: '#0a84ff', weight: 7, interactive: false}).addTo(map));
+    if (meMk) meMk.setZIndexOffset(1000);
+    $('fTutto').hidden = false;
+  }
+  function vediTutto() {
+    const R = S.routes[S.sel]; if (!map || !R) return;
+    setFollow(false);
+    map.fitBounds(L.latLngBounds(R.ll), {paddingTopLeft: [20, (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--th')) || 120) + 10], paddingBottomRight: [70, (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--bh')) || 100) + 10]});
+  }
+  function puntoMappa(ll) {
+    const d = {name: 'Punto sulla mappa', addr: ll.lat.toFixed(5) + ', ' + ll.lng.toFixed(5), lat: ll.lat, lon: ll.lng};
+    L.popup({closeButton: true}).setLatLng(ll).setContent('<button class="btn sm pri" id="popVai">Vai qui</button>').openOn(map);
+    setTimeout(() => { const b = $('popVai'); if (b) b.onclick = () => { map.closePopup(); setDest(d); }; }, 0);
+  }
+
+  /* ---------- tema giorno/notte (alba e tramonto dalla posizione) ---------- */
+  function elevSole(date, lat, lon) {
+    const d = date.getTime() / 864e5 - 10957.5;
+    const g = (357.529 + 0.98560028 * d) * RAD, q = 280.459 + 0.98564736 * d;
+    const L_ = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * RAD, e = (23.439 - 0.00000036 * d) * RAD;
+    const ra = Math.atan2(Math.cos(e) * Math.sin(L_), Math.cos(L_)), dec = Math.asin(Math.sin(e) * Math.sin(L_));
+    const gmst = ((18.697374558 + 24.06570982441908 * d) % 24 + 24) % 24;
+    const h = (gmst * 15 + lon) * RAD - ra;
+    return Math.asin(Math.sin(lat * RAD) * Math.sin(dec) + Math.cos(lat * RAD) * Math.cos(dec) * Math.cos(h)) / RAD;
+  }
+  let notteAttiva = null;
+  function eNotte() {
+    if (opt.tema === 'notte') return true;
+    if (opt.tema === 'giorno') return false;
+    const p = S.pos || AX.store.get('naviga-ultima', null);
+    if (p) return elevSole(new Date(), p.lat, p.lon) < -3;
+    return matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  function applicaTema(forza) {
+    const n = eNotte();
+    if (n === notteAttiva && !forza) return;
+    notteAttiva = n;
+    if (map) {
+      const carto = n && tNotte;
+      if (carto) { map.removeLayer(tGiorno); if (!map.hasLayer(tNotte)) tNotte.addTo(map); }
+      else { map.eachLayer(l => { if (l instanceof L.TileLayer && l !== tGiorno) map.removeLayer(l); }); if (!map.hasLayer(tGiorno)) tGiorno.addTo(map); }
+      $('map').classList.toggle('scura', n && !carto);
+    }
+    if (n) document.documentElement.dataset.theme = 'dark'; else delete document.documentElement.dataset.theme;
+    $('fTema').innerHTML = n ? I.sole : I.luna;
+    $('fTema').setAttribute('aria-label', n ? 'Mappa giorno' : 'Mappa notte');
+  }
+
+  /* ---------- posizione ---------- */
+  let primoFix, prevFix = null, ultimoSalvataggio = 0;
+  const fixP = new Promise(r => { primoFix = r; });
+  function geoNota(t) { const g = $('geoNota'); g.textContent = t; g.hidden = !t; }
+  function startGeo() {
+    if (!('geolocation' in navigator)) { geoNota('Posizione non disponibile su questo dispositivo.'); return; }
+    navigator.geolocation.watchPosition(onPos, e => {
+      if (e.code === 1) geoNota('Permesso di posizione negato. Su iPhone: Impostazioni ▸ Privacy e sicurezza ▸ Localizzazione ▸ Safari (o l\'app Musica) ▸ «Mentre usi l\'app».');
+      else if (!S.pos) geoNota('In attesa del segnale GPS…');
+    }, {enableHighAccuracy: true, maximumAge: 1000, timeout: 20000});
+  }
+  function onPos(p) {
+    const c = p.coords, now = Date.now(), pos = {lat: c.latitude, lon: c.longitude};
+    let sp = (c.speed != null && c.speed >= 0 && !isNaN(c.speed)) ? c.speed : null;
+    let hd = (c.heading != null && !isNaN(c.heading) && (sp == null || sp > 0.8)) ? c.heading : null;
+    if (prevFix) {
+      const d = dist(prevFix, pos), dt = (now - prevFix.t) / 1000;
+      if (sp == null && dt > 0.5 && dt < 15) sp = d / dt;
+      if (hd == null && d > 8 && (c.accuracy || 0) < 40) hd = bearing(prevFix, pos);
+    }
+    if (!prevFix || dist(prevFix, pos) > 8 || now - prevFix.t > 15000) prevFix = {lat: pos.lat, lon: pos.lon, t: now};
+    if (hd != null) S.head = hd;
+    const primo = !S.pos;
+    S.pos = pos; S.acc = c.accuracy; S.speed = sp;
+    primoFix(pos); geoNota('');
+    if (now - ultimoSalvataggio > 30000) { ultimoSalvataggio = now; AX.store.set('naviga-ultima', {lat: +pos.lat.toFixed(4), lon: +pos.lon.toFixed(4)}); }
+    if (primo) applicaTema();
+    disegnaMe(); aggVel();
+    if (S.nav) passoNav();
+    if (S.follow) segui(primo);
+    if (!$('shCerca').hidden) avvisoMovimento();
+  }
+  function aggVel() { $('velN').textContent = S.speed == null ? '–' : Math.round(S.speed * 3.6); }
+
+  /* ---------- voce ---------- */
+  const haVoce = 'speechSynthesis' in window;
+  let voce = null, pausaDaVoce = false, sbloccata = false;
+  function scegliVoce() {
+    if (!haVoce) return;
+    const vs = speechSynthesis.getVoices().filter(v => /^it/i.test(v.lang));
+    voce = vs.find(v => /premium|enhanced|migliorat|avanzat/i.test(v.name)) || vs.find(v => /Alice|Federica|Emma|Luca|Paola/i.test(v.name)) || vs.find(v => /it-IT/i.test(v.lang)) || vs[0] || null;
+  }
+  if (haVoce) { scegliVoce(); speechSynthesis.onvoiceschanged = scegliVoce; }
+  function sbloccaVoce() {  // iOS: la sintesi vocale va avviata la prima volta da un tocco
+    if (!haVoce || sbloccata) return; sbloccata = true;
+    try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}
+  }
+  function parla(testo, forza) {
+    if (!haVoce || (!opt.voce && !forza) || !testo) return;
+    const u = new SpeechSynthesisUtterance(testo);
+    u.lang = 'it-IT'; if (voce) u.voice = voce; u.rate = 1; u.pitch = 1;
+    if (opt.pausaMusica) {
+      const n = AX.player.now();
+      if (n && n.playing) { AX.player.toggle(); pausaDaVoce = true; setTimeout(aggMusica, 200); }
+    }
+    u.onend = u.onerror = () => setTimeout(() => {
+      if (pausaDaVoce && !speechSynthesis.speaking && !speechSynthesis.pending) {
+        pausaDaVoce = false; const n = AX.player.now(); if (n && !n.playing) AX.player.toggle(); setTimeout(aggMusica, 200);
+      }
+    }, 450);
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }
+
+  /* ---------- schermo sempre acceso ---------- */
+  let wl = null;
+  async function wakeOn() {
+    if (!('wakeLock' in navigator)) return false;
+    try { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => { wl = null; aggWake(); }); aggWake(); return true; } catch (e) { aggWake(); return false; }
+  }
+  function wakeOff() { if (wl) { wl.release().catch(() => {}); wl = null; } }
+  function aggWake() {
+    const el = $('nWake'); if (!el) return;
+    el.textContent = wl ? 'Schermo sempre acceso durante la guida ✓' : 'Lo schermo può spegnersi: Impostazioni ▸ Schermo e luminosità ▸ Blocco automatico ▸ Mai.';
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.nav && !wl) wakeOn(); });
+
+  /* ---------- istruzioni in italiano dalle manovre OSRM ---------- */
+  const MOD = {uturn: 'con inversione a U', 'sharp right': 'decisamente a destra', right: 'a destra', 'slight right': 'leggermente a destra', straight: 'dritto', 'slight left': 'leggermente a sinistra', left: 'a sinistra', 'sharp left': 'decisamente a sinistra'};
+  const lato = m => /left/.test(m || '') ? 'la sinistra' : /right/.test(m || '') ? 'la destra' : 'il centro';
+  const ORD = ['prima', 'seconda', 'terza', 'quarta', 'quinta', 'sesta', 'settima', 'ottava', 'nona', 'decima'];
+  const CARD = ['nord', 'nord-est', 'est', 'sud-est', 'sud', 'sud-ovest', 'ovest', 'nord-ovest'];
+  function nomeVia(s) {
+    const n = (s.name || '').trim(), r = (s.ref || '').trim().replace(/;/g, ', ');
+    if (n && r && !n.includes(r.split(',')[0])) return n + ' (' + r + ')';
+    return n || r;
+  }
+  function verso(s) {
+    const d = (s.destinations || '').trim(); if (!d) return '';
+    const i = d.indexOf(':');
+    return i > 0 ? d.slice(0, i).replace(/,\s*/g, ', ') + ' ' + d.slice(i + 1).trim() : d;
+  }
+  function istr(s) {
+    const m = s.maneuver, t = m.type, mod = m.modifier || '', via = nomeVia(s), vs = verso(s);
+    const su = via ? ' su ' + via : '', in_ = via ? ' in ' + via : '', vers = vs ? ' verso ' + vs : su;
+    switch (t) {
+      case 'depart': return 'Parti verso ' + CARD[Math.round((m.bearing_after || 0) / 45) % 8] + su;
+      case 'arrive': return /left/.test(mod) ? 'Sei arrivato: la destinazione è sulla sinistra' : /right/.test(mod) ? 'Sei arrivato: la destinazione è sulla destra' : 'Sei arrivato a destinazione';
+      case 'turn':
+        if (mod === 'uturn') return 'Fai inversione a U' + su;
+        if (mod === 'straight') return 'Prosegui dritto' + su;
+        return 'Svolta ' + (MOD[mod] || '') + in_;
+      case 'new name': return 'Prosegui' + su;
+      case 'continue':
+        if (mod === 'uturn') return 'Fai inversione a U' + su;
+        if (mod && mod !== 'straight') return 'Tieni ' + lato(mod) + (via ? ' per restare su ' + via : '');
+        return 'Prosegui dritto' + su;
+      case 'merge': return 'Immettiti' + (/left|right/.test(mod) ? (/left/.test(mod) ? ' a sinistra' : ' a destra') : '') + su;
+      case 'on ramp': return 'Prendi lo svincolo' + (/left|right/.test(mod) ? ' ' + (MOD[mod] || '') : '') + vers;
+      case 'off ramp': return 'Esci' + (/left|right/.test(mod) ? (/left/.test(mod) ? ' a sinistra' : ' a destra') : '') + (s.exits ? ' all\'uscita ' + s.exits.split(';')[0] : '') + vers;
+      case 'fork': return 'Al bivio tieni ' + lato(mod) + vers;
+      case 'end of road': return 'Alla fine della strada svolta ' + (MOD[mod] || '') + in_;
+      case 'roundabout': case 'rotary': {
+        const nome = s.rotary_name ? ' ' + s.rotary_name : '';
+        if (m.exit) return 'Alla rotonda' + nome + ' prendi la ' + (ORD[m.exit - 1] || m.exit + 'ª') + ' uscita' + (via ? ' su ' + via : vs ? ' verso ' + vs : '');
+        return 'Entra nella rotonda' + nome + (via ? ' ed esci su ' + via : '');
+      }
+      case 'roundabout turn': return mod === 'straight' ? 'Alla rotonda prosegui dritto' + su : 'Alla rotonda svolta ' + (MOD[mod] || '') + in_;
+      case 'exit roundabout': case 'exit rotary': return 'Esci dalla rotonda' + su;
+      default: return via ? 'Prosegui su ' + via : 'Prosegui';
+    }
+  }
+  // manovre che non si annunciano (la strada continua dritta o cambia solo nome)
+  function muta(s) {
+    const t = s.maneuver.type, m = s.maneuver.modifier;
+    if (/^(new name|notification|use lane|exit roundabout|exit rotary)$/.test(t)) return true;
+    if ((t === 'continue' || t === 'turn') && (!m || m === 'straight')) return true;
+    return false;
+  }
+  function iconaManovra(s) {
+    const t = s.maneuver.type, m = s.maneuver.modifier || 'straight';
+    if (t === 'arrive') return '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5 2.5h2V22H5zM8 3.5h11l-2.5 4 2.5 4H8z"/></svg>';
+    if (t === 'roundabout' || t === 'rotary') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13.5" r="4.5"/><path d="M12 18v4M15.3 10.2L20 5.5M20 5.5h-4M20 5.5v4"/></svg>';
+    if (m === 'uturn') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21V9a5 5 0 0 0-10 0v4"/><path d="M2.5 10.5L6 14l3.5-3.5"/></svg>';
+    const ang = {straight: 0, 'slight right': 45, right: 90, 'sharp right': 135, 'slight left': -45, left: -90, 'sharp left': -135}[m] || 0;
+    return '<svg viewBox="0 0 24 24" style="transform:rotate(' + ang + 'deg)"><path fill="currentColor" d="M12 2.5l7.2 8.2h-4.7v10.8H9.5V10.7H4.8z"/></svg>';
+  }
+
+  /* ---------- percorso (OSRM pubblico) ---------- */
+  let osrmLast = 0, excludeOk = null;
+  async function osrm(from, to, br, escludi) {
+    const w = osrmLast + 1100 - Date.now(); if (w > 0) await sleep(w);
+    osrmLast = Date.now();
+    let url = OSRM + from.lon.toFixed(6) + ',' + from.lat.toFixed(6) + ';' + to.lon.toFixed(6) + ',' + to.lat.toFixed(6) + '?overview=full&geometries=geojson&steps=true&alternatives=true';
+    if (br != null) url += '&bearings=' + (Math.round(br) % 360) + ',60;';
+    if (escludi) url += '&exclude=motorway';
+    let r;
+    try { r = await AX.fetchT(url, {}, 25000); } catch (e) { throw new Error(navigator.onLine === false ? 'nessuna connessione' : 'servizio percorsi non raggiungibile'); }
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (!j) throw new Error('servizio percorsi non disponibile (' + r.status + ')');
+    if (j.code !== 'Ok') { const er = new Error(j.code === 'NoRoute' ? 'nessun percorso in auto trovato' : j.code === 'TooBig' ? 'percorso troppo lungo per il servizio' : (j.message || j.code)); er.codice = j.code; throw er; }
+    return j.routes;
+  }
+  async function calcolaRotte(from, to, br) {
+    if (opt.evitaAutostrade && excludeOk !== false) {
+      try { const rr = await osrm(from, to, br, true); excludeOk = true; return {routes: rr, escluse: true}; }
+      catch (e) { if (/exclude/i.test(e.message) || e.codice === 'InvalidValue') excludeOk = false; else throw e; }
+    }
+    return {routes: await osrm(from, to, br, false), escluse: false};
+  }
+  function prepara(r) {
+    const steps = r.legs.flatMap(l => l.steps), coords = [], stepStart = [];
+    for (const s of steps) {
+      const g = s.geometry.coordinates;
+      if (!coords.length) { stepStart.push(0); for (const c of g) coords.push(c); }
+      else { stepStart.push(coords.length - 1); for (let i = 1; i < g.length; i++) coords.push(g[i]); }
+    }
+    const cum = new Float64Array(coords.length);
+    for (let i = 1; i < coords.length; i++) cum[i] = cum[i - 1] + distLL(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+    // km in autostrada: dalle «classes» di OSRM se il server le fornisce (quello pubblico no), altrimenti da nome e sigla della strada
+    let autostrada = 0, pedaggio = 0, autostradaIT = 0, conClassi = false;
+    const fl = steps.map(s => {
+      const cl = s.intersections && s.intersections[0] && s.intersections[0].classes;
+      if (cl) conClassi = true;
+      if (cl && cl.includes('toll')) pedaggio += s.distance;
+      const aut = eAutostrada(s, cl), [x, y] = s.maneuver.location;
+      return {aut, it: aut && /(^|[;,\s])A\s?\d/.test(s.ref || '') && POLI.IT && POLI.IT.rings.some(rg => dentroAnello(rg, x, y)), anon: !s.name && !s.ref};
+    });
+    // tratti senza nome (ponti, gallerie) in mezzo all'autostrada: restano autostrada
+    for (let i = 1; i < fl.length - 1; i++) if (fl[i].anon && !fl[i].aut && fl[i - 1].aut && fl[i + 1].aut) fl[i] = {aut: true, it: fl[i - 1].it};
+    steps.forEach((s, i) => { if (fl[i].aut) autostrada += s.distance; if (fl[i].it) autostradaIT += s.distance; });
+    return {steps, coords, cum, stepAlong: stepStart.map(i => cum[i]), tot: cum[cum.length - 1] || r.distance, dist: r.distance, dur: r.duration,
+      ll: r.geometry.coordinates.map(c => [c[1], c[0]]), autostrada, pedaggio: conClassi ? pedaggio : null, autostradaIT, via: r.legs.map(l => l.summary).filter(Boolean).join(', ')};
+  }
+  // autostrade e superstrade (Schnellstraße, rychlostní silnice, gyorsút, hitra cesta…): per «evita autostrade» contano entrambe
+  const RE_AUT = /autostrada|superstrada|grande comunicazione|autobahn|schnellstra|autoroute|voie rapide|autopista|autov[ií]a|autoestrada|motorway|expressway|d[aá]lnice|rychlostn|dia[lľ]nica|r[yý]chlostn|aut[oó]p[aá]lya|gyors[uú]t|avtocesta|hitra cesta|autocesta|brza cesta|autoput|snelweg/i;
+  function eAutostrada(s, cl) {
+    if (cl) return cl.includes('motorway');
+    const refs = String(s.ref || '').split(/[;,]\s*/);
+    return RE_AUT.test(s.name || '') || refs.some(x => /^(A|M|RA|S)\s?\d{1,3}(var|dir|bis|racc)?$/i.test(x.trim()));
+  }
+  function scegliMigliore() {
+    if (!opt.evitaAutostrade || S.escluse || S.routes.length < 2) return 0;
+    let b = 0; S.routes.forEach((R, i) => { if (R.autostrada < S.routes[b].autostrada - 500) b = i; }); return b;
+  }
+  async function origine() {
+    if (S.pos) return S.pos;
+    renderPanel('calcolo', 'Attendo la posizione GPS…');
+    const p = await Promise.race([fixP, sleep(8000).then(() => null)]);
+    if (p) return p;
+    if (map) { const c = map.getCenter(); toast('GPS non disponibile: parto dal centro della mappa'); return {lat: c.lat, lon: c.lng, daMappa: true}; }
+    throw new Error('posizione non disponibile');
+  }
+  async function setDest(d, avviaSubito) {
+    if (S.nav) fermaNav(false);
+    S.dest = d; S.routes = []; S.esitoVign = null; S.tokVign++;
+    addRecente(d); disegnaDest(); disegnaRotte(); aggPill(); chiudiFogli();
+    renderPanel('calcolo');
+    try {
+      const from = await origine();
+      if (S.dest !== d) return;
+      const {routes, escluse} = await calcolaRotte(from, d, S.speed > 3 ? S.head : null);
+      if (S.dest !== d) return;
+      S.escluse = escluse; S.routes = routes.map(prepara); S.sel = scegliMigliore();
+      disegnaRotte(); renderPanel('anteprima'); vediTutto();
+      if (avviaSubito) avvia(); else controllaVignette();
+    } catch (e) {
+      if (S.dest === d) renderPanel('errore', e.message);
+    }
+  }
+  function scegliRotta(i) {
+    if (S.nav || i === S.sel || !S.routes[i]) return;
+    S.sel = i; disegnaRotte(); renderPanel('anteprima'); controllaVignette();
+  }
+
+  /* ---------- guida ---------- */
+  function snap(R, p, hint) {
+    const c = R.coords, kx = 111320 * Math.cos(p.lat * RAD), ky = 110540;
+    const prova = (a, b) => {
+      let bd = Infinity, bi = 0, bt = 0; a = Math.max(0, a); b = Math.min(c.length - 1, b);
+      for (let i = a; i < b; i++) {
+        const ax = (c[i][0] - p.lon) * kx, ay = (c[i][1] - p.lat) * ky, dx = (c[i + 1][0] - c[i][0]) * kx, dy = (c[i + 1][1] - c[i][1]) * ky, l2 = dx * dx + dy * dy;
+        let t = l2 ? -(ax * dx + ay * dy) / l2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const x = ax + t * dx, y = ay + t * dy, d = x * x + y * y;
+        if (d < bd) { bd = d; bi = i; bt = t; }
+      }
+      return {d: Math.sqrt(bd), i: bi, t: bt};
+    };
+    let m = prova(hint - 30, hint + 900);
+    if (m.d > 50) { const g = prova(0, c.length); if (g.d < m.d - 5) m = g; }
+    m.along = R.cum[m.i] + m.t * ((R.cum[m.i + 1] || R.cum[m.i]) - R.cum[m.i]);
+    return m;
+  }
+  function avvia() {
+    const R = S.routes[S.sel]; if (!R) return;
+    sbloccaVoce();
+    S.nav = true; S.annunci.clear(); S.offSince = 0; S.snapIdx = 0; S.arrivato = false; S.mostraPassi = false; S.navStato = null;
+    AX.store.set('naviga-attiva', {dest: S.dest, t: Date.now()});
+    $('resume').hidden = true;
+    disegnaRotte(); renderPanel('nav'); mostraTop();
+    wakeOn().then(aggWake);
+    setFollow(true);
+    // messaggio di partenza: comprende già la prima manovra, così l'annuncio a 500/200 m non lo interrompe
+    S.zitto = true; if (S.pos) passoNav(); S.zitto = false;
+    let k = 1; while (k < R.steps.length - 1 && muta(R.steps[k])) k++;
+    const st = S.navStato, nx = st ? st.nx : k, s = R.steps[nx];
+    const prossima = s && s.maneuver.type !== 'arrive' ? (st ? 'Tra ' + distParlata(st.dMan) + ', ' : 'Poi ') + minuscola(istr(s)) + '.' : '';
+    parla('Si parte verso ' + S.dest.name + '. Arrivo previsto ' + oraParlata(Date.now() + (st ? st.t : R.dur) * 1000) + '. ' + istr(R.steps[0]) + '. ' + prossima);
+  }
+  function fermaNav(pulisci) {
+    S.nav = false; S.navStato = null; wakeOff();
+    if (haVoce) speechSynthesis.cancel();
+    AX.store.set('naviga-attiva', null);
+    if (pulisci) { S.dest = null; S.routes = []; S.esitoVign = null; S.tokVign++; disegnaDest(); disegnaRotte(); $('fTutto').hidden = true; renderPanel('vuoto'); aggPill(); }
+    mostraTop();
+  }
+  function passoNav() {
+    const R = S.routes[S.sel]; if (!R || !S.pos || S.arrivato) return;
+    const m = snap(R, S.pos, S.snapIdx), now = Date.now();
+    S.snapIdx = m.i;
+    // fuori percorso da più di 10 s → ricalcolo
+    if (m.d > 60 && (S.acc == null || S.acc <= 60)) {
+      if (!S.offSince) S.offSince = now;
+      else if (now - S.offSince > 10000 && now - S.lastRecalc > Math.min(60000, 15000 * Math.pow(2, S.nRicalc || 0))) { ricalcola(); return; }
+    } else if (m.d <= 40) { S.offSince = 0; S.nRicalc = 0; }
+    else S.offSince = 0;
+    const along = m.along, n = R.steps.length;
+    let cur = 0; while (cur + 1 < n && R.stepAlong[cur + 1] <= along + 3) cur++;
+    let nx = cur + 1; while (nx < n - 1 && muta(R.steps[nx])) nx++;
+    if (nx > n - 1) nx = n - 1;
+    const dMan = Math.max(0, R.stepAlong[nx] - along), resto = Math.max(0, R.tot - along);
+    let t = 0; for (let k = cur + 1; k < n; k++) t += R.steps[k].duration;
+    const fine = cur + 1 < n ? R.stepAlong[cur + 1] : R.tot, len = fine - R.stepAlong[cur];
+    if (len > 0) t += R.steps[cur].duration * Math.min(1, Math.max(0, (fine - along) / len));
+    S.navStato = {cur, nx, dMan, resto, t, fuori: m.d > 60};
+    aggBanner(); aggNavInfo();
+    annuncia(R, nx, dMan);
+    if (resto < 30 || (R.steps[nx].maneuver.type === 'arrive' && dMan < 25)) arrivato();
+  }
+  function annuncia(R, nx, d) {
+    const s = R.steps[nx], arr = s.maneuver.type === 'arrive', k = nx + ':', tx = istr(s);
+    const fa = (soglia, testo) => { if (S.annunci.has(k + soglia)) return; S.annunci.add(k + soglia); if (!S.zitto) parla(testo); };
+    const prima = R.stepAlong[nx] - (R.stepAlong[nx - 1] || 0);
+    if ((S.speed || 0) > 22 && d <= 2100 && d > 1300 && prima > 2600) fa('2000', arr ? 'Tra 2 chilometri arriverai a destinazione' : 'Tra 2 chilometri, ' + minuscola(tx));
+    else if (d <= 520 && d > 300) fa('500', arr ? 'Tra 500 metri arriverai a destinazione' : 'Tra 500 metri, ' + minuscola(tx));
+    else if (d <= 220 && d > 70) fa('200', arr ? 'Tra 200 metri arriverai a destinazione' : 'Tra 200 metri, ' + minuscola(tx));
+    else if (d <= Math.max(35, (S.speed || 0) * 2.5)) fa('0', arr ? tx : (/^(Svolta|Esci|Prendi|Tieni|Fai|Immettiti|Al |Alla |Entra)/.test(tx) ? 'Ora ' + minuscola(tx) : tx));
+  }
+  function arrivato() {
+    if (S.arrivato) return; S.arrivato = true;
+    const s = S.routes[S.sel].steps.at(-1);
+    if (!S.annunci.has((S.routes[S.sel].steps.length - 1) + ':0')) parla(istr(s));
+    S.nav = false; wakeOff(); AX.store.set('naviga-attiva', null);
+    renderPanel('arrivo'); mostraTop();
+  }
+  async function ricalcola() {
+    if (S.ricalcolando || !S.dest || !S.pos) return;
+    S.ricalcolando = true; S.lastRecalc = Date.now(); S.offSince = 0; S.nRicalc = (S.nRicalc || 0) + 1;
+    $('bTxt').textContent = 'Ricalcolo del percorso…'; $('bDist').textContent = ''; $('bPoi').hidden = true;
+    parla('Ricalcolo il percorso');
+    try {
+      const {routes, escluse} = await calcolaRotte(S.pos, S.dest, S.head);
+      if (!S.nav) return;
+      S.escluse = escluse; S.routes = routes.map(prepara); S.sel = scegliMigliore(); S.snapIdx = 0; S.annunci.clear();
+      disegnaRotte(); passoNav();
+    } catch (e) { toast('Ricalcolo non riuscito: ' + e.message); }
+    finally { S.ricalcolando = false; }
+  }
+  function aggBanner() {
+    const R = S.routes[S.sel], st = S.navStato; if (!R || !st || S.ricalcolando) return;
+    const s = R.steps[st.nx];
+    const ico = iconaManovra(s); if ($('bIco').dataset.k !== ico) { $('bIco').innerHTML = ico; $('bIco').dataset.k = ico; }
+    $('bDist').textContent = fmtDist(st.dMan);
+    $('bTxt').textContent = istr(s);
+    let n2 = st.nx + 1; while (n2 < R.steps.length - 1 && muta(R.steps[n2])) n2++;
+    const poi = n2 < R.steps.length && R.stepAlong[n2] - R.stepAlong[st.nx] < 400 ? 'Poi: ' + istr(R.steps[n2]) : (st.fuori ? 'Fuori percorso…' : '');
+    $('bPoi').textContent = poi; $('bPoi').hidden = !poi;
+  }
+  function aggNavInfo() {
+    const st = S.navStato; if (!st || !$('nEta')) return;
+    const arr = Date.now() + st.t * 1000, g = giornoDi(arr);
+    $('nEta').textContent = soloOra(arr); $('nEtaL').textContent = g <= 0 ? 'arrivo' : g === 1 ? 'arrivo domani' : 'arrivo ' + new Date(arr).toLocaleDateString('it-IT', {weekday: 'short'});
+    $('nTempo').textContent = fmtDurBreve(st.t); $('nKm').textContent = fmtDist(st.resto);
+  }
+  function mostraTop() {
+    const nav = S.nav;
+    $('pill').hidden = nav; $('chips').hidden = nav; $('banner').hidden = !nav;
+    if (nav && !S.navStato) { const R = S.routes[S.sel]; if (R) { $('bIco').innerHTML = iconaManovra(R.steps[0]); $('bDist').textContent = ''; $('bTxt').textContent = istr(R.steps[0]); } }
+    rs();
+  }
+
+  /* ---------- link verso altre app ---------- */
+  function linkApp(d, solo) {
+    const ll = d.lat.toFixed(6) + ',' + d.lon.toFixed(6);
+    const l = {
+      apple: 'https://maps.apple.com/?daddr=' + ll + '&dirflg=d',
+      google: 'https://www.google.com/maps/dir/?api=1&destination=' + ll + '&travelmode=driving&dir_action=navigate',
+      waze: 'https://waze.com/ul?ll=' + ll + '&navigate=yes'
+    };
+    return solo ? l[solo] : l;
+  }
+  function htmlApri(d) {
+    const l = linkApp(d);
+    return '<div class="apri"><span class="lbl">Stessa destinazione in un\'altra app (anche sullo schermo di CarPlay):</span><a class="btn sm" href="' + l.apple + '" target="_blank" rel="noopener">Apple Mappe</a><a class="btn sm" href="' + l.google + '" target="_blank" rel="noopener">Google Maps</a><a class="btn sm" href="' + l.waze + '" target="_blank" rel="noopener">Waze</a></div>';
+  }
+
+  /* ---------- pannello in basso ---------- */
+  let modoPanel = 'vuoto';
+  function renderPanel(modo, msg) {
+    modoPanel = modo;
+    const p = $('panel'), d = S.dest;
+    if (modo === 'vuoto' || !d) { p.hidden = true; p.innerHTML = ''; rs(); return; }
+    p.hidden = false;
+    const testa = '<div class="ph"><div class="tx"><b>' + esc(d.name) + '</b><span>' + esc(d.addr || '') + '</span></div><button class="ib" data-a="annulla" aria-label="Chiudi percorso" style="color:var(--fg2)">' + I.x + '</button></div>';
+    if (modo === 'calcolo') p.innerHTML = testa + '<p class="sub">' + esc(msg || 'Calcolo del percorso…') + '</p>';
+    else if (modo === 'errore') p.innerHTML = testa + '<div class="note warn">Percorso non disponibile: ' + esc(msg) + '.</div><button class="btn" data-a="riprova">Riprova</button>' + htmlApri(d);
+    else if (modo === 'anteprima') {
+      let h = testa;
+      if (opt.evitaAutostrade && !S.escluse) h += '<div class="note warn">«Evita autostrade»: il servizio gratuito OSRM pubblico non può escluderle. ' + (S.routes.length > 1 ? 'Ho scelto l\'alternativa con meno autostrada.' : 'Non ci sono alternative senza autostrada.') + ' Per evitarle del tutto apri in <a href="' + linkApp(d, 'apple') + '" target="_blank" rel="noopener">Apple Mappe</a> (Impostazioni ▸ App ▸ Mappe ▸ In auto ▸ Evita autostrade) o Google Maps (Opzioni percorso).</div>';
+      h += S.routes.map((R, i) => '<button class="alt' + (i === S.sel ? ' on' : '') + '" data-a="alt" data-i="' + i + '"><b>' + fmtDur(R.dur) + '</b> · ' + fmtDist(R.dist) + '<span class="ln">Arrivo ' + fmtOra(Date.now() + R.dur * 1000) + (R.via ? ' · via ' + esc(R.via) : '') + '</span><span class="tg">' +
+        (i === 0 ? '<span class="pill ok">più veloce</span>' : '<span class="pill">alternativa</span>') +
+        (R.autostrada > 1000 ? '<span class="pill">≈ ' + fmtDist(R.autostrada) + ' in autostrada</span>' : '<span class="pill ok">senza autostrade</span>') +
+        (R.pedaggio != null ? (R.pedaggio > 1000 ? '<span class="pill warn">pedaggio su ' + fmtDist(R.pedaggio) + '</span>' : '')
+          : (R.autostradaIT > 1000 ? '<span class="pill warn">pedaggio in Italia</span>' : '')) + '</span></button>').join('');
+      if (S.pos && S.pos.daMappa) h += '<p class="small">Partenza dal centro della mappa (GPS non disponibile).</p>';
+      h += '<button class="btn big go" data-a="avvia">Avvia</button>';
+      h += htmlApri(d);
+      h += '<div id="vign"></div>';
+      h += '<div class="btns"><button class="btn sm" data-a="passi">' + (S.mostraPassi ? 'Nascondi istruzioni' : 'Istruzioni passo passo (' + S.routes[S.sel].steps.length + ')') + '</button></div>';
+      if (S.mostraPassi) h += listaPassi(S.routes[S.sel], 0);
+      p.innerHTML = h; renderVign();
+    } else if (modo === 'nav') {
+      p.innerHTML = '<div class="navinfo"><div><b id="nEta">–</b><span id="nEtaL">arrivo</span></div><div><b id="nTempo">–</b><span>tempo</span></div><div><b id="nKm">–</b><span>distanza</span></div><button class="btn" data-a="fine">Fine</button></div>' +
+        '<div class="navopt"><button class="btn sm" data-a="passi">' + (S.mostraPassi ? 'Nascondi elenco' : 'Elenco manovre') + '</button><button class="btn sm" data-a="voce">' + (opt.voce ? 'Voce: sì' : 'Voce: no') + '</button></div>' +
+        '<div class="small" id="nWake" style="margin-top:6px"></div>' + (S.mostraPassi ? listaPassi(S.routes[S.sel], S.navStato ? S.navStato.cur + 1 : 1) : '');
+      aggWake(); aggNavInfo();
+    } else if (modo === 'arrivo') {
+      p.innerHTML = testa + '<p class="h3" style="margin-top:6px">Sei arrivato a destinazione.</p><button class="btn big pri" data-a="fine">Fine</button>';
+    }
+    rs();
+  }
+  function listaPassi(R, da) {
+    let h = '<div style="margin-top:6px">';
+    for (let i = da; i < R.steps.length; i++) {
+      const s = R.steps[i], seg = i + 1 < R.steps.length ? R.stepAlong[i + 1] - R.stepAlong[i] : 0;
+      h += '<div class="st"><div class="ic">' + iconaManovra(s) + '</div><div class="tx">' + esc(istr(s)) + (seg > 0 ? '<span>poi ' + fmtDist(seg) + '</span>' : '') + '</div></div>';
+    }
+    return h + '</div>';
+  }
+  $('panel').addEventListener('click', e => {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const a = b.dataset.a;
+    if (a === 'annulla') fermaNav(true);
+    else if (a === 'riprova' && S.dest) setDest(S.dest);
+    else if (a === 'alt') scegliRotta(+b.dataset.i);
+    else if (a === 'avvia') avvia();
+    else if (a === 'fine') fermaNav(true);
+    else if (a === 'passi') { S.mostraPassi = !S.mostraPassi; renderPanel(modoPanel); }
+    else if (a === 'voce') { opt.voce = !opt.voce; salvaOpt(); if (!opt.voce && haVoce) speechSynthesis.cancel(); renderPanel('nav'); syncOpz(); }
+  });
+  $('banner').addEventListener('click', () => { S.mostraPassi = !S.mostraPassi; renderPanel('nav'); });
+
+  /* ---------- vignette autostradali ---------- */
+  // Confini semplificati (Natural Earth 1:50m, Douglas-Peucker ~4 km): "lon,lat lon,lat…", anelli separati da |
+  const POLI_RAW = {"CH":"9.52,47.52 9.63,47.47 9.49,47.06 9.85,47.01 9.88,46.94 10.13,46.85 10.35,46.98 10.45,46.9 10.4,46.67 10.43,46.55 10.09,46.6 10.04,46.48 10.13,46.24 10.04,46.24 9.94,46.36 9.53,46.31 9.43,46.48 9.3,46.5 9.25,46.29 9,46.01 9.05,45.88 8.95,45.83 8.78,46 8.82,46.08 8.64,46.11 8.46,46.25 8.44,46.43 8.37,46.45 8.1,46.27 8.13,46.16 7.85,45.95 7.54,45.98 7.13,45.88 6.77,46.17 6.82,46.28 6.76,46.42 6.43,46.43 6.23,46.33 6.27,46.25 6.2,46.19 5.97,46.15 5.97,46.21 6.1,46.28 6.12,46.38 6.06,46.43 6.16,46.61 6.41,46.76 6.46,46.95 6.67,47.03 6.95,47.27 7,47.34 6.9,47.39 6.97,47.45 7.14,47.49 7.34,47.43 7.62,47.59 8.45,47.6 8.57,47.65 8.4,47.69 8.57,47.78 8.88,47.66 9.18,47.67 9.52,47.52","SK":"22.54,49.07 22.3,48.69 22.14,48.57 22.11,48.39 21.72,48.35 21.45,48.55 20.49,48.53 20.33,48.3 19.95,48.15 19.56,48.21 19.47,48.11 18.79,48 18.72,47.79 18.15,47.76 17.76,47.77 17.32,47.99 17.15,48.01 16.87,48.39 16.99,48.68 17.14,48.84 17.76,48.89 18.09,49.07 18.16,49.26 18.6,49.49 18.94,49.5 18.97,49.4 19.15,49.4 19.44,49.6 19.63,49.41 19.77,49.37 19.76,49.2 19.8,49.19 20.06,49.18 20.16,49.32 20.36,49.39 20.95,49.32 21.08,49.42 21.35,49.43 21.89,49.34 22.02,49.21 22.54,49.07","SI":"16.52,46.5 16.32,46.53 16.24,46.48 16.23,46.37 16.07,46.37 15.64,46.2 15.59,46.14 15.67,46.05 15.65,45.86 15.28,45.73 15.35,45.66 15.28,45.58 15.34,45.47 15.24,45.44 14.79,45.48 14.57,45.66 14.37,45.48 13.99,45.51 13.88,45.43 13.62,45.48 13.58,45.52 13.87,45.61 13.66,45.79 13.57,45.83 13.6,45.98 13.48,46.01 13.63,46.18 13.38,46.26 13.7,46.52 14.55,46.4 14.89,46.61 15.44,46.63 15.77,46.71 15.96,46.68 15.98,46.8 16.09,46.86 16.28,46.86 16.52,46.5","RO":"28.21,45.45 28.45,45.29 28.76,45.23 28.78,45.31 29.4,45.42 29.71,45.26 29.56,44.84 29.05,44.76 29.1,44.98 28.98,44.99 28.89,44.92 28.93,44.81 28.81,44.57 28.89,44.57 28.65,44.3 28.66,43.98 28.59,43.74 28.22,43.77 28.05,43.82 27.88,43.99 27.74,43.96 27.43,44.02 27.09,44.17 26.22,44.01 25.82,43.77 25.5,43.67 23.22,43.87 22.92,43.83 22.87,43.95 23.03,44.08 22.69,44.25 22.49,44.44 22.55,44.54 22.72,44.61 22.5,44.71 22.09,44.54 21.91,44.67 21.36,44.83 21.53,44.9 21.35,45.01 21.49,45.15 20.94,45.37 20.77,45.48 20.77,45.6 20.77,45.75 20.71,45.74 20.24,46.11 20.51,46.17 20.61,46.13 20.76,46.25 21.04,46.24 21.15,46.3 21.26,46.41 21.32,46.61 21.5,46.7 21.66,47.04 22,47.4 22,47.51 22.29,47.73 22.61,47.77 23.14,48.09 23.41,47.99 24.18,47.91 24.58,47.93 24.89,47.72 24.98,47.72 25.46,47.91 26.16,47.99 26.31,48.2 26.71,48.26 26.98,48.16 27.61,47.34 28.07,46.98 28.24,46.64 28.24,46.45 28.1,45.97 28.16,45.65 28.07,45.6 28.21,45.45","MD":"26.62,48.26 26.85,48.39 27.23,48.37 27.55,48.48 27.82,48.42 28.09,48.26 28.29,48.24 28.46,48.09 28.53,48.15 28.77,48.12 28.92,47.95 29.13,47.96 29.21,47.77 29.13,47.49 29.54,47.27 29.51,47.13 29.57,46.96 29.88,46.83 29.94,46.72 29.92,46.54 30.13,46.42 29.84,46.35 29.71,46.45 29.56,46.41 29.3,46.47 29.2,46.38 29.19,46.52 28.96,46.46 28.93,46.36 29.01,46.18 28.95,46.05 28.74,45.94 28.73,45.85 28.49,45.67 28.5,45.52 28.21,45.45 28.07,45.6 28.16,45.65 28.1,45.97 28.24,46.45 28.24,46.64 28.07,46.98 27.61,47.34 26.98,48.16 26.79,48.26 26.62,48.26","IT":"7.02,45.93 7.13,45.88 7.54,45.98 7.79,45.92 7.99,46.02 8.13,46.16 8.1,46.27 8.42,46.45 8.46,46.25 8.64,46.11 8.82,46.08 8.78,46 8.95,45.83 9.02,45.85 9,46.01 9.25,46.29 9.3,46.5 9.43,46.48 9.53,46.31 9.94,46.36 10.08,46.23 10.15,46.25 10.04,46.48 10.09,46.6 10.43,46.55 10.4,46.67 10.45,46.86 10.99,46.78 11.24,46.98 11.78,46.99 12.17,47.08 12.15,46.94 12.39,46.7 13.7,46.52 13.38,46.26 13.63,46.18 13.49,45.99 13.6,45.98 13.58,45.81 13.87,45.61 13.72,45.59 13.78,45.63 13.63,45.77 13.47,45.71 13.21,45.77 13.03,45.64 12.43,45.47 12.54,45.54 12.49,45.55 12.27,45.45 12.23,45.24 12.52,44.97 12.38,44.8 12.28,44.83 12.3,44.43 12.4,44.22 12.69,43.99 13.56,43.57 14.01,42.69 14.54,42.24 15.17,41.93 16.16,41.9 16.15,41.76 15.91,41.62 15.9,41.51 17.1,41.06 17.47,40.84 17.95,40.66 18.33,40.37 18.49,40.1 18.34,39.82 18.08,39.94 17.87,40.28 17.4,40.34 17.18,40.5 16.93,40.46 16.67,40.14 16.52,39.75 16.6,39.64 16.82,39.58 17.11,39.38 17.17,39 17.1,38.92 16.95,38.94 16.62,38.8 16.56,38.71 16.55,38.41 16.28,38.25 16.06,37.94 15.72,37.94 15.65,38.03 15.64,38.18 15.82,38.3 15.93,38.67 16.2,38.76 16.21,38.94 16.11,39.02 16.02,39.35 15.69,39.99 15.59,40.05 15.29,40.07 14.95,40.24 14.95,40.47 14.77,40.67 14.34,40.6 14.46,40.73 14.31,40.81 14.04,40.81 13.73,41.24 13.25,41.29 13.09,41.24 12.85,41.41 12.63,41.47 12.08,41.94 11.81,42.08 11.64,42.29 11.3,42.42 11.1,42.42 11.18,42.46 11.17,42.54 10.71,42.94 10.51,42.97 10.52,43.2 10.32,43.51 10.25,43.85 10.05,44.02 9.73,44.1 9.29,44.32 8.77,44.42 8.55,44.35 8,43.88 7.49,43.77 7.48,43.86 7.68,44.08 7.64,44.16 7.32,44.14 6.9,44.34 6.84,44.51 7.03,44.72 6.99,44.83 6.74,44.92 6.63,45.07 6.69,45.14 6.84,45.14 7.08,45.24 7.15,45.38 6.79,45.74 6.8,45.81 7.02,45.93|15.58,38.22 15.23,37.78 15.1,37.46 15.12,37.33 15.23,37.24 15.17,37.21 15.3,37.06 15.12,36.84 15.11,36.69 14.56,36.78 14.14,37.1 13.91,37.1 13.17,37.48 12.76,37.57 12.53,37.67 12.44,37.82 12.55,38.05 12.73,38.18 12.9,38.03 13.16,38.19 13.29,38.19 13.79,37.98 14.51,38.05 14.79,38.17 15.12,38.15 15.5,38.29 15.63,38.27 15.58,38.22|9.63,40.88 9.81,40.5 9.64,40.27 9.71,40.02 9.56,39.17 9.06,39.24 8.97,38.96 8.88,38.91 8.65,38.93 8.42,39.21 8.4,39.48 8.45,39.72 8.54,39.73 8.55,39.84 8.41,39.92 8.47,40.29 8.19,40.65 8.22,40.91 8.36,40.85 8.57,40.85 8.82,40.95 9.23,41.26 9.62,41.02 9.55,40.93 9.63,40.88","HU":"22.13,48.41 22.25,48.41 22.35,48.26 22.58,48.13 22.77,48.11 22.88,47.95 22.61,47.77 22.29,47.73 22,47.51 22,47.4 21.66,47.04 21.5,46.7 21.32,46.61 21.26,46.41 21.12,46.28 20.76,46.25 20.61,46.13 19.53,46.16 19.28,46 19.09,46.02 18.93,45.93 18.67,45.91 18.53,45.8 18.36,45.75 17.81,45.79 17.31,46 16.87,46.34 16.52,46.5 16.28,46.86 16.09,46.86 16.25,46.97 16.45,47.01 16.49,47.12 16.42,47.22 16.44,47.4 16.62,47.45 16.68,47.54 16.64,47.61 16.42,47.67 16.55,47.75 16.79,47.68 17.07,47.71 17.04,47.87 17.17,48.01 17.76,47.77 18.72,47.79 18.79,48 18.91,48.05 19.47,48.11 19.63,48.22 19.9,48.13 20.33,48.3 20.49,48.53 20.64,48.55 21.07,48.51 21.45,48.55 21.77,48.34 22.13,48.41","CZ":"18.83,49.51 18.6,49.49 18.16,49.26 18.09,49.07 17.76,48.89 17.14,48.84 16.95,48.6 16.88,48.7 16.54,48.8 16.37,48.74 16.06,48.75 15.83,48.86 14.99,49 14.92,48.77 14.79,48.75 14.69,48.6 14.19,48.58 14.05,48.6 13.55,48.96 13.44,48.96 12.92,49.33 12.68,49.41 12.39,49.74 12.51,49.9 12.21,50.1 12.09,50.27 12.13,50.31 12.28,50.18 12.55,50.39 12.94,50.41 13,50.46 13.47,50.62 13.56,50.7 14.37,50.9 14.28,51.03 14.55,50.99 14.61,50.86 14.72,50.81 14.98,50.89 14.99,51.01 15.26,50.96 15.35,50.81 15.73,50.74 16.01,50.61 16.36,50.62 16.42,50.57 16.38,50.52 16.21,50.42 16.64,50.1 16.99,50.24 16.88,50.43 17.42,50.25 17.7,50.31 17.74,50.23 17.59,50.16 17.63,50.12 17.83,49.98 18.03,50.04 18.56,49.88 18.59,49.76 18.81,49.61 18.83,49.51","BG":"28.01,41.97 27.53,41.92 27.24,42.09 26.62,41.96 26.32,41.72 26.11,41.73 26.07,41.67 26.14,41.39 25.92,41.31 25.25,41.24 24.99,41.36 24.77,41.36 24.49,41.56 24.06,41.53 24.01,41.46 23.64,41.39 22.92,41.34 23,41.74 22.84,41.99 22.58,42.1 22.34,42.31 22.52,42.44 22.47,42.54 22.47,42.84 22.71,42.88 22.98,43.19 22.55,43.45 22.37,43.78 22.42,44.01 22.6,44.08 22.63,44.19 22.71,44.24 23.03,44.08 22.87,43.95 22.92,43.83 23.22,43.87 25.5,43.67 25.82,43.77 26.22,44.01 27.09,44.17 27.43,44.02 27.74,43.96 27.88,43.99 28.05,43.82 28.22,43.77 28.59,43.74 28.56,43.5 28.47,43.39 28.13,43.4 27.93,43.19 27.89,42.75 27.75,42.71 27.48,42.47 27.71,42.35 28.01,41.97","AT":"9.53,47.27 9.63,47.47 9.52,47.52 9.75,47.58 10.2,47.36 10.18,47.28 10.37,47.37 10.44,47.55 10.87,47.52 11.04,47.39 11.72,47.58 12.19,47.62 12.21,47.72 12.48,47.64 12.69,47.67 12.77,47.64 12.81,47.54 13.01,47.48 13.05,47.66 12.9,47.72 12.95,47.89 12.76,48.08 12.81,48.16 13.37,48.36 13.49,48.58 13.72,48.54 13.79,48.59 13.81,48.77 14.05,48.6 14.69,48.6 14.79,48.75 14.92,48.77 14.99,49 15.83,48.86 16.06,48.75 16.37,48.74 16.54,48.8 16.88,48.7 16.95,48.59 16.87,48.39 17.15,48.01 17.03,47.84 17.07,47.71 16.79,47.68 16.59,47.75 16.42,47.67 16.64,47.61 16.68,47.54 16.62,47.45 16.44,47.4 16.42,47.22 16.49,47.12 16.45,47.01 16.25,46.97 16.04,46.84 15.96,46.68 15.77,46.71 15.44,46.63 14.89,46.61 14.55,46.4 12.48,46.67 12.15,46.94 12.17,47.08 11.78,46.99 11.24,46.98 10.93,46.77 10.45,46.86 10.35,46.98 10.13,46.85 9.88,46.94 9.85,47.01 9.58,47.06 9.61,47.11 9.53,47.27"};
+  const POLI = {};
+  for (const k in POLI_RAW) {
+    const rings = POLI_RAW[k].split('|').map(r => r.split(' ').map(p => p.split(',').map(Number)));
+    const bb = [180, 90, -180, -90];
+    rings.forEach(r => r.forEach(([x, y]) => { bb[0] = Math.min(bb[0], x); bb[1] = Math.min(bb[1], y); bb[2] = Math.max(bb[2], x); bb[3] = Math.max(bb[3], y); }));
+    POLI[k] = {rings, bb};
+  }
+  const VIG = {
+    AT: {n: 'Austria', f: '🇦🇹', u: 'https://shop.asfinag.at/it', s: 'shop.asfinag.at (ASFINAG)', t: 'Vignetta obbligatoria su autostrade e superstrade: digitale (legata alla targa) da 1 giorno, 10 giorni, 2 mesi o 1 anno. Comprata online, quella di 2 mesi o annuale vale solo dal 18° giorno: per un viaggio vicino scegli 1 o 10 giorni. Alcune tratte (Brennero A13, Tauri, Arlberg, Karawanken…) hanno un pedaggio di tratta a parte.'},
+    CH: {n: 'Svizzera', f: '🇨🇭', u: 'https://via.admin.ch/shop', s: 'via.admin.ch (Ufficio federale dell\'imposizione doganale; anche www.e-vignette.ch)', t: 'Contrassegno autostradale obbligatorio su autostrade e semiautostrade: solo annuale, CHF 40, anche in versione elettronica legata alla targa (valida da subito).'},
+    SI: {n: 'Slovenia', f: '🇸🇮', u: 'https://evinjeta.dars.si/', s: 'evinjeta.dars.si (DARS) — anche nello shop ASFINAG', t: 'E-vignetta (legata alla targa) obbligatoria su autostrade e superstrade: settimanale, mensile, semestrale o annuale. Senza e-vignetta non si può entrare in autostrada. Il tunnel delle Caravanche ha un pedaggio a parte.'},
+    CZ: {n: 'Repubblica Ceca', f: '🇨🇿', u: 'https://edalnice.gov.cz/', s: 'edalnice.gov.cz (eDálnice, sito statale)', t: 'Vignetta elettronica obbligatoria sulle autostrade a pagamento: 1 giorno, 10 giorni, 30 giorni o annuale (prezzo ridotto per veicoli a basse emissioni).'},
+    SK: {n: 'Slovacchia', f: '🇸🇰', u: 'https://eznamka.sk/', s: 'eznamka.sk (Národná diaľničná spoločnosť)', t: 'Vignetta elettronica (e-známka) obbligatoria su autostrade e superstrade, a tempo o annuale.'},
+    HU: {n: 'Ungheria', f: '🇭🇺', u: 'https://ematrica.nemzetiutdij.hu/', s: 'ematrica.nemzetiutdij.hu (gestore statale delle strade)', t: 'E-matrica obbligatoria su autostrade e superstrade a pagamento: a tempo, mensile o annuale (annuale anche per singola contea).'},
+    RO: {n: 'Romania', f: '🇷🇴', u: 'https://www.erovinieta.ro/', s: 'erovinieta.ro (CNAIR, gestore statale)', t: 'Rovinieta obbligatoria su tutte le strade nazionali, non solo in autostrada: 1, 10, 30, 60 giorni o 12 mesi; dal 1° ottobre 2026 il prezzo dipende anche dalla classe Euro. Alcuni ponti sul Danubio hanno una tassa di passaggio a parte.'},
+    BG: {n: 'Bulgaria', f: '🇧🇬', u: 'https://web.bgtoll.bg/', s: 'web.bgtoll.bg (BG TOLL, agenzia statale)', t: 'Vignetta elettronica obbligatoria sulla rete stradale a pedaggio (autostrade e strade nazionali): giornaliera, fine settimana, settimanale, mensile, trimestrale o annuale.'},
+    MD: {n: 'Moldavia', f: '🇲🇩', u: 'https://evinieta.gov.md/', s: 'evinieta.gov.md (e-Vinieta, servizio governativo)', t: 'Per i veicoli immatricolati all\'estero la vinieta è obbligatoria su tutte le strade pubbliche, anche solo in transito, e va comprata prima di entrare: non c\'è tolleranza dopo il confine. Servono targa e numero di telaio.'}
+  };
+  function dentroAnello(r, x, y) {
+    let c = false;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const xi = r[i][0], yi = r[i][1], xj = r[j][0], yj = r[j][1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  }
+  function distBordo(P, x, y) {
+    const kx = 111320 * Math.cos(y * RAD), ky = 110540; let b = Infinity;
+    for (const r of P.rings) for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const ax = (r[j][0] - x) * kx, ay = (r[j][1] - y) * ky, dx = (r[i][0] - r[j][0]) * kx, dy = (r[i][1] - r[j][1]) * ky, l2 = dx * dx + dy * dy;
+      let t = l2 ? -(ax * dx + ay * dy) / l2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const px = ax + t * dx, py = ay + t * dy, d = px * px + py * py; if (d < b) b = d;
+    }
+    return Math.sqrt(b);
+  }
+  function campiona(R, passo) {
+    const out = [], c = R.coords; let k = 0;
+    for (let a = 0; a <= R.tot + 1; a += passo) {
+      const s = Math.min(a, R.tot);
+      while (k < c.length - 2 && R.cum[k + 1] < s) k++;
+      const l = R.cum[k + 1] - R.cum[k], t = l > 0 ? (s - R.cum[k]) / l : 0;
+      out.push({lon: c[k][0] + t * (c[k + 1][0] - c[k][0]), lat: c[k][1] + t * (c[k + 1][1] - c[k][1]), along: s});
+      if (s >= R.tot) break;
+    }
+    const z = c[c.length - 1]; if (out.length && out[out.length - 1].along < R.tot) out.push({lon: z[0], lat: z[1], along: R.tot});
+    return out;
+  }
+  const cacheRev = new Map();
+  async function paeseDi(p) {
+    const k = p.lat.toFixed(3) + ',' + p.lon.toFixed(3);
+    if (cacheRev.has(k)) return cacheRev.get(k);
+    const j = await nominatim(NOM + 'reverse?format=jsonv2&zoom=5&accept-language=it&lat=' + p.lat.toFixed(5) + '&lon=' + p.lon.toFixed(5));
+    const cc = j && j.address && j.address.country_code ? j.address.country_code.toUpperCase() : null;
+    cacheRev.set(k, cc); return cc;
+  }
+  // Paesi attraversati: un punto ogni ~20 km (più un passaggio fine ogni 2 km per non perdere gli attraversamenti brevi);
+  // i punti a meno di 8 km da un confine sono «dubbi» e si confermano con Nominatim (max 6 richieste, 1 al secondo).
+  async function controllaVignette() {
+    const R = S.routes[S.sel]; if (!R) return;
+    const tok = ++S.tokVign;
+    S.esitoVign = {stato: 'calcolo', paesi: {}, ordine: {}};
+    renderVign();
+    const info = {}, grossi = campiona(R, 20000), fini = campiona(R, 2000), marg = 0.12;
+    for (const p of grossi.concat(fini)) for (const cc in POLI) {
+      const P = POLI[cc];
+      if (p.lon < P.bb[0] - marg || p.lon > P.bb[2] + marg || p.lat < P.bb[1] - marg || p.lat > P.bb[3] + marg) continue;
+      const dentro = P.rings.some(r => dentroAnello(r, p.lon, p.lat)), d = distBordo(P, p.lon, p.lat);
+      const X = info[cc] || (info[cc] = {n: 0, max: -1, pMax: null, minOut: Infinity, pOut: null, primo: Infinity});
+      if (dentro) { X.n++; X.primo = Math.min(X.primo, p.along); if (d > X.max) { X.max = d; X.pMax = p; } }
+      else if (d < X.minOut) { X.minOut = d; X.pOut = p; }
+    }
+    const paesi = {}, ordine = {}, dubbi = [];
+    for (const cc in info) {
+      const X = info[cc];
+      ordine[cc] = X.n ? X.primo : (X.pOut ? X.pOut.along : Infinity);
+      if (X.n && X.max >= 8000) paesi[cc] = 'si';
+      else if (X.n) { paesi[cc] = 'forse'; dubbi.push({cc, p: X.pMax, pri: 0, d: X.max}); }
+      else if (X.minOut < 4000 && cc !== 'IT') { paesi[cc] = 'forse'; dubbi.push({cc, p: X.pOut, pri: 1, d: X.minOut}); }
+    }
+    dubbi.sort((a, b) => a.pri - b.pri || (a.pri ? a.d - b.d : b.d - a.d));
+    const tot = Math.min(6, dubbi.length);
+    S.esitoVign = {stato: tot ? 'verifica' : 'fatto', paesi, ordine, n: 0, tot};
+    renderVign();
+    for (let i = 0; i < tot; i++) {
+      if (tok !== S.tokVign) return;
+      const x = dubbi[i];
+      S.esitoVign.n = i + 1; renderVign();
+      try { const cc = await paeseDi(x.p); if (cc === x.cc) paesi[x.cc] = 'si'; else if (cc) paesi[x.cc] = 'no'; } catch (e) {}
+    }
+    if (tok !== S.tokVign) return;
+    S.esitoVign.stato = 'fatto'; renderVign();
+  }
+  function renderVign() {
+    const el = $('vign'), E = S.esitoVign; if (!el || !E) return;
+    const R = S.routes[S.sel]; if (!R) return;
+    let h = '<div class="h3">Vignette e pedaggi</div>';
+    if (E.stato === 'calcolo') h += '<p class="small">Controllo i paesi attraversati…</p>';
+    else if (E.stato === 'verifica') h += '<p class="small">Verifico i tratti vicino ai confini (' + E.n + '/' + E.tot + ')…</p>';
+    const lista = Object.keys(VIG).filter(cc => E.paesi[cc] === 'si' || E.paesi[cc] === 'forse').sort((a, b) => E.ordine[a] - E.ordine[b]);
+    for (const cc of lista) {
+      const v = VIG[cc], forse = E.paesi[cc] === 'forse';
+      h += '<div class="vg" data-paese="' + cc + '"><div class="fl">' + v.f + '</div><div class="tx"><b>' + v.n + (forse ? ' <span class="pill warn">forse: il percorso passa vicino al confine</span>' : '') + '</b>' + esc(v.t) +
+        '<br><a class="btn sm pri" href="' + v.u + '" target="_blank" rel="noopener">Acquista sul sito ufficiale ↗</a><div class="small" style="margin-top:4px">' + esc(v.s) + '</div></div></div>';
+    }
+    if (E.stato === 'fatto' && !lista.length) h += '<p class="small">Nessun paese con vignetta su questo percorso.</p>';
+    if (E.paesi.IT === 'si' || (S.pos && POLI.IT.rings.some(r => dentroAnello(r, S.pos.lon, S.pos.lat)))) {
+      h += '<div class="vg"><div class="fl">🇮🇹</div><div class="tx"><b>Italia: niente vignetta</b>In autostrada il pedaggio si paga al casello (contanti o carte) oppure con <a href="https://www.telepass.com/" target="_blank" rel="noopener">Telepass</a> o altro telepedaggio (corsie gialle, solo con il dispositivo a bordo)' +
+        (R.pedaggio != null ? (R.pedaggio > 1000 ? '; su questo percorso circa ' + fmtDist(R.pedaggio) + ' sono a pedaggio' : '')
+          : (R.autostradaIT > 1000 ? '; su questo percorso circa ' + fmtDist(R.autostradaIT) + ' di autostrade italiane, quasi tutte a pedaggio' : '')) + '. <b style="display:inline;font-size:inherit">ZTL:</b> nei centri storici i varchi con telecamera multano chi entra senza permesso; il percorso non conosce le ZTL, segui i cartelli.</div></div>';
+    }
+    if (lista.length) h += '<div class="note warn">Compra solo dai siti ufficiali indicati: molti siti di «vignette online» non ufficiali applicano sovrapprezzi o sono truffe. Le regole valgono per auto fino a 3,5 t.</div>';
+    el.innerHTML = h;
+  }
+
+  /* ---------- ricerca, preferiti, recenti ---------- */
+  let pref = Object.assign({casa: null, lavoro: null, salvati: []}, AX.store.get('naviga-preferiti', {}));
+  let recenti = AX.store.get('naviga-recenti', []);
+  let ris = [], modoSalva = null, aperta = -1, tCerca = 0, seqCerca = 0;
+  const cacheCerca = new Map();
+  const salvaPref = () => AX.store.set('naviga-preferiti', pref);
+  const pulisci = d => ({name: d.name, addr: d.addr || '', lat: +d.lat, lon: +d.lon});
+  function addRecente(d) {
+    if (!d || d.name === 'Punto sulla mappa' && !d.addr) return;
+    recenti = [pulisci(d)].concat(recenti.filter(r => Math.abs(r.lat - d.lat) > 1e-4 || Math.abs(r.lon - d.lon) > 1e-4)).slice(0, 12);
+    AX.store.set('naviga-recenti', recenti);
+  }
+  function coordDa(q) {
+    const m = q.match(/^\s*(-?\d{1,2}(?:[.,]\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:[.,]\d+)?)\s*$/);
+    if (!m) return null;
+    const lat = +m[1].replace(',', '.'), lon = +m[2].replace(',', '.');
+    return Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? {name: 'Coordinate', addr: lat + ', ' + lon, lat, lon} : null;
+  }
+  function apriCerca() {
+    chiudiFogli(); $('shCerca').hidden = false;
+    clearTimeout(tCerca); seqCerca++; $('qIn').value = ''; ris = []; aperta = -1; $('cStato').textContent = '';
+    avvisoMovimento(); renderLuoghi(); setTimeout(() => $('qIn').focus(), 60);
+  }
+  function avvisoMovimento() {
+    const a = $('cAvviso');
+    if (modoSalva) { a.hidden = false; a.textContent = 'Cerca l\'indirizzo e toccalo per salvarlo come ' + (modoSalva === 'casa' ? 'Casa' : modoSalva === 'lavoro' ? 'Lavoro' : 'preferito') + '.'; return; }
+    const mov = (S.speed || 0) * 3.6 > 15;
+    a.hidden = !mov; if (mov) a.textContent = 'Sei in movimento: fai impostare la destinazione a un passeggero o fermati in un posto sicuro.';
+  }
+  $('qIn').addEventListener('input', () => {
+    const q = $('qIn').value.trim(); clearTimeout(tCerca);
+    if (q.length < 3) { ris = []; $('cStato').textContent = ''; renderLuoghi(); return; }
+    tCerca = setTimeout(() => cerca(q), 1200);
+  });
+  $('fCerca').addEventListener('submit', e => { e.preventDefault(); clearTimeout(tCerca); const q = $('qIn').value.trim(); if (q) cerca(q); $('qIn').blur(); });
+  async function cerca(q) {
+    const seq = ++seqCerca, co = coordDa(q);
+    if (co) { ris = [co]; aperta = -1; $('cStato').textContent = ''; renderLuoghi(); return; }
+    const key = q.toLowerCase() + (S.pos ? '@' + S.pos.lat.toFixed(1) + ',' + S.pos.lon.toFixed(1) : '');
+    if (cacheCerca.has(key)) { ris = cacheCerca.get(key); aperta = -1; $('cStato').textContent = ris.length ? '' : 'Nessun risultato.'; renderLuoghi(); return; }
+    $('cStato').textContent = 'Cerco…';
+    let url = NOM + 'search?format=jsonv2&accept-language=it&limit=8&q=' + encodeURIComponent(q);
+    if (S.pos) { const b = 1.5; url += '&viewbox=' + (S.pos.lon - b).toFixed(3) + ',' + (S.pos.lat + b).toFixed(3) + ',' + (S.pos.lon + b).toFixed(3) + ',' + (S.pos.lat - b).toFixed(3); }
+    try {
+      const j = await nominatim(url);
+      const r = (j || []).map(x => {
+        const parti = String(x.display_name || '').split(', '), nome = x.name || parti[0] || 'Luogo';
+        return {name: nome, addr: (parti[0] === nome ? parti.slice(1) : parti).join(', '), lat: +x.lat, lon: +x.lon};
+      });
+      cacheCerca.set(key, r);
+      if (seq !== seqCerca) return;
+      ris = r; aperta = -1; $('cStato').textContent = r.length ? '' : 'Nessun risultato: prova ad aggiungere la città.'; renderLuoghi();
+    } catch (e) {
+      if (seq === seqCerca) $('cStato').textContent = 'Ricerca non riuscita: ' + (navigator.onLine === false ? 'nessuna connessione' : e.message) + '.';
+    }
+  }
+  function rigaLuogo(key, d, ico, extra) {
+    const km = S.pos && d.lat != null ? ' · ' + fmtDist(dist(S.pos, d)) : '';
+    return '<div class="rrow"><button class="pick" data-pick="' + key + '"><span class="ic">' + ico + '</span><span class="tx"><b>' + esc(d.name) + '</b><span>' + esc((d.addr || '') + km) + '</span></span></button>' + (extra || '') + '</div>';
+  }
+  function renderLuoghi() {
+    const q = $('qIn').value.trim();
+    let h = '';
+    if (ris.length) {
+      h += '<div class="h3">Risultati</div><div class="list">';
+      ris.forEach((d, i) => {
+        h += rigaLuogo('r:' + i, d, I.pin, '<button class="ib' + (aperta === i ? ' on' : '') + '" data-star="' + i + '" aria-label="Salva">' + I.stella + '</button>');
+        if (aperta === i) h += '<div class="acts"><button class="btn sm" data-salva="casa:' + i + '">Salva come Casa</button><button class="btn sm" data-salva="lavoro:' + i + '">Come Lavoro</button><button class="btn sm" data-salva="pref:' + i + '">Nei preferiti</button></div>';
+      });
+      h += '</div>';
+    }
+    $('cRis').innerHTML = h;
+    let p = '<div class="h3">Preferiti</div><div class="list">';
+    for (const k of ['casa', 'lavoro']) {
+      const d = pref[k], nome = k === 'casa' ? 'Casa' : 'Lavoro';
+      if (d) p += rigaLuogo('p:' + k, {name: nome, addr: d.name + (d.addr ? ', ' + d.addr : ''), lat: d.lat, lon: d.lon}, k === 'casa' ? I.casa : I.lavoro, '<button class="btn sm" data-imposta="' + k + '" style="margin-right:8px">Cambia</button>');
+      else p += '<div class="rrow"><button class="pick" data-imposta="' + k + '"><span class="ic">' + (k === 'casa' ? I.casa : I.lavoro) + '</span><span class="tx"><b>' + nome + '</b><span>Tocca per impostare</span></span></button></div>';
+    }
+    pref.salvati.forEach((d, i) => { p += rigaLuogo('s:' + i, d, I.stella, '<button class="ib" data-del="s:' + i + '" aria-label="Rimuovi">' + I.x + '</button>'); });
+    p += '</div>';
+    $('cPref').innerHTML = q.length >= 3 && ris.length ? '' : p;
+    let r = '';
+    if (recenti.length && !(q.length >= 3 && ris.length)) {
+      r = '<div class="h3" style="display:flex;justify-content:space-between;align-items:center">Recenti <button class="btn sm" data-del="rec">Cancella</button></div><div class="list">';
+      recenti.forEach((d, i) => { r += rigaLuogo('c:' + i, d, I.orologio); });
+      r += '</div>';
+    }
+    $('cRec').innerHTML = r;
+  }
+  function luogo(key) {
+    const [t, v] = key.split(':');
+    if (t === 'r') return ris[+v];
+    if (t === 'p') return pref[v];
+    if (t === 's') return pref.salvati[+v];
+    if (t === 'c') return recenti[+v];
+    return null;
+  }
+  function salvaCome(dove, d) {
+    d = pulisci(d);
+    if (dove === 'pref') { pref.salvati = [d].concat(pref.salvati.filter(x => Math.abs(x.lat - d.lat) > 1e-4 || Math.abs(x.lon - d.lon) > 1e-4)).slice(0, 30); toast('Aggiunto ai preferiti'); }
+    else { pref[dove] = d; toast((dove === 'casa' ? 'Casa' : 'Lavoro') + ' salvato'); }
+    salvaPref(); renderChips();
+  }
+  $('shCerca').addEventListener('click', e => {
+    const b = e.target.closest('[data-pick],[data-star],[data-salva],[data-imposta],[data-del],[data-chiudi]'); if (!b) return;
+    if (b.dataset.chiudi != null) { modoSalva = null; chiudiFogli(); return; }
+    if (b.dataset.imposta) { modoSalva = b.dataset.imposta; avvisoMovimento(); $('qIn').value = ''; ris = []; renderLuoghi(); $('qIn').focus(); return; }
+    if (b.dataset.star != null) { const i = +b.dataset.star; aperta = aperta === i ? -1 : i; renderLuoghi(); return; }
+    if (b.dataset.salva) { const [dove, i] = b.dataset.salva.split(':'); salvaCome(dove, ris[+i]); aperta = -1; renderLuoghi(); return; }
+    if (b.dataset.del) {
+      if (b.dataset.del === 'rec') { recenti = []; AX.store.set('naviga-recenti', recenti); }
+      else { pref.salvati.splice(+b.dataset.del.split(':')[1], 1); salvaPref(); renderChips(); }
+      renderLuoghi(); return;
+    }
+    const d = luogo(b.dataset.pick); if (!d) return;
+    if (modoSalva) { salvaCome(modoSalva, d); modoSalva = null; avvisoMovimento(); $('qIn').value = ''; ris = []; renderLuoghi(); return; }
+    setDest(b.dataset.pick.startsWith('p:') ? {name: b.dataset.pick === 'p:casa' ? 'Casa' : 'Lavoro', addr: d.name + (d.addr ? ', ' + d.addr : ''), lat: d.lat, lon: d.lon} : pulisci(d));
+  });
+  function renderChips() {
+    let h = '';
+    if (pref.casa) h += '<button class="chip" data-chip="p:casa">' + I.casa.replace('<svg', '<svg width="16" height="16"') + ' Casa</button>';
+    if (pref.lavoro) h += '<button class="chip" data-chip="p:lavoro">' + I.lavoro.replace('<svg', '<svg width="16" height="16"') + ' Lavoro</button>';
+    pref.salvati.slice(0, 4).forEach((d, i) => { h += '<button class="chip" data-chip="s:' + i + '">' + esc(d.name.length > 22 ? d.name.slice(0, 21) + '…' : d.name) + '</button>'; });
+    $('chips').innerHTML = h; rs();
+  }
+  $('chips').addEventListener('click', e => {
+    const b = e.target.closest('[data-chip]'); if (!b) return;
+    const k = b.dataset.chip, d = luogo(k); if (!d) return;
+    setDest(k.startsWith('p:') ? {name: k === 'p:casa' ? 'Casa' : 'Lavoro', addr: d.name + (d.addr ? ', ' + d.addr : ''), lat: d.lat, lon: d.lon} : pulisci(d));
+  });
+  function aggPill() { $('pillTx').textContent = S.dest ? S.dest.name : 'Dove vuoi andare?'; $('pill').style.color = S.dest ? 'var(--fg)' : ''; }
+  $('pill').addEventListener('click', apriCerca);
+
+  /* ---------- fogli ---------- */
+  function chiudiFogli() { ['shCerca', 'shVei', 'shOpz'].forEach(id => { $(id).hidden = true; }); }
+  document.querySelectorAll('#shVei [data-chiudi], #shOpz [data-chiudi]').forEach(b => b.addEventListener('click', () => { if (!$('shVei').hidden) salvaVeicolo(true); chiudiFogli(); }));
+  $('bOpz').addEventListener('click', () => { chiudiFogli(); syncOpz(); $('shOpz').hidden = false; });
+  $('bVei').addEventListener('click', () => { chiudiFogli(); renderVeicolo(); $('shVei').hidden = false; });
+
+  /* ---------- opzioni ---------- */
+  function syncOpz() {
+    $('oVoce').checked = opt.voce; $('oPausa').checked = opt.pausaMusica; $('oEvita').checked = opt.evitaAutostrade;
+    document.querySelectorAll('#oTema button').forEach(b => b.classList.toggle('on', b.dataset.t === opt.tema));
+    if (excludeOk === true) $('oEvitaNota').textContent = 'Il servizio di percorsi ora esclude le autostrade.';
+    if (document.activeElement !== $('oCarto')) $('oCarto').value = AX.store.get('naviga-carto-key', '') || '';
+  }
+  $('oCarto').addEventListener('change', () => {
+    const k = $('oCarto').value.trim();
+    if (k && !/^[\w.-]{8,200}$/.test(k)) { toast('La chiave contiene caratteri non validi'); return; }
+    AX.store.set('naviga-carto-key', k); creaNotte(); applicaTema(true);
+    toast(k ? 'Chiave CARTO salvata: mappa notte CARTO' : 'Chiave rimossa: mappa notte OpenStreetMap scurita');
+  });
+  $('oVoce').addEventListener('change', e => { opt.voce = e.target.checked; salvaOpt(); if (!opt.voce && haVoce) speechSynthesis.cancel(); });
+  $('oPausa').addEventListener('change', e => { opt.pausaMusica = e.target.checked; salvaOpt(); });
+  $('oEvita').addEventListener('change', e => { opt.evitaAutostrade = e.target.checked; salvaOpt(); if (S.dest && !S.nav) setDest(S.dest); });
+  $('oTema').addEventListener('click', e => { const b = e.target.closest('[data-t]'); if (!b) return; opt.tema = b.dataset.t; salvaOpt(); syncOpz(); applicaTema(true); });
+  $('oProva').addEventListener('click', () => { sbloccaVoce(); if (!haVoce) { toast('Sintesi vocale non disponibile'); return; } parla('Tra 500 metri, svolta a destra in Via dell\'Indipendenza', true); if (!voce) toast('Nessuna voce italiana installata: uso la voce predefinita'); });
+
+  /* ---------- tasti mappa ---------- */
+  $('fSegui').addEventListener('click', () => { if (!S.pos) { toast('Posizione non ancora disponibile'); return; } setFollow(true); });
+  $('fPiu').addEventListener('click', () => map && map.zoomIn());
+  $('fMeno').addEventListener('click', () => map && map.zoomOut());
+  $('fTutto').addEventListener('click', vediTutto);
+  $('fTema').addEventListener('click', () => { opt.tema = notteAttiva ? 'giorno' : 'notte'; salvaOpt(); applicaTema(true); toast(opt.tema === 'notte' ? 'Mappa notte (per tornare all\'automatica: Opzioni)' : 'Mappa giorno (per tornare all\'automatica: Opzioni)'); });
+
+  /* ---------- musica (lettore dell'app che ospita) ---------- */
+  let ultimaMusica = '';
+  function aggMusica() {
+    const n = AX.player.now(), disp = AX.player.available;
+    const k = JSON.stringify([disp, n && n.id, n && n.title, n && n.artist, n && n.cover, n && n.playing]);
+    if (k === ultimaMusica) return; ultimaMusica = k;
+    $('mPrev').disabled = $('mNext').disabled = $('mPlay').disabled = !disp || !n;
+    $('mPlay').innerHTML = n && n.playing ? I.pausa : I.play;
+    $('mPlay').setAttribute('aria-label', n && n.playing ? 'Pausa' : 'Riproduci');
+    $('mTit').textContent = !disp ? 'Musica' : n ? (n.title || 'Brano') : 'Nessun brano';
+    $('mArt').textContent = !disp ? 'Apri Naviga dalla scheda Altro di Atlante Musica per i comandi' : n ? (n.artist || n.album || '') : 'Scegli la musica nell\'app';
+    $('mCov').innerHTML = n && n.cover ? '<img alt="" src="' + esc(n.cover) + '">' : I.nota;
+  }
+  const comando = f => () => { f(); setTimeout(aggMusica, 150); setTimeout(aggMusica, 700); };
+  $('mPrev').addEventListener('click', comando(() => AX.player.prev()));
+  $('mNext').addEventListener('click', comando(() => AX.player.next()));
+  $('mPlay').addEventListener('click', comando(() => { pausaDaVoce = false; AX.player.toggle(); }));
+  AX.player.onChange(aggMusica);
+  setInterval(aggMusica, 2500);
+  aggMusica();
+
+  /* ---------- veicolo ---------- */
+  const SCAD = [['revisione', 'Revisione'], ['assicurazione', 'Assicurazione (RCA)'], ['bollo', 'Bollo'], ['tagliando', 'Tagliando']];
+  const SERVIZI = [
+    {t: 'Copertura assicurativa (RCA)', s: 'Portale dell\'Automobilista — Ministero dei Trasporti, gratuito', u: 'https://www.ilportaledellautomobilista.it/web/portale-automobilista/ext/verifica-copertura-rc'},
+    {t: 'Ultime revisioni', s: 'Portale dell\'Automobilista — data ed esito', u: 'https://www.ilportaledellautomobilista.it/web/portale-automobilista/verifica-revisioni-effettuate-ms'},
+    {t: 'Classe ambientale (Euro)', s: 'Portale dell\'Automobilista — utile per ZTL e blocchi del traffico', u: 'https://www.ilportaledellautomobilista.it/web/portale-automobilista/ext/verifica-classe-ambientale-veicolo'},
+    {t: 'Visura PRA', s: 'ACI Visurenet — proprietario, fermi e ipoteche (SPID o CIE, 6 €)', u: 'https://aci.gov.it/servizio/visurenet-visura-della-banca-dati-del-pubblico-registro-automobilistico-pra/'},
+    {t: 'Calcolo del bollo', s: 'ACI — importo e scadenza dagli archivi regionali, gratuito', u: 'https://online.aci.it/acinet/calcolobollo/index.asp'}
+  ];
+  const TARGA_IT = /^[A-HJ-NPR-TV-Z]{2}\d{3}[A-HJ-NPR-TV-Z]{2}$/;
+  let V = Object.assign({targa: '', marca: '', modello: '', anno: '', alim: '', scad: {}}, AX.store.get('naviga-veicolo', {}));
+  V.scad = V.scad || {};
+  let fotoV = AX.store.get('naviga-veicolo-foto', null), fotoOrig = null, tSalva = 0;
+  const normTarga = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // dal testo letto (OCR) alla targa italiana AA000AA, correggendo le confusioni tipiche lettera/cifra
+  const L2D = {O: '0', D: '0', Q: '0', U: '0', I: '1', L: '1', J: '1', T: '7', Z: '2', S: '5', B: '8', G: '6', A: '4'};
+  const D2L = {'0': 'D', '1': 'L', '2': 'Z', '3': 'B', '4': 'A', '5': 'S', '6': 'G', '7': 'T', '8': 'B', '9': 'P'};
+  const BAD = {I: 'L', O: 'D', Q: 'D', U: 'V'};
+  function targaDa(testo) { const r = targaDett(testo); return r ? r.t : null; }
+  function targaDett(testo) {
+    const T = String(testo || '').toUpperCase(), righe = T.split(/\n+/).concat([T]);
+    let best = null;
+    for (const r of righe) {
+      const s = r.replace(/[^A-Z0-9]/g, '');
+      for (let i = 0; i + 7 <= s.length; i++) {
+        let out = '', fix = 0;
+        for (let k = 0; k < 7 && fix < 9; k++) {
+          let c = s[i + k];
+          if (k >= 2 && k <= 4) { if (!/\d/.test(c)) { if (L2D[c]) { c = L2D[c]; fix++; } else fix = 9; } }
+          else if (/\d/.test(c)) { c = D2L[c]; fix++; }
+          else if (BAD[c]) { c = BAD[c]; fix++; }
+          out += c;
+        }
+        if (fix <= 2 && (!best || fix < best.fix)) best = {t: out, fix};
+      }
+    }
+    return best;
+  }
+  function giorniA(iso) { if (!iso) return null; const d = new Date(iso + 'T12:00:00'), o = new Date(); o.setHours(12, 0, 0, 0); return Math.round((d - o) / 864e5); }
+  function statoScad(iso) {
+    const g = giorniA(iso); if (g == null || isNaN(g)) return {c: '', t: 'non impostata'};
+    if (g < 0) return {c: 'bad', t: 'scaduta da ' + (-g) + (g === -1 ? ' giorno' : ' giorni')};
+    if (g === 0) return {c: 'bad', t: 'scade oggi'};
+    if (g <= 30) return {c: 'warn', t: 'tra ' + g + (g === 1 ? ' giorno' : ' giorni')};
+    return {c: 'ok', t: 'in regola'};
+  }
+  const fmtData = iso => iso ? new Date(iso + 'T12:00:00').toLocaleDateString('it-IT', {day: '2-digit', month: '2-digit', year: 'numeric'}) : '';
+  function aggPromemoria() {
+    const vicine = SCAD.map(([k, n]) => ({k, n, iso: V.scad[k], g: giorniA(V.scad[k])})).filter(x => x.iso && x.g != null && !isNaN(x.g));
+    $('bVeiDot').hidden = !vicine.some(x => x.g <= 30);
+    if (!$('vPromo')) return;
+    if (!vicine.length) { $('vPromo').innerHTML = '<div class="note">Inserisci le scadenze qui sotto: i promemoria compaiono qui e con un pallino rosso sul tasto del veicolo quando manca meno di un mese.</div>'; return; }
+    vicine.sort((a, b) => a.g - b.g);
+    $('vPromo').innerHTML = '<div class="list">' + vicine.map(x => { const s = statoScad(x.iso); return '<div class="row"><div class="tx"><b>' + x.n + '</b><span>' + fmtData(x.iso) + '</span></div><span class="pill ' + s.c + '">' + s.t + '</span></div>'; }).join('') + '</div>';
+  }
+  function renderFoto() {
+    $('vFoto').innerHTML = fotoV ? '<img alt="Foto del veicolo" src="' + fotoV + '">' : '<div class="vuota">' + I.foto + 'Nessuna foto: scattane una alla tua auto<br><span class="small">con la targa ben visibile, se vuoi leggerla</span></div>';
+    $('vOcr').disabled = !fotoV && !fotoOrig;
+  }
+  function aggTarga() {
+    const t = normTarga($('vTarga').value), el = $('vTargaSt');
+    el.textContent = !t ? 'Formato italiano: AA000AA (le lettere I, O, Q, U non si usano).' : TARGA_IT.test(t) ? 'Formato italiano corretto ✓' : 'Formato diverso da AA000AA: controlla (va bene per targhe estere o speciali).';
+    el.style.color = t && !TARGA_IT.test(t) ? 'var(--warn)' : '';
+  }
+  function renderVeicolo() {
+    $('vTarga').value = V.targa || ''; $('vMarca').value = V.marca || ''; $('vModello').value = V.modello || ''; $('vAnno').value = V.anno || ''; $('vAlim').value = V.alim || '';
+    $('vScad').innerHTML = SCAD.map(([k, n]) => { const s = statoScad(V.scad[k]); return '<div class="sc"><label for="d_' + k + '">' + n + '</label><span class="pill ' + s.c + '" id="p_' + k + '">' + s.t + '</span><input type="date" class="in" id="d_' + k + '" value="' + esc(V.scad[k] || '') + '"></div>'; }).join('');
+    $('vServ').innerHTML = SERVIZI.map((s, i) => '<a class="row" href="' + s.u + '" target="_blank" rel="noopener" data-serv="' + i + '"><div class="tx"><b>' + s.t + '</b><span>' + s.s + '</span></div><span style="color:var(--fg3)">↗</span></a>').join('');
+    renderFoto(); aggTarga(); aggPromemoria(); aggHint(); $('vSalvato').textContent = '';
+  }
+  function aggHint() {
+    const a = parseInt(V.anno, 10), h = $('vHint');
+    if (a > 1950 && a <= new Date().getFullYear() + 1 && !V.scad.revisione) h.textContent = 'Revisione: la prima entro 4 anni dall\'immatricolazione (quindi nel ' + (a + 4) + '), poi ogni 2 anni. Controlla la data esatta con «Ultime revisioni» qui sotto.';
+    else h.textContent = 'Bollo, assicurazione e revisione si possono verificare con la targa nei servizi ufficiali qui sotto.';
+  }
+  function leggiForm() {
+    V.targa = normTarga($('vTarga').value); V.marca = $('vMarca').value.trim(); V.modello = $('vModello').value.trim();
+    V.anno = $('vAnno').value.replace(/\D/g, '').slice(0, 4); V.alim = $('vAlim').value;
+    SCAD.forEach(([k]) => { const el = $('d_' + k); if (el) V.scad[k] = el.value || ''; });
+  }
+  function salvaVeicolo(silenzioso) {
+    leggiForm(); V.agg = Date.now();
+    AX.store.set('naviga-veicolo', V);
+    $('vSalvato').textContent = 'Salvato ✓';
+    SCAD.forEach(([k]) => { const p = $('p_' + k); if (p) { const s = statoScad(V.scad[k]); p.className = 'pill ' + s.c; p.textContent = s.t; } });
+    aggPromemoria(); aggHint();
+    if (silenzioso === false) toast('Dati del veicolo salvati');
+  }
+  $('shVei').addEventListener('input', e => {
+    if (e.target.id === 'vTarga') aggTarga();
+    clearTimeout(tSalva); $('vSalvato').textContent = ''; tSalva = setTimeout(() => salvaVeicolo(true), 700);
+  });
+  $('shVei').addEventListener('change', () => { clearTimeout(tSalva); salvaVeicolo(true); });
+  $('vTarga').addEventListener('blur', () => { $('vTarga').value = normTarga($('vTarga').value); aggTarga(); });
+  $('vSalva').addEventListener('click', () => { clearTimeout(tSalva); $('vTarga').value = normTarga($('vTarga').value); salvaVeicolo(false); });
+  $('vFotoBtn').addEventListener('click', () => $('vFile').click());
+  $('vFile').addEventListener('change', async () => {
+    const f = $('vFile').files && $('vFile').files[0]; if (!f) return;
+    fotoOrig = f;
+    try { fotoV = await riduci(f, 1024, 0.78); AX.store.set('naviga-veicolo-foto', fotoV); renderFoto(); $('vOcrSt').textContent = 'Foto salvata. Se la targa è visibile, tocca «Leggi la targa dalla foto».'; }
+    catch (e) { $('vOcrSt').textContent = 'Foto non leggibile: ' + e.message; }
+    $('vFile').value = '';
+  });
+  function caricaImg(src) {
+    return new Promise((res, rej) => {
+      const im = new Image(), u = typeof src === 'string' ? src : URL.createObjectURL(src);
+      im.onload = () => { res(im); if (typeof src !== 'string') setTimeout(() => URL.revokeObjectURL(u), 2000); };
+      im.onerror = () => rej(new Error('formato immagine non supportato'));
+      im.src = u;
+    });
+  }
+  async function riduci(src, max, q) {
+    const im = await caricaImg(src), k = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+    const c = document.createElement('canvas'); c.width = Math.round(im.naturalWidth * k); c.height = Math.round(im.naturalHeight * k);
+    c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', q);
+  }
+  function ritaglio(im, x, y, w, h, scala) {
+    const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * scala)); c.height = Math.max(1, Math.round(h * scala));
+    c.getContext('2d', {willReadFrequently: true}).drawImage(im, x, y, w, h, 0, 0, c.width, c.height);
+    return contrasto(c);
+  }
+  function preparaOcr(im, max) {
+    const k = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+    return ritaglio(im, 0, 0, im.naturalWidth, im.naturalHeight, k);
+  }
+  // Zone dove è probabile la targa: fasce con molti bordi verticali (i caratteri), larghe circa 4-5 volte l'altezza
+  function zoneTarga(im) {
+    const W = 640, k = W / im.naturalWidth, H = Math.max(1, Math.round(im.naturalHeight * k));
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const g = c.getContext('2d', {willReadFrequently: true}); g.drawImage(im, 0, 0, W, H);
+    const p = g.getImageData(0, 0, W, H).data, L = new Float32Array(W * H), E = new Uint8Array(W * H);
+    for (let i = 0, j = 0; j < W * H; i += 4, j++) L[j] = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W - 1; x++) if (Math.abs(L[y * W + x + 1] - L[y * W + x]) > 40) E[y * W + x] = 1;
+    const righe = new Float32Array(H), r = Math.max(2, Math.round(H / 80));
+    for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < W; x++) s += E[y * W + x]; righe[y] = s; }
+    const sm = new Float32Array(H);
+    for (let y = 0; y < H; y++) { let s = 0, n = 0; for (let q = Math.max(0, y - r); q <= Math.min(H - 1, y + r); q++) { s += righe[q]; n++; } sm[y] = s / n; }
+    const out = [];
+    for (let t = 0; t < 3; t++) {
+      let ym = 0; for (let y = 1; y < H; y++) if (sm[y] > sm[ym]) ym = y;
+      if (sm[ym] < 6) break;
+      let y0 = ym, y1 = ym; const lim = sm[ym] * 0.4;
+      while (y0 > 0 && sm[y0 - 1] > lim) y0--;
+      while (y1 < H - 1 && sm[y1 + 1] > lim) y1++;
+      const bh = Math.max(8, y1 - y0 + 1), col = new Float32Array(W);
+      for (let y = y0; y <= y1; y++) for (let x = 0; x < W; x++) col[x] += E[y * W + x];
+      const ww = Math.min(W, Math.round(bh * 5.5)); let best = -1, bx = 0, s = 0;
+      for (let x = 0; x < W; x++) { s += col[x]; if (x >= ww) s -= col[x - ww]; if (x >= ww - 1 && s > best) { best = s; bx = x - ww + 1; } }
+      const m = bh * 0.4, x0 = Math.max(0, bx - m), yy0 = Math.max(0, y0 - m), x1 = Math.min(W, bx + ww + m), yy1 = Math.min(H, y1 + 1 + m);
+      const Hc = (yy1 - yy0) / k;
+      out.push(ritaglio(im, x0 / k, yy0 / k, (x1 - x0) / k, Hc, Math.min(4, 150 / Hc)));
+      for (let y = Math.max(0, y0 - bh); y <= Math.min(H - 1, y1 + bh); y++) sm[y] = 0;
+    }
+    return out;
+  }
+  function contrasto(c) {  // scala di grigi e contrasto allungato: aiuta Tesseract sulle foto
+    const g = c.getContext('2d', {willReadFrequently: true});
+    const d = g.getImageData(0, 0, c.width, c.height), p = d.data, n = p.length / 4, lum = new Uint8ClampedArray(n), hist = new Uint32Array(256);
+    for (let i = 0, j = 0; j < n; i += 4, j++) { lum[j] = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]; hist[lum[j]]++; }
+    let acc = 0, lo = 0, hi = 255;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > n * 0.02) { lo = i; break; } }
+    acc = 0; for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > n * 0.02) { hi = i; break; } }
+    const sc = 255 / Math.max(1, hi - lo);
+    for (let i = 0, j = 0; j < n; i += 4, j++) { const v = (lum[j] - lo) * sc; p[i] = p[i + 1] = p[i + 2] = v; }
+    g.putImageData(d, 0, 0); return c;
+  }
+  $('vOcr').addEventListener('click', async () => {
+    const src = fotoOrig || fotoV; if (!src) { toast('Prima scatta o scegli una foto'); return; }
+    const b = $('vOcr'), st = $('vOcrSt'); b.disabled = true;
+    st.textContent = 'Carico il lettore di testo (la prima volta scarica qualche MB)…';
+    let w = null;
+    try {
+      await caricaScript(TESSERACT);
+      const im = await caricaImg(src);
+      let fase = '';
+      w = await Tesseract.createWorker('eng', 1, {logger: m => {
+        if (m.status === 'recognizing text') st.textContent = 'Leggo la targa' + fase + '… ' + Math.round((m.progress || 0) * 100) + '%';
+        else if (/load|initializ/i.test(m.status || '')) st.textContent = 'Preparo il lettore di testo…';
+      }});
+      // più passaggi: testo sparso sull'intera foto, poi una riga sulle zone simili a una targa, poi una riga sull'intera foto
+      const passi = [[preparaOcr(im, 1800), '11']].concat(zoneTarga(im).map(c => [c, '7']), [[preparaOcr(im, 1000), '7']]);
+      // tengo la lettura con meno correzioni lettera/cifra; mi fermo subito solo se una lettura è già perfetta
+      let best = null; S.ocrTesti = [];
+      for (let i = 0; i < passi.length && !(best && best.fix === 0); i++) {
+        fase = passi.length > 1 ? ' (' + (i + 1) + '/' + passi.length + ')' : '';
+        await w.setParameters({tessedit_char_whitelist: 'ABCDEFGHJKLMNPRSTVWXYZ0123456789', tessedit_pageseg_mode: passi[i][1]});
+        const {data} = await w.recognize(passi[i][0]);
+        const r = targaDett(data && data.text); S.ocrTesti.push((data && data.text || '').trim());
+        if (r && (!best || r.fix < best.fix)) best = r;
+      }
+      const t = best && best.t;
+      if (t) { $('vTarga').value = t; aggTarga(); salvaVeicolo(true); st.textContent = 'Targa letta: ' + t + '. Controllala e correggila se serve.'; }
+      else st.textContent = 'Non ho trovato una targa nel formato AA000AA. Fotografa la targa più da vicino e dritta, oppure scrivila a mano.';
+    } catch (e) { st.textContent = 'Lettura non riuscita: ' + (e && e.message || e) + '. Puoi scrivere la targa a mano.'; }
+    finally { if (w) w.terminate().catch(() => {}); renderFoto(); }
+  });
+  $('vServ').addEventListener('click', e => {
+    const a = e.target.closest('[data-serv]'); if (!a) return;
+    const t = normTarga($('vTarga').value);
+    if (t) copia(t).then(ok => toast(ok ? 'Targa ' + t + ' copiata: incollala nel modulo del sito' : 'Copia non riuscita: la targa è ' + t));
+    else toast('Inserisci prima la targa');
+  });
+  $('vIcs').addEventListener('click', () => {
+    leggiForm();
+    const ev = SCAD.filter(([k]) => V.scad[k]).map(([k, n]) => {
+      const d = V.scad[k].replace(/-/g, ''), t = (n + ' ' + (V.targa || '') + ' ' + [V.marca, V.modello].filter(Boolean).join(' ')).trim();
+      return 'BEGIN:VEVENT\r\nUID:naviga-' + k + '-' + d + '@atlante\r\nDTSTAMP:' + new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '') + '\r\nDTSTART;VALUE=DATE:' + d + '\r\nSUMMARY:Scadenza ' + t + '\r\nBEGIN:VALARM\r\nTRIGGER:-P7D\r\nACTION:DISPLAY\r\nDESCRIPTION:Scadenza ' + t + '\r\nEND:VALARM\r\nEND:VEVENT';
+    });
+    if (!ev.length) { toast('Inserisci almeno una scadenza'); return; }
+    const ics = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlante//Naviga//IT\r\n' + ev.join('\r\n') + '\r\nEND:VCALENDAR\r\n';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([ics], {type: 'text/calendar'})); a.download = 'scadenze-auto.ics';
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+    toast('Apri il file per aggiungere le scadenze al Calendario (avviso 7 giorni prima)');
+  });
+  let tElim = 0;
+  $('vElimina').addEventListener('click', () => {
+    const b = $('vElimina');
+    if (!tElim) { b.textContent = 'Tocca di nuovo per eliminare'; tElim = setTimeout(() => { tElim = 0; b.textContent = 'Elimina i dati del veicolo'; }, 4000); return; }
+    clearTimeout(tElim); tElim = 0; b.textContent = 'Elimina i dati del veicolo';
+    V = {targa: '', marca: '', modello: '', anno: '', alim: '', scad: {}}; fotoV = null; fotoOrig = null;
+    AX.store.set('naviga-veicolo', V); AX.store.set('naviga-veicolo-foto', null);
+    renderVeicolo(); $('vOcrSt').textContent = ''; toast('Dati del veicolo eliminati');
+  });
+  function promemoriaAvvio() {
+    const oggi = new Date().toISOString().slice(0, 10);
+    if (AX.store.get('naviga-promemoria-giorno', '') === oggi) return;
+    const x = SCAD.map(([k, n]) => ({n, iso: V.scad[k], g: giorniA(V.scad[k])})).filter(x => x.g != null && !isNaN(x.g) && x.g <= 7).sort((a, b) => a.g - b.g)[0];
+    if (!x) return;
+    AX.store.set('naviga-promemoria-giorno', oggi);
+    setTimeout(() => toast('Promemoria veicolo: ' + x.n + ' — ' + statoScad(x.iso).t), 1500);
+  }
+
+  /* ---------- ripresa di una guida interrotta ---------- */
+  function offriRipresa() {
+    const a = AX.store.get('naviga-attiva', null);
+    if (!a || !a.dest || Date.now() - a.t > 12 * 3600e3) return;
+    const r = $('resume'); r.hidden = false;
+    r.innerHTML = '<div class="tx"><b>Riprendi la guida</b><div class="small">verso ' + esc(a.dest.name) + '</div></div><button class="btn sm pri" id="rSi">Riprendi</button><button class="ib" id="rNo" aria-label="Ignora" style="color:var(--fg2)">' + I.x + '</button>';
+    $('rSi').onclick = () => { r.hidden = true; sbloccaVoce(); setDest(a.dest, true); };
+    $('rNo').onclick = () => { r.hidden = true; AX.store.set('naviga-attiva', null); rs(); };
+    rs();
+  }
+
+  /* ---------- avvio ---------- */
+  initMap();
+  applicaTema(true);
+  setInterval(() => applicaTema(), 60000);
+  startGeo();
+  renderChips(); aggPill(); aggPromemoria(); promemoriaAvvio(); offriRipresa(); syncOpz();
+  window.NAVIGA = {istr, targaDa, zoneTarga, stato: S, VIG};  // per le prove automatiche
+})();
+</script>
+</body>
+</html>

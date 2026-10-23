@@ -1,0 +1,965 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<title>Podcast</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Podcast – stile Apple Podcasts dentro Atlante Musica */
+:root{--axb:0px}
+.wrap{padding-bottom:calc(60px + var(--axb) + env(safe-area-inset-bottom,0px))}
+svg.i{width:22px;height:22px;display:block;flex:none}
+.topbar{display:flex;align-items:center;justify-content:space-between;min-height:44px;gap:10px}
+.back{display:flex;align-items:center;color:var(--accent);font-size:17px;padding:8px 8px 8px 0;min-height:44px}
+.round{width:36px;height:36px;border-radius:50%;background:var(--fill);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;flex:none}
+.round svg.i{width:20px;height:20px}
+.round.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ricerca */
+.search{display:flex;align-items:center;gap:12px;margin:0 0 6px}
+.search .box{flex:1;position:relative}
+.search .box svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:var(--fg2);pointer-events:none}
+.search input{width:100%;min-height:42px;padding:8px 12px 8px 36px;border:0;border-radius:12px;background:var(--fill);outline:none;-webkit-appearance:none;appearance:none}
+.search input::-webkit-search-cancel-button{-webkit-appearance:none}
+#qCancel{color:var(--accent);font-size:17px;min-height:44px}
+
+/* griglia iscrizioni */
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:18px 12px;margin:12px 0}
+.ptile{display:block;text-align:left;position:relative;min-width:0}
+.ptile img,.ptile .ph,.cov{width:100%;aspect-ratio:1/1;border-radius:10px;object-fit:cover;background:var(--fill);box-shadow:0 1px 5px rgba(0,0,0,.13)}
+.ptile b{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:14px;font-weight:600;margin-top:7px;line-height:1.25}
+.ptile span{display:block;font-size:13px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{position:absolute;top:-7px;right:-7px;min-width:24px;height:24px;border-radius:12px;background:var(--accent);color:var(--onaccent);font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 7px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
+.empty{text-align:center;color:var(--fg2);padding:26px 16px;background:var(--bg2);border-radius:12px;margin:10px 0}
+.empty b{display:block;color:var(--fg);font-size:17px;margin-bottom:4px}
+
+/* righe */
+.row{color:inherit}
+.row .rank{width:24px;text-align:center;font-weight:700;color:var(--fg2);flex:none;font-size:17px}
+.row img,.row .ph{width:56px;height:56px}
+.chev{color:var(--fg3);font-size:22px;flex:none}
+.mini{display:inline-block;width:40px;height:4px;border-radius:2px;background:var(--fg3);overflow:hidden;vertical-align:middle}
+.mini>i{display:block;height:100%;background:var(--accent)}
+.row .mini{margin-top:6px}
+
+/* pagina podcast */
+.phead{text-align:center;margin:4px 0 6px}
+.pcover{width:min(230px,62vw);aspect-ratio:1/1;object-fit:cover;border-radius:12px;margin:4px auto 16px;box-shadow:var(--shadow);background:var(--fill)}
+.ptitle{font-size:24px;font-weight:700;margin:0 0 2px;line-height:1.2;text-wrap:balance}
+.pauth{color:var(--accent);font-size:17px}
+.pmeta{color:var(--fg2);font-size:13px;margin-top:4px}
+.pbtns{display:flex;gap:10px;justify-content:center;margin:16px 0 8px}
+.pbtns .btn{min-height:50px;flex:1;max-width:220px;font-size:17px;border-radius:14px;white-space:nowrap;padding:0 12px}
+.pdesc{text-align:left;color:var(--fg2);font-size:15px;white-space:pre-line;margin:8px 0 0}
+.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.more{color:var(--accent);font-size:15px;font-weight:600;min-height:36px}
+.upd{font-size:13px;color:var(--fg2);text-align:center;margin:4px 0 0}
+
+/* episodi */
+.eplist{margin:4px 0}
+.ep{padding:14px 0 10px;border-bottom:.5px solid var(--sep)}
+.ep:last-child{border-bottom:0}
+.ep .dt{font-size:12px;font-weight:600;color:var(--fg2);text-transform:uppercase;letter-spacing:.02em;display:flex;gap:6px;align-items:center}
+.ep .dt .ok{color:var(--accent);text-transform:none}
+.ep .tt{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;width:100%;text-align:left;font-weight:600;font-size:17px;line-height:1.28;margin:3px 0 2px}
+.ep .ds{font-size:15px;color:var(--fg2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.33}
+.ep.done .tt{color:var(--fg2)}
+.acts{display:flex;align-items:center;gap:6px;margin-top:8px;min-height:44px}
+.playp{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 16px 0 12px;border-radius:19px;background:var(--fill);color:var(--accent);font-weight:600;font-size:15px;white-space:nowrap}
+.playp svg.i{width:16px;height:16px}
+.playp .mini{width:34px}
+.sp{flex:1}
+.icb{width:44px;height:44px;display:inline-flex;align-items:center;justify-content:center;border-radius:22px;color:var(--accent);flex:none}
+.icb.got{color:var(--fg2)}
+.ring{width:26px;height:26px;border-radius:50%;background:conic-gradient(var(--accent) calc(var(--p,0)*1%),var(--fill) 0);position:relative;display:block}
+.ring::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--bg)}
+.ring::before{content:'';position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:1.5px;background:var(--accent);z-index:1}
+.loading{display:flex;align-items:center;justify-content:center;gap:10px;color:var(--fg2);padding:28px 0}
+.spinner{width:20px;height:20px;border-radius:50%;border:2.5px solid var(--fill);border-top-color:var(--fg2);animation:spin .8s linear infinite}
+
+/* scaricati */
+.space{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.space b{font-size:28px;font-weight:700}
+.btn.big{min-height:50px;width:100%;font-size:17px;border-radius:14px}
+.btn.danger{color:var(--bad)}
+.btn.danger.pri{background:var(--bad);color:#fff}
+
+/* foglio (scheda dal basso) */
+.sheet{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,0);transition:background .25s}
+.sheet.open{background:rgba(0,0,0,.42)}
+.pan{width:100%;max-width:640px;max-height:90vh;overflow:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;background:var(--card);border-radius:16px 16px 0 0;padding:8px 18px calc(28px + var(--axb) + env(safe-area-inset-bottom,0px));transform:translateY(100%);transition:transform .32s cubic-bezier(.2,.8,.2,1)}
+.sheet.open .pan{transform:none}
+.grab{width:38px;height:5px;border-radius:3px;background:var(--fg3);margin:0 auto 4px}
+.shd{display:flex;justify-content:flex-end}
+.shd button{color:var(--accent);font-weight:600;font-size:17px;min-height:44px;padding:0 4px}
+.eph{display:flex;gap:12px;align-items:center}
+.eph img{width:64px;height:64px;border-radius:9px;object-fit:cover;background:var(--fill);flex:none}
+.ept{font-size:22px;line-height:1.22;font-weight:700;margin:14px 0 4px}
+.col{display:flex;flex-direction:column;gap:10px;margin:16px 0}
+.epd{white-space:pre-line;font-size:16px;line-height:1.45;color:var(--fg);overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+
+<!-- Home: ricerca, i miei podcast, scaricati, classifica -->
+<div class="wrap" id="vHome">
+  <form class="search" id="qForm" role="search" autocomplete="off">
+    <div class="box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5l5 5"/></svg>
+      <input id="q" type="search" placeholder="Cerca podcast" enterkeyhint="search" aria-label="Cerca podcast">
+    </div>
+    <button type="button" id="qCancel" hidden>Annulla</button>
+  </form>
+  <div id="macNote" class="note" hidden></div>
+  <div id="dbNote" class="note" hidden>L'archivio del dispositivo non è disponibile (navigazione privata?): iscrizioni e scaricati non verranno salvati.</div>
+
+  <section id="sRes" hidden>
+    <h2 class="h2" id="resH">Risultati</h2>
+    <div id="res"></div>
+  </section>
+
+  <div id="homeMain">
+    <section id="sCont" hidden>
+      <h2 class="h2">Continua ad ascoltare</h2>
+      <div class="list" id="cont"></div>
+    </section>
+    <section>
+      <h2 class="h2" style="display:flex;justify-content:space-between;align-items:center">I miei podcast <button class="round" id="refAll" aria-label="Aggiorna tutti"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button></h2>
+      <div id="subs"></div>
+      <div id="refInfo" class="small"></div>
+    </section>
+    <section id="sDl">
+      <div class="list" style="margin-top:22px"><button class="row" data-a="vdl"><span class="ph" style="display:flex;align-items:center;justify-content:center;color:var(--accent)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v8.5M8.2 12.6 12 16.4l3.8-3.8"/></svg></span><span class="tx"><b>Scaricati</b><span id="dlSum">Nessun episodio</span></span><span class="chev">›</span></button></div>
+    </section>
+    <section>
+      <h2 class="h2">Classifica</h2>
+      <div class="small" style="margin:-4px 0 6px">I podcast più ascoltati in Italia</div>
+      <div id="top"><div class="loading"><span class="spinner"></span>Caricamento…</div></div>
+    </section>
+  </div>
+</div>
+
+<!-- Pagina di un podcast -->
+<div class="wrap" id="vPod" hidden>
+  <div class="topbar">
+    <button class="back" data-a="home">‹ Podcast</button>
+    <button class="round" id="pRef" data-a="pref" aria-label="Aggiorna episodi"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+  </div>
+  <div class="phead">
+    <img class="pcover" id="pCover" alt="">
+    <h1 class="ptitle" id="pTitle"></h1>
+    <div class="pauth" id="pAuth"></div>
+    <div class="pmeta" id="pMeta"></div>
+    <div class="pbtns">
+      <button class="btn pri" id="pPlay" data-a="pplay" disabled></button>
+      <button class="btn" id="pSub" data-a="psub"></button>
+    </div>
+    <p class="pdesc clamp" id="pDesc"></p>
+    <button class="more" id="pDescMore" data-a="pdesc" hidden>altro</button>
+    <div class="upd" id="pUpd"></div>
+  </div>
+  <div id="pNote" class="note" hidden></div>
+  <div class="seg" id="pSeg" role="tablist">
+    <button data-f="tutti" class="on">Tutti</button><button data-f="nuovi">Da ascoltare</button><button data-f="scaricati">Scaricati</button>
+  </div>
+  <div class="eplist" id="pList"></div>
+  <button class="btn big" id="pMore" data-a="pmore" hidden>Mostra altri episodi</button>
+</div>
+
+<!-- Episodi scaricati -->
+<div class="wrap" id="vDl" hidden>
+  <div class="topbar"><button class="back" data-a="home">‹ Podcast</button><span></span></div>
+  <h1 class="lt">Scaricati</h1>
+  <div class="card">
+    <div class="space"><b id="dlTot">0 MB</b><span class="sub" id="dlN"></span></div>
+    <div class="small" id="dlFree" style="margin-top:4px"></div>
+  </div>
+  <div id="dlList"></div>
+  <div style="margin-top:18px"><button class="btn big danger" id="dlAll" data-a="dlall" hidden>Elimina scaricati</button></div>
+</div>
+
+<div class="sheet" id="sheet" hidden><div class="pan" id="pan" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheetBody"></div></div></div>
+
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast} = AX;
+const ITUNES = 'https://itunes.apple.com/';
+const TOP_URL = 'https://itunes.apple.com/it/rss/toppodcasts/limit=25/json';
+const PREFIX = 'pod:';
+
+/* ---------- icone ---------- */
+const IC = {
+  play:'<svg class="i" viewBox="0 0 24 24"><path fill="currentColor" d="M7 4.9v14.2c0 .8.9 1.3 1.6.9l11.3-7.1c.6-.4.6-1.4 0-1.8L8.6 4c-.7-.4-1.6.1-1.6.9z"/></svg>',
+  pause:'<svg class="i" viewBox="0 0 24 24"><rect fill="currentColor" x="6" y="4.5" width="4" height="15" rx="1.2"/><rect fill="currentColor" x="14" y="4.5" width="4" height="15" rx="1.2"/></svg>',
+  dl:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v8.5M8.2 12.6 12 16.4l3.8-3.8"/></svg>',
+  got:'<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".18"/><path d="M12 7v8.6M8.3 12.2 12 15.9l3.7-3.7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  dots:'<svg class="i" viewBox="0 0 24 24" fill="currentColor"><circle cx="5.5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="18.5" cy="12" r="1.8"/></svg>',
+  trash:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/></svg>',
+  check:'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>'
+};
+
+/* ---------- utilità ---------- */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function hash(s) {  // cyrb53: id brevi e stabili per gli episodi
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  if (s < 60) return s ? '1 min' : '';
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h ? (h + ' h' + (m ? ' ' + m + ' min' : '')) : (m + ' min');
+}
+function fmtOra(s) { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); }
+function giorno(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+function fmtData(ms) {
+  if (!ms) return '';
+  const d = new Date(ms), oggi = new Date(), g = Math.round((giorno(oggi) - giorno(d)) / 864e5);
+  if (g === 0) return 'Oggi';
+  if (g === 1) return 'Ieri';
+  if (g > 1 && g < 7) return d.toLocaleDateString('it-IT', {weekday:'long'});
+  return d.toLocaleDateString('it-IT', d.getFullYear() === oggi.getFullYear() ? {day:'numeric', month:'short'} : {day:'numeric', month:'short', year:'numeric'});
+}
+function fmtMB(b) {
+  if (!b) return '0 MB';
+  if (b >= 1e9) return (b / 1e9).toLocaleString('it-IT', {maximumFractionDigits:1}) + ' GB';
+  return (b / 1e6).toLocaleString('it-IT', {maximumFractionDigits:b < 1e7 ? 1 : 0}) + ' MB';
+}
+function decodeEnt(s) { if (!s || s.indexOf('&') < 0) return s || ''; return new DOMParser().parseFromString('<body>' + s, 'text/html').body.textContent; }
+// descrizioni HTML dei feed → testo semplice (il documento di DOMParser è inerte: niente script né immagini)
+function pulisci(html, max) {
+  if (!html) return '';
+  const src = String(html).replace(/<\s*(br|\/p|\/div|\/li|\/h\d|\/tr)\b[^>]*>/gi, '$&\n');
+  const body = new DOMParser().parseFromString('<body>' + src, 'text/html').body;
+  body.querySelectorAll('script,style,noscript,iframe,object,template').forEach(x => x.remove());
+  let t = body.textContent || '';
+  t = t.replace(/\r/g, '').replace(/[ \t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return max && t.length > max ? t.slice(0, max).replace(/\s+\S*$/, '') + '…' : t;
+}
+function durata(s) {
+  if (!s) return 0; s = String(s).trim();
+  if (/^\d+(\.\d+)?$/.test(s)) return Math.round(+s);
+  const p = s.split(':').map(Number); if (!p.length || p.some(isNaN)) return 0;
+  return p.reduce((a, b) => a * 60 + b, 0);
+}
+function tipoAudio(url, t) {
+  if (t && /^(audio|video)\//.test(t)) return t;
+  const e = (String(url).split('?')[0].match(/\.(\w+)$/) || [])[1] || '';
+  return ({m4a:'audio/mp4', mp4:'audio/mp4', m4b:'audio/mp4', aac:'audio/aac', ogg:'audio/ogg', opus:'audio/ogg', wav:'audio/wav'})[e.toLowerCase()] || 'audio/mpeg';
+}
+// messaggi d'errore del browser («Failed to fetch»…) → testo italiano
+function msgErr(e, d) { const m = (e && e.message) || ''; return !m || (e && (e.name === 'AbortError' || e.name === 'TypeError')) || /failed to fetch|networkerror|load failed|network|abort/i.test(m) ? d : m; }
+function throttle(fn, ms) { let t = 0, tm = 0; return () => { const now = Date.now(); clearTimeout(tm); if (now - t > ms) { t = now; fn(); } else tm = setTimeout(() => { t = Date.now(); fn(); }, ms - (now - t)); }; }
+
+/* ---------- archivio sul dispositivo (IndexedDB ax-podcast) ---------- */
+const DB = (() => {
+  let p = null;
+  const STORES = [['iscrizioni', 'feed'], ['episodi', 'feed'], ['stato', 'id'], ['scaricati', 'id'], ['file', 'id']];
+  function open() {
+    if (!p) p = new Promise((res, rej) => {
+      let r; try { r = indexedDB.open('ax-podcast', 1); } catch (e) { return rej(e); }
+      r.onupgradeneeded = () => { const d = r.result; for (const [s, k] of STORES) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, {keyPath:k}); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); r.onblocked = () => rej(new Error('Archivio bloccato'));
+    });
+    return p;
+  }
+  async function run(store, mode, fn) {
+    const d = await open();
+    return new Promise((res, rej) => {
+      const t = d.transaction(store, mode); let q;
+      try { q = fn(t.objectStore(store)); } catch (e) { rej(e); return; }
+      t.oncomplete = () => res(q ? q.result : undefined);
+      t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Spazio insufficiente'));
+    });
+  }
+  return {
+    get: (s, k) => run(s, 'readonly', st => st.get(k)),
+    all: s => run(s, 'readonly', st => st.getAll()),
+    put: (s, v) => run(s, 'readwrite', st => st.put(v)),
+    del: (s, k) => run(s, 'readwrite', st => st.delete(k)),
+    clear: s => run(s, 'readwrite', st => st.clear())
+  };
+})();
+
+/* ---------- stato del modulo ---------- */
+const S = {
+  mac: null, db: true,
+  subs: new Map(),     // feed → iscrizione
+  stato: new Map(),    // id episodio → {id, t, d, fatto, agg, feed, pod:{titolo,cover}, ep:{...}}
+  dl: new Map(),       // id episodio → dati del file scaricato
+  dling: new Map(),    // id episodio → {pct, ctrl}
+  urls: new Map(),     // id episodio → blob: URL
+  eps: new Map(),      // id episodio → {ep, pod} (episodi mostrati)
+  pod: null, lista: [], filtro: 'tutti', quanti: 40,
+  top: [], ris: []
+};
+
+/* ---------- lettore (dell'app, o di riserva se la pagina è aperta da sola) ---------- */
+const P = {
+  list: [], i: 0, cbs: [],
+  play(items, i, from) {
+    this.list = items; this.i = i || 0;
+    AX.player.play(items, this.i, from);
+    if (!AX.player.available) this.hook();
+  },
+  hook() {
+    const a = AX.player._au; if (!a || a._ax) return; a._ax = 1;
+    a.addEventListener('ended', () => { if (this.i + 1 < this.list.length) { this.i++; a.src = new URL(this.list[this.i].url, location.href).href; a.play().catch(() => {}); } });
+    ['play', 'pause', 'loadedmetadata', 'ended', 'seeked'].forEach(ev => a.addEventListener(ev, () => this.cbs.forEach(cb => cb())));
+  },
+  now() {
+    if (AX.player.available) { try { return AX.player.now(); } catch (e) { return null; } }
+    const a = AX.player._au, it = this.list[this.i];
+    if (!a || !it || !a.src) return null;
+    return {id:it.id, title:it.title, artist:it.artist, album:it.album, cover:it.cover, playing:!a.paused, ext:true, t:a.currentTime || 0, d:isFinite(a.duration) ? a.duration : 0};
+  },
+  seek(t) { AX.player.seek(t); },
+  toggle() { AX.player.toggle(); },
+  onChange(cb) { if (AX.player.available) { try { return AX.player.onChange(cb); } catch (e) { return () => {}; } } this.cbs.push(cb); return () => {}; }
+};
+// salta al punto salvato appena il lettore ha caricato l'episodio
+function riprendi(id, t) {
+  if (!(t > 5)) return;
+  let n = 0;
+  const iv = setInterval(() => {
+    const x = P.now(); n++;
+    if (x && x.id === id && (x.d > 0 || (n > 16 && x.playing))) { clearInterval(iv); if (Math.abs((x.t || 0) - t) > 3) P.seek(t); }
+    else if (n > 80 || (x && x.id && x.id !== id && n > 8)) clearInterval(iv);
+  }, 250);
+}
+
+/* ---------- spazio occupato da barre del lettore dell'app sopra il riquadro ---------- */
+function misuraBasso() {
+  let inset = 0;
+  try {
+    const fe = window.frameElement; if (fe) {
+      const pd = parent.document, r = fe.getBoundingClientRect();
+      for (const dy of [6, 30, 70]) {
+        const y = r.bottom - dy; if (y <= r.top) break;
+        const els = pd.elementsFromPoint(r.left + r.width / 2, y), k = els.indexOf(fe);
+        if (k <= 0) continue;
+        let top = Infinity;
+        for (const e of els.slice(0, k)) if (!e.contains(fe)) top = Math.min(top, e.getBoundingClientRect().top);
+        if (top < Infinity) inset = Math.max(inset, r.bottom - top);
+      }
+    }
+  } catch (e) {}
+  document.documentElement.style.setProperty('--axb', Math.min(Math.max(0, inset), 220) + 'px');
+}
+
+/* ---------- Apple: ricerca, consultazione, classifica ---------- */
+function jsonp(url) {
+  return new Promise((res, rej) => {
+    const cb = 'axcb' + Math.random().toString(36).slice(2), s = document.createElement('script');
+    const tm = setTimeout(() => fine(new Error('Tempo scaduto')), 12000);
+    function fine(e, j) { clearTimeout(tm); try { delete window[cb]; } catch (x) {} s.remove(); e ? rej(e) : res(j); }
+    window[cb] = j => fine(null, j);
+    s.onerror = () => fine(new Error('Ricerca non disponibile'));
+    s.src = url + '&callback=' + cb; document.head.appendChild(s);
+  });
+}
+async function itunes(path) {
+  const url = ITUNES + path; let err = null;
+  for (const pausa of [400, 900, 1800, 0]) {   // Apple a volte risponde 403 alle richieste ravvicinate: si riprova
+    try { const r = await AX.fetchT(url, {}, 12000); if (r.ok) return await r.json(); err = new Error('Apple ha risposto ' + r.status); }
+    catch (e) { err = e; }
+    if (pausa) await sleep(pausa);
+  }
+  try { return await jsonp(url); } catch (e) {}
+  if ((await AX.stato()).ok) { try { return await (await AX.proxy(url)).json(); } catch (e) {} }
+  throw err || new Error('Ricerca non disponibile');
+}
+const daItunes = r => ({feed:r.feedUrl || '', titolo:r.collectionName || r.trackName || 'Podcast', autore:r.artistName || '', cover:r.artworkUrl600 || r.artworkUrl100 || '', genere:r.primaryGenreName || '', itunesId:r.collectionId || r.trackId || 0, n:r.trackCount || 0});
+
+let qTimer = 0, qSeq = 0;
+async function cerca(q) {
+  q = q.trim();
+  const seq = ++qSeq;
+  if (q.length < 2) { $('res').innerHTML = ''; return; }
+  $('resH').textContent = 'Risultati';
+  $('res').innerHTML = '<div class="loading"><span class="spinner"></span>Ricerca…</div>';
+  try {
+    const j = await itunes('search?media=podcast&entity=podcast&country=IT&limit=40&term=' + encodeURIComponent(q));
+    if (seq !== qSeq) return;
+    S.ris = (j.results || []).map(daItunes);
+    if (!S.ris.length) { $('res').innerHTML = '<div class="empty"><b>Nessun risultato</b>Prova con altre parole.</div>'; return; }
+    $('res').innerHTML = '<div class="list">' + S.ris.map((p, i) =>
+      `<button class="row" data-a="ris" data-i="${i}"><img src="${esc(p.cover)}" alt="" loading="lazy"><span class="tx"><b>${esc(p.titolo)}</b><span>${esc([p.autore, p.genere].filter(Boolean).join(' · '))}</span></span>${S.subs.has(p.feed) ? '<span class="pill ok">Iscritto</span>' : '<span class="chev">›</span>'}</button>`).join('') + '</div>';
+  } catch (e) {
+    if (seq !== qSeq) return;
+    $('res').innerHTML = `<div class="empty"><b>Ricerca non riuscita</b>${esc(navigator.onLine === false ? 'Sei offline.' : 'Apple non risponde, riprova tra poco.')}<div class="btns" style="justify-content:center"><button class="btn sm" data-a="riprova">Riprova</button></div></div>`;
+  }
+}
+
+async function caricaTop(forza) {
+  const cache = AX.store.get('podcast-top', null);
+  if (cache && cache.list && cache.list.length) { S.top = cache.list; disegnaTop(); if (!forza && Date.now() - cache.t < 6 * 3600e3) return; }
+  let j = null;
+  for (let k = 0; k < 2 && !j; k++) { try { const r = await AX.fetchT(TOP_URL, {}, 12000); if (r.ok) j = await r.json(); } catch (e) {} if (!j) await sleep(600); }
+  if (!j && (await AX.stato()).ok) { try { j = await (await AX.proxy(TOP_URL)).json(); } catch (e) {} }
+  const ent = j && j.feed ? [].concat(j.feed.entry || []) : [];
+  if (ent.length) {
+    S.top = ent.map(e => {
+      const imgs = [].concat(e['im:image'] || []), img = imgs.length ? imgs[imgs.length - 1].label : '';
+      return {itunesId:(e.id && e.id.attributes && e.id.attributes['im:id']) || '', titolo:(e['im:name'] || {}).label || '', autore:(e['im:artist'] || {}).label || '',
+        cover:img.replace(/\/\d+x\d+bb\./, '/300x300bb.'), genere:(e.category && e.category.attributes && e.category.attributes.label) || '', descr:(e.summary || {}).label || ''};
+    });
+    AX.store.set('podcast-top', {t:Date.now(), list:S.top});
+    disegnaTop();
+  } else if (!S.top.length) {
+    $('top').innerHTML = `<div class="empty"><b>Classifica non disponibile</b>${navigator.onLine === false ? 'Sei offline.' : 'Apple non risponde.'}<div class="btns" style="justify-content:center"><button class="btn sm" data-a="topri">Riprova</button></div></div>`;
+  }
+}
+function disegnaTop() {
+  $('top').innerHTML = '<div class="list">' + S.top.map((p, i) =>
+    `<button class="row" data-a="top" data-i="${i}"><span class="rank">${i + 1}</span><img src="${esc(p.cover)}" alt="" loading="lazy"><span class="tx"><b>${esc(p.titolo)}</b><span>${esc([p.autore, p.genere].filter(Boolean).join(' · '))}</span></span><span class="chev">›</span></button>`).join('') + '</div>';
+}
+async function apriTop(p) {
+  toast('Apertura di «' + p.titolo + '»…');
+  try {
+    const j = await itunes('lookup?country=IT&entity=podcast&id=' + encodeURIComponent(p.itunesId));
+    const r = (j.results || []).find(x => x.feedUrl);
+    if (!r) throw new Error('Questo podcast non ha un feed pubblico');
+    apriPod(Object.assign(daItunes(r), {descr:p.descr}));
+  } catch (e) { toast(msgErr(e, 'Podcast non disponibile: Apple non risponde')); }
+}
+
+/* ---------- feed RSS (letto dal Mac) ---------- */
+function parseXml(txt) {
+  txt = String(txt).replace(/^﻿/, '').trim();
+  const D = new DOMParser(), bad = d => d.getElementsByTagName('parsererror').length > 0;
+  let d = D.parseFromString(txt, 'application/xml'); if (!bad(d)) return d;
+  d = D.parseFromString(txt.replace(/&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);)/gi, '&amp;'), 'application/xml'); if (!bad(d)) return d;
+  return D.parseFromString(txt, 'text/html');
+}
+const kid = (el, n) => { if (!el) return null; for (const c of el.children) if (c.nodeName.toLowerCase() === n) return c; return null; };
+const sotto = (el, ...ns) => { for (const n of ns) { const x = el.getElementsByTagName(n)[0]; if (x) return x; } return null; };
+const testo = (el, ...ns) => { const x = sotto(el, ...ns); return x ? decodeEnt(x.textContent.trim()) : ''; };
+function parseFeed(txt, feed) {
+  const d = parseXml(txt);
+  const ch = d.getElementsByTagName('channel')[0] || d.getElementsByTagName('feed')[0];
+  if (!ch) throw new Error('Il feed non è leggibile');
+  const imgCh = kid(ch, 'itunes:image') || sotto(ch, 'itunes:image');
+  const imgUrl = kid(kid(ch, 'image'), 'url');
+  const info = {
+    titolo:decodeEnt((kid(ch, 'title') || {textContent:''}).textContent.trim()),
+    autore:decodeEnt(((kid(ch, 'itunes:author') || kid(ch, 'author') || {}).textContent || '').trim()),
+    descr:pulisci((kid(ch, 'description') || kid(ch, 'itunes:summary') || kid(ch, 'subtitle') || {}).textContent || '', 3000),
+    cover:(imgCh && (imgCh.getAttribute('href') || imgCh.getAttribute('url'))) || (imgUrl ? imgUrl.textContent.trim() : ''),
+    serial:/serial/i.test((kid(ch, 'itunes:type') || {}).textContent || '')
+  };
+  const fh = hash(feed), visti = new Set(), lista = [];
+  let items = [...d.getElementsByTagName('item')];
+  const atom = !items.length;
+  if (atom) items = [...d.getElementsByTagName('entry')];
+  for (const it of items) {
+    let url = '', tipo = '', len = 0;
+    if (atom) { const l = [...it.getElementsByTagName('link')].find(x => x.getAttribute('rel') === 'enclosure'); if (l) { url = l.getAttribute('href') || ''; tipo = l.getAttribute('type') || ''; } }
+    else { const en = sotto(it, 'enclosure'); if (en) { url = en.getAttribute('url') || ''; tipo = en.getAttribute('type') || ''; len = +en.getAttribute('length') || 0; } if (!url) { const m = sotto(it, 'media:content'); if (m) { url = m.getAttribute('url') || ''; tipo = m.getAttribute('type') || ''; } } }
+    url = url.trim(); if (!/^https?:\/\//i.test(url)) continue;
+    const guid = testo(it, 'guid', 'id') || url;
+    const id = PREFIX + fh + '.' + hash(guid);
+    if (visti.has(id)) continue; visti.add(id);
+    const img = sotto(it, 'itunes:image');
+    const dataT = Date.parse(testo(it, 'pubDate', 'published', 'updated', 'dc:date')) || 0;
+    lista.push({
+      id, url, tipo:tipoAudio(url, tipo), len,
+      titolo:testo(it, 'title') || 'Episodio',
+      data:dataT, durata:durata(testo(it, 'itunes:duration')),
+      descr:pulisci(testo(it, 'content:encoded') || testo(it, 'description') || testo(it, 'itunes:summary') || testo(it, 'summary', 'content'), 4000),
+      cover:img ? (img.getAttribute('href') || '') : '',
+      num:+testo(it, 'itunes:episode') || 0, stag:+testo(it, 'itunes:season') || 0
+    });
+  }
+  if (info.serial) lista.sort((a, b) => (a.stag - b.stag) || (a.num - b.num) || (a.data - b.data));
+  else lista.sort((a, b) => b.data - a.data);
+  return {info, lista};
+}
+async function leggiFeed(feed) {
+  const mac = await AX.stato();
+  const modi = mac.ok ? ['proxy', 'diretto'] : ['diretto'];
+  let txt = null, err = null;
+  for (const m of modi) {
+    try {
+      const r = m === 'proxy' ? await AX.proxy(feed, 30000) : await AX.fetchT(feed, {cache:'no-store'}, 12000);
+      if (!r.ok) throw new Error('Il feed ha risposto ' + r.status);
+      txt = await r.text(); break;
+    } catch (e) { err = e; }
+  }
+  if (txt == null) { const m = msgErr(err, ''); const e = new Error(mac.ok ? ('Il feed del podcast non risponde' + (m ? ' (' + m + ')' : '') + '.') : 'Mac non raggiungibile'); e.mac = !mac.ok; throw e; }
+  return parseFeed(txt, feed);
+}
+async function aggiornaFeed(feed) {
+  const r = await leggiFeed(feed);
+  const rec = {feed, agg:Date.now(), info:r.info, lista:r.lista};
+  DB.put('episodi', rec).catch(() => {});
+  const sub = S.subs.get(feed);
+  if (sub) {
+    sub.aggiornato = rec.agg;
+    if (!sub.cover && r.info.cover) sub.cover = r.info.cover;
+    if (r.info.descr) sub.descr = r.info.descr;
+    const da = sub.visto || sub.aggiunto || 0;
+    sub.nuovi = r.lista.filter(e => e.data > da && !(S.stato.get(e.id) || {}).fatto).length;
+    DB.put('iscrizioni', sub).catch(() => {});
+  }
+  return rec;
+}
+
+/* ---------- note sul Mac ---------- */
+function notaMac() {
+  const n = $('macNote');
+  if (S.mac && !S.mac.ok) {
+    n.hidden = false;
+    n.innerHTML = '<b>Mac non raggiungibile.</b> La ricerca e la classifica funzionano lo stesso; per aggiornare gli episodi (il Mac legge i feed dei podcast) accendi il Mac con Atlante Musica. Gli episodi già visti e quelli scaricati restano disponibili.';
+  } else n.hidden = true;
+}
+
+/* ---------- home ---------- */
+function disegnaHome() { disegnaSubs(); disegnaCont(); disegnaDlSum(); }
+function disegnaSubs() {
+  const subs = [...S.subs.values()].sort((a, b) => (b.ultimo || b.aggiunto || 0) - (a.ultimo || a.aggiunto || 0));
+  $('refAll').hidden = !subs.length;
+  if (!subs.length) { $('subs').innerHTML = '<div class="empty"><b>Nessuna iscrizione</b>Cerca un podcast qui sopra o scegline uno dalla classifica, poi tocca «Iscriviti».</div>'; return; }
+  $('subs').innerHTML = '<div class="pgrid">' + subs.map(s =>
+    `<button class="ptile" data-a="sub" data-feed="${esc(s.feed)}">${s.cover ? `<img src="${esc(s.cover)}" alt="" loading="lazy">` : '<span class="ph" style="display:block"></span>'}${s.nuovi ? `<span class="badge" aria-label="${s.nuovi} nuovi">${s.nuovi > 99 ? '99+' : s.nuovi}</span>` : ''}<b>${esc(s.titolo)}</b><span>${esc(s.autore || '')}</span></button>`).join('') + '</div>';
+}
+function inCorso() { return [...S.stato.values()].filter(s => s.ep && !s.fatto && s.t > 5).sort((a, b) => (b.agg || 0) - (a.agg || 0)); }
+function disegnaCont() {
+  const l = inCorso().slice(0, 5);
+  $('sCont').hidden = !l.length;
+  $('cont').innerHTML = l.map(s => {
+    const d = s.d || s.ep.durata || 0, pct = d ? Math.min(100, s.t / d * 100) : 0;
+    return `<button class="row" data-a="cont" data-id="${esc(s.id)}"><img src="${esc(s.ep.cover || (s.pod && s.pod.cover) || '')}" alt="" loading="lazy"><span class="tx"><b>${esc(s.ep.titolo)}</b><span>${esc((s.pod && s.pod.titolo) || '')}${d ? ' · Restano ' + esc(fmtDur(d - s.t)) : ''}</span><span class="mini"><i style="width:${pct.toFixed(1)}%"></i></span></span><span class="round">${IC.play}</span></button>`;
+  }).join('');
+}
+function disegnaDlSum() {
+  let n = 0, b = 0; for (const x of S.dl.values()) { n++; b += x.size || 0; }
+  $('dlSum').textContent = n ? (n === 1 ? '1 episodio' : n + ' episodi') + ' · ' + fmtMB(b) : 'Nessun episodio — ascoltali anche senza rete';
+}
+
+let aggInCorso = false;
+async function aggiornaTutti(forza) {
+  if (aggInCorso) return; aggInCorso = true;
+  const subs = [...S.subs.values()].filter(s => forza || Date.now() - (s.aggiornato || 0) > 30 * 60e3);
+  if (subs.length) {
+    $('refAll').classList.add('spin'); $('refInfo').textContent = 'Aggiornamento degli episodi…';
+    let ok = 0, macKo = false;
+    const coda = subs.slice();
+    async function lavora() { while (coda.length) { const s = coda.shift(); try { await aggiornaFeed(s.feed); ok++; } catch (e) { if (e.mac) macKo = true; } disegnaSubs(); } }
+    await Promise.all([lavora(), lavora()]);
+    $('refAll').classList.remove('spin');
+    $('refInfo').textContent = ok ? '' : (macKo ? 'Episodi non aggiornati: il Mac non è raggiungibile.' : 'Episodi non aggiornati: feed non raggiungibili.');
+    if (forza && ok) toast('Podcast aggiornati');
+  } else if (forza) toast('Già aggiornati');
+  aggInCorso = false;
+}
+
+/* ---------- pagina di un podcast ---------- */
+const VIEWS = ['vHome', 'vPod', 'vDl'];
+let homeY = 0;
+function vai(v) {
+  if (!$('vHome').hidden) homeY = scrollY;
+  VIEWS.forEach(x => { $(x).hidden = x !== v; });
+  scrollTo(0, v === 'vHome' ? homeY : 0);
+  if (v === 'vHome') disegnaHome();
+}
+async function apriPod(info) {
+  if (!info || !info.feed) { toast('Questo podcast non ha un feed pubblico'); return; }
+  const sub = S.subs.get(info.feed);
+  S.pod = Object.assign({}, info, sub || {});
+  S.lista = []; S.filtro = 'tutti'; S.quanti = 40;
+  [...$('pSeg').children].forEach(b => b.classList.toggle('on', b.dataset.f === 'tutti'));
+  $('pNote').hidden = true; $('pUpd').textContent = '';
+  disegnaTestaPod();
+  $('pList').innerHTML = '<div class="loading"><span class="spinner"></span>Caricamento degli episodi…</div>';
+  vai('vPod');
+  if (sub) { sub.visto = Date.now(); sub.nuovi = 0; sub.ultimo = Date.now(); DB.put('iscrizioni', sub).catch(() => {}); }
+  let cache = null; try { cache = await DB.get('episodi', info.feed); } catch (e) {}
+  if (S.pod.feed !== info.feed) return;
+  if (cache) { S.lista = cache.lista; mescolaInfo(cache.info); disegnaLista(); $('pUpd').textContent = 'Aggiornato ' + fmtQuando(cache.agg); }
+  aggiornaPod(false);
+}
+function fmtQuando(t) { if (!t) return ''; const g = fmtData(t); return (g === 'Oggi' ? 'oggi' : g === 'Ieri' ? 'ieri' : g) + ' alle ' + new Date(t).toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'}); }
+function mescolaInfo(i) {
+  if (!i) return;
+  const p = S.pod;
+  if (i.titolo && !p.titolo) p.titolo = i.titolo;
+  if (i.autore && !p.autore) p.autore = i.autore;
+  if (i.cover && !p.cover) p.cover = i.cover;
+  if (i.descr) p.descr = i.descr;
+  disegnaTestaPod();
+}
+async function aggiornaPod(manuale) {
+  const feed = S.pod && S.pod.feed; if (!feed) return;
+  $('pRef').classList.add('spin');
+  try {
+    const rec = await aggiornaFeed(feed);
+    if (!S.pod || S.pod.feed !== feed) return;
+    S.lista = rec.lista; mescolaInfo(rec.info); disegnaLista();
+    $('pNote').hidden = true; $('pUpd').textContent = 'Aggiornato ' + fmtQuando(rec.agg);
+    if (manuale) toast('Episodi aggiornati');
+  } catch (e) {
+    if (!S.pod || S.pod.feed !== feed) return;
+    const n = $('pNote'); n.hidden = false;
+    n.innerHTML = e.mac
+      ? '<b>Mac non raggiungibile.</b> Gli episodi si leggono dal feed del podcast tramite il Mac: accendilo con Atlante Musica e tocca ⟳.' + (S.lista.length ? ' Intanto vedi gli episodi salvati l\'ultima volta.' : '')
+      : '<b>Episodi non aggiornati.</b> ' + esc(msgErr(e, 'Il feed non risponde.'));
+    if (!S.lista.length) $('pList').innerHTML = '';
+  } finally { $('pRef').classList.remove('spin'); }
+}
+function disegnaTestaPod() {
+  const p = S.pod; if (!p) return;
+  const c = $('pCover'); if (p.cover) { c.src = p.cover; c.hidden = false; } else c.hidden = true;
+  $('pTitle').textContent = p.titolo || 'Podcast';
+  $('pAuth').textContent = p.autore || '';
+  const n = S.lista.length || p.n || 0;
+  $('pMeta').textContent = [p.genere, n ? n + ' episodi' : ''].filter(Boolean).join(' · ');
+  const iscr = S.subs.has(p.feed);
+  $('pSub').innerHTML = iscr ? IC.check.replace('width="13" height="13"', 'width="17" height="17"') + ' Iscritto' : '＋ Iscriviti';
+  $('pSub').setAttribute('aria-pressed', iscr ? 'true' : 'false');
+  $('pDesc').textContent = p.descr || '';
+  $('pDesc').classList.add('clamp');
+  $('pDescMore').hidden = !p.descr || p.descr.length < 160;
+  const pp = $('pPlay'), r = riprendiDi(p.feed);
+  pp.disabled = !S.lista.length;
+  pp.innerHTML = IC.play + (r ? ' Riprendi' : p.serial ? ' Dall\'inizio' : ' Ascolta');
+  pp.setAttribute('aria-label', r ? 'Riprendi l\'episodio iniziato' : p.serial ? 'Ascolta dal primo episodio' : 'Ascolta l\'ultimo episodio');
+}
+function riprendiDi(feed) { return inCorso().find(s => s.feed === feed && S.lista.some(e => e.id === s.id)) || null; }
+function filtrati() {
+  if (S.filtro === 'nuovi') return S.lista.filter(e => !(S.stato.get(e.id) || {}).fatto);
+  if (S.filtro === 'scaricati') return S.lista.filter(e => S.dl.has(e.id));
+  return S.lista;
+}
+function disegnaLista() {
+  const p = S.pod; disegnaTestaPod();
+  for (const ep of S.lista) S.eps.set(ep.id, {ep, pod:p});
+  const l = filtrati();
+  if (!l.length) {
+    $('pList').innerHTML = `<div class="empty">${S.lista.length ? (S.filtro === 'scaricati' ? 'Nessun episodio scaricato.' : 'Hai ascoltato tutto!') : 'Nessun episodio.'}</div>`;
+    $('pMore').hidden = true; return;
+  }
+  $('pList').innerHTML = l.slice(0, S.quanti).map(epHtml).join('');
+  $('pMore').hidden = l.length <= S.quanti;
+}
+function epHtml(ep) {
+  const st = S.stato.get(ep.id) || {};
+  return `<div class="ep${st.fatto ? ' done' : ''}" data-ep="${esc(ep.id)}">
+    <div class="dt">${dtHtml(ep)}</div>
+    <button class="tt" data-a="info" data-id="${esc(ep.id)}">${esc(ep.titolo)}</button>
+    ${ep.descr ? `<div class="ds">${esc(ep.descr.slice(0, 260))}</div>` : ''}
+    <div class="acts">${attiHtml(ep)}</div></div>`;
+}
+function dtHtml(ep) {
+  const st = S.stato.get(ep.id) || {};
+  return `<span>${esc(fmtData(ep.data))}</span>${ep.num ? `<span>· Ep. ${ep.num}</span>` : ''}${st.fatto ? `<span class="ok">${IC.check} Ascoltato</span>` : ''}`;
+}
+function attiHtml(ep) {
+  const st = S.stato.get(ep.id) || {}, n = P.now(), suona = n && n.id === ep.id && n.playing;
+  const d = ep.durata || st.d || 0;
+  let lab, bar = '';
+  if (suona) lab = IC.pause + 'In ascolto';
+  else if (!st.fatto && st.t > 5) { lab = IC.play + (d ? 'Restano ' + fmtDur(d - st.t) : fmtOra(st.t)); if (d) bar = `<span class="mini"><i style="width:${Math.min(100, st.t / d * 100).toFixed(1)}%"></i></span>`; }
+  else lab = IC.play + (d ? fmtDur(d) : 'Riproduci');
+  const ing = S.dling.get(ep.id);
+  const dl = ing ? `<button class="icb" data-a="stopdl" data-id="${esc(ep.id)}" aria-label="Annulla scaricamento (${Math.round(ing.pct)}%)"><span class="ring" style="--p:${ing.pct.toFixed(0)}"></span></button>`
+    : S.dl.has(ep.id) ? `<button class="icb got" data-a="info" data-id="${esc(ep.id)}" aria-label="Scaricato">${IC.got}</button>`
+    : `<button class="icb" data-a="dl" data-id="${esc(ep.id)}" aria-label="Scarica">${IC.dl}</button>`;
+  return `<button class="playp" data-a="${suona ? 'toggle' : 'play'}" data-id="${esc(ep.id)}">${lab}${bar}</button><span class="sp"></span>${dl}<button class="icb" data-a="info" data-id="${esc(ep.id)}" aria-label="Altro">${IC.dots}</button>`;
+}
+function aggiornaAtti(id) {
+  const x = S.eps.get(id); if (!x) return;
+  document.querySelectorAll(`[data-ep="${id}"]`).forEach(el => {
+    const st = S.stato.get(id) || {};
+    el.classList.toggle('done', !!st.fatto);
+    const dt = el.querySelector('.dt'); if (dt) dt.innerHTML = dtHtml(x.ep);
+    const a = el.querySelector('.acts'); if (a) a.innerHTML = attiHtml(x.ep);
+  });
+  if (!$('vDl').hidden) disegnaDl();
+}
+
+/* ---------- ascolto ---------- */
+async function urlLocale(id) {
+  if (!S.dl.has(id)) return null;
+  if (S.urls.has(id)) return S.urls.get(id);
+  try {
+    const rec = await DB.get('file', id); if (!rec || !rec.blob) return null;
+    let u; try { u = (AX.host ? parent : window).URL.createObjectURL(rec.blob); } catch (e) { u = URL.createObjectURL(rec.blob); }
+    S.urls.set(id, u); return u;
+  } catch (e) { return null; }
+}
+async function suona(lista, i, pod) {
+  const ep = lista[i]; if (!ep) return;
+  let l = lista, k = i;
+  if (navigator.onLine === false) { l = lista.filter(e => S.dl.has(e.id)); k = l.indexOf(ep); if (k < 0) { toast('Sei offline: questo episodio non è scaricato'); return; } }
+  if (l.length > 400) { const a = Math.max(0, k - 50); l = l.slice(a, a + 400); k -= a; }
+  const items = [];
+  for (const e of l) items.push({id:e.id, title:e.titolo, artist:pod.titolo || '', album:pod.titolo || 'Podcast', url:(await urlLocale(e.id)) || e.url, cover:e.cover || pod.cover || ''});
+  // ricorda l'episodio per «Continua ad ascoltare»
+  const st = Object.assign({id:ep.id, t:0}, S.stato.get(ep.id), {feed:pod.feed, pod:{titolo:pod.titolo, cover:pod.cover}, ep:{titolo:ep.titolo, url:ep.url, cover:ep.cover, data:ep.data, durata:ep.durata}, agg:Date.now()});
+  if (st.fatto) { st.t = 0; }
+  S.stato.set(ep.id, st); DB.put('stato', st).catch(() => {});
+  const sub = S.subs.get(pod.feed); if (sub) { sub.ultimo = Date.now(); DB.put('iscrizioni', sub).catch(() => {}); }
+  try { P.play(items, k, pod.titolo || 'Podcast'); } catch (e) { toast('Il lettore non risponde'); return; }
+  if (!st.fatto && st.t > 5) riprendi(ep.id, st.t);
+  setTimeout(check, 1200);
+}
+function suonaId(id) {
+  const x = S.eps.get(id); if (!x) return;
+  const lista = S.pod && S.pod.feed === x.pod.feed && S.lista.some(e => e.id === id) ? S.lista : [x.ep];
+  suona(lista, lista.indexOf(x.ep) >= 0 ? lista.indexOf(x.ep) : lista.findIndex(e => e.id === id), x.pod);
+}
+async function suonaCont(id) {
+  const s = S.stato.get(id); if (!s || !s.ep) return;
+  let lista = null, info = null;
+  try { const c = await DB.get('episodi', s.feed); if (c) { lista = c.lista; info = c.info; } } catch (e) {}
+  const pod = Object.assign({feed:s.feed, titolo:(s.pod && s.pod.titolo) || '', cover:(s.pod && s.pod.cover) || ''}, S.subs.get(s.feed) || {});
+  if (info && !pod.cover) pod.cover = info.cover;
+  let i = lista ? lista.findIndex(e => e.id === id) : -1;
+  if (i < 0) { lista = [Object.assign({id}, s.ep)]; i = 0; }
+  lista.forEach(e => S.eps.set(e.id, {ep:e, pod}));
+  suona(lista, i, pod);
+}
+
+// punto di ripresa: ogni 10 s (e a ogni cambio del lettore) si salva la posizione dell'episodio in corso
+let lastId = null;
+function check() {
+  const n = P.now();
+  const id = n && n.id && String(n.id).startsWith(PREFIX) ? String(n.id) : null;
+  if (id !== lastId) {
+    const prev = lastId; lastId = id;
+    if (prev) aggiornaAtti(prev);
+    if (id) { const st = S.stato.get(id); if (st && !st.fatto && st.t > 5 && (n.t || 0) < 3) riprendi(id, st.t); }
+  }
+  if (!id) return;
+  salvaPos(id, n);
+  aggiornaAtti(id);
+}
+function salvaPos(id, n) {
+  const t = n.t || 0, prima = S.stato.get(id) || {id, t:0};
+  if (!(t > 0)) return;
+  if (t < 3 && prima.t > 5 && !prima.fatto) return;     // appena partito: non perdere il punto salvato
+  const st = Object.assign({}, prima, {id, t, agg:Date.now()});
+  if (n.d > 0) st.d = n.d;
+  const d = st.d || (st.ep && st.ep.durata) || 0;
+  if (d && t >= (d > 120 ? d - 30 : d - 3)) { st.fatto = true; st.t = 0; }
+  else if (st.fatto && t > 30) st.fatto = false;         // lo si sta riascoltando
+  if (!st.ep) { const x = S.eps.get(id); if (x) { st.feed = x.pod.feed; st.pod = {titolo:x.pod.titolo, cover:x.pod.cover}; st.ep = {titolo:x.ep.titolo, url:x.ep.url, cover:x.ep.cover, data:x.ep.data, durata:x.ep.durata}; } }
+  S.stato.set(id, st); DB.put('stato', st).catch(() => {});
+  if (prima.fatto !== st.fatto && !$('vHome').hidden) disegnaCont();
+}
+function segnaFatto(id, si) {
+  const st = Object.assign({id, t:0}, S.stato.get(id), {fatto:!!si, t:0, agg:Date.now()});
+  S.stato.set(id, st); DB.put('stato', st).catch(() => {});
+  aggiornaAtti(id);
+  if (S.filtro === 'nuovi') disegnaLista();
+  toast(si ? 'Segnato come ascoltato' : 'Segnato come da ascoltare');
+}
+
+/* ---------- scaricare per l'ascolto offline ---------- */
+async function leggiCorpo(r, fase) {
+  const tot = +r.headers.get('content-length') || 0;
+  if (!r.body || !r.body.getReader) return r.blob();
+  const rd = r.body.getReader(), parti = []; let got = 0;
+  for (;;) { const {done, value} = await rd.read(); if (done) break; parti.push(value); got += value.length; fase(tot ? got / tot * 100 : Math.min(95, got / 4e5)); }
+  return new Blob(parti);
+}
+async function scarica(id) {
+  const x = S.eps.get(id); if (!x || S.dling.has(id) || S.dl.has(id)) return;
+  const {ep, pod} = x, st = {pct:0, ctrl:new AbortController()};
+  S.dling.set(id, st); aggiornaAtti(id);
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
+  try {
+    let r = null;
+    try { r = await fetch(ep.url, {signal:st.ctrl.signal}); if (!r.ok) r = null; } catch (e) { if (st.ctrl.signal.aborted) throw e; r = null; }
+    if (!r) {   // il sito non permette la lettura diretta: la fa il Mac
+      if (!(await AX.stato()).ok) throw new Error('Questo sito non permette di scaricare direttamente e il Mac non è raggiungibile');
+      r = await fetch(AX.API + 'proxy?url=' + encodeURIComponent(ep.url), {signal:st.ctrl.signal});
+      if (!r.ok) { let j = null; try { j = await r.json(); } catch (e) {} throw new Error((j && j.errore) || 'Il Mac non è riuscito a scaricare l\'episodio'); }
+    }
+    const tipo = tipoAudio(ep.url, (r.headers.get('content-type') || '').split(';')[0] || ep.tipo);
+    let ultimo = 0;
+    const raw = await leggiCorpo(r, p => { st.pct = p; const t = Date.now(); if (t - ultimo > 400) { ultimo = t; aggiornaAtti(id); } });
+    const blob = raw.type === tipo ? raw : new Blob([raw], {type:tipo});
+    if (blob.size < 2048) throw new Error('Il file ricevuto non è un audio valido');
+    await DB.put('file', {id, blob});
+    const meta = {id, size:blob.size, tipo, feed:pod.feed, podcast:pod.titolo || '', cover:ep.cover || pod.cover || '', titolo:ep.titolo, data:ep.data, durata:ep.durata, url:ep.url, quando:Date.now()};
+    await DB.put('scaricati', meta);
+    S.dl.set(id, meta);
+    toast('Scaricato: ' + ep.titolo);
+  } catch (e) {
+    if (st.ctrl.signal.aborted) toast('Scaricamento annullato');
+    else toast(/quota|space|spazio/i.test((e && (e.name + e.message)) || '') ? 'Spazio insufficiente sul dispositivo' : msgErr(e, 'Scaricamento non riuscito: rete o Mac non raggiungibili'));
+    DB.del('file', id).catch(() => {});
+  } finally { S.dling.delete(id); aggiornaAtti(id); disegnaDlSum(); }
+}
+async function eliminaDl(id) {
+  try { await DB.del('file', id); await DB.del('scaricati', id); } catch (e) {}
+  S.dl.delete(id);
+  const u = S.urls.get(id); if (u) { S.urls.delete(id); setTimeout(() => { try { (AX.host ? parent : window).URL.revokeObjectURL(u); } catch (e) {} }, 60000); }
+  aggiornaAtti(id); disegnaDlSum();
+}
+async function disegnaDl() {
+  const l = [...S.dl.values()].sort((a, b) => (b.quando || 0) - (a.quando || 0));
+  let tot = 0; l.forEach(x => { tot += x.size || 0; S.eps.has(x.id) || S.eps.set(x.id, {ep:{id:x.id, titolo:x.titolo, url:x.url, cover:x.cover, data:x.data, durata:x.durata, tipo:x.tipo}, pod:Object.assign({feed:x.feed, titolo:x.podcast, cover:x.cover}, S.subs.get(x.feed) || {})}); });
+  $('dlTot').textContent = fmtMB(tot);
+  $('dlN').textContent = l.length === 1 ? '1 episodio' : l.length + ' episodi';
+  $('dlAll').hidden = !l.length;
+  $('dlList').innerHTML = l.length ? '<div class="list">' + l.map(x => {
+    const n = P.now(), on = n && n.id === x.id && n.playing;
+    return `<div class="row" data-ep="${esc(x.id)}"><img src="${esc(x.cover)}" alt="" loading="lazy"><span class="tx"><b>${esc(x.titolo)}</b><span>${esc(x.podcast)} · ${esc(fmtMB(x.size))}${x.durata ? ' · ' + esc(fmtDur(x.durata)) : ''}</span></span><button class="icb" data-a="${on ? 'toggle' : 'playdl'}" data-id="${esc(x.id)}" aria-label="${on ? 'Pausa' : 'Riproduci'}">${on ? IC.pause : IC.play}</button><button class="icb" data-a="deldl" data-id="${esc(x.id)}" aria-label="Elimina">${IC.trash}</button></div>`;
+  }).join('') + '</div>' : '<div class="empty"><b>Nessun episodio scaricato</b>Tocca ' + '<span style="display:inline-block;vertical-align:-5px;color:var(--accent)">' + IC.dl + '</span> accanto a un episodio per ascoltarlo anche senza rete.</div>';
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const e = await navigator.storage.estimate();
+      $('dlFree').textContent = e.quota ? 'Spazio ancora disponibile per le app web: circa ' + fmtMB(Math.max(0, e.quota - (e.usage || 0))) : '';
+    }
+  } catch (e) {}
+}
+async function suonaDl(id) {
+  const l = [...S.dl.values()].sort((a, b) => (b.quando || 0) - (a.quando || 0));
+  const lista = l.map(x => S.eps.get(x.id).ep), i = lista.findIndex(e => e.id === id);
+  const x = S.eps.get(id);
+  suona(lista, i, x.pod);
+}
+let confermaTm = 0;
+async function eliminaTutti(b) {
+  if (!b.classList.contains('pri')) {
+    b.classList.add('pri'); b.textContent = 'Tocca di nuovo per eliminare tutto';
+    clearTimeout(confermaTm); confermaTm = setTimeout(() => { b.classList.remove('pri'); b.textContent = 'Elimina scaricati'; }, 4000);
+    return;
+  }
+  clearTimeout(confermaTm); b.classList.remove('pri'); b.textContent = 'Elimina scaricati';
+  try { await DB.clear('file'); await DB.clear('scaricati'); } catch (e) {}
+  const ids = [...S.dl.keys()]; S.dl.clear();
+  for (const id of ids) { const u = S.urls.get(id); if (u) { S.urls.delete(id); try { (AX.host ? parent : window).URL.revokeObjectURL(u); } catch (e) {} } }
+  toast('Episodi scaricati eliminati'); disegnaDl(); disegnaDlSum();
+}
+
+/* ---------- scheda episodio ---------- */
+function apriSheet(html) {
+  const s = $('sheet'); $('sheetBody').innerHTML = html; s.hidden = false; $('pan').scrollTop = 0;
+  requestAnimationFrame(() => requestAnimationFrame(() => s.classList.add('open')));
+}
+function chiudiSheet() { const s = $('sheet'); s.classList.remove('open'); setTimeout(() => { if (!s.classList.contains('open')) s.hidden = true; }, 320); }
+function infoEp(id) {
+  const x = S.eps.get(id); if (!x) return;
+  const {ep, pod} = x, st = S.stato.get(id) || {}, d = ep.durata || st.d || 0;
+  const ing = S.dling.get(id), got = S.dl.has(id);
+  const lab = !st.fatto && st.t > 5 ? 'Riprendi da ' + fmtOra(st.t) : 'Riproduci';
+  apriSheet(`<div class="shd"><button data-a="chiudi">Fine</button></div>
+    <div class="eph"><img src="${esc(ep.cover || pod.cover || '')}" alt=""><div style="min-width:0"><div style="font-weight:600">${esc(pod.titolo || '')}</div><div class="small">${esc([fmtData(ep.data), d ? fmtDur(d) : '', st.fatto ? 'ascoltato' : (st.t > 5 && d ? 'restano ' + fmtDur(d - st.t) : '')].filter(Boolean).join(' · '))}</div></div></div>
+    <h2 class="ept">${esc(ep.titolo)}</h2>
+    <div class="col">
+      <button class="btn pri big" data-a="play" data-id="${esc(id)}" data-chiudi="1">${IC.play} ${esc(lab)}</button>
+      ${got ? `<button class="btn big danger" data-a="deldl" data-id="${esc(id)}" data-chiudi="1">${IC.trash} Elimina dal dispositivo${S.dl.get(id).size ? ' (' + esc(fmtMB(S.dl.get(id).size)) + ')' : ''}</button>`
+        : ing ? `<button class="btn big" data-a="stopdl" data-id="${esc(id)}" data-chiudi="1">Annulla scaricamento (${Math.round(ing.pct)}%)</button>`
+        : `<button class="btn big" data-a="dl" data-id="${esc(id)}" data-chiudi="1">${IC.dl} Scarica per l'ascolto offline</button>`}
+      <button class="btn big" data-a="${st.fatto ? 'nonfatto' : 'fatto'}" data-id="${esc(id)}" data-chiudi="1">${st.fatto ? 'Segna come da ascoltare' : IC.check.replace('width="13" height="13"', 'width="18" height="18"') + ' Segna come ascoltato'}</button>
+    </div>
+    <div class="epd">${esc(ep.descr || 'Nessuna descrizione.')}</div>`);
+}
+
+/* ---------- iscrizioni ---------- */
+async function iscrivi() {
+  const p = S.pod; if (!p) return;
+  if (S.subs.has(p.feed)) {
+    S.subs.delete(p.feed); DB.del('iscrizioni', p.feed).catch(() => {});
+    toast('Iscrizione annullata');
+  } else {
+    const s = {feed:p.feed, titolo:p.titolo, autore:p.autore, cover:p.cover, descr:p.descr || '', genere:p.genere || '', itunesId:p.itunesId || 0, serial:!!p.serial,
+      aggiunto:Date.now(), aggiornato:S.lista.length ? Date.now() : 0, visto:Date.now(), ultimo:Date.now(), nuovi:0};
+    S.subs.set(p.feed, s); DB.put('iscrizioni', s).catch(() => toast('Iscrizione non salvata: archivio non disponibile'));
+    toast('Iscritto a «' + p.titolo + '»');
+  }
+  disegnaTestaPod();
+}
+
+/* ---------- eventi ---------- */
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-a]'); if (!b) { if (e.target === $('sheet')) chiudiSheet(); return; }
+  const a = b.dataset.a, id = b.dataset.id;
+  if (b.dataset.chiudi) chiudiSheet();
+  switch (a) {
+    case 'home': vai('vHome'); break;
+    case 'vdl': vai('vDl'); disegnaDl(); break;
+    case 'ris': apriPod(S.ris[+b.dataset.i]); break;
+    case 'top': apriTop(S.top[+b.dataset.i]); break;
+    case 'topri': $('top').innerHTML = '<div class="loading"><span class="spinner"></span>Caricamento…</div>'; caricaTop(true); break;
+    case 'riprova': cerca($('q').value); break;
+    case 'sub': { const s = S.subs.get(b.dataset.feed); if (s) apriPod(s); break; }
+    case 'cont': suonaCont(id); break;
+    case 'pref': aggiornaPod(true); break;
+    case 'psub': iscrivi(); break;
+    case 'pdesc': $('pDesc').classList.toggle('clamp'); b.textContent = $('pDesc').classList.contains('clamp') ? 'altro' : 'meno'; break;
+    case 'pmore': S.quanti += 60; disegnaLista(); break;
+    case 'pplay': { const r = riprendiDi(S.pod.feed); const ep = r ? S.lista.find(x => x.id === r.id) : S.lista[0]; if (ep) suona(S.lista, S.lista.indexOf(ep), S.pod); break; }
+    case 'play': suonaId(id); break;
+    case 'playdl': suonaDl(id); break;
+    case 'toggle': P.toggle(); setTimeout(() => aggiornaAtti(id), 300); break;
+    case 'info': infoEp(id); break;
+    case 'dl': scarica(id); break;
+    case 'stopdl': { const d = S.dling.get(id); if (d) d.ctrl.abort(); break; }
+    case 'deldl': eliminaDl(id).then(() => { toast('Episodio eliminato dal dispositivo'); if (S.filtro === 'scaricati' && !$('vPod').hidden) disegnaLista(); }); break;
+    case 'dlall': eliminaTutti(b); break;
+    case 'fatto': segnaFatto(id, true); break;
+    case 'nonfatto': segnaFatto(id, false); break;
+    case 'chiudi': chiudiSheet(); break;
+  }
+});
+$('pSeg').addEventListener('click', e => {
+  const b = e.target.closest('button[data-f]'); if (!b) return;
+  S.filtro = b.dataset.f; S.quanti = 40;
+  [...$('pSeg').children].forEach(x => x.classList.toggle('on', x === b));
+  disegnaLista();
+});
+$('refAll').addEventListener('click', e => { e.stopPropagation(); aggiornaTutti(true); });
+const q = $('q');
+function modoRicerca(on) { $('sRes').hidden = !on; $('homeMain').hidden = on; $('qCancel').hidden = !on && document.activeElement !== q; }
+q.addEventListener('focus', () => { $('qCancel').hidden = false; });
+q.addEventListener('input', () => {
+  clearTimeout(qTimer);
+  const v = q.value.trim();
+  modoRicerca(!!v);
+  if (!v) { qSeq++; $('res').innerHTML = ''; return; }
+  qTimer = setTimeout(() => cerca(v), 450);
+});
+$('qForm').addEventListener('submit', e => { e.preventDefault(); clearTimeout(qTimer); if (q.value.trim()) { modoRicerca(true); cerca(q.value); } q.blur(); });
+$('qCancel').addEventListener('click', () => { q.value = ''; qSeq++; $('res').innerHTML = ''; q.blur(); modoRicerca(false); $('qCancel').hidden = true; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('sheet').hidden) chiudiSheet(); });
+// copertina non disponibile: resta il riquadro grigio al posto dell'icona d'immagine rotta
+document.addEventListener('error', e => { const im = e.target; if (im && im.tagName === 'IMG' && im.getAttribute('src')) im.removeAttribute('src'); }, true);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') check(); else { check(); misuraBasso(); } });
+addEventListener('pagehide', check);
+addEventListener('resize', misuraBasso);
+
+/* ---------- avvio ---------- */
+(async function avvio() {
+  AX.header('Podcast');
+  misuraBasso(); setInterval(misuraBasso, 3000);
+  try {
+    const [subs, stato, dl] = await Promise.all([DB.all('iscrizioni'), DB.all('stato'), DB.all('scaricati')]);
+    subs.forEach(s => S.subs.set(s.feed, s));
+    stato.forEach(s => S.stato.set(s.id, s));
+    dl.forEach(x => S.dl.set(x.id, x));
+  } catch (e) { S.db = false; $('dbNote').hidden = false; }
+  disegnaHome();
+  caricaTop();
+  setInterval(check, 10000);
+  P.onChange(throttle(check, 1000));
+  check();
+  S.mac = await AX.stato();
+  notaMac();
+  aggiornaTutti(false);
+})();
+</script>
+</body>
+</html>
