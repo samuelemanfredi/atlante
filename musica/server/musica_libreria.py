@@ -2130,12 +2130,15 @@ def main():
         def log_message(self, *x):
             pass
 
-    srv = ThreadingHTTPServer(("0.0.0.0", a.porta), H)
+    # ATLANTE_ASCOLTO=127.0.0.1 dietro Tailscale: il server non chiede codici, dalla rete di casa nessuno deve arrivarci
+    ascolto = os.environ.get("ATLANTE_ASCOLTO", "0.0.0.0")
+    ThreadingHTTPServer.request_queue_size = 128   # con 5, dietro Tailscale le copertine davano 502
+    srv = ThreadingHTTPServer((ascolto, a.porta), H)
     if https:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(a.cert, a.chiave)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
-    print("Atlante Musica su %s://0.0.0.0:%d/%s  (Ctrl+C per fermare)" % ("https" if https else "http", a.porta,
+    print("Atlante Musica su %s://%s:%d/%s  (Ctrl+C per fermare)" % ("https" if https else "http", ascolto, a.porta,
           "  -> dal telefono: " + indirizzo if indirizzo else ""), flush=True)
     srv.serve_forever()
 
