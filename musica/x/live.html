@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Vai in diretta</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Vai in diretta: piattaforme (link ufficiali, server RTMP, chiavi solo sul dispositivo), prova fotocamera/microfono/rete, checklist */
+:root{--track:#d1d1d6}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--track:#3a3a3c}}
+:root[data-theme="dark"]{--track:#3a3a3c}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .seg button.on{background:#636366}}
+:root[data-theme="dark"] .seg button.on{background:#636366}
+.pt{display:flex;gap:12px;align-items:center}
+.pt .tx{flex:1;min-width:0}
+.pt .tx b{display:block;font-weight:600}
+.pt .tx span{display:block;color:var(--fg2);font-size:14px}
+.mono{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;font-weight:800;font-size:13px;letter-spacing:-.3px;flex:none;color:#fff;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.15)}
+.plat p.small{margin:8px 0 0}
+.plat .btns{margin:10px 0 0}
+details.rtmp{margin-top:10px;border-top:.5px solid var(--sep);padding-top:4px}
+details.rtmp summary{cursor:pointer;color:var(--link);font-size:15px;padding:8px 0;list-style:none}
+details.rtmp summary::-webkit-details-marker{display:none}
+details.rtmp summary::before{content:"›";display:inline-block;margin-right:6px;transition:.2s}
+details.rtmp[open] summary::before{transform:rotate(90deg)}
+.kv .in{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}
+.mask{-webkit-text-security:disc;text-security:disc}
+.alt{font-size:12px;color:var(--fg2);margin:4px 4px 0;word-break:break-all}
+.prev{position:relative;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:16/9;width:100%;margin:0 auto}
+.prev.v{aspect-ratio:9/16;width:min(100%,calc(62vh * 9 / 16))}
+.prev video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.prev .msg{position:absolute;inset:0;display:grid;place-items:center;color:rgba(255,255,255,.75);font-size:15px;text-align:center;padding:16px}
+.prev .info{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;padding:3px 8px;border-radius:99px}
+.meter{margin:14px 0 4px}
+.mtr{position:relative;height:14px;border-radius:7px;overflow:hidden;background:linear-gradient(90deg,#34c759 0,#34c759 67%,#ffcc00 67%,#ffcc00 88%,#ff3b30 88%)}
+.mtr i{position:absolute;top:0;right:0;bottom:0;left:0;background:var(--track);transition:left .06s linear}
+.mtr b{position:absolute;top:0;bottom:0;width:2px;background:var(--fg);left:0;opacity:0}
+.scale{display:flex;justify-content:space-between;font-size:11px;color:var(--fg3);margin:3px 2px 0}
+.err{color:var(--bad)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:4px 0 0}
+.stat{background:var(--card);border-radius:10px;padding:10px;text-align:center;min-width:0}
+.stat b{display:block;font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.stat span{font-size:12px;color:var(--fg2)}
+label.row{cursor:pointer}
+label.row input{width:22px;height:22px;accent-color:var(--accent);flex:none;margin:0}
+label.row .tx b{white-space:normal}
+label.row .tx span{white-space:normal}
+.app{display:flex;gap:12px;align-items:flex-start}
+.app .tx{flex:1;min-width:0}
+.app .tx b{display:block}
+.app .tx span{color:var(--fg2);font-size:14px}
+.steps{margin:6px 0 0;padding-left:22px;font-size:15px}
+.steps li{margin:4px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="seg" id="tabs" role="tablist">
+    <button data-tab="piattaforme" class="on" role="tab">Piattaforme</button>
+    <button data-tab="prova" role="tab">Prova</button>
+    <button data-tab="strumenti" role="tab">Strumenti</button>
+  </div>
+
+  <!-- ===== Piattaforme ===== -->
+  <section id="p-piattaforme">
+    <div class="note">«Vai in diretta» apre la pagina o l'app ufficiale. Per trasmettere con app come Larix, Streamlabs o OBS apri «Server e chiave»: la chiave resta <b>solo su questo dispositivo</b> (non va al Mac né altrove). Chi ha la chiave può trasmettere sul tuo canale: non mostrarla mai.</div>
+    <h2 class="h2">Video</h2>
+    <div id="listVideo"></div>
+    <h2 class="h2">Solo audio</h2>
+    <div id="listAudio"></div>
+    <p class="small">Non esistono più: Periscope (chiuso nel 2021, le dirette sono ora in X), Facebook Live Audio Rooms (2022), Spotify Live e Spotify Greenroom (2023).</p>
+  </section>
+
+  <!-- ===== Prova prima della diretta ===== -->
+  <section id="p-prova" hidden>
+    <h2 class="h2" style="margin-top:8px">Fotocamera e microfono</h2>
+    <div class="card">
+      <div class="prev" id="prev"><video id="cam" playsinline muted autoplay></video><div class="msg" id="camMsg">Anteprima spenta</div><span class="info" id="camInfo" hidden></span></div>
+      <div class="seg" id="segRatio">
+        <button data-r="h" class="on">Orizzontale 16:9</button>
+        <button data-r="v">Verticale 9:16</button>
+      </div>
+      <div class="btns">
+        <button class="btn pri" id="btnProva" style="flex:1">Avvia prova</button>
+        <button class="btn" id="btnGira" style="flex:1" hidden>Gira fotocamera</button>
+        <button class="btn" id="btnStop" style="flex:1" hidden>Ferma</button>
+      </div>
+      <div class="meter">
+        <div class="mtr" aria-label="Livello del microfono"><i id="mtrCover"></i><b id="mtrPeak"></b></div>
+        <div class="scale"><span>-60 dB</span><span>-20</span><span>-7</span><span>0</span></div>
+        <div class="small" id="mtrTxt" style="margin-top:6px">Microfono spento</div>
+      </div>
+      <div class="btns"><button class="btn sm" id="btnRec" disabled>Registra 5 s e riascolta</button></div>
+      <audio id="recAudio" controls hidden style="width:100%"></audio>
+      <p class="small" id="camErr" hidden></p>
+      <p class="small">Orizzontale per YouTube, Twitch, Facebook, Kick; verticale per Instagram e TikTok. La fotocamera frontale si vede a specchio solo qui: chi guarda ti vede dritto.</p>
+    </div>
+
+    <h2 class="h2">Connessione</h2>
+    <div class="card">
+      <div class="small" id="netInfo"></div>
+      <div class="stats">
+        <div class="stat"><b id="sDown">–</b><span>Download<br>Mbps</span></div>
+        <div class="stat"><b id="sUp">–</b><span>Upload<br>Mbps</span></div>
+        <div class="stat"><b id="sLat">–</b><span>Latenza<br>ms</span></div>
+      </div>
+      <div class="btns"><button class="btn pri" id="btnNet">Prova la connessione</button></div>
+      <p class="sub" id="netAdv" style="margin:6px 0 0"></p>
+      <p class="small">Per una diretta conta l'<b>upload</b>. La prova usa speed.cloudflare.com e consuma fino a circa 45 MB: fallo nel posto da cui trasmetterai.</p>
+    </div>
+
+    <div class="hd" style="display:flex;align-items:center;justify-content:space-between;margin-top:22px"><h2 class="h2" style="margin:0">Checklist prima della diretta</h2><button class="btn sm" id="checkReset">Azzera</button></div>
+    <div class="list" id="check"></div>
+  </section>
+
+  <!-- ===== Strumenti ===== -->
+  <section id="p-strumenti" hidden>
+    <h2 class="h2" style="margin-top:8px">Multistreaming</h2>
+    <p class="sub">Una sola trasmissione, inviata insieme a più piattaforme (YouTube, Twitch, Facebook, LinkedIn…). Controlla le regole delle piattaforme e gli eventuali accordi di esclusiva.</p>
+    <div class="list">
+      <a class="row" href="https://restream.io/" target="_blank" rel="noopener"><span class="mono" style="background:#0b2b5c">Re</span><div class="tx"><b>Restream</b><span>Studio nel browser, ospiti, chat unificata; collega i canali o aggiungi server e chiave</span></div></a>
+      <a class="row" href="https://streamyard.com/" target="_blank" rel="noopener"><span class="mono" style="background:#3b5bdb">SY</span><div class="tx"><b>StreamYard</b><span>Studio nel browser con ospiti e grafiche; partner ufficiale di LinkedIn Live</span></div></a>
+    </div>
+
+    <h2 class="h2">App per trasmettere con server e chiave</h2>
+    <div class="list">
+      <a class="row" href="https://softvelum.com/larix/" target="_blank" rel="noopener"><span class="mono" style="background:#e4572e">Lx</span><div class="tx"><b>Larix Broadcaster</b><span>iPhone e Android, gratis: RTMP, RTMPS e SRT dalla fotocamera</span></div></a>
+      <a class="row" href="https://streamlabs.com/mobile-app" target="_blank" rel="noopener"><span class="mono" style="background:#80f5d2;color:#09161d">SL</span><div class="tx"><b>Streamlabs</b><span>App per iPhone e Android: collega l'account o usa server e chiave</span></div></a>
+      <a class="row" href="https://obsproject.com/" target="_blank" rel="noopener"><span class="mono" style="background:#302e31">OBS</span><div class="tx"><b>OBS Studio</b><span>Mac e PC, gratis e open source: scene, grafiche, più fotocamere</span></div></a>
+    </div>
+    <div class="card">
+      <b>Larix in 4 passi</b>
+      <ol class="steps">
+        <li>In «Piattaforme» apri <b>Server e chiave</b> e tocca <b>Copia URL completo</b>.</li>
+        <li>In Larix: <b>Impostazioni → Connessioni → Nuova connessione</b>.</li>
+        <li>Incolla nel campo URL e salva (attiva solo questa connessione).</li>
+        <li>Torna alla fotocamera e premi il tasto rosso.</li>
+      </ol>
+      <p class="small">Con OBS sul Mac: Impostazioni → Stream → Servizio «Personalizzato», poi incolla separatamente server e chiave. L'iPhone può fare da webcam per il Mac con «Fotocamera Continuity».</p>
+    </div>
+  </section>
+</div>
+
+<script src="kit.js"></script>
+<script>
+(function () {
+  'use strict';
+  const {$, esc, toast} = AX;
+  AX.header('Vai in diretta');
+
+  async function copia(t, msg) {
+    try { await navigator.clipboard.writeText(t); toast(msg || 'Copiato'); return; } catch (e) {}
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+    toast(ok ? (msg || 'Copiato') : 'Copia non riuscita');
+  }
+
+  /* ---------- schede ---------- */
+  const TABS = ['piattaforme', 'prova', 'strumenti'];
+  function mostraScheda(t) {
+    if (!TABS.includes(t)) t = 'piattaforme';
+    TABS.forEach(x => { $('p-' + x).hidden = x !== t; });
+    $('tabs').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+    AX.store.set('live-tab', t);
+    if (t !== 'prova') ferma();          // fotocamera e microfono accesi solo nella scheda Prova
+  }
+  $('tabs').onclick = e => { const b = e.target.closest('button[data-tab]'); if (b) mostraScheda(b.dataset.tab); };
+
+  /* ---------- piattaforme ---------- */
+  // rtmp.server vuoto = server personale o diverso a ogni diretta (lo dà la piattaforma)
+  const VIDEO = [
+    {id: 'yt', n: 'YouTube Live', c: '#ff0000', m: '▶', go: 'https://www.youtube.com/livestreaming',
+      tel: 'App YouTube → + → Vai in diretta',
+      req: 'Serve un canale verificato; la prima attivazione può richiedere fino a 24 ore. Dal telefono YouTube può chiedere un numero minimo di iscritti, con un\'app e la chiave no.',
+      rtmp: {server: 'rtmp://a.rtmp.youtube.com/live2', alt: 'rtmps://a.rtmps.youtube.com/live2', where: 'https://studio.youtube.com/', dove: 'YouTube Studio → Crea → Trasmetti dal vivo → Stream → Chiave stream (può restare sempre la stessa).'}},
+    {id: 'tw', n: 'Twitch', c: '#9146ff', m: 'Tw', go: 'https://dashboard.twitch.tv/stream-manager',
+      tel: 'App Twitch → Crea → Trasmetti in diretta (fotocamera o schermo)',
+      req: 'Basta un account Twitch.',
+      rtmp: {server: 'rtmps://ingest.global-contribute.live-video.net/app', alt: 'rtmp://ingest.global-contribute.live-video.net/app', where: 'https://dashboard.twitch.tv/settings/stream', dove: 'Dashboard creator → Impostazioni → Stream → Chiave stream principale.'}},
+    {id: 'kick', n: 'Kick', c: '#53fc18', f: '#000', m: 'K', go: 'https://dashboard.kick.com/',
+      tel: 'App «KICK - Go Live» per iPhone e Android, oppure dal browser: Dashboard → Go Live',
+      req: 'Server e chiave sono personali.',
+      rtmp: {server: '', ph: 'rtmps://….global-contribute.live-video.net', where: 'https://dashboard.kick.com/', dove: 'Dashboard → Impostazioni → Stream: copia il tuo URL del server e la chiave (inizia con sk_).'}},
+    {id: 'ig', n: 'Instagram', c: '#d6249f', m: 'IG', go: 'https://www.instagram.com/',
+      tel: 'App Instagram → + → Live (scorri le modalità in basso)',
+      req: 'Per trasmettere da un\'app esterna serve un account professionale e il computer (Live Producer).',
+      rtmp: {server: '', ph: 'Incolla il server da Live Producer', temp: true, where: 'https://www.instagram.com/', dove: 'Da computer: instagram.com → Crea → Video in diretta. URL e chiave cambiano a ogni diretta: incollali qui ogni volta.'}},
+    {id: 'tt', n: 'TikTok', c: '#010101', m: '♪', go: 'https://www.tiktok.com/',
+      tel: 'App TikTok → + → LIVE',
+      req: 'Di solito servono 18 anni e almeno 1.000 follower (varia per paese e account).',
+      rtmp: {server: '', ph: 'Incolla il server da LIVE Producer', temp: true, where: 'https://livecenter.tiktok.com/producer', dove: 'TikTok LIVE Producer, solo per gli account abilitati: la chiave è temporanea, prendila prima di ogni diretta.'}},
+    {id: 'fb', n: 'Facebook', c: '#1877f2', m: 'f', go: 'https://www.facebook.com/live/producer',
+      tel: 'App Facebook → «A cosa stai pensando?» → Diretta',
+      req: 'Profilo, Pagina o gruppo.',
+      rtmp: {server: 'rtmps://live-api-s.facebook.com:443/rtmp/', where: 'https://www.facebook.com/live/producer', dove: 'Live Producer → Software di streaming → chiave (puoi scegliere una chiave permanente).'}},
+    {id: 'x', n: 'X', c: '#000', m: 'X', go: 'https://x.com/',
+      tel: 'App X → + → Live (per l\'audio: Spaces)',
+      req: 'Per trasmettere da un\'app esterna serve X Premium (Live Studio).',
+      rtmp: {server: '', ph: 'Incolla l\'URL RTMP da Live Studio', where: 'https://studio.x.com/live', dove: 'Live Studio → Nuova diretta → Sorgente: copia l\'URL RTMP e la chiave.'}},
+    {id: 'li', n: 'LinkedIn Live', c: '#0a66c2', m: 'in', go: 'https://www.linkedin.com/video/golive/now',
+      tel: 'Si trasmette con StreamYard o Restream (anche da telefono) oppure con «Custom stream» e un\'app come Larix',
+      req: 'Serve l\'accesso a LinkedIn Live (requisiti di follower e buona reputazione dell\'account).',
+      rtmp: {server: '', ph: 'Incolla l\'URL da Custom stream', temp: true, where: 'https://www.linkedin.com/video/golive/now', dove: 'LinkedIn → Custom stream → Ottieni URL: server e chiave valgono per quella diretta.'}}
+  ];
+  const AUDIO = [
+    {id: 'spaces', n: 'X Spaces', c: '#000', m: 'X', go: 'https://x.com/',
+      tel: 'App X → + → Spaces → Avvia ora',
+      req: 'Stanze audio dal vivo con ospiti sul palco; si possono registrare.'},
+    {id: 'ch', n: 'Clubhouse', c: '#f2efe4', f: '#000', m: 'Ch', go: 'https://www.clubhouse.com/',
+      tel: 'App Clubhouse (iPhone e Android) → avvia una stanza',
+      req: 'Stanze audio dal vivo con alzata di mano.'},
+    {id: 'mixlr', n: 'Mixlr', c: '#ff4f00', m: 'Mx', go: 'https://mixlr.com/',
+      tel: 'Dal sito Mixlr (Go live) o con Mixlr Studio sul Mac',
+      req: 'Per radio, chiese, sport ed eventi: pagina dell\'evento e registrazioni. Server e chiave (RTMP) solo nei piani più alti.',
+      rtmp: {server: '', ph: 'Incolla il server dal pannello Mixlr', where: 'https://mixlr.com/', dove: 'Pannello Mixlr → impostazioni di trasmissione: chiave dello stream (piano Advanced).'}},
+    {id: 'spreaker', n: 'Spreaker', c: '#ffc700', f: '#000', m: 'Sp', go: 'https://www.spreaker.com/',
+      tel: 'App Spreaker Studio → Live',
+      req: 'Radio e podcast in diretta con chat degli ascoltatori; la registrazione diventa un episodio.'},
+    {id: 'ytaudio', n: 'YouTube e Twitch solo audio', c: '#636366', m: '♫',
+      tel: 'Non esiste una diretta «solo audio»: si trasmette un\'immagine fissa con il microfono',
+      req: 'In OBS: sorgente Immagine + Microfono. Usa server e chiave delle schede YouTube o Twitch qui sopra; su Twitch scegli la categoria Musica o Talk show.'}
+  ];
+
+  const chiavi = AX.store.get('live-chiavi', {});
+  function salvaChiavi() { AX.store.set('live-chiavi', chiavi); }
+  const maskOk = window.CSS && CSS.supports && (CSS.supports('-webkit-text-security', 'disc') || CSS.supports('text-security', 'disc'));
+
+  function htmlPiattaforma(p) {
+    const k = chiavi[p.id] || {}, r = p.rtmp;
+    let h = '<div class="card plat" data-id="' + p.id + '">' +
+      '<div class="pt"><span class="mono" style="background:' + p.c + ';color:' + (p.f || '#fff') + '">' + esc(p.m) + '</span>' +
+      '<div class="tx"><b>' + esc(p.n) + '</b><span>' + esc(p.tel) + '</span></div></div>' +
+      (p.req ? '<p class="small">' + esc(p.req) + '</p>' : '') +
+      (p.go ? '<div class="btns"><a class="btn pri sm" href="' + esc(p.go) + '" target="_blank" rel="noopener">Vai in diretta</a></div>' : '');
+    if (r) {
+      h += '<details class="rtmp"' + (k.key ? ' open' : '') + '><summary>Server e chiave (RTMP)</summary>' +
+        '<div class="field kv"><label>Server' + (r.server ? ' ufficiale' : '') + '</label>' +
+          '<input class="in" data-f="server" value="' + esc(k.server || r.server) + '" placeholder="' + esc(r.ph || '') + '" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url">' +
+          (r.alt ? '<div class="alt">Se la rete blocca la porta 1935 usa: ' + esc(r.alt) + '</div>' : '') +
+          (!r.server ? '<div class="alt">Questo server è personale' + (r.temp ? ' e cambia a ogni diretta' : '') + ': copialo dal pannello ufficiale.</div>' : '') +
+        '</div>' +
+        '<div class="field kv"><label>Chiave di trasmissione' + (r.temp ? ' (temporanea)' : '') + '</label>' +
+          '<input class="in' + (maskOk ? ' mask' : '') + '" type="' + (maskOk ? 'text' : 'password') + '" data-f="key" value="' + esc(k.key || '') + '" placeholder="Incolla la chiave" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">' +
+        '</div>' +
+        '<div class="btns">' +
+          '<button class="btn sm" data-a="show">Mostra</button>' +
+          '<button class="btn sm" data-a="ckey">Copia chiave</button>' +
+          '<button class="btn sm" data-a="cserver">Copia server</button>' +
+          '<button class="btn sm" data-a="cfull">Copia URL completo</button>' +
+          '<a class="btn sm" href="' + esc(r.where) + '" target="_blank" rel="noopener">Dove trovo la chiave</a>' +
+          '<button class="btn sm" data-a="del">Cancella</button>' +
+        '</div>' +
+        '<p class="small">' + esc(r.dove) + ' L\'«URL completo» (server/chiave) serve ad app come Larix.</p>' +
+      '</details>';
+    }
+    return h + '</div>';
+  }
+  $('listVideo').innerHTML = VIDEO.map(htmlPiattaforma).join('');
+  $('listAudio').innerHTML = AUDIO.map(htmlPiattaforma).join('');
+  const PIATT = {}; VIDEO.concat(AUDIO).forEach(p => { PIATT[p.id] = p; });
+
+  let salvaT = 0;
+  document.addEventListener('input', e => {
+    const inp = e.target.closest('.plat input[data-f]'); if (!inp) return;
+    const id = inp.closest('.plat').dataset.id;
+    chiavi[id] = Object.assign({}, chiavi[id], {[inp.dataset.f]: inp.value.trim()});
+    clearTimeout(salvaT); salvaT = setTimeout(salvaChiavi, 300);
+  });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('.plat button[data-a]'); if (!b) return;
+    const card = b.closest('.plat'), id = card.dataset.id, p = PIATT[id];
+    const sIn = card.querySelector('input[data-f="server"]'), kIn = card.querySelector('input[data-f="key"]');
+    const server = sIn.value.trim(), key = kIn.value.trim();
+    switch (b.dataset.a) {
+      case 'show':
+        if (maskOk) kIn.classList.toggle('mask'); else kIn.type = kIn.type === 'password' ? 'text' : 'password';
+        b.textContent = (maskOk ? kIn.classList.contains('mask') : kIn.type === 'password') ? 'Mostra' : 'Nascondi';
+        break;
+      case 'ckey':
+        if (!key) { toast('Incolla prima la chiave'); kIn.focus(); break; }
+        copia(key, 'Chiave copiata: non mostrarla in diretta'); break;
+      case 'cserver':
+        if (!server) { toast('Incolla prima il server'); sIn.focus(); break; }
+        copia(server, 'Server copiato'); break;
+      case 'cfull':
+        if (!server || !key) { toast('Servono server e chiave'); (server ? kIn : sIn).focus(); break; }
+        copia(server.replace(/\/+$/, '') + '/' + key, 'URL completo copiato'); break;
+      case 'del':
+        delete chiavi[id]; salvaChiavi();
+        kIn.value = ''; sIn.value = (p.rtmp && p.rtmp.server) || '';
+        toast('Chiave cancellata da questo dispositivo'); break;
+    }
+  });
+
+  /* ---------- prova fotocamera e microfono ---------- */
+  const cam = $('cam');
+  let stream = null, ac = null, raf = 0, facing = 'user', devIdx = 0, camDevs = [], picco = -100, piccoT = 0, rec = null;
+  const supportato = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  $('segRatio').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    $('segRatio').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    $('prev').classList.toggle('v', b.dataset.r === 'v');
+  };
+
+  function mostraErrore(t, html) {
+    const el = $('camErr');
+    el.hidden = !t; el.className = 'small err';
+    if (html) el.innerHTML = t; else el.textContent = t || '';
+  }
+  function testoErrore(e) {
+    const n = e && e.name;
+    if (n === 'NotAllowedError' || n === 'SecurityError') {
+      const inRiquadro = window.parent !== window;
+      return 'Permesso negato. Su iPhone: Impostazioni → Safari (o l\'app) → Fotocamera e Microfono → Consenti, poi riprova.' +
+        (inRiquadro ? ' Se il riquadro non può chiederlo, <a href="' + esc(location.href.split('#')[0]) + '" target="_blank" rel="noopener">apri la pagina a sé</a>.' : '');
+    }
+    if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'Nessuna fotocamera o microfono trovato su questo dispositivo.';
+    if (n === 'NotReadableError' || n === 'AbortError') return 'Fotocamera o microfono già in uso da un\'altra app: chiudila e riprova.';
+    return 'Avvio non riuscito: ' + esc((e && e.message) || n || 'errore');
+  }
+
+  async function prendiFlusso(videoC) {
+    try { return await navigator.mediaDevices.getUserMedia({video: videoC, audio: true}); }
+    catch (e) {
+      if (e.name !== 'NotFoundError' && e.name !== 'OverconstrainedError') throw e;
+      try { return await navigator.mediaDevices.getUserMedia({audio: true}); }      // solo microfono
+      catch (e2) { return await navigator.mediaDevices.getUserMedia({video: videoC}); } // solo fotocamera
+    }
+  }
+
+  async function avvia(deviceId) {
+    if (!supportato) return;
+    ferma(true);
+    mostraErrore('');
+    $('btnProva').disabled = true; $('camMsg').textContent = 'Avvio…'; $('camMsg').hidden = false;
+    const videoC = deviceId ? {deviceId: {exact: deviceId}, width: {ideal: 1280}, height: {ideal: 720}}
+                            : {facingMode: {ideal: facing}, width: {ideal: 1280}, height: {ideal: 720}};
+    try {
+      stream = await prendiFlusso(videoC);
+    } catch (e) {
+      stream = null; $('btnProva').disabled = false; $('camMsg').textContent = 'Anteprima spenta';
+      mostraErrore(testoErrore(e), true);
+      return;
+    }
+    const vt = stream.getVideoTracks()[0], at = stream.getAudioTracks()[0];
+    if (vt) {
+      cam.srcObject = stream;
+      cam.play().catch(() => {});
+      const s = vt.getSettings ? vt.getSettings() : {};
+      if (s.facingMode) facing = s.facingMode;
+      cam.style.transform = (s.facingMode || facing) === 'environment' ? '' : 'scaleX(-1)';
+      $('camMsg').hidden = true;
+      const info = () => { const st = vt.getSettings ? vt.getSettings() : {}; const w = cam.videoWidth || st.width, h = cam.videoHeight || st.height;
+        $('camInfo').textContent = (w && h ? w + '×' + h : '') + (st.frameRate ? ' · ' + Math.round(st.frameRate) + ' fps' : '') + (vt.label ? ' · ' + vt.label : '');
+        $('camInfo').hidden = false; };
+      cam.onloadedmetadata = info; info();
+    } else { $('camMsg').textContent = 'Nessuna fotocamera: provo solo il microfono'; }
+    try { camDevs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch (e) { camDevs = []; }
+    if (deviceId) devIdx = Math.max(0, camDevs.findIndex(d => d.deviceId === deviceId));
+    $('btnGira').hidden = !vt || camDevs.length < 2;
+    $('btnStop').hidden = false;
+    $('btnProva').disabled = false; $('btnProva').hidden = true;
+    if (at) avviaMisuratore(stream); else $('mtrTxt').textContent = 'Nessun microfono';
+    $('btnRec').disabled = !at || typeof MediaRecorder === 'undefined';
+  }
+
+  function avviaMisuratore(s) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { $('mtrTxt').textContent = 'Misuratore non supportato da questo browser'; return; }
+    ac = new AC();
+    if (ac.state === 'suspended') ac.resume().catch(() => {});
+    const src = ac.createMediaStreamSource(s), an = ac.createAnalyser();
+    an.fftSize = 2048; src.connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    let liv = -100;
+    const cover = $('mtrCover'), pk = $('mtrPeak'), txt = $('mtrTxt');
+    const pct = db => Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+    let ultimoTxt = 0;
+    const giro = () => {
+      an.getByteTimeDomainData(buf);
+      let sum = 0, max = 0;
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; const a = Math.abs(v); if (a > max) max = a; }
+      const rms = Math.sqrt(sum / buf.length);
+      const db = rms > 0 ? 20 * Math.log10(rms) : -100, dbP = max > 0 ? 20 * Math.log10(max) : -100;
+      liv = db > liv ? db : liv - 1.2;                            // sale subito, scende piano
+      const now = performance.now();
+      if (dbP > picco || now - piccoT > 1500) { picco = dbP; piccoT = now; }
+      cover.style.left = pct(liv) + '%';
+      pk.style.left = 'calc(' + pct(picco) + '% - 1px)'; pk.style.opacity = picco > -60 ? .8 : 0;
+      if (now - ultimoTxt > 250) {
+        ultimoTxt = now;
+        const v = Math.round(liv);
+        txt.textContent = (liv < -55 ? 'Silenzio: parla o avvicina il microfono' :
+          picco > -1 ? 'Troppo alto: la voce distorce, allontanati o abbassa il guadagno' :
+          liv < -35 ? 'Basso: avvicinati al microfono' :
+          liv < -12 ? 'Buono' : 'Alto: va bene se non tocca il rosso') + ' · ' + (v < -99 ? '-∞' : v) + ' dB';
+      }
+      raf = requestAnimationFrame(giro);
+    };
+    giro();
+  }
+
+  function ferma(silenzioso) {
+    cancelAnimationFrame(raf); raf = 0;
+    if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
+    rec = null;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    if (ac) { ac.close().catch(() => {}); ac = null; }
+    cam.srcObject = null;
+    $('camInfo').hidden = true;
+    $('camMsg').hidden = false; $('camMsg').textContent = 'Anteprima spenta';
+    $('mtrCover').style.left = '0%'; $('mtrPeak').style.opacity = 0; picco = -100;
+    if (!silenzioso) $('mtrTxt').textContent = 'Microfono spento';
+    $('btnStop').hidden = true; $('btnGira').hidden = true; $('btnRec').disabled = true;
+    $('btnProva').hidden = false;
+  }
+
+  $('btnProva').onclick = () => avvia();
+  $('btnStop').onclick = () => ferma();
+  $('btnGira').onclick = () => {
+    // sui telefoni basta invertire facingMode; sui computer con più webcam si passa alla successiva
+    const tel = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (tel) { facing = facing === 'user' ? 'environment' : 'user'; avvia(); }
+    else if (camDevs.length > 1) { devIdx = (devIdx + 1) % camDevs.length; avvia(camDevs[devIdx].deviceId); }
+  };
+  $('btnRec').onclick = () => {
+    if (!stream || typeof MediaRecorder === 'undefined') return;
+    const tracce = stream.getAudioTracks(); if (!tracce.length) return;
+    let r;
+    try { r = new MediaRecorder(new MediaStream(tracce)); } catch (e) { toast('Registrazione non supportata'); return; }
+    const parti = []; rec = r;
+    r.ondataavailable = e => { if (e.data && e.data.size) parti.push(e.data); };
+    r.onstop = () => {
+      $('btnRec').textContent = 'Registra 5 s e riascolta'; $('btnRec').disabled = !stream;
+      if (!parti.length) return;
+      const a = $('recAudio');
+      if (a.src) URL.revokeObjectURL(a.src);
+      a.src = URL.createObjectURL(new Blob(parti, {type: r.mimeType || 'audio/mp4'}));
+      a.hidden = false; a.play().catch(() => {});
+    };
+    r.start();
+    $('btnRec').disabled = true; $('btnRec').textContent = 'Registro… parla';
+    setTimeout(() => { if (r.state !== 'inactive') r.stop(); }, 5000);
+  };
+
+  if (!supportato) {
+    $('btnProva').disabled = true;
+    mostraErrore(window.isSecureContext === false
+      ? 'Fotocamera e microfono funzionano solo con l\'indirizzo sicuro (https) dell\'app, per esempio quello di Tailscale.'
+      : 'Questo browser non permette di usare fotocamera e microfono.');
+  }
+
+  /* ---------- prova della connessione ---------- */
+  const CF = 'https://speed.cloudflare.com/';
+  function infoRete() {
+    const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (!c) return 'Il browser non dice che rete stai usando: la prova qui sotto misura la velocità reale.';
+    const tipo = {wifi: 'Wi-Fi', cellular: 'rete cellulare', ethernet: 'cavo', bluetooth: 'Bluetooth', none: 'nessuna rete'}[c.type] || '';
+    const parti = [];
+    if (tipo) parti.push('Rete: ' + tipo);
+    if (c.effectiveType) parti.push('qualità ' + c.effectiveType.toUpperCase());
+    if (c.downlink) parti.push('stima ' + String(c.downlink).replace('.', ',') + ' Mbps in download');
+    if (c.rtt) parti.push(c.rtt + ' ms');
+    if (c.saveData) parti.push('risparmio dati attivo');
+    return parti.length ? parti.join(' · ') + ' (stima del browser)' : 'Il browser non fornisce dettagli sulla rete.';
+  }
+  const fmtM = v => v == null ? '×' : (v >= 100 ? Math.round(v) : v.toFixed(1)).toString().replace('.', ',');
+
+  async function latenza() {
+    const t = [];
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      const r = await AX.fetchT(CF + '__down?bytes=0&r=' + Math.random(), {cache: 'no-store'}, 5000);
+      await r.arrayBuffer();
+      t.push(performance.now() - t0);
+    }
+    return Math.min.apply(null, t);
+  }
+  async function download() {
+    const ctrl = new AbortController(), stop = setTimeout(() => ctrl.abort(), 15000);
+    let n = 0, t1 = 0;
+    try {
+      const r = await fetch(CF + '__down?bytes=25000000&r=' + Math.random(), {cache: 'no-store', signal: ctrl.signal});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.body || !r.body.getReader) {
+        const t0 = performance.now(); const b = await r.arrayBuffer();
+        return b.byteLength * 8 / ((performance.now() - t0) / 1000) / 1e6;
+      }
+      const rd = r.body.getReader();
+      for (;;) {
+        const {done, value} = await rd.read(); if (done) break;
+        if (!t1) { t1 = performance.now(); continue; }        // il primo pezzo include l'attesa iniziale
+        n += value.length;
+        $('sDown').textContent = fmtM(n * 8 / ((performance.now() - t1) / 1000) / 1e6);
+        if (performance.now() - t1 > 6000) { rd.cancel().catch(() => {}); break; }
+      }
+    } catch (e) { if (!n) throw e; }
+    finally { clearTimeout(stop); }
+    const dt = (performance.now() - t1) / 1000;
+    return n && dt > 0 ? n * 8 / dt / 1e6 : null;
+  }
+  async function upload() {
+    let size = 1e6, mbps = null;
+    for (let i = 0; i < 3; i++) {
+      const body = new Uint8Array(size);
+      const t0 = performance.now();
+      const r = await AX.fetchT(CF + '__up?r=' + Math.random(), {method: 'POST', body, cache: 'no-store'}, 20000);
+      await r.text();
+      const dt = (performance.now() - t0) / 1000;
+      mbps = size * 8 / dt / 1e6;
+      $('sUp').textContent = fmtM(mbps);
+      if (dt > 2) break;
+      size *= 4;
+    }
+    return mbps;
+  }
+  function consiglio(up) {
+    if (up == null) return 'Upload non misurato: riprova o controlla la rete.';
+    if (up >= 10) return 'Ottima: 1080p a 30 fps (circa 4,5–6 Mbps) con margine.';
+    if (up >= 6) return 'Buona: 1080p a 30 fps intorno a 4 Mbps, o 720p per stare tranquillo.';
+    if (up >= 3.5) return 'Sufficiente: 720p a 30 fps intorno a 2,5 Mbps.';
+    if (up >= 1.5) return 'Debole: 480p a circa 1 Mbps; meglio avvicinarsi al Wi-Fi o al 5G.';
+    if (up >= 0.3) return 'Basta solo per una diretta audio (128–192 kbps).';
+    return 'Troppo debole per andare in diretta.';
+  }
+  $('btnNet').onclick = async () => {
+    const b = $('btnNet'); b.disabled = true; b.textContent = 'Prova in corso…';
+    $('netInfo').textContent = infoRete();
+    ['sDown', 'sUp', 'sLat'].forEach(id => { $(id).textContent = '…'; });
+    $('netAdv').textContent = '';
+    let lat = null, down = null, up = null;
+    try { lat = await latenza(); } catch (e) {}
+    $('sLat').textContent = lat == null ? '×' : Math.round(lat);
+    try { down = await download(); } catch (e) {}
+    $('sDown').textContent = fmtM(down);
+    try { up = await upload(); } catch (e) {}
+    $('sUp').textContent = fmtM(up);
+    $('netAdv').textContent = (lat == null && down == null && up == null)
+      ? 'Prova non riuscita: sei offline o il server di prova non è raggiungibile.'
+      : consiglio(up) + (lat != null && lat > 150 ? ' La latenza è alta: la chat arriverà in ritardo.' : '');
+    b.disabled = false; b.textContent = 'Ripeti la prova';
+  };
+  $('netInfo').textContent = infoRete();
+
+  /* ---------- checklist ---------- */
+  const VOCI = [
+    ['Batteria e memoria', 'Telefono carico o in carica, spazio libero se registri anche in locale.'],
+    ['Non disturbare', 'Attiva Full immersion: niente chiamate né notifiche durante la diretta.'],
+    ['Rete', 'Wi-Fi stabile o 5G: fai la prova di connessione qui sopra nello stesso posto.'],
+    ['Inquadratura e luce', 'Obiettivo pulito, luce davanti a te e non alle spalle, formato giusto (16:9 o 9:16).'],
+    ['Audio', 'Microfono vicino, livello nel verde-giallo, niente musica protetta da diritti in sottofondo.'],
+    ['Titolo e pubblico', 'Titolo, descrizione, categoria e visibilità (pubblica, non in elenco, privata) pronti.'],
+    ['Diretta di prova', 'Una breve prova privata o non in elenco prima di quella vera.'],
+    ['Chiave al sicuro', 'Mai mostrare la chiave di trasmissione sullo schermo o negli screenshot.'],
+    ['Chat e persone', 'Moderatori e filtri per la chat; consenso di chi riprendi, attenzione ai minori.']
+  ];
+  const spunte = AX.store.get('live-checklist', {});
+  function disegnaChecklist() {
+    $('check').innerHTML = VOCI.map((v, i) =>
+      '<label class="row"><input type="checkbox" data-i="' + i + '"' + (spunte[i] ? ' checked' : '') + '><div class="tx"><b>' + esc(v[0]) + '</b><span>' + esc(v[1]) + '</span></div></label>').join('');
+  }
+  $('check').addEventListener('change', e => {
+    const c = e.target.closest('input[data-i]'); if (!c) return;
+    if (c.checked) spunte[c.dataset.i] = 1; else delete spunte[c.dataset.i];
+    AX.store.set('live-checklist', spunte);
+    if (VOCI.every((v, i) => spunte[i])) toast('Tutto pronto: buona diretta!');
+  });
+  $('checkReset').onclick = () => { Object.keys(spunte).forEach(k => delete spunte[k]); AX.store.set('live-checklist', spunte); disegnaChecklist(); };
+  disegnaChecklist();
+
+  /* ---------- avvio ---------- */
+  mostraScheda(AX.store.get('live-tab', 'piattaforme'));
+  addEventListener('pagehide', () => ferma(true));
+})();
+</script>
+</body>
+</html>

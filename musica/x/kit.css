@@ -2,16 +2,16 @@
 :root{
   --bg:#ffffff; --bg2:#f2f2f7; --card:#ffffff; --fg:#000000; --fg2:rgba(60,60,67,.6); --fg3:rgba(60,60,67,.3);
   --sep:rgba(60,60,67,.22); --fill:rgba(118,118,128,.12); --accent:#fa2d48; --onaccent:#ffffff;
-  --ok:#34c759; --warn:#ff9f0a; --bad:#ff3b30; --link:#007aff; --shadow:0 4px 14px rgba(0,0,0,.12);
+  --segon:#ffffff; --ok:#34c759; --warn:#ff9f0a; --bad:#ff3b30; --link:#007aff; --shadow:0 4px 14px rgba(0,0,0,.12);
   --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue","Segoe UI",Roboto,Arial,sans-serif;
   color-scheme:light;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
   --bg:#000000; --bg2:#1c1c1e; --card:#1c1c1e; --fg:#ffffff; --fg2:rgba(235,235,245,.6); --fg3:rgba(235,235,245,.3);
-  --sep:rgba(84,84,88,.6); --fill:rgba(118,118,128,.24); --accent:#fc3c54; --link:#0a84ff; --shadow:0 4px 14px rgba(0,0,0,.5); color-scheme:dark}}
+  --sep:rgba(84,84,88,.6); --fill:rgba(118,118,128,.24); --accent:#fc3c54; --segon:#636366; --link:#0a84ff; --shadow:0 4px 14px rgba(0,0,0,.5); color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#000000; --bg2:#1c1c1e; --card:#1c1c1e; --fg:#ffffff; --fg2:rgba(235,235,245,.6); --fg3:rgba(235,235,245,.3);
-  --sep:rgba(84,84,88,.6); --fill:rgba(118,118,128,.24); --accent:#fc3c54; --link:#0a84ff; --shadow:0 4px 14px rgba(0,0,0,.5); color-scheme:dark}
+  --sep:rgba(84,84,88,.6); --fill:rgba(118,118,128,.24); --accent:#fc3c54; --segon:#636366; --link:#0a84ff; --shadow:0 4px 14px rgba(0,0,0,.5); color-scheme:dark}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 [hidden]{display:none!important}
 html{background:var(--bg)}
@@ -50,7 +50,7 @@ textarea.in{min-height:110px;resize:vertical}
 .tile .ic{font-size:24px;line-height:1}
 .seg{display:flex;background:var(--fill);border-radius:9px;padding:2px;margin:10px 0}
 .seg button{flex:1;min-height:32px;border-radius:7px;font-size:14px;font-weight:600}
-.seg button.on{background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.seg button.on{background:var(--segon);box-shadow:0 1px 3px rgba(0,0,0,.15)}
 .pill{display:inline-block;padding:2px 8px;border-radius:99px;background:var(--fill);font-size:12px;color:var(--fg2)}
 .pill.ok{background:rgba(52,199,89,.18);color:var(--ok)}
 .pill.warn{background:rgba(255,159,10,.18);color:var(--warn)}
