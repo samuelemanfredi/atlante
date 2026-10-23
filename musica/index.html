@@ -391,6 +391,8 @@ let q = '';
 let lists = [];
 const au = $('au');
 let curUrl = null, curId = null;
+let REMOTE = 0;            // brani arrivati dalla libreria del Mac (disco di backup)
+const remoteSaved = new Map(); // preferiti e ascolti dei brani del Mac, salvati qui
 
 /* ---------- lettura dei tag ---------- */
 const td = (enc, b) => { try { return new TextDecoder(enc).decode(b); } catch (e) { return ''; } };
@@ -669,6 +671,7 @@ const pages = {
     let h = topBar() + '<div class="lt-row"><h1 class="lt">Libreria</h1><button class="round" data-a="add" aria-label="Aggiungi musica">' + ic('plus') + '</button></div>';
     if (!T.size) return h + installBanner() + emptyState();
     const row = (v, icon, t) => '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(icon) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>';
+    if (REMOTE) h += '<div class="banner"><span class="bt">Musica del disco di backup: ' + REMOTE + ' brani</span><button class="ba" data-a="rescan">Aggiorna</button></div>';
     h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + '</div>';
     h += '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + albums().sort((a, b) => b.added - a.added).slice(0, 24).map(tile).join('') + '</div>';
     return h;
@@ -788,11 +791,17 @@ async function load(i, play, at) {
   if (i < 0 || i >= S.queue.length) return;
   S.qi = i; const id = S.queue[i], t = T.get(id);
   if (!t) { S.queue.splice(i, 1); S.orig = S.orig.filter(x => x !== id); if (S.queue.length) return load(Math.min(i, S.queue.length - 1), play); return stop(); }
-  const f = await getFile(id);
-  if (!f) { toast('File non trovato: ' + t.title); return; }
-  if (curUrl) URL.revokeObjectURL(curUrl);
-  curUrl = URL.createObjectURL(f); curId = id;
-  au.src = curUrl;
+  if (t.remote) {
+    if (curUrl) URL.revokeObjectURL(curUrl);
+    curUrl = null; curId = id;
+    au.src = 'api/musica/file/' + encodeURIComponent(id);
+  } else {
+    const f = await getFile(id);
+    if (!f) { toast('File non trovato: ' + t.title); return; }
+    if (curUrl) URL.revokeObjectURL(curUrl);
+    curUrl = URL.createObjectURL(f); curId = id;
+    au.src = curUrl;
+  }
   if (at) au.addEventListener('loadedmetadata', function h() { au.removeEventListener('loadedmetadata', h); try { au.currentTime = at; } catch (e) {} }, {once:true});
   if (play) { au.play().catch(() => {}); t.plays = (t.plays || 0) + 1; t.last = Date.now(); dbPut('meta', t).catch(() => {}); }
   updateNow(); saveState();
@@ -835,6 +844,15 @@ function npColor(key) {
   const rgb = (m) => 'rgb(' + Math.round(r * m) + ',' + Math.round(g * m) + ',' + Math.round(b * m) + ')';
   return [rgb(1), rgb(0.5), rgb(0.75)];
 }
+function ensureColor(key) {
+  const c = key && C.get(key); if (!c || c.color || c.pending) return; c.pending = true;
+  const img = new Image();
+  img.onload = () => { try { const cv = document.createElement('canvas'); cv.width = cv.height = 24; const x = cv.getContext('2d', {willReadFrequently:true}); x.drawImage(img, 0, 0, 24, 24);
+    const px = x.getImageData(0, 0, 24, 24).data; let r = 0, g = 0, b = 0, wt = 0;
+    for (let i = 0; i < px.length; i += 4) { const R = px[i], G = px[i + 1], B = px[i + 2], mx = Math.max(R, G, B), mn = Math.min(R, G, B), s2 = mx ? (mx - mn) / mx : 0, w = 0.15 + s2 * s2 * (mx > 30 ? 1 : 0.2); r += R * w; g += G * w; b += B * w; wt += w; }
+    c.color = [Math.round(r / wt), Math.round(g / wt), Math.round(b / wt)]; lastNowKey = ''; updateNow(); } catch (e) {} };
+  img.src = c.url;
+}
 let lastNowKey = '';
 function updateNow() {
   const t = curId && T.get(curId);
@@ -858,6 +876,7 @@ function updateNow() {
       $('miniT').textContent = t.title; $('miniA').textContent = t.artist || UNK_ART;
       $('npT').textContent = t.title; $('npA').textContent = t.artist || UNK_ART;
       $('npqT').textContent = t.title; $('npqA').textContent = t.artist || UNK_ART;
+      ensureColor(t.cover);
       const [c1, c2, c3] = npColor(t.cover);
       $('np').style.setProperty('--npbg', 'linear-gradient(180deg,' + c1 + ' 0%,' + c3 + ' 55%,' + c2 + ' 100%)');
       $('np').style.setProperty('--npc', c2);
@@ -890,7 +909,7 @@ function tick() {
 function mediaMeta(t) {
   if (!('mediaSession' in navigator)) return;
   const u = coverUrl(t.cover);
-  try { navigator.mediaSession.metadata = new MediaMetadata({title:t.title, artist:t.artist || UNK_ART, album:t.album || '', artwork:u ? [{src:u, sizes:'640x640', type:'image/jpeg'}] : []}); } catch (e) {}
+  try { navigator.mediaSession.metadata = new MediaMetadata({title:t.title, artist:t.artist || UNK_ART, album:t.album || '', artwork:u ? [{src:new URL(u, location.href).href, sizes:'640x640', type:'image/jpeg'}] : []}); } catch (e) {}
 }
 if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession, sa = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) {} };
@@ -943,9 +962,9 @@ function trackMenu(id, pl, pi) {
     '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' +
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
     '<button data-a="m-artist" data-k="' + esc(primary(t)) + '"><span class="l">Vai all\'artista</span>' + ic('person') + '</button>' +
-    '<button data-a="m-edit" data-id="' + id + '"><span class="l">Modifica informazioni</span>' + ic('edit') + '</button></div>' +
-    '<div class="grp">' + (pl ? '<button class="red" data-a="m-unpl" data-k="' + pl + '" data-pi="' + pi + '"><span class="l">Rimuovi dalla playlist</span>' + ic('close') + '</button>' : '') +
-    '<button class="red" data-a="m-del" data-id="' + id + '"><span class="l">Elimina dalla libreria</span>' + ic('trash') + '</button></div>' + cancel);
+    (t.remote ? '' : '<button data-a="m-edit" data-id="' + id + '"><span class="l">Modifica informazioni</span>' + ic('edit') + '</button>') + '</div>' +
+    (pl || !t.remote ? '<div class="grp">' + (pl ? '<button class="red" data-a="m-unpl" data-k="' + pl + '" data-pi="' + pi + '"><span class="l">Rimuovi dalla playlist</span>' + ic('close') + '</button>' : '') +
+    (t.remote ? '' : '<button class="red" data-a="m-del" data-id="' + id + '"><span class="l">Elimina dalla libreria</span>' + ic('trash') + '</button>') + '</div>' : '') + cancel);
 }
 function addSheet() {
   openSheet('<div class="grp"><div class="smsg"><b>Aggiungi musica</b>I file vengono copiati in questa app e restano su questo dispositivo.</div>' +
@@ -1043,6 +1062,7 @@ document.addEventListener('click', e => {
     case 'pickt': { const p = P.find(x => x.id === d.k); if (!p) break; const i = p.ids.indexOf(d.id); if (i >= 0) p.ids.splice(i, 1); else p.ids.push(d.id); b.classList.toggle('on', i < 0); savePl(p); break; }
     case 'sclear': q = ''; $('sq').value = ''; b.hidden = true; render(true); $('sq').focus(); break;
     case 'install': installSheet(); break;
+    case 'rescan': toast('Rileggo il disco di backup…', true); fetch('api/musica/aggiorna', {cache:'no-store'}).then(r => r.json()).then(() => loadRemote()).then(ok => { render(true); toast(ok ? 'Libreria aggiornata: ' + REMOTE + ' brani' : 'Il Mac non risponde'); }).catch(() => toast('Il Mac non risponde')); break;
     case 'noinstall': ls.set('am-noinstall', true); render(true); break;
   }
 });
@@ -1080,6 +1100,26 @@ addEventListener('drop', e => { e.preventDefault(); dragN = 0; $('drop').hidden 
 let toastT = 0;
 function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), sticky ? 8000 : 2400); }
 
+/* ---------- libreria del Mac ---------- */
+async function loadRemote() {
+  try {
+    const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 8000);
+    const r = await fetch('api/musica/catalogo', {cache:'no-store', signal:ctl.signal}); clearTimeout(tm);
+    if (!r.ok || (r.headers.get('content-type') || '').indexOf('json') < 0) return false;
+    const d = await r.json(); if (!d || !Array.isArray(d.brani)) return false;
+    for (const [id, t] of T) if (t.remote) { remoteSaved.set(id, t); T.delete(id); }
+    for (const b of d.brani) {
+      const old = remoteSaved.get(b.id) || {};
+      const cover = b.cover ? 'r:' + b.cover : null;
+      if (cover && !C.has(cover)) C.set(cover, {url:'api/musica/copertina/' + encodeURIComponent(b.cover), color:null});
+      T.set(b.id, Object.assign({}, b, {remote:true, src:'remote:' + b.id, cover, duration:b.duration || old.duration || 0,
+        fav:!!old.fav, plays:old.plays || 0, last:old.last || 0}));
+    }
+    REMOTE = d.brani.length;
+    return true;
+  } catch (e) { return false; }
+}
+
 /* ---------- avvio ---------- */
 (function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; })();
 $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list');
@@ -1088,9 +1128,10 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   try {
     const [m, cv, pl] = await Promise.all([dbAll('meta'), dbAll('covers'), dbAll('playlists')]);
     cv.forEach(c => C.set(c.key, {url:URL.createObjectURL(c.blob), color:c.color}));
-    m.forEach(t => T.set(t.id, t));
+    m.forEach(t => { if (t.remote) remoteSaved.set(t.id, t); else T.set(t.id, t); });
     P = pl.sort((a, b) => a.created - b.created);
   } catch (e) {}
+  await loadRemote();
   const lt = ls.get('am-tab', null); tab = lt && tabs[lt] ? lt : (T.size ? 'home' : 'lib');
   render();
   S.queue = (S.queue || []).filter(id => T.has(id)); S.orig = (S.orig || []).filter(id => T.has(id));
