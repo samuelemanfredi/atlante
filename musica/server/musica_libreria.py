@@ -24,20 +24,36 @@ salvati e playlist stanno con l'indirizzo). Con --indirizzo chi apre la vecchia 
 da un altro dispositivo viene mandato lì. In alternativa: `tailscale cert` e --cert/--chiave.
 Per unirlo a un server esistente basta chiamare `gestisci(handler)` dentro do_GET:
 restituisce True se la richiesta era per la musica.
+
+Serve anche le API dei moduli extra (pagine in x/, vedi x/CONTRATTO.md) sotto api/extra/: stato, proxy, video
+(yt-dlp), voci e audiolibro (`say` del Mac), ia (Ollama sul Mac), dispositivo. Opzioni: --video-dir, --libri-dir,
+--ia-modello, --ia-indirizzo. In un server esistente: `gestisci_extra(handler, metodo)` in do_GET, do_HEAD,
+do_POST e do_DELETE, prima di `gestisci`.
 """
 import argparse
 import hashlib
+import http.client
+import ipaddress
 import json
 import mimetypes
 import os
+import platform
+import queue
 import re
+import shutil
+import signal
+import socket
 import ssl
 import struct
+import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
+import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 
 ESTENSIONI = {".mp3", ".m4a", ".m4b", ".aac", ".flac", ".wav", ".aif", ".aiff", ".ogg", ".oga", ".opus", ".alac", ".mp4"}
 TIPI = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".m4b": "audio/mp4", ".mp4": "audio/mp4", ".alac": "audio/mp4",
@@ -715,7 +731,7 @@ INDIRIZZO = ""   # indirizzo https fisso dell'app (facoltativo): l'app lo propon
 PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna)(?:/([^/]+))?$")
 
 
-def _invia_file(h, percorso, tipo):
+def _invia_file(h, percorso, tipo, intestazioni=None):
     dim = os.path.getsize(percorso)
     inizio, fine, parziale = 0, dim - 1, False
     rng = h.headers.get("Range", "")
@@ -743,6 +759,8 @@ def _invia_file(h, percorso, tipo):
         if parziale:
             h.send_header("Content-Range", "bytes %d-%d/%d" % (inizio, fine, dim))
         h.send_header("Cache-Control", "private, max-age=86400")
+        for k, v in (intestazioni or {}).items():
+            h.send_header(k, v)
         h.end_headers()
         if h.command == "HEAD":
             return
@@ -830,6 +848,1170 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
     return LIB
 
 
+# ---------- moduli extra (pagine in x/): API sotto api/extra/ ----------
+#
+#   GET    stato                       programmi presenti sul Mac (yt-dlp, ffmpeg, say, Ollama) e cartelle
+#   GET    proxy?url=<url>             pagina o feed di un sito pubblico, letto dal Mac (max 15 MB, 20 s)
+#   POST   video {url,tipo,qualita}    scaricamento con yt-dlp in sottofondo -> {id}
+#   GET    video                       elenco dei lavori (il più recente per primo)
+#   GET    video/file/<id>             il file scaricato (con Range)
+#   POST   video/<id>/annulla          ferma lo scaricamento; un lavoro già finito esce dall'elenco (il file resta)
+#   GET    voci                        voci di sintesi del Mac, prima le italiane
+#   POST   audiolibro {...}            ogni capitolo diventa un m4a con `say` -> {id}
+#   GET    audiolibro                  elenco
+#   GET    audiolibro/file/<id>/<n>    capitolo n (da 0), con Range
+#   DELETE audiolibro/<id>             toglie l'audiolibro dall'elenco e cancella i suoi file
+#   GET    ia / POST ia                IA locale (Ollama)
+#   GET    dispositivo                 nome, sistema, memoria, dischi, cartelle che si possono svuotare (solo lettura)
+#
+# Errori: {errore: "testo"} con codice >= 400.
+
+EXTRA = re.compile(r"^(?:.*/)?api/extra/(.*)$")
+CONF = {"cache": "~/.atlante-musica", "video_dir": "~/Movies/Atlante", "libri_dir": "~/Music/Atlante Audiolibri",
+        "ia_modello": "", "ia_indirizzo": "http://127.0.0.1:11434"}
+# avviato da launchd o da un'altra app il PATH è minimo: Homebrew sta in /opt/homebrew/bin (Apple Silicon) o /usr/local/bin
+CARTELLE_PROGRAMMI = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/usr/sbin", "/bin", "/sbin")
+MAX_CORPO = 20 * 1024 * 1024    # corpo delle richieste (testo di un audiolibro)
+MAX_PROXY = 15 * 1024 * 1024
+TEMPO_PROXY = 20
+TEMPO_IA = 180
+BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+           "Version/18.0 Safari/605.1.15")
+SENZA_IA = "IA locale non attiva sul Mac: installa Ollama (ollama.com) e un modello, es. ollama pull llama3.2"
+TIPI_VIDEO = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+              ".mkv": "video/x-matroska", ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".aac": "audio/aac",
+              ".opus": "audio/ogg", ".ogg": "audio/ogg", ".flac": "audio/flac", ".wav": "audio/wav"}
+# cartelle di cui il «gestore dispositivo» mostra quanto occupano (il server non cancella niente)
+PULIZIA = (("Cache delle app", "Library/Caches", "Si ricreano da sole: si possono svuotare ad app chiuse."),
+           ("Xcode: DerivedData", "Library/Developer/Xcode/DerivedData", "File di compilazione di Xcode: si ricreano."),
+           ("Xcode: supporto dispositivi iOS", "Library/Developer/Xcode/iOS DeviceSupport",
+            "Si riscaricano quando colleghi un iPhone a Xcode."),
+           ("Backup di iPhone e iPad", "Library/Application Support/MobileSync/Backup",
+            "Da Finder > iPhone > Gestisci backup: tieni almeno l'ultimo."),
+           ("Cestino", ".Trash", "Si svuota dal Finder."),
+           ("Download", "Downloads", "Controlla i file prima di eliminarli."))
+
+
+class ErroreExtra(Exception):
+    """Risposta d'errore per l'app: {errore: testo} con il codice HTTP dato."""
+
+    def __init__(self, codice, testo):
+        super().__init__(testo)
+        self.codice, self.testo = codice, testo
+
+
+class Annullato(Exception):
+    pass
+
+
+def avvia_extra(cache=None, video_dir=None, libri_dir=None, ia_modello=None, ia_indirizzo=None):
+    """Cartelle e IA dei moduli extra (senza chiamarla valgono quelle predefinite). Le code partono alla prima richiesta."""
+    for k, v in (("cache", cache), ("video_dir", video_dir), ("libri_dir", libri_dir),
+                 ("ia_modello", ia_modello), ("ia_indirizzo", ia_indirizzo)):
+        if v is not None:
+            CONF[k] = v
+    # file temporanei di lavori interrotti (Mac spento a metà di uno scaricamento): via dopo un giorno
+    tmp = os.path.join(_cart("cache"), "extra", "tmp")
+    try:
+        for n in os.listdir(tmp):
+            p = os.path.join(tmp, n)
+            if os.path.getmtime(p) < time.time() - 86400:
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.unlink(p)
+    except OSError:
+        pass
+
+
+def _cart(chiave):
+    return os.path.abspath(os.path.expanduser(CONF[chiave]))
+
+
+def _cartella_tmp():
+    p = os.path.join(_cart("cache"), "extra", "tmp")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _cancella(p):
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+
+
+def _nome_file(s, massimo=150):
+    """Nome di file sicuro (niente / : né caratteri di controllo), al più `massimo` byte (macOS ne permette 255)."""
+    s = re.sub(r"[\x00-\x1f/:\\]+", " ", str(s or ""))
+    s = re.sub(r"\s+", " ", s).strip().lstrip(".").strip()
+    return s.encode("utf-8")[:massimo].decode("utf-8", "ignore").strip()
+
+
+def _pubblico(x):
+    """Copia senza le chiavi interne (che cominciano con «_»: percorsi sul disco)."""
+    if isinstance(x, dict):
+        return {k: _pubblico(v) for k, v in x.items() if not k.startswith("_")}
+    if isinstance(x, list):
+        return [_pubblico(v) for v in x]
+    return x
+
+
+def _con_limite(fn, secondi, predefinito=None):
+    """fn() in un thread a parte, al più per `secondi` (un disco di rete bloccato non deve bloccare la risposta)."""
+    esito = [predefinito]
+
+    def corri():
+        try:
+            esito[0] = fn()
+        except Exception:   # noqa: BLE001
+            pass
+    t = threading.Thread(target=corri, daemon=True)
+    t.start()
+    t.join(secondi)
+    return esito[0]
+
+
+# ----- programmi del Mac -----
+
+def _percorso_programmi():
+    v = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    return os.pathsep.join(v + [p for p in CARTELLE_PROGRAMMI if p not in v])
+
+
+def _programma(nome):
+    return shutil.which(nome, path=_percorso_programmi())
+
+
+def _ambiente():
+    env = dict(os.environ)
+    env["PATH"] = _percorso_programmi()   # così yt-dlp trova ffmpeg (e deno) anche con il PATH minimo
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
+def _comando(args, tempo=10):
+    """Uscita di un comando ('' se il programma manca, non riesce o va oltre il tempo)."""
+    prog = args[0] if os.path.isabs(args[0]) else _programma(args[0])
+    if not prog:
+        return ""
+    try:
+        r = subprocess.run([prog] + list(args[1:]), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=tempo, env=_ambiente())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+
+
+def _termina(p):
+    """Ferma un processo con i suoi figli (yt-dlp lancia ffmpeg): prima con garbo, dopo 5 s con la forza."""
+    def segnale(s):
+        try:
+            if os.name == "posix":
+                os.killpg(p.pid, s)   # il processo ha un gruppo suo (start_new_session)
+            elif s == signal.SIGTERM:
+                p.terminate()
+            else:
+                p.kill()
+        except OSError:
+            pass
+    segnale(signal.SIGTERM)
+
+    def forza():
+        try:
+            p.wait(5)
+        except subprocess.TimeoutExpired:
+            segnale(getattr(signal, "SIGKILL", signal.SIGTERM))
+    threading.Thread(target=forza, daemon=True).start()
+
+
+_VERSIONI = {}
+
+
+def _versione(prog):
+    try:
+        chiave = (prog, os.path.getmtime(prog))
+    except OSError:
+        return ""
+    if chiave not in _VERSIONI:
+        _VERSIONI[chiave] = _comando([prog, "--version"], 15).strip().splitlines()[0:1]
+    return (_VERSIONI[chiave] or [""])[0]
+
+
+def _sistema():
+    if platform.system() == "Darwin":
+        return ("macOS %s %s" % (platform.mac_ver()[0], platform.machine())).replace("  ", " ").strip()
+    return "%s %s %s" % (platform.system(), platform.release(), platform.machine())
+
+
+# ----- lavori in sottofondo -----
+
+class Coda:
+    """Lavori in sottofondo (scaricamenti, audiolibri), al più `paralleli` alla volta. L'elenco sta in un JSON nella
+    cache: dopo un riavvio i lavori finiti restano; quelli rimasti a metà risultano interrotti."""
+    MAX = 300   # lavori ricordati: i più vecchi già finiti escono dall'elenco (i loro file restano)
+
+    def __init__(self, file, paralleli, esegui):
+        self.file, self.esegui = file, esegui
+        self.blocco = threading.RLock()
+        self.lavori = {}       # id -> lavoro (in ordine di arrivo)
+        self.processi = {}     # id -> processo in corso
+        self.annullati = set()
+        self.attesa = queue.Queue()
+        try:
+            with open(file, encoding="utf-8") as f:
+                for l in json.load(f).get("lavori", []):
+                    if isinstance(l, dict) and l.get("id"):
+                        if l.get("stato") in ("in coda", "in corso"):
+                            l["stato"], l["errore"] = "errore", "Interrotto: il server sul Mac è stato riavviato. Riprova."
+                        self.lavori[l["id"]] = l
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+        for _ in range(paralleli):
+            threading.Thread(target=self._lavora, daemon=True).start()
+
+    def salva(self):
+        with self.blocco:
+            try:
+                os.makedirs(os.path.dirname(self.file), exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.file), prefix=".lavori.", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump({"lavori": list(self.lavori.values())}, f, ensure_ascii=False)
+                    os.replace(tmp, self.file)
+                except BaseException:
+                    _cancella(tmp)
+                    raise
+            except OSError as e:   # disco pieno: il lavoro va avanti, l'elenco si salverà la prossima volta
+                print("Atlante: elenco dei lavori non salvato:", e, flush=True)
+
+    def aggiungi(self, campi, dati=None):
+        l = {"id": uuid.uuid4().hex[:12]}
+        l.update(campi)
+        l.update(stato="in coda", progresso=0, errore="", creato=int(time.time() * 1000))
+        with self.blocco:
+            self.lavori[l["id"]] = l
+            vecchi = [i for i, x in self.lavori.items() if x.get("stato") in ("fatto", "errore")]
+            for i in vecchi[:max(0, len(self.lavori) - self.MAX)]:
+                del self.lavori[i]
+            self.salva()
+        self.attesa.put((l["id"], dati))
+        return l["id"]
+
+    def aggiorna(self, id_, salva=False, **campi):
+        with self.blocco:
+            l = self.lavori.get(id_)
+            if l is not None:
+                l.update(campi)
+                if salva:
+                    self.salva()
+
+    def elenco(self):
+        with self.blocco:
+            return [_pubblico(l) for l in reversed(list(self.lavori.values()))]
+
+    def rimuovi(self, id_):
+        with self.blocco:
+            l = self.lavori.pop(id_, None)
+            if l is not None:
+                self.salva()
+            return l
+
+    def controlla(self, id_):
+        if id_ in self.annullati:
+            raise Annullato()
+
+    def processo(self, id_, args, **kw):
+        """Avvia un programma per il lavoro (argomenti in lista: mai una shell) e lo ricorda per poterlo fermare."""
+        with self.blocco:
+            self.controlla(id_)
+            p = subprocess.Popen(args, stdin=subprocess.DEVNULL, env=_ambiente(), start_new_session=os.name == "posix", **kw)
+            self.processi[id_] = p
+        return p
+
+    def annulla(self, id_):
+        with self.blocco:
+            l = self.lavori.get(id_)
+            if not l or l.get("stato") not in ("in coda", "in corso"):
+                return
+            self.annullati.add(id_)
+            p = self.processi.get(id_)
+            if l["stato"] == "in coda":
+                l["stato"], l["errore"] = "errore", "Annullato"
+                self.salva()
+        if p is not None:
+            _termina(p)
+
+    def _lavora(self):
+        while True:
+            id_, dati = self.attesa.get()
+            with self.blocco:
+                l = self.lavori.get(id_)
+                if l is None or l.get("stato") != "in coda":
+                    self.annullati.discard(id_)
+                    continue
+                l["stato"] = "in corso"
+                self.salva()
+            try:
+                self.esegui(self, l, dati)
+            except Annullato:
+                self.aggiorna(id_, salva=True, stato="errore", errore="Annullato")
+            except Exception as e:   # noqa: BLE001
+                print("Atlante: lavoro %s non riuscito: %s" % (id_, e), flush=True)
+                self.aggiorna(id_, salva=True, stato="errore", errore=str(e) or e.__class__.__name__)
+            else:
+                self.aggiorna(id_, salva=True, stato="fatto", progresso=100, errore="")
+            finally:
+                with self.blocco:
+                    self.processi.pop(id_, None)
+                    self.annullati.discard(id_)
+
+
+_CODE = {}
+_blocco_code = threading.Lock()
+
+
+def _coda(nome):
+    with _blocco_code:
+        if nome not in _CODE:
+            base = os.path.join(_cart("cache"), "extra")
+            if nome == "video":
+                _CODE[nome] = Coda(os.path.join(base, "video.json"), 2, _scarica_video)
+            else:   # say usa tutto il processore: un audiolibro alla volta
+                _CODE[nome] = Coda(os.path.join(base, "audiolibri.json"), 1, _crea_audiolibro)
+        return _CODE[nome]
+
+
+def _disposizione(nome):
+    """Content-Disposition con il nome del file (per «Salva in File» sull'iPhone)."""
+    semplice = re.sub(r'[^\x20-\x7e]|["\\]', "_", nome)
+    return "inline; filename=\"%s\"; filename*=UTF-8''%s" % (semplice, quote(nome, safe=""))
+
+
+# ----- video e audio con yt-dlp -----
+
+def _formato(tipo, qualita, ffmpeg):
+    """Argomenti di formato per yt-dlp. Senza ffmpeg non si possono unire video e audio né convertire: un file unico."""
+    if tipo == "audio":
+        if not ffmpeg:
+            return ["-f", "ba[ext=m4a]/ba/b"]
+        return ["-f", "ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--embed-metadata"]
+    alt = {"1080": 1080, "720": 720}.get(qualita)
+    if not ffmpeg:
+        return ["-f", ("b[height<=%d]/b" % alt) if alt else "b"]
+    f = ("bv*[height<=%d]+ba/b[height<=%d]/b" % (alt, alt)) if alt else "bv*+ba/b"
+    # a parità di risoluzione H.264 e AAC: si vedono su iPhone, iPad e QuickTime
+    return ["-f", f, "-S", "res,vcodec:h264,acodec:aac", "--merge-output-format", "mp4", "--embed-metadata"]
+
+
+def _piu_recente(cartella, dopo):
+    meglio, t = "", dopo - 2
+    try:
+        for e in os.scandir(cartella):
+            if e.is_file() and not e.name.startswith(".") and not e.name.endswith((".part", ".ytdl", ".temp")):
+                m = e.stat().st_mtime
+                if m >= t:
+                    meglio, t = e.path, m
+    except OSError:
+        pass
+    return meglio
+
+
+def _scarica_video(coda, l, _dati):
+    yt = _programma("yt-dlp")
+    if not yt:
+        raise RuntimeError("yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
+    cartella = _cart("video_dir")
+    os.makedirs(cartella, exist_ok=True)
+    tmp = os.path.join(_cartella_tmp(), "video-" + l["id"])   # pezzi a metà: via in ogni caso alla fine
+    os.makedirs(tmp, exist_ok=True)
+    ff = _programma("ffmpeg")
+    args = [yt, "--newline", "--progress", "--no-playlist", "--no-mtime",
+            "-P", "home:" + cartella, "-P", "temp:" + tmp, "-o", "%(title).150B [%(id)s].%(ext)s",
+            "--print", "before_dl:[atlante] titolo %(title)s", "--print", "after_move:[atlante] file %(filepath)s"]
+    if ff:
+        args += ["--ffmpeg-location", ff]
+    args += _formato(l.get("tipo"), l.get("qualita"), bool(ff)) + ["--", l["url"]]
+    inizio, file_, errore, titolo = time.time(), "", "", ""
+    parte, ultimo, prog = 0, 0.0, 0.0
+    radice = os.path.realpath(cartella)
+    try:
+        p = coda.processo(l["id"], args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=tmp)
+        for riga in p.stdout:
+            r = riga.decode("utf-8", "replace").strip()
+            m = re.match(r"\[download\]\s+(\d+(?:\.\d+)?)%", r)
+            if m:
+                pct = float(m.group(1))
+                if pct + 5 < ultimo:   # si riparte da zero: seconda parte (l'audio, dopo il video)
+                    parte += 1
+                ultimo = pct
+                if l.get("tipo") == "audio":
+                    x = pct * 0.97              # poi la conversione in m4a
+                elif parte == 0:
+                    x = pct * 0.9               # video
+                else:
+                    x = 90 + min(pct, 100) * 0.09   # audio, poi l'unione
+                if x > prog:
+                    prog = x
+                    coda.aggiorna(l["id"], progresso=round(prog, 1))
+            elif r.startswith("[atlante] titolo "):
+                titolo = r[17:].strip()
+                if titolo and titolo != "NA":
+                    coda.aggiorna(l["id"], titolo=titolo)
+            elif r.startswith("[atlante] file "):
+                file_ = r[15:].strip()
+            elif r.startswith("ERROR:"):
+                errore = r[6:].strip()
+            elif r.startswith("/") and _dentro(os.path.realpath(r), radice) and os.path.isfile(r):
+                file_ = r   # --print after_move:filepath senza prefisso
+        p.wait()
+        coda.controlla(l["id"])
+        if (not file_ or not os.path.isfile(file_)) and p.returncode == 0:
+            file_ = _piu_recente(cartella, inizio)
+        if not file_ or not os.path.isfile(file_):
+            raise RuntimeError(errore or "yt-dlp non è riuscito (codice %s)" % p.returncode)
+        nome = os.path.basename(file_)
+        if not titolo or titolo == "NA":
+            titolo = re.sub(r"\s*\[[^\[\]]*\]$", "", os.path.splitext(nome)[0]).strip() or nome
+        coda.aggiorna(l["id"], titolo=titolo, nome=nome, dimensione=os.path.getsize(file_),
+                      file="video/file/" + l["id"], _percorso=file_)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _nuovo_video(corpo):
+    url = str(corpo.get("url") or "").strip()
+    if not re.match(r"^https?://[^\s/]+\S*$", url, re.I):
+        raise ErroreExtra(400, "Serve l'indirizzo (http o https) della pagina del video")
+    tipo = str(corpo.get("tipo") or "video")
+    if tipo not in ("video", "audio"):
+        raise ErroreExtra(400, "Tipo non valido: video o audio")
+    qualita = str(corpo.get("qualita") or "1080")
+    if qualita not in ("1080", "720", "best"):
+        raise ErroreExtra(400, "Qualità non valida: 1080, 720 o best")
+    if not _programma("yt-dlp"):
+        raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
+    return _coda("video").aggiungi({"url": url, "titolo": url, "tipo": tipo, "qualita": qualita,
+                                    "file": "", "nome": "", "dimensione": 0})
+
+
+def _annulla_video(id_):
+    coda = _coda("video")
+    l = coda.lavori.get(id_)
+    if not l:
+        raise ErroreExtra(404, "Scaricamento non trovato")
+    if l.get("stato") in ("in coda", "in corso"):
+        coda.annulla(id_)
+    else:
+        coda.rimuovi(id_)
+
+
+def _file_video(h, id_):
+    l = _coda("video").lavori.get(id_) or {}
+    p = l.get("_percorso")
+    if not p or not os.path.isfile(p):
+        raise ErroreExtra(404, "File non trovato: non ancora scaricato, oppure spostato dalla cartella")
+    tipo = TIPI_VIDEO.get(os.path.splitext(p)[1].lower()) or mimetypes.guess_type(p)[0] or "application/octet-stream"
+    _invia_file(h, p, tipo, {"Content-Disposition": _disposizione(os.path.basename(p)), "X-Content-Type-Options": "nosniff"})
+
+
+# ----- voci e audiolibri con `say` -----
+
+_VOCI = {"t": 0.0, "say": "", "voci": []}
+
+
+def voci():
+    """Voci di sintesi del Mac (`say -v ?`): [{nome, lingua, esempio}], prima le italiane. [] senza `say`."""
+    say = _programma("say")
+    if not say:
+        return []
+    if _VOCI["say"] == say and time.time() - _VOCI["t"] < 600:
+        return _VOCI["voci"]
+    out = []
+    for riga in _comando([say, "-v", "?"], 20).splitlines():
+        # «Eddy (Italian (Italy)) it_IT    # Ciao! Mi chiamo Eddy.»: la lingua è l'ultima parola prima di «#»
+        m = re.match(r"^(.+?)\s+([A-Za-z]{2,3}(?:[_-][A-Za-z0-9]+)+)\s+#\s?(.*)$", riga.strip())
+        if m:
+            out.append({"nome": m.group(1).strip(), "lingua": m.group(2), "esempio": m.group(3).strip()})
+    out.sort(key=lambda v: (0, "", v["nome"].lower()) if v["lingua"].lower().startswith("it")
+             else (1, v["lingua"], v["nome"].lower()))
+    if out:
+        _VOCI.update(t=time.time(), say=say, voci=out)
+    return out
+
+
+def _durata_audio(p):
+    m = re.search(r"duration:\s*([\d.]+)\s*sec", _comando(["afinfo", p], 20))
+    if m and float(m.group(1)) > 0:
+        return float(m.group(1))
+    return leggi_tag(p).get("duration") or 0
+
+
+def _nuovo_audiolibro(corpo):
+    if not _programma("say"):
+        raise ErroreExtra(503, "Sintesi vocale non disponibile: serve il comando say del Mac")
+    capitoli = corpo.get("capitoli")
+    if not isinstance(capitoli, list) or not capitoli:
+        raise ErroreExtra(400, "Mancano i capitoli")
+    titoli, testi = [], []
+    for i, c in enumerate(capitoli):
+        if isinstance(c, str):
+            c = {"testo": c}
+        if not isinstance(c, dict):
+            raise ErroreExtra(400, "Capitolo %d non valido" % (i + 1))
+        testo = str(c.get("testo") or "").strip()
+        if not testo:
+            continue   # un capitolo vuoto non diventa un file
+        titoli.append(str(c.get("titolo") or "").strip() or "Capitolo %d" % (len(titoli) + 1))
+        testi.append(testo)
+    if not testi:
+        raise ErroreExtra(400, "I capitoli sono vuoti")
+    titolo = str(corpo.get("titolo") or "").strip() or "Audiolibro"
+    autore = str(corpo.get("autore") or "").strip()
+    voce = str(corpo.get("voce") or "").strip()
+    elenco = voci()
+    if voce and elenco and voce not in {v["nome"] for v in elenco}:
+        raise ErroreExtra(400, "Voce non disponibile sul Mac: %s" % voce)
+    try:
+        vel = float(corpo.get("velocita") or 0)
+    except (TypeError, ValueError):
+        vel = 0
+    if 0 < vel <= 4:
+        vel *= 180   # data come moltiplicatore (1 = normale)
+    vel = int(min(500, max(80, vel))) if vel > 0 else 0   # parole al minuto; 0 = quella della voce
+    radice = _cart("libri_dir")
+    os.makedirs(radice, exist_ok=True)
+    base = _nome_file("%s - %s" % (autore, titolo) if autore else titolo) or "Audiolibro"
+    n = 1
+    while True:
+        cart = os.path.join(radice, base if n == 1 else "%s (%d)" % (base, n))
+        try:
+            os.makedirs(cart)
+            break
+        except FileExistsError:
+            n += 1
+    l = {"titolo": titolo, "autore": autore, "voce": voce, "velocita": vel, "_cartella": cart,
+         "capitoli": [{"n": i, "titolo": t, "pronto": False, "durata": 0} for i, t in enumerate(titoli)]}
+    return _coda("libri").aggiungi(l, testi)
+
+
+def _crea_audiolibro(coda, l, testi):
+    say = _programma("say")
+    if not say:
+        raise RuntimeError("Sintesi vocale non disponibile: serve il comando say del Mac")
+    if not testi:
+        raise RuntimeError("Testo dei capitoli non più disponibile: crea di nuovo l'audiolibro")
+    cart = l["_cartella"]
+    os.makedirs(cart, exist_ok=True)
+    totale, fatto = sum(len(t) for t in testi) or 1, 0
+    for i, testo in enumerate(testi):
+        coda.controlla(l["id"])
+        cap = l["capitoli"][i]
+        out = os.path.join(cart, "%03d %s.m4a" % (i + 1, _nome_file(cap["titolo"], 120) or "Capitolo"))
+        fd, txt = tempfile.mkstemp(dir=_cartella_tmp(), prefix="say.", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(testo)
+            args = [say]
+            if l.get("voce"):
+                args += ["-v", l["voce"]]
+            if l.get("velocita"):
+                args += ["-r", str(l["velocita"])]
+            args += ["-o", out, "--file-format=m4af", "--data-format=aac", "-f", txt]
+            p = coda.processo(l["id"], args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            _, err = p.communicate()
+            coda.controlla(l["id"])
+            if p.returncode != 0 or not os.path.isfile(out):
+                motivo = err.decode("utf-8", "replace").strip()[:300] or "codice %s" % p.returncode
+                raise RuntimeError("say non è riuscito sul capitolo %d: %s" % (i + 1, motivo))
+        except BaseException:
+            _cancella(out)
+            raise
+        finally:
+            _cancella(txt)
+        durata = _durata_audio(out)
+        fatto += len(testo)
+        with coda.blocco:
+            cap.update(pronto=True, durata=round(durata, 1), _file=out)
+        coda.aggiorna(l["id"], salva=True, progresso=round(min(99.9, fatto * 100.0 / totale), 1))
+
+
+def _elimina_audiolibro(id_):
+    coda = _coda("libri")
+    l = coda.lavori.get(id_)
+    if not l:
+        raise ErroreExtra(404, "Audiolibro non trovato")
+    coda.annulla(id_)
+    fine = time.time() + 5   # il lavoro in corso si ferma e toglie il capitolo a metà
+    while id_ in coda.processi and time.time() < fine:
+        time.sleep(0.05)
+    coda.rimuovi(id_)
+    cart = l.get("_cartella") or ""
+    for c in l.get("capitoli") or []:
+        f = c.get("_file")
+        if f and cart and _dentro(f, cart):
+            _cancella(f)
+    if cart:
+        try:
+            os.rmdir(cart)   # solo se è rimasta vuota: niente che non abbia creato il server
+        except OSError:
+            pass
+
+
+def _file_capitolo(h, id_, n):
+    l = _coda("libri").lavori.get(id_) or {}
+    caps = l.get("capitoli") or []
+    try:
+        cap = caps[int(n)] if 0 <= int(n) < len(caps) else {}
+    except ValueError:
+        cap = {}
+    p = cap.get("_file")
+    if not cap.get("pronto") or not p or not os.path.isfile(p):
+        raise ErroreExtra(404, "Capitolo non pronto o non trovato")
+    _invia_file(h, p, "audio/mp4", {"Content-Disposition": _disposizione(os.path.basename(p))})
+
+
+# ----- IA locale (Ollama) -----
+
+_APRI = urllib.request.build_opener(urllib.request.ProxyHandler({})).open   # Ollama è sul Mac: niente proxy di sistema
+
+
+def _ollama(percorso, dati=None, tempo=3):
+    corpo = None if dati is None else json.dumps(dati).encode("utf-8")
+    req = urllib.request.Request(CONF["ia_indirizzo"].rstrip("/") + percorso, data=corpo,
+                                 headers={"Content-Type": "application/json"})
+    with _APRI(req, timeout=tempo) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _modelli_ia():
+    """(attiva, [nomi dei modelli]) di Ollama."""
+    try:
+        j = _ollama("/api/tags")
+    except (OSError, ValueError, http.client.HTTPException):
+        return False, []
+    nomi = [m.get("name") or m.get("model") for m in (j.get("models") if isinstance(j, dict) else None) or []
+            if isinstance(m, dict) and (m.get("name") or m.get("model"))]
+    return True, nomi
+
+
+def _scegli_modello(richiesto, modelli):
+    if richiesto:
+        return richiesto
+    voluto = (CONF.get("ia_modello") or "").strip()
+    if voluto:
+        for m in modelli:
+            if m == voluto or m.split(":")[0] == voluto:
+                return m
+        if not modelli:
+            return voluto
+    return modelli[0] if modelli else ""
+
+
+def _chiedi_ia(corpo):
+    prompt = str(corpo.get("prompt") or "").strip()
+    if not prompt:
+        raise ErroreExtra(400, "Manca la domanda (prompt)")
+    attiva, modelli = _modelli_ia()
+    if not attiva:
+        raise ErroreExtra(503, SENZA_IA)
+    modello = _scegli_modello(str(corpo.get("modello") or "").strip(), modelli)
+    if not modello:
+        raise ErroreExtra(503, "Ollama è attivo ma non ha modelli: sul Mac esegui ollama pull llama3.2")
+    dati = {"model": modello, "prompt": prompt, "stream": False}
+    sistema = str(corpo.get("sistema") or "").strip()
+    if sistema:
+        dati["system"] = sistema
+    if corpo.get("json"):
+        dati["format"] = "json"
+    try:
+        j = _ollama("/api/generate", dati, TEMPO_IA)
+    except urllib.error.HTTPError as e:
+        try:
+            testo = json.loads(e.read().decode("utf-8")).get("error") or ""
+        except (OSError, ValueError, AttributeError):
+            testo = ""
+        raise ErroreExtra(502, "IA locale: %s" % (testo or "errore %d" % e.code))
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        if isinstance(e, socket.timeout) or isinstance(getattr(e, "reason", None), socket.timeout):
+            raise ErroreExtra(504, "L'IA locale non ha risposto entro %d secondi" % TEMPO_IA)
+        raise ErroreExtra(503, SENZA_IA)
+    return {"testo": j.get("response", "") if isinstance(j, dict) else "", "modello": modello}
+
+
+# ----- stato e dispositivo -----
+
+def stato():
+    attiva, modelli = _modelli_ia()
+    yt = _programma("yt-dlp")
+    return {"ytdlp": bool(yt), "ffmpeg": bool(_programma("ffmpeg")), "say": bool(_programma("say")),
+            "ollama": attiva, "modelli": modelli, "modello": _scegli_modello("", modelli),
+            "video_dir": _cart("video_dir"), "libri_dir": _cart("libri_dir"), "sistema": _sistema(),
+            "ytdlp_versione": _versione(yt) if yt else "",
+            "ollama_installato": attiva or bool(_programma("ollama")) or os.path.isdir("/Applications/Ollama.app")}
+
+
+def _memoria(mac):
+    tot = libera = 0
+    if mac:
+        try:
+            tot = int(_comando(["sysctl", "-n", "hw.memsize"]).strip() or 0)
+        except ValueError:
+            tot = 0
+        vm = _comando(["vm_stat"])
+        m = re.search(r"page size of (\d+) bytes", vm)
+        pag = int(m.group(1)) if m else 4096
+        for voce in ("free", "inactive", "speculative"):   # come «memoria disponibile»: libera + riutilizzabile
+            m = re.search(r"^Pages %s:\s+(\d+)" % voce, vm, re.M)
+            if m:
+                libera += int(m.group(1)) * pag
+    else:
+        try:
+            with open("/proc/meminfo") as f:
+                info = dict(re.findall(r"^(\w+):\s+(\d+)", f.read(), re.M))
+            tot = int(info.get("MemTotal", 0)) * 1024
+            libera = int(info.get("MemAvailable", info.get("MemFree", 0))) * 1024
+        except (OSError, ValueError):
+            pass
+    return {"totale": tot, "libera": libera}
+
+
+def _dischi():
+    def misura(nome, p):
+        u = shutil.disk_usage(p)
+        return {"nome": nome, "percorso": p, "totale": u.total, "libero": u.free, "usato": u.used}
+
+    def esame(n, p):   # in un thread: un disco di rete bloccato non blocca la risposta
+        if os.path.realpath(p) == "/":
+            return n   # «Macintosh HD» in /Volumes è un collegamento al disco di avvio
+        return misura(n, p) if os.path.ismount(p) else None
+
+    radice, altri = "Disco di avvio", []
+    try:
+        nomi = sorted(os.listdir("/Volumes")) if os.path.isdir("/Volumes") else []
+    except OSError:
+        nomi = []
+    for n in nomi:
+        if n.startswith(".") or n.startswith("com.apple."):
+            continue
+        v = _con_limite(lambda n=n: esame(n, os.path.join("/Volumes", n)), 3)
+        if isinstance(v, str):
+            radice = v
+        elif v:
+            altri.append(v)
+    primo = _con_limite(lambda: misura(radice, "/"), 3)
+    return ([primo] if primo else []) + altri
+
+
+_MISURE = {"t": 0.0, "voci": [], "fili": []}
+_blocco_misure = threading.Lock()
+
+
+def _misura_cartella(v, scadenza):
+    """Spazio occupato da una cartella (solo lettura). Si ferma alla scadenza: «completa» dice se ha finito."""
+    tot, pile, n = 0, [v["percorso"]], 0
+    try:
+        while pile:
+            d = pile.pop()
+            try:
+                voci_ = os.scandir(d)
+            except PermissionError:
+                if d == v["percorso"]:
+                    v["errore"] = ("macOS non permette di leggerla: dai a Terminale (o all'app che avvia il server) "
+                                   "l'accesso completo al disco in Impostazioni di Sistema > Privacy e sicurezza")
+                    tot = None
+                    return
+                continue
+            except OSError:
+                continue
+            with voci_:
+                for e in voci_:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            pile.append(e.path)
+                        else:
+                            st = e.stat(follow_symlinks=False)
+                            tot += getattr(st, "st_blocks", 0) * 512 or st.st_size
+                    except OSError:
+                        pass
+                    n += 1
+                    if n % 2000 == 0:
+                        v["dimensione"] = tot
+                        if time.monotonic() > scadenza:
+                            return
+        v["completa"] = True
+    finally:
+        v["dimensione"] = tot
+
+
+def _pulizia(attesa=8):
+    """Quanto occupano le cartelle di PULIZIA. La misura continua in sottofondo (al più 60 s) e resta valida 5 minuti:
+    la risposta aspetta al più `attesa` secondi e dà le misure fatte fin lì («completa»: false)."""
+    with _blocco_misure:
+        finita = all(not t.is_alive() for t in _MISURE["fili"])
+        if not _MISURE["fili"] or (finita and time.time() - _MISURE["t"] > 300):
+            casa = os.path.expanduser("~")
+            voci_ = []
+            for nome, rel, nota in PULIZIA:
+                p = os.path.join(casa, rel)
+                if os.path.isdir(p):
+                    voci_.append({"nome": nome, "percorso": p, "dimensione": 0, "completa": False, "nota": nota})
+            scadenza = time.monotonic() + 60
+            fili = [threading.Thread(target=_misura_cartella, args=(v, scadenza), daemon=True) for v in voci_]
+            for t in fili:
+                t.start()
+            _MISURE.update(t=time.time(), voci=voci_, fili=fili)
+        fili, voci_ = _MISURE["fili"], _MISURE["voci"]
+    fine = time.monotonic() + attesa
+    for t in fili:
+        t.join(max(0, fine - time.monotonic()))
+    return [dict(v) for v in voci_]
+
+
+def dispositivo():
+    mac = platform.system() == "Darwin"
+    nome = (_comando(["scutil", "--get", "ComputerName"]).strip() if mac else "") or socket.gethostname()
+    avvio = 0.0
+    if mac:
+        m = re.search(r"sec\s*=\s*(\d+)", _comando(["sysctl", "-n", "kern.boottime"]))
+        avvio = float(m.group(1)) if m else 0.0
+    else:
+        try:
+            with open("/proc/uptime") as f:
+                avvio = time.time() - float(f.read().split()[0])
+        except (OSError, ValueError, IndexError):
+            pass
+    o = {"nome": nome, "sistema": "macOS" if mac else platform.system(),
+         "versione": platform.mac_ver()[0] if mac else platform.release(), "architettura": platform.machine(),
+         "avvio": int(avvio * 1000), "acceso_da": int(time.time() - avvio) if avvio else 0,
+         "memoria": _memoria(mac), "dischi": _dischi(), "pulizia": _pulizia()}
+    if mac:
+        o["modello"] = _comando(["sysctl", "-n", "hw.model"]).strip()
+        o["processore"] = _comando(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+    return o
+
+
+# ----- proxy verso siti pubblici -----
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _ip_vietato(testo):
+    """True per ciò che non è Internet pubblico: il Mac stesso (Ollama), la rete di casa, Tailscale (100.64/10),
+    link-local (169.254), multicast, riservati. Anche se nascosti in un indirizzo IPv6 (::ffff:, 6to4, NAT64, Teredo)."""
+    try:
+        ip = ipaddress.ip_address(str(testo).split("%", 1)[0])
+    except ValueError:
+        return True
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip in _NAT64:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+        elif ip.teredo is not None:
+            ip = ip.teredo[1]
+    return (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified)
+
+
+class _Conn(http.client.HTTPConnection):
+    """Connessione all'indirizzo già controllato: il nome non si risolve una seconda volta (niente DNS rebinding)."""
+
+    def __init__(self, host, porta, ip, tempo):
+        super().__init__(host, porta, timeout=tempo)
+        self._ip = ip
+
+    def connect(self):
+        self.sock = socket.create_connection((self._ip, self.port), self.timeout)
+
+
+class _ConnS(http.client.HTTPSConnection):
+    def __init__(self, host, porta, ip, tempo, ctx):
+        super().__init__(host, porta, timeout=tempo, context=ctx)
+        self._ip = ip
+
+    def connect(self):
+        s = socket.create_connection((self._ip, self.port), self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(s, server_hostname=self.host)
+        except BaseException:
+            s.close()
+            raise
+
+
+_SSL = []
+
+
+def _ssl():
+    if not _SSL:
+        ctx = ssl.create_default_context()
+        # il Python di python.org su macOS non usa i certificati di sistema: si aggiungono quelli di /etc/ssl/cert.pem
+        if os.path.isfile("/etc/ssl/cert.pem"):
+            try:
+                ctx.load_verify_locations("/etc/ssl/cert.pem")
+            except (OSError, ssl.SSLError):
+                pass
+        _SSL.append(ctx)
+    return _SSL[0]
+
+
+def _apri_pubblico(url, scadenza):
+    """(risposta, connessione, socket) per una GET a un indirizzo pubblico. Niente rimandi: li segue _proxy."""
+    u = urlsplit(url)
+    sicuro = u.scheme.lower() == "https"
+    if u.scheme.lower() not in ("http", "https") or not u.hostname:
+        raise ErroreExtra(400, "Si possono leggere solo indirizzi http e https")
+    try:
+        host = u.hostname.encode("idna").decode("ascii")
+        porta = u.port or (443 if sicuro else 80)
+    except (UnicodeError, ValueError):
+        raise ErroreExtra(400, "Indirizzo non valido")
+    try:
+        infos = socket.getaddrinfo(host, porta, 0, socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        raise ErroreExtra(502, "Sito non trovato: %s" % u.hostname)
+    ips = []
+    for info in infos:
+        if info[4][0] not in ips:
+            ips.append(info[4][0])
+    if not ips or any(_ip_vietato(ip) for ip in ips):
+        raise ErroreExtra(403, "Indirizzo non permesso: dal Mac si leggono solo siti pubblici "
+                               "(non il Mac stesso né la rete di casa)")
+    percorso = quote(u.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    if u.query:
+        percorso += "?" + quote(u.query, safe="/?%:@!$&'()*+,;=-._~")
+    intest = {"User-Agent": BROWSER, "Accept-Language": "it-IT,it;q=0.9,en;q=0.8", "Accept-Encoding": "identity",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml,*/*;q=0.8",
+              "Connection": "close"}
+    ultimo = ""
+    for ip in ips:
+        resto = scadenza - time.time()
+        if resto <= 0:
+            break
+        conn = _ConnS(host, porta, ip, resto, _ssl()) if sicuro else _Conn(host, porta, ip, resto)
+        try:
+            conn.request("GET", percorso, headers=intest)
+            sock = conn.sock
+            return conn.getresponse(), conn, sock
+        except socket.timeout:
+            conn.close()
+            raise ErroreExtra(504, "Il sito non ha risposto in tempo")
+        except ssl.SSLError as e:
+            conn.close()
+            ultimo = "connessione sicura non riuscita (%s)" % (getattr(e, "reason", None) or e)
+        except (OSError, http.client.HTTPException) as e:
+            conn.close()
+            ultimo = str(e)
+    if time.time() >= scadenza:
+        raise ErroreExtra(504, "Il sito non ha risposto in tempo")
+    raise ErroreExtra(502, "Sito non raggiungibile" + (": " + ultimo if ultimo else ""))
+
+
+def _proxy(h):
+    url = (parse_qs(urlsplit(h.path).query).get("url") or [""])[0].strip()
+    if not url:
+        raise ErroreExtra(400, "Manca l'indirizzo da leggere (url)")
+    scadenza = time.time() + TEMPO_PROXY
+    for _ in range(10):   # al più 9 rimandi, ognuno ricontrollato
+        r, conn, sock = _apri_pubblico(url, scadenza)
+        loc = r.getheader("Location")
+        if r.status in (301, 302, 303, 307, 308) and loc:
+            r.close()
+            conn.close()
+            url = urljoin(url, loc.strip())
+            continue
+        break
+    else:
+        raise ErroreExtra(502, "Il sito rimanda ad altri indirizzi troppe volte")
+    pezzi, tot = [], 0
+    try:
+        if r.status >= 400:
+            raise ErroreExtra(502, "Il sito ha risposto %d" % r.status)
+        try:
+            lun = int(r.getheader("Content-Length") or 0)
+        except ValueError:
+            lun = 0
+        if lun > MAX_PROXY:
+            raise ErroreExtra(413, "Contenuto troppo grande (oltre 15 MB)")
+        while True:
+            resto = scadenza - time.time()
+            if resto <= 0:
+                raise ErroreExtra(504, "Il sito non ha risposto in tempo")
+            if sock is not None and not r.isclosed():   # a risposta finita http.client chiude già la connessione
+                try:
+                    sock.settimeout(resto)
+                except OSError:
+                    pass
+            try:
+                b = r.read1(65536)
+            except socket.timeout:
+                raise ErroreExtra(504, "Il sito non ha risposto in tempo")
+            except (OSError, http.client.HTTPException):
+                raise ErroreExtra(502, "Il sito ha interrotto la risposta")
+            if not b:
+                break
+            tot += len(b)
+            if tot > MAX_PROXY:
+                raise ErroreExtra(413, "Contenuto troppo grande (oltre 15 MB)")
+            pezzi.append(b)
+    finally:
+        r.close()
+        conn.close()
+    corpo = b"".join(pezzi)
+    h._musica_risposto = True
+    h.send_response(200)
+    h.send_header("Content-Type", r.getheader("Content-Type") or "application/octet-stream")
+    ce = r.getheader("Content-Encoding")
+    if ce and ce.strip().lower() != "identity":
+        h.send_header("Content-Encoding", ce)
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.send_header("X-Content-Type-Options", "nosniff")
+    h.send_header("Content-Security-Policy", "sandbox")   # aperta come pagina, non può toccare i dati dell'app
+    h.send_header("X-Url-Finale", quote(url, safe=":/?#[]@!$&'()*+,;=%-._~"))
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+
+
+# ----- richieste HTTP -----
+
+def _leggi_corpo(h):
+    if "chunked" in (h.headers.get("Transfer-Encoding") or "").lower():
+        h.close_connection = True
+        raise ErroreExtra(411, "Serve Content-Length")
+    try:
+        n = int(h.headers.get("Content-Length") or 0)
+    except ValueError:
+        n = -1
+    if n < 0:
+        h.close_connection = True
+        raise ErroreExtra(400, "Content-Length non valido")
+    if n > MAX_CORPO:
+        h.close_connection = True   # il corpo non si legge: la connessione non si può riusare
+        raise ErroreExtra(413, "Richiesta troppo grande (massimo 20 MB)")
+    return h.rfile.read(n) if n else b""
+
+
+def _da_json(dati):
+    if not dati.strip():
+        return {}
+    try:
+        o = json.loads(dati.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ErroreExtra(400, "Richiesta non valida: serve JSON")
+    if not isinstance(o, dict):
+        raise ErroreExtra(400, "Richiesta non valida: serve un oggetto JSON")
+    return o
+
+
+def _stessa_origine(h):
+    """Le richieste che cambiano qualcosa (POST, DELETE) devono venire dall'app: un altro sito aperto nel browser
+    del Mac non può avviare scaricamenti o cancellare audiolibri."""
+    o = h.headers.get("Origin")
+    if not o:
+        return True   # non da una pagina web (curl, app)
+    if o.strip() == "null":
+        return False
+    ammessi = {(h.headers.get("Host") or "").lower()}
+    if INDIRIZZO:
+        ammessi.add(urlsplit(INDIRIZZO).netloc.lower())
+    return urlsplit(o.strip()).netloc.lower() in ammessi
+
+
+def _instrada(h, metodo, parti, corpo):
+    cosa, resto = (parti[0] if parti else ""), parti[1:]
+
+    def solo(*metodi):
+        if metodo not in metodi:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+
+    if cosa == "stato" and not resto:
+        solo("GET")
+        _json(h, stato())
+    elif cosa == "proxy" and not resto:
+        solo("GET")
+        _proxy(h)
+    elif cosa == "video" and not resto:
+        solo("GET", "POST")
+        if metodo == "GET":
+            _json(h, {"lavori": _coda("video").elenco()})
+        else:
+            _json(h, {"id": _nuovo_video(corpo)})
+    elif cosa == "video" and len(resto) == 2 and resto[0] == "file":
+        solo("GET")
+        _file_video(h, resto[1])
+    elif cosa == "video" and len(resto) == 2 and resto[1] == "annulla":
+        solo("POST")
+        _annulla_video(resto[0])
+        _json(h, {"ok": True})
+    elif cosa == "voci" and not resto:
+        solo("GET")
+        _json(h, {"voci": voci()})
+    elif cosa == "audiolibro" and not resto:
+        solo("GET", "POST")
+        if metodo == "GET":
+            _json(h, {"lavori": _coda("libri").elenco()})
+        else:
+            _json(h, {"id": _nuovo_audiolibro(corpo)})
+    elif cosa == "audiolibro" and len(resto) == 3 and resto[0] == "file":
+        solo("GET")
+        _file_capitolo(h, resto[1], resto[2])
+    elif cosa == "audiolibro" and len(resto) == 1:
+        solo("DELETE")
+        _elimina_audiolibro(resto[0])
+        _json(h, {"ok": True})
+    elif cosa == "ia" and not resto:
+        solo("GET", "POST")
+        if metodo == "GET":
+            attiva, modelli = _modelli_ia()
+            _json(h, {"attiva": attiva, "modelli": modelli, "modello": _scegli_modello("", modelli)})
+        else:
+            _json(h, _chiedi_ia(corpo))
+    elif cosa == "dispositivo" and not resto:
+        solo("GET")
+        _json(h, dispositivo())
+    else:
+        raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join(parti))
+
+
+def gestisci_extra(h, metodo=None):
+    """API dei moduli extra: da chiamare in do_GET, do_HEAD, do_POST e do_DELETE, prima di `gestisci`.
+    True se la richiesta era per api/extra/ (e ha avuto risposta)."""
+    m = EXTRA.match(unquote(urlsplit(h.path).path))
+    if not m:
+        return False
+    metodo = (metodo or h.command or "GET").upper()
+    if metodo == "HEAD":
+        metodo = "GET"   # stessa risposta senza corpo (_json e _invia_file guardano h.command)
+    h._musica_risposto = False
+    try:
+        dati = _leggi_corpo(h)
+        if metodo in ("POST", "DELETE", "PUT", "PATCH") and not _stessa_origine(h):
+            raise ErroreExtra(403, "Richiesta da un altro sito: rifiutata")
+        corpo = _da_json(dati) if metodo == "POST" else {}
+        _instrada(h, metodo, [p for p in m.group(1).split("/") if p], corpo)
+    except ErroreExtra as e:
+        if not h._musica_risposto:
+            try:
+                _json(h, {"errore": e.testo}, e.codice)
+            except OSError:
+                h.close_connection = True
+    except (BrokenPipeError, ConnectionResetError):
+        h.close_connection = True
+    except Exception as e:   # noqa: BLE001  l'app riceve comunque una risposta
+        print("Atlante: errore su %s %s: %s" % (metodo, h.path, e), flush=True)
+        if not h._musica_risposto:
+            try:
+                _json(h, {"errore": "Errore sul Mac: %s" % e}, 500)
+            except OSError:
+                pass
+        h.close_connection = True
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="+", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
@@ -840,11 +2022,18 @@ def main():
                     "(con `tailscale serve --bg 8790`): chi apre l'app in http da un altro dispositivo viene mandato lì")
     ap.add_argument("--cert", help="certificato HTTPS (es. da `tailscale cert`): il server risponde direttamente in https")
     ap.add_argument("--chiave", help="chiave privata del certificato")
+    ap.add_argument("--video-dir", default=CONF["video_dir"], help="dove salvare video e audio scaricati con yt-dlp")
+    ap.add_argument("--libri-dir", default=CONF["libri_dir"], help="dove salvare gli audiolibri creati con la voce del Mac")
+    ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
+                    "(predefinito: il primo installato)")
+    ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
     a = ap.parse_args()
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"
     avvia(a.cartelle, a.cache, indirizzo=indirizzo)
+    avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
+                ia_indirizzo=a.ia_indirizzo.strip())
     app = os.path.abspath(a.app)
     https = bool(a.cert)
     host_sicuro = urlsplit(indirizzo).netloc.lower()
@@ -866,18 +2055,31 @@ def main():
             return True
 
         def do_GET(self):
-            if not gestisci(self) and not self._vai_al_sicuro():
+            if not gestisci_extra(self, "GET") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_GET()
 
         def do_HEAD(self):
-            if not gestisci(self) and not self._vai_al_sicuro():
+            if not gestisci_extra(self, "HEAD") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
 
+        def do_POST(self):
+            if not gestisci_extra(self, "POST"):
+                self.close_connection = True   # corpo non letto
+                self.send_error(501, "Unsupported method ('POST')")
+
+        def do_DELETE(self):
+            if not gestisci_extra(self, "DELETE"):
+                self.close_connection = True
+                self.send_error(501, "Unsupported method ('DELETE')")
+
         def end_headers(self):
-            # pagina, service worker e manifest: il browser chiede sempre al Mac se sono cambiati (304 se no). Senza, con un
-            # index.html vecchio di settimane terrebbe la sua copia per giorni e un aggiornamento dell'app non arriverebbe.
+            # pagina, service worker e manifest (e le pagine dei moduli in x/ con kit.js e kit.css): il browser chiede
+            # sempre al Mac se sono cambiati (304 se no). Senza, con un index.html vecchio di settimane terrebbe la sua
+            # copia per giorni e un aggiornamento dell'app non arriverebbe. Le API (api/musica/, api/extra/) hanno già
+            # le loro regole (no-store per i JSON) e non passano dalla copia offline del service worker.
             p = urlsplit(self.path).path
-            if not PREFISSO.match(unquote(p)) and (p.endswith("/") or p.endswith((".html", ".js", ".webmanifest"))):
+            q = unquote(p)
+            if not PREFISSO.match(q) and not EXTRA.match(q) and (p.endswith("/") or p.endswith((".html", ".js", ".css", ".webmanifest"))):
                 self.send_header("Cache-Control", "no-cache")
             super().end_headers()
 
