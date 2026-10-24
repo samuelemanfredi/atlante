@@ -1,6 +1,6 @@
 // Atlante Musica: copia offline dell'app (la musica è salvata a parte, in IndexedDB).
-const CACHE = 'atlante-musica-v4';
-const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
+const CACHE = 'atlante-musica-v5';
+const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png?v=2', './icon-512.png?v=2', './icon-maskable-512.png?v=2', './apple-touch-icon.png?v=2'];
 // moduli della scheda Altro: si mettono in copia uno per uno (se uno manca, gli altri restano)
 const MODULI = ['x/kit.css', 'x/kit.js'].concat(['podcast', 'libri', 'video', 'live', 'naviga', 'benessere', 'strumenti', 'studio'].map(m => 'x/' + m + '.html'));
 const ATTESA = 3000;   // se il Mac non risponde entro 3 s l'app si apre dalla copia offline
