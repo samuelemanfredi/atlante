@@ -516,11 +516,16 @@ async function aggiornaFeed(feed) {
 /* ---------- note sul Mac ---------- */
 function notaMac() {
   const n = $('macNote');
-  if (S.mac && !S.mac.ok) {
+  if (navigator.onLine === false) {   // senza rete non è colpa del Mac, e non vanno nemmeno ricerca e classifica
+    n.hidden = false;
+    n.innerHTML = '<b>Sei senza connessione.</b> Si ascoltano solo gli episodi scaricati; ricerca, classifica e aggiornamenti tornano con la rete.';
+  } else if (S.mac && !S.mac.ok) {
     n.hidden = false;
     n.innerHTML = '<b>Mac non raggiungibile.</b> La ricerca e la classifica funzionano lo stesso; per aggiornare gli episodi (il Mac legge i feed dei podcast) accendi il Mac con Atlante Musica. Gli episodi già visti e quelli scaricati restano disponibili.';
   } else n.hidden = true;
 }
+addEventListener('offline', notaMac);
+addEventListener('online', async () => { notaMac(); S.mac = await AX.stato(true); notaMac(); });
 
 /* ---------- home ---------- */
 function disegnaHome() { disegnaSubs(); disegnaCont(); disegnaDlSum(); }

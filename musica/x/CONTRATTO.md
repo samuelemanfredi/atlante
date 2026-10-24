@@ -3,6 +3,8 @@
 L'app Musica (`musica/index.html`) ha una scheda **Altro** che apre ogni modulo (`musica/x/<nome>.html`)
 in un riquadro a tutto schermo **dentro l'app**: la musica continua a suonare, il mini player resta.
 Il server sul Mac (`musica/server/musica_libreria.py`) serve sia l'app sia queste pagine e le API `api/extra/`.
+Nella stessa scheda, sotto «Dal Mac», ci sono anche i collegamenti del catalogo del Mac (opzione `--collegamento NOME=URL`
+del server, per esempio Benessere): si aprono nello stesso riquadro, con le stesse regole (la musica continua).
 
 ## Regole per ogni modulo
 - Un file HTML autonomo in `musica/x/`, in italiano, che include `kit.css` e `kit.js` (`window.AX`).
@@ -12,6 +14,10 @@ Il server sul Mac (`musica/server/musica_libreria.py`) serve sia l'app sia quest
 - Se il Mac non risponde (`(await AX.stato()).ok === false`) il modulo resta usabile per tutto ciò che non dipende dal Mac e lo dice con una nota chiara.
 - Audio da riprodurre (podcast, audiolibri, voce) → `AX.player.play([{id,title,artist,album,url,cover}], start, 'Nome lista')`: suona nel lettore dell'app (schermata di blocco, CarPlay, cuffie).
 - Intestazione con `AX.header('Titolo')` (pulsante «‹ Altro» che chiude il riquadro).
+- Ciclo di vita: chiuso con «‹ Altro» il modulo resta vivo, nascosto (riaprendolo non si ricarica). Aprire un altro modulo o
+  collegamento chiude invece la sua pagina (`pagehide`), tranne quando segue con `AX.player.onChange` il brano in ascolto fatto
+  partire da lui (Podcast e Libri, per salvare il punto). Su `pagehide` il modulo spegne ciò che ha acceso: fotocamera, microfono,
+  `<video>`, voce (`speechSynthesis.cancel()`), GPS, wake lock.
 - Niente `alert()`/`confirm()`: usare `AX.toast` e controlli nella pagina.
 
 ## API del Mac (`AX.api(path, opt)` → JSON; errori: `{errore:"testo"}` con codice ≥ 400)
