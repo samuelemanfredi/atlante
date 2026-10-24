@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Video e streaming</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Video: scarica col Mac (yt-dlp), servizi di streaming, browser con «Scarica da questa pagina» */
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .seg button.on{background:#636366}}
+:root[data-theme="dark"] .seg button.on{background:#636366}
+.urlrow{display:flex;gap:8px;align-items:center}
+.urlrow .in{flex:1;min-width:0}
+.site{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:22px;margin:8px 2px 0;font-size:14px;color:var(--fg2)}
+.lbl{font-size:13px;color:var(--fg2);margin:12px 4px 0}
+.seg.small2 button{font-size:13px}
+.alert{background:rgba(255,59,48,.12);color:var(--fg);border-radius:12px;padding:12px 14px;margin:10px 0;font-size:15px}
+.alert.warn{background:rgba(255,159,10,.14)}
+.alert b{display:block;margin-bottom:2px}
+.alert .btns{margin:8px 0 0}
+.alert code,.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+.hd{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.hd b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job{background:var(--bg2);border-radius:12px;padding:12px 14px;margin:10px 0}
+.jt{display:flex;gap:12px;align-items:center}
+.jt .ic{width:44px;height:44px;border-radius:9px;background:var(--fill);display:grid;place-items:center;color:var(--accent);font-size:18px;flex:none}
+.jt .tx{flex:1;min-width:0}
+.jt .tx b{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-weight:600;word-break:break-word}
+.jt .meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;color:var(--fg2);font-size:14px;margin-top:2px}
+.job .bar{margin:10px 0 0}
+.job .btns{margin:10px 0 0}
+.job .err{color:var(--bad);margin-top:6px;word-break:break-word}
+.jt .x{width:30px;height:30px;border-radius:50%;background:var(--fill);color:var(--fg2);font-size:20px;line-height:1;flex:none;align-self:flex-start}
+#vid{display:block;width:100%;max-height:62vh;background:#000;border-radius:10px;margin-top:10px}
+.grid.svc{grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}
+a.tile{color:var(--fg)}
+.tile .top{display:flex;align-items:center;gap:8px;min-width:0}
+.tile .top b{min-width:0;line-height:1.2;overflow-wrap:anywhere}
+.mono{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-weight:800;font-size:12px;letter-spacing:-.3px;flex:none;color:#fff;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.15)}
+.tag{font-size:12px;color:var(--fg2)}
+.tag.mac{color:var(--ok)}
+details.card summary{cursor:pointer;font-weight:600;list-style:none;display:flex;justify-content:space-between;align-items:center}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::after{content:"›";transform:rotate(90deg);color:var(--fg2);font-size:20px;transition:.2s}
+details.card[open] summary::after{transform:rotate(-90deg)}
+.how{margin:10px 0 0;padding:0;list-style:none}
+.how li{padding:9px 0;border-bottom:.5px solid var(--sep);font-size:15px}
+.how li:last-child{border-bottom:0}
+.how li b{display:block}
+.how li span{color:var(--fg2)}
+.steps{margin:6px 0 0;padding-left:22px;font-size:15px}
+.steps li{margin:4px 0}
+.codebox{display:block;width:100%;background:var(--fill);border-radius:10px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;color:var(--fg);user-select:all;-webkit-user-select:all}
+.bm{display:inline-flex;align-items:center;min-height:34px;padding:0 12px;border-radius:9px;background:var(--accent);color:var(--onaccent);font-weight:600;font-size:15px;cursor:grab}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="seg" id="tabs" role="tablist">
+    <button data-tab="scarica" class="on" role="tab">Scarica</button>
+    <button data-tab="streaming" role="tab">Streaming</button>
+    <button data-tab="browser" role="tab">Browser</button>
+  </div>
+
+  <div id="macNote" class="alert" hidden>
+    <b id="macTit"></b><span id="macTxt"></span>
+    <div class="btns"><button class="btn sm" id="macRetry">Riprova</button></div>
+  </div>
+
+  <!-- ===== Scarica ===== -->
+  <section id="p-scarica">
+    <div class="card">
+      <div class="urlrow">
+        <input class="in" id="url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Incolla il link di un video" aria-label="Link del video">
+        <button class="btn sm" id="btnPaste">Incolla</button>
+      </div>
+      <div class="site" id="siteInfo"></div>
+      <div class="lbl">Scarica come</div>
+      <div class="seg" id="segTipo">
+        <button data-v="video">Video</button>
+        <button data-v="audio">Solo audio</button>
+      </div>
+      <div id="qualRow">
+        <div class="lbl">Qualità</div>
+        <div class="seg" id="segQual">
+          <button data-v="1080">1080p</button>
+          <button data-v="720">720p</button>
+          <button data-v="best">Migliore</button>
+        </div>
+      </div>
+      <div class="btns"><button class="btn pri" id="btnScarica" style="flex:1" disabled>Scarica sul Mac</button></div>
+      <div class="small">YouTube, Vimeo, Instagram, TikTok, X, Facebook, Twitch (registrazioni e clip), RaiPlay, La7, SoundCloud e oltre mille altri siti supportati da yt-dlp. Scarica solo ciò che hai il diritto di salvare: i contenuti protetti (DRM) non si scaricano.</div>
+    </div>
+
+    <div class="card" id="playerBox" hidden>
+      <div class="hd"><b id="playerTit"></b><button class="btn sm" id="playerClose">Chiudi</button></div>
+      <video id="vid" controls playsinline preload="metadata"></video>
+    </div>
+
+    <div class="card" id="salvaBox" hidden></div>
+
+    <div class="hd" style="margin-top:22px"><h2 class="h2" style="margin:0">Scaricati</h2><button class="btn sm" id="btnAggiorna">Aggiorna</button></div>
+    <div id="jobsErr" class="note" hidden></div>
+    <div id="jobs"></div>
+  </section>
+
+  <!-- ===== Servizi di streaming ===== -->
+  <section id="p-streaming" hidden>
+    <div class="note">I servizi in abbonamento (Netflix, Prime Video, Disney+, Spotify…) proteggono i contenuti con <b>DRM</b>: per vederli o ascoltarli senza rete usa <b>solo il tasto «Scarica» (↓) della loro app ufficiale</b>, sul dispositivo dove hai l'abbonamento. Atlante non aggira queste protezioni. Col Mac si scaricano soltanto i video non protetti (YouTube, Vimeo, Twitch, RaiPlay, La7…).</div>
+    <div class="grid svc" id="svcGrid"></div>
+    <details class="card" id="howBox">
+      <summary>Come vederli offline, servizio per servizio</summary>
+      <ul class="how" id="howList"></ul>
+    </details>
+  </section>
+
+  <!-- ===== Browser ===== -->
+  <section id="p-browser" hidden>
+    <div class="card">
+      <div class="urlrow">
+        <input class="in" id="addr" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Indirizzo o ricerca" aria-label="Indirizzo">
+        <button class="btn sm" id="btnApri">Apri</button>
+      </div>
+      <div class="btns"><button class="btn pri" id="btnPagina" style="flex:1" disabled>Scarica da questa pagina</button></div>
+      <div class="small">«Apri» mostra il sito in una nuova scheda. «Scarica da questa pagina» manda l'indirizzo al Mac come <span id="prefLbl"></span> (si cambia in «Scarica»).</div>
+    </div>
+
+    <h2 class="h2">«Scarica con Atlante» da qualsiasi app</h2>
+    <div class="card">
+      <b>Comando Rapido (iPhone e iPad)</b>
+      <ol class="steps">
+        <li>Apri <b>Comandi</b> → <b>+</b> → rinomina in «Scarica con Atlante».</li>
+        <li>Tocca <b>ⓘ</b> e attiva <b>Mostra nel foglio di condivisione</b>; come input scegli <b>URL</b> e <b>Pagine web Safari</b>.</li>
+        <li>Aggiungi l'azione <b>Codifica URL</b> sull'<i>Input comando rapido</i>.</li>
+        <li>Aggiungi <b>Testo</b> con questo indirizzo e subito dopo la variabile <i>URL codificato</i>:</li>
+      </ol>
+      <span class="codebox" id="scBase"></span>
+      <ol class="steps" start="5">
+        <li>Aggiungi <b>Apri URL</b> (sul Testo). Fatto: in YouTube, Instagram, TikTok, Safari… tocca <b>Condividi → Scarica con Atlante</b>.</li>
+      </ol>
+      <div class="btns"><button class="btn sm" id="copyBase">Copia indirizzo</button></div>
+      <div class="small">Per far partire il download senza toccare altro, aggiungi <span class="code">&amp;subito=1</span> alla fine del Testo (e <span class="code">&amp;tipo=audio</span> per il solo audio).</div>
+    </div>
+    <div class="card">
+      <b>Segnalibro (Safari su iPhone e Mac, Chrome)</b>
+      <ol class="steps">
+        <li>Su Mac: trascina questo tasto nella barra dei preferiti → <a class="bm" id="bmLink" href="#">Scarica con Atlante</a></li>
+        <li>Su iPhone: aggiungi un segnalibro a una pagina qualsiasi (Condividi → Aggiungi segnalibro), poi in Segnalibri → Modifica cambia nome in «Scarica con Atlante» e incolla come indirizzo il codice qui sotto.</li>
+        <li>Sulla pagina del video apri i segnalibri e tocca «Scarica con Atlante».</li>
+      </ol>
+      <span class="codebox" id="bmCode"></span>
+      <div class="btns"><button class="btn sm" id="copyBm">Copia codice del segnalibro</button></div>
+    </div>
+  </section>
+</div>
+
+<script src="kit.js"></script>
+<script>
+(function () {
+  'use strict';
+  const {$, esc, toast} = AX;
+  AX.header('Video');
+
+  const qs = new URLSearchParams(location.search);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const SHARE_MAX = 250 * 1024 * 1024;           // oltre questa dimensione niente foglio di condivisione (memoria dell'iPhone)
+  const BASE = new URL('video.html', location.href).href;
+
+  /* ---------- utilità ---------- */
+  function fmtB(n) {
+    if (n == null || n === '') return '';
+    if (typeof n === 'string' && !/^\d+(\.\d+)?$/.test(n)) return n;
+    n = +n; if (!isFinite(n) || n <= 0) return '';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+    while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+    return (i < 2 ? Math.round(n) : n.toFixed(n < 10 ? 1 : 0)).toString().replace('.', ',') + ' ' + u[i];
+  }
+  async function copia(t, msg) {
+    try { await navigator.clipboard.writeText(t); toast(msg || 'Copiato'); return; } catch (e) {}
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+    toast(ok ? (msg || 'Copiato') : 'Copia non riuscita: seleziona il testo e copialo');
+  }
+  function apriScheda(u) {
+    const a = document.createElement('a');
+    a.href = u; a.target = '_blank'; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  const urlRe = /https?:\/\/[^\s<>"'«»]+/i;
+  function estraiUrl(t) {
+    t = String(t || '').trim();
+    const m = t.match(urlRe);
+    if (m) return m[0].replace(/[).,;:!?\]}»]+$/, '');
+    if (/^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(\/\S*)?$/i.test(t)) return 'https://' + t;
+    return '';
+  }
+  function host(u) { try { return new URL(u).hostname.replace(/^www\.|^m\./, '').toLowerCase(); } catch (e) { return ''; } }
+
+  /* siti noti: nome da mostrare; drm = solo app ufficiale */
+  const SITI = [
+    [/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/, 'YouTube'], [/(^|\.)vimeo\.com$/, 'Vimeo'],
+    [/(^|\.)instagram\.com$/, 'Instagram'], [/(^|\.)tiktok\.com$/, 'TikTok'], [/(^|\.)(x\.com|twitter\.com)$/, 'X'],
+    [/(^|\.)(facebook\.com|fb\.watch)$/, 'Facebook'], [/(^|\.)twitch\.tv$/, 'Twitch'], [/(^|\.)raiplay\.it$|(^|\.)rai\.it$/, 'RaiPlay'],
+    [/(^|\.)la7\.it$/, 'La7'], [/(^|\.)mediasetinfinity\.mediaset\.it$|(^|\.)mediaset\.it$/, 'Mediaset Infinity'],
+    [/(^|\.)soundcloud\.com$/, 'SoundCloud'], [/(^|\.)dailymotion\.com$|(^|\.)dai\.ly$/, 'Dailymotion'],
+    [/(^|\.)reddit\.com$|(^|\.)redd\.it$/, 'Reddit'], [/(^|\.)bandcamp\.com$/, 'Bandcamp'], [/(^|\.)threads\.(net|com)$/, 'Threads'],
+    [/(^|\.)bsky\.app$/, 'Bluesky'], [/(^|\.)kick\.com$/, 'Kick'], [/(^|\.)linkedin\.com$/, 'LinkedIn'], [/(^|\.)pinterest\.\w+$/, 'Pinterest']
+  ];
+  const DRM = [
+    [/(^|\.)netflix\.com$/, 'Netflix'], [/(^|\.)primevideo\.com$/, 'Prime Video'], [/(^|\.)disneyplus\.com$/, 'Disney+'],
+    [/^tv\.apple\.com$/, 'Apple TV'], [/^music\.apple\.com$/, 'Apple Music'], [/(^|\.)nowtv\.it$|(^|\.)now\.it$/, 'NOW'],
+    [/(^|\.)dazn\.com$/, 'DAZN'], [/(^|\.)paramountplus\.com$/, 'Paramount+'], [/(^|\.)discoveryplus\.\w+$/, 'discovery+'],
+    [/(^|\.)(hbomax|max)\.com$/, 'HBO Max'], [/(^|\.)spotify\.com$/, 'Spotify'], [/(^|\.)audible\.\w+$/, 'Audible'],
+    [/(^|\.)crunchyroll\.com$/, 'Crunchyroll'], [/(^|\.)mubi\.com$/, 'MUBI'], [/(^|\.)timvision\.it$/, 'TIMVISION'],
+    [/(^|\.)rakuten\.tv$/, 'Rakuten TV'], [/^skygo\.sky\.it$/, 'Sky Go'], [/(^|\.)deezer\.com$/, 'Deezer'],
+    [/(^|\.)tidal\.com$/, 'TIDAL'], [/^music\.amazon\.\w+$/, 'Amazon Music'], [/(^|\.)plex\.tv$/, 'Plex'], [/(^|\.)pluto\.tv$/, 'Pluto TV']
+  ];
+  function sito(u) {
+    const h = host(u); if (!h) return {nome: '', drm: false};
+    let p = ''; try { p = new URL(u).pathname; } catch (e) {}
+    if (/^amazon\.\w+(\.\w+)?$/.test(h) && /\/gp\/video\//.test(p)) return {nome: 'Prime Video', drm: true};
+    for (const [re, n] of DRM) if (re.test(h)) return {nome: n, drm: true};
+    for (const [re, n] of SITI) if (re.test(h)) return {nome: n, drm: false};
+    return {nome: h, drm: false};
+  }
+
+  /* ---------- schede ---------- */
+  const TABS = ['scarica', 'streaming', 'browser'];
+  let scheda = 'scarica';
+  function mostraScheda(t) {
+    if (!TABS.includes(t)) t = 'scarica';
+    scheda = t;
+    TABS.forEach(x => { $('p-' + x).hidden = x !== t; });
+    $('tabs').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+    AX.store.set('video-tab', t);
+    notaMac();
+  }
+  $('tabs').onclick = e => { const b = e.target.closest('button[data-tab]'); if (b) mostraScheda(b.dataset.tab); };
+
+  /* ---------- preferenze ---------- */
+  const pref = Object.assign({tipo: 'video', qualita: '1080'}, AX.store.get('video-pref', {}));
+  if (['video', 'audio'].includes(qs.get('tipo'))) pref.tipo = qs.get('tipo');
+  if (['1080', '720', 'best'].includes(qs.get('qualita'))) pref.qualita = qs.get('qualita');
+  function descrPref() { return pref.tipo === 'audio' ? 'solo audio' : 'video ' + (pref.qualita === 'best' ? 'nella qualità migliore' : pref.qualita + 'p'); }
+  function disegnaPref() {
+    $('segTipo').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === pref.tipo));
+    $('segQual').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === pref.qualita));
+    $('qualRow').hidden = pref.tipo !== 'video';
+    $('prefLbl').textContent = descrPref();
+  }
+  $('segTipo').onclick = e => { const b = e.target.closest('button'); if (!b) return; pref.tipo = b.dataset.v; AX.store.set('video-pref', pref); disegnaPref(); };
+  $('segQual').onclick = e => { const b = e.target.closest('button'); if (!b) return; pref.qualita = b.dataset.v; AX.store.set('video-pref', pref); disegnaPref(); };
+
+  /* ---------- stato del Mac ---------- */
+  let mac = {ok: false, controllo: true};
+  const puoScaricare = () => !!(mac.ok && mac.ytdlp);
+  function aggiornaTasti() {
+    const u = estraiUrl($('url').value), s = sito(u);
+    $('btnScarica').disabled = !puoScaricare() || !u || s.drm;
+    const a = estraiUrl($('addr').value);
+    $('btnPagina').disabled = !puoScaricare() || !a || sito(a).drm;
+  }
+  function notaMac() {
+    const n = $('macNote');
+    n.className = 'alert';
+    if (mac.controllo) { n.hidden = true; return; }
+    if (!mac.ok) {
+      $('macTit').textContent = 'Mac non raggiungibile';
+      $('macTxt').textContent = 'Per scaricare serve il Mac acceso con Atlante Musica avviato e raggiungibile (stessa rete Wi-Fi o Tailscale). I servizi di streaming e il browser funzionano lo stesso.';
+      n.hidden = false;
+    } else if (!mac.ytdlp) {
+      $('macTit').textContent = 'Sul Mac manca yt-dlp';
+      $('macTxt').innerHTML = 'Installalo dal Terminale del Mac con <code>brew install yt-dlp ffmpeg</code>, poi tocca Riprova.';
+      n.hidden = false;
+    } else if (mac.ffmpeg === false) {
+      n.className = 'alert warn';
+      $('macTit').textContent = 'Sul Mac manca ffmpeg';
+      $('macTxt').innerHTML = 'I video in 1080p e il «Solo audio» potrebbero non riuscire. Installalo con <code>brew install ffmpeg</code>.';
+      n.hidden = false;
+    } else n.hidden = true;
+    if (scheda === 'streaming') n.hidden = true;     // la griglia funziona sempre, senza Mac
+  }
+  async function controllaMac(forza) {
+    mac = {ok: false, controllo: true}; notaMac(); aggiornaTasti();
+    $('macRetry').disabled = true;
+    const s = await AX.stato(!!forza);
+    mac = Object.assign({controllo: false}, s);
+    $('macRetry').disabled = false;
+    notaMac(); aggiornaTasti(); aggiorna();
+    avvioAutomatico();
+  }
+  $('macRetry').onclick = () => controllaMac(true);
+  addEventListener('online', () => { if (!mac.ok) controllaMac(true); });
+
+  /* ---------- link da scaricare ---------- */
+  function controllaLink() {
+    const raw = $('url').value.trim(), u = estraiUrl(raw), box = $('siteInfo');
+    if (!raw) { box.innerHTML = ''; aggiornaTasti(); return; }
+    if (!u) { box.innerHTML = '<span class="pill warn">Non sembra un link</span>'; aggiornaTasti(); return; }
+    const s = sito(u);
+    box.innerHTML = s.drm
+      ? '<span class="pill bad">' + esc(s.nome) + ' è protetto (DRM)</span><span>Usa «Scarica» nella sua app ufficiale.</span>'
+      : '<span class="pill ok">' + esc(s.nome) + '</span>';
+    aggiornaTasti();
+  }
+  $('url').addEventListener('input', controllaLink);
+  $('url').addEventListener('paste', () => setTimeout(() => { const u = estraiUrl($('url').value); if (u) $('url').value = u; controllaLink(); }, 0));
+  $('url').addEventListener('change', () => { const u = estraiUrl($('url').value); if (u && u !== $('url').value) { $('url').value = u; controllaLink(); } });
+  $('url').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('btnScarica').disabled) $('btnScarica').click(); });
+
+  async function incolla() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) { toast('Tieni premuto nel campo e scegli «Incolla»'); $('url').focus(); return; }
+    try {
+      const u = estraiUrl(await navigator.clipboard.readText());
+      if (!u) { toast('Negli appunti non c\'è un link'); return; }
+      $('url').value = u; controllaLink();
+    } catch (e) {
+      toast(e && e.name === 'NotAllowedError' ? 'Permesso negato agli appunti: tieni premuto nel campo e scegli «Incolla»' : 'Appunti non leggibili: incolla a mano');
+      $('url').focus();
+    }
+  }
+  $('btnPaste').onclick = incolla;
+  // se il permesso è già concesso (Chrome), propone da solo il link copiato, senza chiedere nulla
+  async function appuntiAuto() {
+    if ($('url').value.trim() || !navigator.permissions || !navigator.clipboard || !navigator.clipboard.readText) return;
+    try {
+      const p = await navigator.permissions.query({name: 'clipboard-read'});
+      if (p.state !== 'granted') return;
+      const u = estraiUrl(await navigator.clipboard.readText());
+      if (u && u !== AX.store.get('video-ultimi-appunti', '') && !$('url').value.trim()) {
+        AX.store.set('video-ultimi-appunti', u);
+        $('url').value = u; controllaLink(); toast('Link preso dagli appunti');
+      }
+    } catch (e) {}
+  }
+
+  async function invia(u, btn) {
+    u = estraiUrl(u);
+    if (!u) { toast('Incolla prima un link'); return false; }
+    const s = sito(u);
+    if (s.drm) { toast(s.nome + ' è protetto: usa «Scarica» nella sua app'); return false; }
+    if (!puoScaricare()) { toast(mac.ok ? 'Sul Mac manca yt-dlp' : 'Mac non raggiungibile'); return false; }
+    const lab = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Invio al Mac…'; }
+    try {
+      await AX.api('video', {method: 'POST', body: {url: u, tipo: pref.tipo, qualita: pref.tipo === 'audio' ? 'best' : pref.qualita}, timeout: 20000});
+      toast('Il Mac sta scaricando: ' + (s.nome || 'video'));
+      aggiorna();
+      return true;
+    } catch (e) {
+      toast(e.message || 'Invio non riuscito');
+      return false;
+    } finally {
+      if (btn) { btn.textContent = lab; aggiornaTasti(); }
+    }
+  }
+  $('btnScarica').onclick = async () => { if (await invia($('url').value, $('btnScarica'))) { $('url').value = ''; controllaLink(); } };
+
+  /* ---------- elenco lavori ---------- */
+  let lavori = [], poll = 0, ultimo = '', inCorsoPrima = false;
+  const nascosti = new Set(AX.store.get('video-nascosti', []));
+  const fileUrl = id => AX.API + 'video/file/' + encodeURIComponent(id);
+  const attivo = l => l.stato === 'in coda' || l.stato === 'in corso';
+
+  async function aggiorna() {
+    clearTimeout(poll); poll = 0;
+    if (!mac.ok) { lavori = []; render(true); return; }
+    try {
+      const j = await AX.api('video', {timeout: 10000});
+      lavori = (j && Array.isArray(j.lavori)) ? j.lavori : [];
+      $('jobsErr').hidden = true;
+    } catch (e) {
+      $('jobsErr').hidden = false; $('jobsErr').textContent = 'Elenco non disponibile: ' + e.message;
+      if (inCorsoPrima && !document.hidden) poll = setTimeout(aggiorna, 5000);
+      return;
+    }
+    render(false);
+    inCorsoPrima = lavori.some(attivo);
+    if (inCorsoPrima && !document.hidden) poll = setTimeout(aggiorna, 2000);
+  }
+  $('btnAggiorna').onclick = () => { if (!mac.ok) controllaMac(true); else aggiorna(); };
+
+  function bt(act, txt, pri) { return '<button class="btn sm' + (pri ? ' pri' : '') + '" data-act="' + act + '">' + txt + '</button>'; }
+  function htmlLavoro(l) {
+    const audio = l.tipo === 'audio', st = l.stato || '';
+    const p = Math.max(0, Math.min(100, +l.progresso || 0));
+    const cls = st === 'fatto' ? 'ok' : st === 'errore' ? 'bad' : st === 'in corso' ? 'warn' : '';
+    const meta = [sito(l.url).nome, fmtB(l.dimensione), st === 'in corso' ? Math.round(p) + '%' : ''].filter(Boolean).join(' · ');
+    const b = [];
+    if (attivo(l)) b.push(bt('annulla', 'Annulla'));
+    if (st === 'fatto') {
+      b.push(audio ? bt('ascolta', '♪ Ascolta', true) : bt('guarda', '▶ Guarda', true));
+      b.push(bt('salva', 'Salva sul dispositivo'));
+    }
+    return '<div class="job" data-id="' + esc(l.id) + '">' +
+      '<div class="jt"><div class="ic">' + (audio ? '♪' : '▶') + '</div><div class="tx"><b>' + esc(l.titolo || l.nome || l.url || 'Senza titolo') + '</b>' +
+      '<div class="meta"><span class="pill ' + cls + '">' + esc(st || '—') + '</span><span>' + esc(meta) + '</span></div></div>' +
+      (st === 'fatto' || st === 'errore' ? '<button class="x" data-act="nascondi" aria-label="Nascondi dall\'elenco" title="Nascondi dall\'elenco">×</button>' : '') + '</div>' +
+      (attivo(l) ? '<div class="bar"><i style="width:' + p + '%"></i></div>' : '') +
+      (st === 'errore' && l.errore ? '<div class="small err">' + esc(l.errore) + '</div>' : '') +
+      (b.length ? '<div class="btns">' + b.join('') + '</div>' : '') + '</div>';
+  }
+  function render(offline) {
+    const vis = lavori.map((l, i) => ({l, i})).filter(x => !nascosti.has(String(x.l.id)))
+      .sort((a, b) => (attivo(b.l) - attivo(a.l)) || (b.i - a.i)).map(x => x.l);
+    const key = (offline ? 'off' : 'on') + (mac.controllo ? 'c' : '') + JSON.stringify(vis);
+    if (key === ultimo) return; ultimo = key;
+    let h;
+    if (mac.controllo) h = '<div class="list"><div class="row"><div class="tx"><span>Controllo il Mac…</span></div></div></div>';
+    else if (offline) h = '<div class="list"><div class="row"><div class="tx"><b>Elenco sul Mac</b><span>Disponibile quando il Mac risponde.</span></div></div></div>';
+    else if (!vis.length) h = '<div class="list"><div class="row"><div class="tx"><b>Nessun download</b><span>Incolla un link qui sopra e tocca «Scarica sul Mac».</span></div></div></div>';
+    else h = vis.map(htmlLavoro).join('');
+    $('jobs').innerHTML = h;
+  }
+
+  $('jobs').onclick = async e => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    const id = b.closest('.job').dataset.id;
+    const l = lavori.find(x => String(x.id) === id); if (!l) return;
+    const act = b.dataset.act;
+    if (act === 'annulla') {
+      b.disabled = true;
+      try { await AX.api('video/' + encodeURIComponent(l.id) + '/annulla', {method: 'POST'}); toast('Annullato'); }
+      catch (err) { toast(err.message); }
+      aggiorna();
+    } else if (act === 'guarda') guarda(l);
+    else if (act === 'ascolta') {
+      chiudiPlayer();
+      AX.player.play([{id: 'video-' + l.id, title: l.titolo || l.nome || 'Audio', artist: sito(l.url).nome || 'Scaricato dal Mac', album: 'Video scaricati', url: fileUrl(l.id), cover: ''}], 0, 'Video scaricati');
+      if (AX.player.available) toast('In riproduzione nel lettore');
+    } else if (act === 'salva') salva(l);
+    else if (act === 'nascondi') {
+      nascosti.add(String(l.id)); AX.store.set('video-nascosti', [...nascosti].slice(-300));
+      ultimo = ''; render(false);
+    }
+  };
+
+  /* ---------- lettore video nella pagina ---------- */
+  const vid = $('vid');
+  function guarda(l) {
+    $('playerTit').textContent = l.titolo || l.nome || 'Video';
+    $('playerBox').hidden = false;
+    vid.src = fileUrl(l.id);
+    $('playerBox').scrollIntoView({behavior: 'smooth', block: 'start'});
+    vid.play().catch(() => {});
+  }
+  function chiudiPlayer() { vid.pause(); vid.removeAttribute('src'); vid.load(); $('playerBox').hidden = true; }
+  $('playerClose').onclick = chiudiPlayer;
+  vid.addEventListener('play', () => { const n = AX.player.now(); if (n && n.playing) AX.player.toggle(); });   // ferma la musica dell'app
+  vid.addEventListener('error', () => { if (vid.getAttribute('src')) toast('Video non riproducibile qui: prova «Salva sul dispositivo»'); });
+
+  /* ---------- salva sul dispositivo ---------- */
+  const MIME = {mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', m4a: 'audio/mp4', mp3: 'audio/mpeg', aac: 'audio/aac', opus: 'audio/ogg', ogg: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac'};
+  function nomeFile(l) {
+    if (l.nome) return String(l.nome).split('/').pop();
+    const base = String(l.titolo || 'video').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'video';
+    return base + (l.tipo === 'audio' ? '.m4a' : '.mp4');
+  }
+  function scaricaFile(l) {
+    const a = document.createElement('a');
+    a.href = fileUrl(l.id); a.download = nomeFile(l);
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  let salvaCtrl = null;
+  function chiudiSalva() { if (salvaCtrl) salvaCtrl.abort(); salvaCtrl = null; $('salvaBox').hidden = true; $('salvaBox').innerHTML = ''; }
+  function salva(l) {
+    if (!isIOS) { scaricaFile(l); toast('Download avviato: lo trovi nella cartella Download'); return; }
+    chiudiSalva();
+    const box = $('salvaBox'), nome = nomeFile(l), dim = +l.dimensione || 0, audio = l.tipo === 'audio';
+    const condivisione = !!(navigator.share && navigator.canShare) && (!dim || dim <= SHARE_MAX);
+    box.innerHTML =
+      '<div class="hd"><b>Salva sull\'iPhone</b><button class="btn sm" data-x>Chiudi</button></div>' +
+      '<div class="sub" style="margin:4px 0 8px;overflow-wrap:anywhere">' + esc(l.titolo || nome) + (dim ? ' · ' + fmtB(dim) : '') + '</div>' +
+      (condivisione
+        ? '<ol class="steps"><li>Tocca <b>Prepara</b>: il file passa dal Mac all\'iPhone.</li><li>Tocca <b>Condividi</b> e scegli ' + (audio ? '<b>Salva in File</b>' : '<b>Salva video</b> (va in Foto) o <b>Salva in File</b>') + '.</li></ol>' +
+          '<div class="btns"><button class="btn pri" data-prep>Prepara' + (dim ? ' (' + fmtB(dim) + ')' : '') + '</button><button class="btn" data-share disabled>Condividi…</button></div>' +
+          '<div class="bar" data-bar hidden><i></i></div><div class="small" data-st></div>' +
+          '<p class="small">Se «Salva video» non compare, Foto non legge quel formato: usa «Salva in File».</p>'
+        : '<p class="small">' + (dim > SHARE_MAX ? 'Il file è grande: meglio scaricarlo direttamente. ' : '') + '</p>') +
+      '<p class="small">' + (condivisione ? 'Oppure tocca' : 'Tocca') + ' <b>Scarica il file</b>: Safari chiede «Scaricare?» e lo mette in <b>File → Download</b>; da lì Condividi → ' + (audio ? 'apri con l\'app che preferisci' : '«Salva video»') + '.</p>' +
+      '<div class="btns"><a class="btn" data-dl href="' + esc(fileUrl(l.id)) + '" download="' + esc(nome) + '">Scarica il file</a></div>';
+    box.hidden = false;
+    box.scrollIntoView({behavior: 'smooth', block: 'start'});
+    box.querySelector('[data-x]').onclick = chiudiSalva;
+    if (!condivisione) return;
+    let file = null;
+    const st = box.querySelector('[data-st]'), bar = box.querySelector('[data-bar]'), bPrep = box.querySelector('[data-prep]'), bShare = box.querySelector('[data-share]');
+    bPrep.onclick = async () => {
+      bPrep.disabled = true; bar.hidden = false; st.textContent = 'Trasferimento dal Mac…';
+      salvaCtrl = new AbortController();
+      try {
+        const r = await fetch(fileUrl(l.id), {signal: salvaCtrl.signal});
+        if (!r.ok) throw new Error('Il Mac ha risposto ' + r.status);
+        const tot = +r.headers.get('Content-Length') || dim;
+        if (tot > SHARE_MAX) throw new Error('File troppo grande per la condivisione: usa «Scarica il file»');
+        const parti = []; let n = 0;
+        if (r.body && r.body.getReader) {
+          const rd = r.body.getReader();
+          for (;;) {
+            const {done, value} = await rd.read(); if (done) break;
+            parti.push(value); n += value.length;
+            if (n > SHARE_MAX) { rd.cancel(); throw new Error('File troppo grande per la condivisione: usa «Scarica il file»'); }
+            bar.firstChild.style.width = (tot ? Math.min(100, n / tot * 100) : 50) + '%';
+            st.textContent = 'Trasferimento dal Mac… ' + fmtB(n) + (tot ? ' di ' + fmtB(tot) : '');
+          }
+        } else { parti.push(await r.arrayBuffer()); }
+        const ext = nome.split('.').pop().toLowerCase();
+        const tipo = (r.headers.get('Content-Type') || '').split(';')[0] || MIME[ext] || 'application/octet-stream';
+        file = new File(parti, nome, {type: tipo});
+        if (!navigator.canShare({files: [file]})) throw new Error('Questo formato non si può condividere: usa «Scarica il file»');
+        bar.firstChild.style.width = '100%';
+        st.textContent = 'Pronto: tocca «Condividi…»';
+        bShare.disabled = false; bShare.classList.add('pri'); bPrep.classList.remove('pri');
+      } catch (e) {
+        if (e.name !== 'AbortError') { st.textContent = e.message || 'Trasferimento non riuscito'; bPrep.disabled = false; }
+      } finally { salvaCtrl = null; }
+    };
+    bShare.onclick = async () => {
+      if (!file) return;
+      try { await navigator.share({files: [file], title: l.titolo || nome}); st.textContent = 'Fatto.'; }
+      catch (e) { if (e.name !== 'AbortError') st.textContent = 'Condivisione non riuscita: usa «Scarica il file»'; }
+    };
+  }
+
+  /* ---------- servizi di streaming ---------- */
+  // dl: app = scarica ufficiale nell'app · mac = video non protetti scaricabili col Mac · no = solo streaming
+  const SERVIZI = [
+    {n: 'Netflix', u: 'https://www.netflix.com/', c: '#e50914', m: 'N', dl: ['app'], how: 'App Netflix → titolo → ↓ Scarica. Non tutti i titoli e non tutti i piani lo consentono.'},
+    {n: 'Prime Video', u: 'https://www.primevideo.com/', c: '#1a98ff', m: 'PV', dl: ['app'], how: 'App Prime Video → titolo → Scarica.'},
+    {n: 'Disney+', u: 'https://www.disneyplus.com/', c: '#0b3d91', m: 'D+', dl: ['app'], how: 'App Disney+ → titolo → icona ↓.'},
+    {n: 'Apple TV', s: 'ex Apple TV+', u: 'https://tv.apple.com/', c: '#1d1d1f', m: 'tv', dl: ['app'], how: 'App TV → titolo → ↓ Scarica.'},
+    {n: 'HBO Max', u: 'https://www.hbomax.com/', c: '#0029d6', m: 'HBO', dl: ['app'], how: 'App HBO Max → titolo → Scarica (dipende dal piano).'},
+    {n: 'NOW', u: 'https://www.nowtv.it/', c: '#00a99d', m: 'NOW', dl: ['app'], how: 'App NOW su iPhone o iPad → titolo → Download, per i titoli che lo consentono.'},
+    {n: 'DAZN', u: 'https://www.dazn.com/', c: '#0c161c', f: '#f7ff1a', m: 'DA', dl: ['no'], how: 'Sport in diretta e on demand solo in streaming: niente download offline.'},
+    {n: 'RaiPlay', u: 'https://www.raiplay.it/', c: '#1f63c4', m: 'Rai', dl: ['app', 'mac'], how: 'App RaiPlay → Download per i programmi che lo permettono. I contenuti non protetti si scaricano anche col Mac: incolla il link in «Scarica».'},
+    {n: 'Mediaset Infinity', u: 'https://mediasetinfinity.mediaset.it/', c: '#14204a', m: '∞', dl: ['app'], how: 'App Mediaset Infinity → Download per i titoli che lo consentono.'},
+    {n: 'Paramount+', u: 'https://www.paramountplus.com/', c: '#0064ff', m: 'P+', dl: ['app'], how: 'App Paramount+ → titolo → Scarica (dipende dal piano).'},
+    {n: 'discovery+', u: 'https://www.discoveryplus.com/', c: '#2175d9', m: 'd+', dl: ['app'], how: 'App discovery+ → Scarica, dove disponibile.'},
+    {n: 'La7', u: 'https://www.la7.it/', c: '#222', m: 'La7', dl: ['mac'], how: 'Puntate in replica: incolla il link della puntata in «Scarica».'},
+    {n: 'YouTube', u: 'https://www.youtube.com/', c: '#ff0000', m: '▶', dl: ['app', 'mac'], how: 'Offline ufficiale con YouTube Premium (↓ sotto il video). Col Mac: incolla il link in «Scarica».'},
+    {n: 'Twitch', u: 'https://www.twitch.tv/', c: '#9146ff', m: 'Tw', dl: ['mac'], how: 'Registrazioni delle dirette (VOD) e clip: incolla il link in «Scarica».'},
+    {n: 'Vimeo', u: 'https://vimeo.com/', c: '#17d5ff', f: '#0b1f2a', m: 'V', dl: ['mac'], how: 'Tasto «Scarica» sotto il video quando l\'autore lo permette; i video pubblici anche col Mac.'},
+    {n: 'Spotify', u: 'https://open.spotify.com/', c: '#1db954', f: '#000', m: 'S', dl: ['app'], how: 'Con Premium: ↓ su playlist, album e podcast nell\'app.'},
+    {n: 'Apple Music', u: 'https://music.apple.com/', c: '#fa2d48', m: '♫', dl: ['app'], how: 'App Musica → … → Scarica (con abbonamento attivo).'},
+    {n: 'Audible', u: 'https://www.audible.it/', c: '#f7991c', f: '#000', m: 'A', dl: ['app'], how: 'App Audible → Libreria → tocca il titolo per scaricarlo.'},
+    {n: 'Pluto TV', u: 'https://pluto.tv/it/', c: '#111', f: '#fff200', m: 'P', dl: ['no'], how: 'Gratis con pubblicità, solo in streaming.'},
+    {n: 'Plex', u: 'https://app.plex.tv/', c: '#1f1f1f', f: '#e5a00d', m: '▸', dl: ['app'], how: 'Con Plex Pass: Scarica nell\'app Plex i video del tuo server.'},
+    {n: 'Crunchyroll', u: 'https://www.crunchyroll.com/', c: '#f47521', m: 'C', dl: ['app'], how: 'Con abbonamento premium: download per la visione offline nell\'app.'},
+    {n: 'MUBI', u: 'https://mubi.com/', c: '#000', m: 'M', dl: ['app'], how: 'App MUBI → film → Scarica.'},
+    {n: 'TIMVISION', u: 'https://www.timvision.it/', c: '#0033a0', m: 'TIM', dl: ['app'], how: 'App TimVision → Download, dove disponibile.'},
+    {n: 'Rakuten TV', u: 'https://www.rakuten.tv/it', c: '#bf0000', m: 'R', dl: ['app'], how: 'Titoli acquistati: download nell\'app, dove consentito.'},
+    {n: 'Sky Go', u: 'https://skygo.sky.it/', c: '#0072c9', m: 'Sky', dl: ['app'], how: 'App Sky Go → Download per i contenuti on demand che lo consentono (per abbonati Sky).'}
+  ];
+  const TAG = {app: '↓ nell\'app', mac: '↓ col Mac', no: 'solo streaming'};
+  $('svcGrid').innerHTML = SERVIZI.map(s =>
+    '<a class="tile" href="' + esc(s.u) + '" target="_blank" rel="noopener">' +
+      '<div class="top"><span class="mono" style="background:' + s.c + ';color:' + (s.f || '#fff') + '">' + esc(s.m) + '</span><b>' + esc(s.n) + '</b></div>' +
+      '<span>' + s.dl.map(d => '<span class="tag' + (d === 'mac' ? ' mac' : '') + '">' + TAG[d] + '</span>').join(' · ') + (s.s ? ' · ' + esc(s.s) : '') + '</span>' +
+    '</a>').join('');
+  $('howList').innerHTML = SERVIZI.map(s => '<li><b>' + esc(s.n) + '</b><span>' + esc(s.how) + '</span></li>').join('');
+
+  /* ---------- browser ---------- */
+  function indirizzo(t) {
+    t = String(t || '').trim(); if (!t) return '';
+    return estraiUrl(t) || 'https://www.google.com/search?q=' + encodeURIComponent(t);
+  }
+  $('addr').addEventListener('input', aggiornaTasti);
+  $('addr').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnApri').click(); });
+  $('btnApri').onclick = () => { const u = indirizzo($('addr').value); if (!u) { toast('Scrivi un indirizzo o una ricerca'); return; } apriScheda(u); };
+  $('btnPagina').onclick = async () => {
+    const u = estraiUrl($('addr').value);
+    if (!u) { toast('Scrivi l\'indirizzo della pagina del video'); return; }
+    if (await invia(u, $('btnPagina'))) mostraScheda('scarica');
+  };
+  const BM = 'javascript:location.href=\'' + BASE + '?url=\'+encodeURIComponent(location.href)';
+  $('scBase').textContent = BASE + '?url=';
+  $('bmCode').textContent = BM;
+  $('bmLink').setAttribute('href', BM);
+  $('bmLink').onclick = e => { e.preventDefault(); toast('Trascinalo nella barra dei preferiti'); };
+  $('copyBase').onclick = () => copia(BASE + '?url=', 'Indirizzo copiato');
+  $('copyBm').onclick = () => copia(BM, 'Codice copiato: incollalo come indirizzo del segnalibro');
+
+  /* ---------- link passato nell'indirizzo (?url=…, da Comandi Rapidi o segnalibro) ---------- */
+  let auto = false;
+  const daIndirizzo = estraiUrl(qs.get('url') || qs.get('u') || qs.get('text') || '');
+  if (daIndirizzo) {
+    $('url').value = daIndirizzo; $('addr').value = daIndirizzo;
+    auto = qs.get('subito') === '1';
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}   // un ricaricamento non lo rimanda
+  }
+  function avvioAutomatico() {
+    if (!auto || !puoScaricare()) return;
+    auto = false;
+    $('btnScarica').click();
+  }
+
+  /* ---------- avvio ---------- */
+  mostraScheda(daIndirizzo ? 'scarica' : AX.store.get('video-tab', 'scarica'));
+  disegnaPref(); controllaLink(); render(true);
+  controllaMac(false);
+  appuntiAuto();
+  addEventListener('focus', appuntiAuto);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { clearTimeout(poll); poll = 0; return; }
+    if (!mac.ok) controllaMac(true); else aggiorna();
+    appuntiAuto();
+  });
+  addEventListener('pagehide', () => { clearTimeout(poll); if (salvaCtrl) salvaCtrl.abort(); });
+})();
+</script>
+</body>
+</html>

@@ -6,8 +6,10 @@
 Crea in una cartella temporanea due finti dischi (principale e backup) con MP3 sintetici
 (tag ID3 con titolo, artista e copertina, frame MPEG veri per la durata), link simbolici di
 playlist e un playlist.json della radio. Poi controlla: doppioni (livello 1 e 2), id stabili,
-disco principale scollegato, durate, playlist, e l'aggancio servi_app dentro un finto server
-Benessere (redirect, file dell'app, percorsi vietati, API, Range).
+disco principale scollegato, durate, playlist, l'aggancio servi_app dentro un finto server
+(redirect, file dell'app, percorsi vietati, API, Range) e il server avviato come il servizio del Mac
+(main() con i due dischi, le playlist, playlist.json, un collegamento e le opzioni dei moduli extra).
+Scrive solo nella sua cartella temporanea, che alla fine cancella; dura pochi secondi.
 Alla fine scrive «TUTTO OK» (codice 0) oppure l'elenco degli errori (codice 1).
 Solo libreria standard: va bene il Python 3.9 di macOS.
 """
@@ -18,7 +20,9 @@ import http.client
 import json
 import os
 import shutil
+import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -212,7 +216,7 @@ def finto_benessere(app_musica):
         def do_POST(self):
             self.gestisci(post=True)
 
-        def do_HEAD(self):   # facoltativo, come in AGGANCIO-BENESSERE.md
+        def do_HEAD(self):   # facoltativo in un server che ospita servi_app
             percorso = unquote(urlsplit(self.path).path)
             if (percorso == "/musica" or percorso.startswith("/musica/")) and self.headers.get("Tailscale-User-Login"):
                 ml.servi_app(self, percorso, app=app_musica)
@@ -879,12 +883,26 @@ def prova_migrazione(base):
                       "%s: gli alias della migrazione non pesano sul catalogo (che dice solo che ci sono: %s)" % (nome, c1.get("alias_vecchi")))
             st, _, b = chiedi(porta, "/api/musica/alias")
             controlla(st == 200 and json.loads(b.decode("utf-8")) == {"alias": attesi}, "%s: api/musica/alias li dà all'app (%d)" % (nome, st))
+            # l'app della versione precedente (main) non conosce gli alias: con gli id nuovi toglierebbe dalla coda dei download
+            # (e nasconderebbe) i brani che ha. Chiede il catalogo senza «v=2» e riceve ancora gli id di prima
+            st, _, b = chiedi(porta, "/api/musica/catalogo")
+            cv = json.loads(b.decode("utf-8")) if st == 200 else {}
+            controlla(sorted(x["id"] for x in cv.get("brani", [])) == sorted(v["id"] for v in voci) and cv.get("aggiornato", 0) > 0,
+                      "%s: catalogo senza «v=2» (app di prima): gli id di prima, a lettura finita (%d)" % (nome, st))
+            st, _, b = chiedi(porta, "/api/musica/catalogo?v=2")
+            cn = json.loads(b.decode("utf-8")) if st == 200 else {}
+            controlla(sorted(x["id"] for x in cn.get("brani", [])) == sorted(x["id"] for x in c1["brani"])
+                      and cn.get("alias_vecchi") == c1["alias_vecchi"] and "playlist" in cn,
+                      "%s: catalogo?v=2 (app di adesso): gli id nuovi e il segno degli alias (%d)" % (nome, st))
             st, _, b = chiedi(porta, "/api/musica/file/" + voci[0]["id"])
             controlla(st == 200 and b == mp3("Uno", "Artista", ROSSO, secondi=5),
                       "%s: dopo la lettura il vecchio id porta ancora al brano (app non ancora aggiornata: %d)" % (nome, st))
             l2 = ml.Libreria([pm], cm)
             controlla(l2.alias_vecchi() == attesi and l2.catalogo().get("alias_vecchi") == c1["alias_vecchi"],
                       "%s: e se lo ricorda dopo un riavvio (indice nuovo)" % nome)
+            cv2 = json.loads(l2.catalogo_json(None, True).decode("utf-8"))
+            controlla(sorted(x["id"] for x in cv2["brani"]) == sorted(v["id"] for v in voci),
+                      "%s: anche dopo il riavvio l'app di prima riceve gli id del suo catalogo" % nome)
             l2.scansiona()
             controlla(l2.alias_vecchi() == attesi and not any(k in l2.catalogo()["alias"] for k in attesi),
                       "%s: anche dopo altre letture, sempre fuori dal catalogo" % nome)
@@ -895,20 +913,93 @@ def prova_migrazione(base):
             srv.server_close()
 
 
+def prova_servizio(base):
+    """Il server come lo avvia il LaunchAgent it.samuele.atlante-musica-app (vedi DISCHI-E-PLAYLIST.md): main() con i due
+    dischi, le playlist, playlist.json e un collegamento, insieme alle opzioni dei moduli extra e ad ATLANTE_ASCOLTO."""
+    titolo("Il servizio del Mac: due dischi, playlist, playlist.json, collegamento e moduli extra insieme")
+    x = crea_dischi(os.path.join(base, "servizio"))
+    scrivi(os.path.join(x["app"], "x", "kit.css"), b"body{}")
+    scrivi(os.path.join(x["app"], "x", "prova.html"), b"<!doctype html><p>modulo")
+    cartelle = {k: os.path.join(base, "servizio", k) for k in ("cache", "video", "libri")}
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        porta = so.getsockname()[1]
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        nessuno = so.getsockname()[1]   # «Ollama» dove non risponde nessuno
+    env = dict(os.environ, ATLANTE_ASCOLTO="127.0.0.1")
+    log = open(os.path.join(base, "servizio", "server.log"), "wb")
+    p = subprocess.Popen([sys.executable, "-I", "-B", os.path.join(QUI, "musica_libreria.py"), x["princ"], x["back"],
+                          "--porta", str(porta), "--cache", cartelle["cache"], "--app", x["app"],
+                          "--playlist", x["playlist"], "--playlist-json", x["radio"], "--collegamento", "Benessere=/benessere/",
+                          "--video-dir", cartelle["video"], "--libri-dir", cartelle["libri"],
+                          "--ia-indirizzo", "http://127.0.0.1:%d" % nessuno], env=env, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        def catalogo():
+            try:
+                st, h, b = chiedi(porta, "/api/musica/catalogo", login=False)
+                c = json.loads((gzip.decompress(b) if h.get("content-encoding") == "gzip" else b).decode("utf-8"))
+                return c if st == 200 and c.get("aggiornato") else None
+            except (OSError, ValueError):
+                return None
+        fine, c = time.time() + 30, None
+        while c is None and time.time() < fine and p.poll() is None:
+            c = catalogo()
+            if c is None:
+                time.sleep(0.1)
+        c = c or {}
+        titoli = {b["title"] for b in c.get("brani", [])}
+        controlla({"Song One", "Solo principale", "Only Backup"} <= titoli,
+                  "i brani dei due dischi, anche quelli solo sul backup (%d brani)" % len(titoli))
+        fonti = sorted((pl["fonte"], pl["nome"]) for pl in c.get("playlist", []))
+        controlla(("cartella", "Sara❤️") in fonti and ("radio", "Sara❤️") in fonti and ("radio", "Di Sara") in fonti,
+                  "le playlist della cartella Playlist e quelle di playlist.json (%s)" % fonti)
+        controlla(c.get("collegamenti") == [{"nome": "Benessere", "url": "/benessere/"}], "il collegamento per la scheda Altro")
+        st, h, b = chiedi(porta, "/api/extra/stato", login=False)
+        j = json.loads(b.decode("utf-8")) if st == 200 else {}
+        controlla(j.get("video_dir") == cartelle["video"] and j.get("libri_dir") == cartelle["libri"] and j.get("ollama") is False,
+                  "le API dei moduli con le loro cartelle (%d)" % st)
+        st, h, _ = chiedi(porta, "/x/kit.css", login=False)
+        controlla(st == 200 and h.get("cache-control") == "no-cache", "le pagine dei moduli, sempre fresche (%d %s)" % (st, h.get("cache-control")))
+        st, _, _ = chiedi(porta, "/altro", metodo="POST", login=False)
+        controlla(st == 501, "POST fuori da api/extra: 501 (%d)" % st)
+        log.flush()
+        with open(log.name, "rb") as f:
+            testa = f.read().decode("utf-8", "replace")
+        controlla("http://127.0.0.1:%d/" % porta in testa, "risponde solo dal Mac (ATLANTE_ASCOLTO=127.0.0.1)")
+    finally:
+        p.terminate()
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        log.close()
+
+
 def main():
     print("Prova di musica_libreria.py con Python %s" % sys.version.split()[0])
     base = tempfile.mkdtemp(prefix="prova-musica-")
+    # una cartella di casa vuota, anche per il servizio avviato da prova_servizio: il server cerca i vecchi id anche
+    # passando dai link della cartella di casa (Libreria._id_dai_percorsi), e quelli del Mac vero cambierebbero gli attesi
+    casa_vera, os.environ["HOME"] = os.environ.get("HOME"), os.path.join(base, "casa-della-prova")
+    os.makedirs(os.environ["HOME"])
     try:
         prova(base)
         prova_giro2(base)
         prova_unione(base)
         prova_migrazione(base)
+        prova_servizio(base)
     except Exception:
         import traceback
         traceback.print_exc()
         ERRORI.append("la prova si è interrotta per un errore")
     finally:
         shutil.rmtree(base, ignore_errors=True)
+        if casa_vera is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = casa_vera
     if ERRORI:
         print("\n%d ERRORI:" % len(ERRORI))
         for e in ERRORI:

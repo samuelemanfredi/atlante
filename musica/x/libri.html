@@ -1,0 +1,1613 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<title>Libri</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Libri e audiolibri – stile Apple Libri dentro Atlante Musica */
+:root{--axb:0px}
+.wrap{padding-bottom:calc(60px + var(--axb) + env(safe-area-inset-bottom,0px))}
+svg.i{width:22px;height:22px;display:block;flex:none}
+.topbar{display:flex;align-items:center;justify-content:space-between;min-height:44px;gap:10px}
+.back{display:flex;align-items:center;color:var(--accent);font-size:17px;padding:8px 8px 8px 0;min-height:44px;white-space:nowrap}
+.round{width:38px;height:38px;border-radius:50%;background:var(--fill);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;flex:none;font-weight:700;font-size:16px}
+.round svg.i{width:20px;height:20px}
+.btn.big{min-height:50px;width:100%;font-size:17px;border-radius:14px}
+.btn.danger{color:var(--bad)}
+.btn.danger.pri{background:var(--bad);color:#fff}
+.btn svg.i{width:20px;height:20px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+.loading{display:flex;align-items:center;justify-content:center;gap:10px;color:var(--fg2);padding:26px 0}
+.spinner{width:20px;height:20px;border-radius:50%;border:2.5px solid var(--fill);border-top-color:var(--fg2);animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{text-align:center;color:var(--fg2);padding:24px 16px;background:var(--bg2);border-radius:12px;margin:10px 0}
+.empty b{display:block;color:var(--fg);font-size:17px;margin-bottom:4px}
+.chev{color:var(--fg3);font-size:22px;flex:none}
+.mini{display:block;width:44px;height:4px;border-radius:2px;background:var(--fg3);overflow:hidden;margin-top:6px}
+.mini>i{display:block;height:100%;background:var(--accent)}
+.note b{color:var(--fg)}
+
+/* libreria */
+.bgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:22px 14px;margin:12px 0}
+.btile{display:block;text-align:left;min-width:0;position:relative}
+.bcov{width:100%;aspect-ratio:2/3;border-radius:3px 8px 8px 3px;object-fit:cover;background:var(--fill);box-shadow:0 2px 9px rgba(0,0,0,.2);display:block;overflow:hidden;position:relative}
+.bcov.sq{aspect-ratio:1/1;border-radius:8px}
+.gcov{display:flex;flex-direction:column;justify-content:space-between;padding:12px 10px;background:linear-gradient(160deg,hsl(var(--h) 42% 48%),hsl(calc(var(--h) + 35) 48% 26%));color:#fff;text-align:left}
+.gcov b{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:15px;line-height:1.15;font-weight:700;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:break-word;hyphens:auto;-webkit-hyphens:auto}
+.cont .gcov,.gcov.sq{padding:9px 8px}
+.cont .gcov b{font-size:12px}
+.cont .gcov i{display:none}
+.gcov i{font-style:normal;font-size:11px;opacity:.85;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.btile .tt{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:14px;font-weight:600;line-height:1.25;margin-top:8px}
+.btile .au{display:block;font-size:13px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btile .pr{display:block;font-size:12px;color:var(--fg2);margin-top:2px}
+.btile .pr.new{color:var(--accent);font-weight:600}
+.cw{position:relative;display:block}
+.abadge{position:absolute;right:6px;bottom:6px;width:28px;height:28px;border-radius:14px;background:rgba(0,0,0,.55);color:#fff;display:flex;align-items:center;justify-content:center}
+.abadge svg.i{width:16px;height:16px}
+.cont{display:flex;gap:14px;align-items:center;background:var(--bg2);border-radius:14px;padding:14px;margin:12px 0}
+.cont .bcov{width:84px;flex:none}
+.cont .tx{flex:1;min-width:0}
+.cont .lab{font-size:13px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.03em}
+.cont .tt{font-size:18px;font-weight:700;line-height:1.2;margin:2px 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cont .btns{margin:10px 0 0}
+.busy{display:flex;gap:12px;align-items:center}
+.busy .tx{flex:1;min-width:0}
+.busy .bar{margin-top:8px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.chip{min-height:36px;padding:0 14px;border-radius:18px;background:var(--fill);font-size:15px;font-weight:500}
+.chk{display:flex;align-items:center;gap:10px;min-height:44px;font-size:16px}
+.chk input{width:22px;height:22px;accent-color:var(--accent)}
+.vh{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip:rect(0 0 0 0);pointer-events:none}
+
+/* ricerca */
+.search{display:flex;align-items:center;gap:10px;margin:10px 0 6px}
+.search .box{flex:1;position:relative}
+.search .box svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:var(--fg2);pointer-events:none}
+.search input{width:100%;min-height:42px;padding:8px 12px 8px 36px;border:0;border-radius:12px;background:var(--fill);outline:none;-webkit-appearance:none;appearance:none}
+
+/* scheda libro */
+.bhead{display:flex;gap:16px;align-items:flex-end;margin:6px 0 14px}
+.bhead .bcov{width:118px;flex:none}
+.bhead .tx{min-width:0;flex:1}
+.bhead h1{font-size:24px;line-height:1.18;margin:0 0 4px;font-weight:700;overflow-wrap:anywhere}
+.bhead .au{color:var(--fg2);font-size:16px}
+.bhead .meta{color:var(--fg2);font-size:13px;margin-top:6px}
+.bdesc{white-space:pre-line;color:var(--fg2);font-size:15px;line-height:1.45}
+.clamp{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.more{color:var(--accent);font-size:15px;font-weight:600;min-height:36px}
+.mac .mch{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:700;margin-bottom:4px}
+.mac .mch svg{color:var(--accent)}
+.mac p{margin:4px 0 10px}
+.tr{display:flex;align-items:center;gap:12px;padding:10px 14px;min-height:54px;border-bottom:.5px solid var(--sep);width:100%;text-align:left}
+.tr:last-child{border-bottom:0}
+.tr .n{width:26px;text-align:center;color:var(--fg2);font-variant-numeric:tabular-nums;flex:none;font-size:15px}
+.tr .tx{flex:1;min-width:0}
+.tr .tx b{display:block;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tr .tx span{display:block;color:var(--fg2);font-size:13px}
+.tr.on .tx b,.tr.on .n{color:var(--accent);font-weight:700}
+.tr.done .tx b{color:var(--fg2)}
+.tr .ok{color:var(--accent);flex:none}
+.tr .dis{opacity:.45}
+.fieldrow{display:grid;grid-template-columns:1fr;gap:0}
+
+/* lettore */
+#vRead{--rbg:var(--bg);--rfg:var(--fg);--rfg2:var(--fg2);--rsep:var(--sep);--rhl:rgba(250,45,72,.2);background:var(--rbg);color:var(--rfg);min-height:100vh}
+#vRead[data-tema="chiaro"]{--rbg:#ffffff;--rfg:#1c1c1e;--rfg2:rgba(60,60,67,.6);--rsep:rgba(60,60,67,.2);--rhl:rgba(250,45,72,.18)}
+#vRead[data-tema="seppia"]{--rbg:#f6efe1;--rfg:#4a3a28;--rfg2:rgba(74,58,40,.62);--rsep:rgba(74,58,40,.2);--rhl:rgba(214,120,40,.26)}
+#vRead[data-tema="scuro"]{--rbg:#121212;--rfg:#e4e4e6;--rfg2:rgba(235,235,245,.55);--rsep:rgba(84,84,88,.6);--rhl:rgba(252,60,84,.32)}
+.rbar{position:sticky;top:0;z-index:5;background:var(--rbg);border-bottom:.5px solid var(--rsep)}
+@supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){.rbar{background:color-mix(in srgb,var(--rbg) 86%,transparent);-webkit-backdrop-filter:saturate(1.6) blur(20px);backdrop-filter:saturate(1.6) blur(20px)}}
+.rbar .in{max-width:900px;margin:0 auto;display:flex;align-items:center;gap:8px;min-height:52px;padding:0 max(12px,env(safe-area-inset-right,0px)) 0 max(14px,env(safe-area-inset-left,0px))}
+.rbar .back{flex:none}
+.rtit{flex:1;min-width:0;text-align:center;line-height:1.2}
+.rtit b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rtit span{display:block;font-size:12px;color:var(--rfg2)}
+.rbar .round{background:transparent;width:40px;height:40px;color:var(--accent)}
+.rbar .round.on{background:var(--accent);color:var(--onaccent)}
+.rprog{height:2px;background:transparent}
+.rprog i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+#rTxt{max-width:36em;margin:0 auto;padding:18px max(22px,env(safe-area-inset-left,0px)) 10px;font-size:var(--rdim,20px);line-height:var(--rint,1.6);hyphens:auto;-webkit-hyphens:auto;overflow-wrap:break-word}
+#rTxt.serif{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"New York",ui-serif,serif}
+#rTxt .ctit{font-size:1.35em;line-height:1.25;margin:.6em 0 1.1em;font-weight:700;text-align:center}
+#rTxt p{margin:0 0 .85em}
+#rTxt .f{border-radius:4px;transition:background .15s}
+#rTxt .f.on{background:var(--rhl);-webkit-box-decoration-break:clone;box-decoration-break:clone}
+.rnav{max-width:36em;margin:10px auto 0;padding:0 22px calc(120px + var(--axb) + env(safe-area-inset-bottom,0px));display:flex;gap:10px}
+.rnav .btn{flex:1;min-height:50px;border-radius:14px;white-space:nowrap;padding:0 10px}
+.rnav .btn:disabled{visibility:hidden}
+.ttsbar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(10px + var(--axb) + env(safe-area-inset-bottom,0px));z-index:20;width:min(calc(100% - 20px),480px);display:flex;align-items:center;justify-content:space-between;gap:4px;padding:8px 10px;border-radius:22px;background:var(--card);color:var(--fg);box-shadow:0 8px 30px rgba(0,0,0,.25),0 0 0 .5px var(--sep)}
+.ttsbar .icb{width:46px;height:46px;border-radius:23px;display:inline-flex;align-items:center;justify-content:center;color:var(--fg);flex:none}
+.ttsbar .icb svg.i{width:24px;height:24px}
+.ttsbar .pp{width:56px;height:56px;border-radius:28px;background:var(--accent);color:var(--onaccent);display:inline-flex;align-items:center;justify-content:center;flex:none}
+.ttsbar .pp svg.i{width:26px;height:26px}
+.ttsbar .rate{min-width:52px;height:40px;border-radius:20px;background:var(--fill);font-weight:700;font-size:15px;font-variant-numeric:tabular-nums;flex:none}
+@media (max-width:370px){.ttsbar{gap:0;padding:6px;width:calc(100% - 12px)}.ttsbar .icb{width:40px;height:44px}.ttsbar .pp{width:50px;height:50px}.ttsbar .rate{min-width:44px;font-size:14px}}
+.sz{display:flex;align-items:center;gap:10px}
+.sz button{flex:1;min-height:50px;border-radius:12px;background:var(--fill);font-weight:600}
+.sz .v{min-width:56px;text-align:center;font-variant-numeric:tabular-nums;color:var(--fg2)}
+.temi{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:8px 0}
+.temi button{min-height:64px;border-radius:12px;font-weight:600;font-size:14px;border:2px solid transparent;box-shadow:0 0 0 .5px var(--sep) inset}
+.temi button.on{border-color:var(--accent)}
+.lbl{font-size:13px;color:var(--fg2);margin:18px 0 6px 4px;text-transform:uppercase;letter-spacing:.03em}
+.vrow{display:flex;align-items:center;gap:10px;padding:10px 14px;min-height:54px;border-bottom:.5px solid var(--sep);width:100%;text-align:left}
+.vrow:last-child{border-bottom:0}
+.vrow .tx{flex:1;min-width:0}
+.vrow .tx b{display:block;font-weight:500}
+.vrow .tx span{display:block;font-size:13px;color:var(--fg2)}
+.vrow .sel{width:22px;color:var(--accent);flex:none}
+.range{width:100%;accent-color:var(--accent);min-height:36px}
+
+/* foglio dal basso */
+.sheet{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,0);transition:background .25s}
+.sheet.open{background:rgba(0,0,0,.42)}
+.pan{width:100%;max-width:640px;max-height:90vh;overflow:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;background:var(--card);color:var(--fg);border-radius:16px 16px 0 0;padding:8px 18px calc(28px + var(--axb) + env(safe-area-inset-bottom,0px));transform:translateY(100%);transition:transform .32s cubic-bezier(.2,.8,.2,1)}
+.sheet.open .pan{transform:none}
+.grab{width:38px;height:5px;border-radius:3px;background:var(--fg3);margin:0 auto 4px}
+.shd{display:flex;justify-content:space-between;align-items:center;min-height:44px}
+.shd h2{font-size:20px;margin:0;font-weight:700}
+.shd button{color:var(--accent);font-weight:600;font-size:17px;min-height:44px;padding:0 4px}
+.pan .list{background:var(--fill)}
+</style>
+</head>
+<body>
+
+<!-- Libreria e audiolibri gratuiti -->
+<div class="wrap" id="vHome">
+  <div class="seg" id="tabs" role="tablist"><button data-t="lib" class="on">Libreria</button><button data-t="lv">Audiolibri gratuiti</button></div>
+  <div id="dbNote" class="note" hidden>L'archivio del dispositivo non è disponibile (navigazione privata?): i libri importati non verranno salvati.</div>
+
+  <section id="tLib">
+    <div class="two">
+      <label class="btn pri big" for="file" role="button" tabindex="0">＋ Importa</label>
+      <button class="btn big" data-a="incolla">Incolla testo</button>
+    </div>
+    <input type="file" id="file" class="vh" multiple accept=".epub,.txt,.text,.md,.pdf,.html,.htm,.xhtml,application/epub+zip,text/plain,application/pdf,audio/*,.m4b,.m4a,.mp3,.aac,.ogg,.opus,.wav,.flac">
+    <div class="small" style="margin:0 4px">EPUB, PDF con testo, TXT, oppure i file audio di un audiolibro (m4b, mp3).</div>
+    <div class="card busy" id="busy" hidden><span class="spinner"></span><div class="tx"><b id="busyT">Importazione…</b><div class="small" id="busyS"></div><div class="bar"><i id="busyB"></i></div></div></div>
+    <div id="cont"></div>
+    <h2 class="h2">Libri</h2>
+    <div id="gLibri"></div>
+    <section id="sAudio" hidden>
+      <h2 class="h2">Audiolibri</h2>
+      <div id="gAudio"></div>
+    </section>
+    <section id="sMac" hidden>
+      <h2 class="h2">Creati con il Mac</h2>
+      <div class="small" style="margin:-4px 4px 6px">Audiolibri presenti sul Mac ma non ancora in questa libreria.</div>
+      <div class="list" id="macJobs"></div>
+    </section>
+  </section>
+
+  <section id="tLv" hidden>
+    <div class="small" style="margin:6px 4px 0">Audiolibri di pubblico dominio letti da volontari (LibriVox): classici in italiano e in molte altre lingue, gratis.</div>
+    <div id="lvNote" class="note" hidden></div>
+    <form class="search" id="lvForm" autocomplete="off" role="search">
+      <div class="box"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5l5 5"/></svg>
+      <input id="lvQ" type="search" placeholder="Titolo (es. Pinocchio)" enterkeyhint="search" aria-label="Cerca audiolibri"></div>
+    </form>
+    <div class="seg" id="lvCampo"><button data-c="title" class="on">Titolo</button><button data-c="author">Autore (cognome)</button></div>
+    <label class="chk"><input type="checkbox" id="lvIt"> Solo audiolibri in italiano</label>
+    <div class="chips" id="lvChips"></div>
+    <div id="lvRes"></div>
+  </section>
+</div>
+
+<!-- Scheda di un libro -->
+<div class="wrap" id="vBook" hidden>
+  <div class="topbar"><button class="back" data-a="home">‹ Libri</button><span></span></div>
+  <div id="bBody"></div>
+</div>
+
+<!-- Scheda di un audiolibro LibriVox -->
+<div class="wrap" id="vLv" hidden>
+  <div class="topbar"><button class="back" data-a="home">‹ Audiolibri gratuiti</button><span></span></div>
+  <div id="lvBody"></div>
+</div>
+
+<!-- Lettore -->
+<div id="vRead" hidden>
+  <div class="rbar"><div class="in">
+    <button class="back" data-a="rchiudi" aria-label="Chiudi il lettore">‹ Fine</button>
+    <div class="rtit"><b id="rLibro"></b><span id="rCap"></span></div>
+    <button class="round" data-a="rcap" aria-label="Capitoli"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor"/></svg></button>
+    <button class="round" data-a="raspetto" aria-label="Aspetto del testo">Aa</button>
+    <button class="round" id="rTts" data-a="tts" aria-label="Leggi ad alta voce"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 19V5L7.5 9.5z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></button>
+  </div><div class="rprog"><i id="rProg"></i></div></div>
+  <article id="rTxt" lang="it"></article>
+  <div class="rnav"><button class="btn" id="rPrev" data-a="rprev">‹ Precedente</button><button class="btn pri" id="rNext" data-a="rnext">Successivo ›</button></div>
+  <div class="ttsbar" id="ttsBar" hidden>
+    <button class="icb" data-a="tprev" aria-label="Frase precedente"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M11 6.2v11.6c0 .6-.7 1-1.2.6L3.4 12.6a.8.8 0 0 1 0-1.2l6.4-5.8c.5-.4 1.2 0 1.2.6zM20 6.2v11.6c0 .6-.7 1-1.2.6l-6.4-5.8a.8.8 0 0 1 0-1.2l6.4-5.8c.5-.4 1.2 0 1.2.6z"/></svg></button>
+    <button class="pp" id="tPP" data-a="ttoggle" aria-label="Pausa"></button>
+    <button class="icb" data-a="tnext" aria-label="Frase successiva"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M13 6.2v11.6c0 .6.7 1 1.2.6l6.4-5.8a.8.8 0 0 0 0-1.2l-6.4-5.8c-.5-.4-1.2 0-1.2.6zM4 6.2v11.6c0 .6.7 1 1.2.6l6.4-5.8a.8.8 0 0 0 0-1.2L5.2 5.6C4.7 5.2 4 5.6 4 6.2z"/></svg></button>
+    <button class="rate" id="tRate" data-a="trate" aria-label="Velocità">1×</button>
+    <button class="icb" data-a="tvoce" aria-label="Voce"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 20c.8-3.6 3.9-5.5 7.5-5.5s6.7 1.9 7.5 5.5"/></svg></button>
+    <button class="icb" data-a="tstop" aria-label="Interrompi la lettura"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+</div>
+
+<div class="sheet" id="sheet" hidden><div class="pan" id="pan" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheetBody"></div></div></div>
+
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast} = AX;
+const JSZIP = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+const PDFJS = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
+const PDFWORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+const PREF = ['alib:', 'lv:', 'aud:'];   // id dei capitoli audio di questo modulo nel lettore dell'app
+
+/* ---------- icone ---------- */
+const IC = {
+  play:'<svg class="i" viewBox="0 0 24 24"><path fill="currentColor" d="M7 4.9v14.2c0 .8.9 1.3 1.6.9l11.3-7.1c.6-.4.6-1.4 0-1.8L8.6 4c-.7-.4-1.6.1-1.6.9z"/></svg>',
+  pause:'<svg class="i" viewBox="0 0 24 24"><rect fill="currentColor" x="6" y="4.5" width="4" height="15" rx="1.2"/><rect fill="currentColor" x="14" y="4.5" width="4" height="15" rx="1.2"/></svg>',
+  cuffie:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="5" height="7" rx="2" fill="currentColor"/><rect x="16" y="14" width="5" height="7" rx="2" fill="currentColor"/></svg>',
+  voce:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 19V5L7.5 9.5z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>',
+  libro:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5zM12 6.5v13"/></svg>',
+  mac:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+  dl:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v8.5M8.2 12.6 12 16.4l3.8-3.8"/></svg>',
+  trash:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/></svg>',
+  check:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>'
+};
+
+/* ---------- utilità ---------- */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+function hashN(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+const nuovoId = () => 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+function fmtDur(s) { s = Math.max(0, Math.round(s || 0)); if (!s) return ''; if (s < 60) return '1 min'; const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h ? h + ' h' + (m ? ' ' + m + ' min' : '') : m + ' min'; }
+function fmtOra(s) { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); }
+function fmtMB(b) { if (!b) return '0 MB'; if (b >= 1e9) return (b / 1e9).toLocaleString('it-IT', {maximumFractionDigits:1}) + ' GB'; return (b / 1e6).toLocaleString('it-IT', {maximumFractionDigits:b < 1e7 ? 1 : 0}) + ' MB'; }
+function durata(s) { if (!s) return 0; s = String(s).trim(); if (/^\d+(\.\d+)?$/.test(s)) return Math.round(+s); const p = s.split(':').map(Number); return p.some(isNaN) ? 0 : p.reduce((a, b) => a * 60 + b, 0); }
+function pulisci(html, max) {
+  if (!html) return '';
+  const src = String(html).replace(/<\s*(br|\/p|\/div|\/li|\/h\d)\b[^>]*>/gi, '$&\n');
+  const body = new DOMParser().parseFromString('<body>' + src, 'text/html').body;
+  body.querySelectorAll('script,style,noscript,iframe,object,template').forEach(x => x.remove());
+  let t = body.textContent || '';
+  t = t.replace(/\r/g, '').replace(/[ \t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return max && t.length > max ? t.slice(0, max).replace(/\s+\S*$/, '') + '…' : t;
+}
+function tipoAudio(url, t) {
+  if (t && /^(audio|video)\//.test(t)) return t;
+  const e = ((String(url).split('?')[0].match(/\.(\w+)$/) || [])[1] || '').toLowerCase();
+  return ({m4a:'audio/mp4', m4b:'audio/mp4', mp4:'audio/mp4', aac:'audio/aac', ogg:'audio/ogg', oga:'audio/ogg', opus:'audio/ogg', wav:'audio/wav', flac:'audio/flac'})[e] || 'audio/mpeg';
+}
+const senzaEst = n => String(n).replace(/\.[^.]{1,6}$/, '').replace(/[_]+/g, ' ').trim();
+function carica(src) {
+  carica.p = carica.p || {};
+  return carica.p[src] || (carica.p[src] = new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src; s.async = true;
+    s.onload = res; s.onerror = () => { delete carica.p[src]; s.remove(); rej(new Error('Non riesco a scaricare il lettore del formato: controlla la connessione')); };
+    document.head.appendChild(s);
+  }));
+}
+// messaggi d'errore del browser («Failed to fetch»…) → testo italiano
+function msgErr(e, d) { const m = (e && e.message) || ''; return !m || (e && (e.name === 'AbortError' || e.name === 'TypeError')) || /failed to fetch|networkerror|load failed|network|abort/i.test(m) ? d : m; }
+function throttle(fn, ms) { let t = 0, tm = 0; return () => { const now = Date.now(); clearTimeout(tm); if (now - t > ms) { t = now; fn(); } else tm = setTimeout(() => { t = Date.now(); fn(); }, ms - (now - t)); }; }
+
+/* ---------- archivio sul dispositivo (IndexedDB ax-libri) ---------- */
+const DB = (() => {
+  let p = null;
+  const STORES = [['libri', 'id'], ['testi', 'id'], ['file', 'id'], ['pos', 'id']];
+  function open() {
+    if (!p) p = new Promise((res, rej) => {
+      let r; try { r = indexedDB.open('ax-libri', 1); } catch (e) { return rej(e); }
+      r.onupgradeneeded = () => { const d = r.result; for (const [s, k] of STORES) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, {keyPath:k}); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); r.onblocked = () => rej(new Error('Archivio bloccato'));
+    });
+    return p;
+  }
+  async function run(store, mode, fn) {
+    const d = await open();
+    return new Promise((res, rej) => {
+      const t = d.transaction(store, mode); let q;
+      try { q = fn(t.objectStore(store)); } catch (e) { rej(e); return; }
+      t.oncomplete = () => res(q ? q.result : undefined);
+      t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Spazio insufficiente'));
+    });
+  }
+  return {
+    get: (s, k) => run(s, 'readonly', st => st.get(k)),
+    all: s => run(s, 'readonly', st => st.getAll()),
+    keys: s => run(s, 'readonly', st => st.getAllKeys()),
+    put: (s, v) => run(s, 'readwrite', st => st.put(v)),
+    del: (s, k) => run(s, 'readwrite', st => st.delete(k))
+  };
+})();
+
+/* ---------- stato del modulo ---------- */
+const S = {
+  mac: null, db: true,
+  libri: new Map(),     // id → libro (senza testo)
+  files: new Set(),     // chiavi dei file audio salvati sul dispositivo
+  pos: new Map(),       // id capitolo audio → {t, d, fatto, agg}
+  tmap: new Map(),      // id capitolo audio → {bid, n}
+  urlsHost: new Map(),  // chiave → blob: URL valido nell'app che ospita
+  covers: new Map(),    // id libro → blob: URL della copertina (per questa pagina)
+  dl: new Map(),        // id libro → scaricamento in corso {k, tot, pct, ctrl}
+  lavori: [],           // audiolibri del Mac
+  lv: null, lvRis: [], lvCampo:'title', bid: null
+};
+const salvaTm = {};
+function salvaLibro(b, subito) {
+  S.libri.set(b.id, b);
+  clearTimeout(salvaTm[b.id]);
+  const f = () => DB.put('libri', b).catch(e => toast(/quota/i.test(e && e.name) ? 'Spazio insufficiente' : 'Libro non salvato'));
+  if (subito) return f(); salvaTm[b.id] = setTimeout(f, 800);
+}
+
+/* ---------- lettore dell'app (o di riserva se la pagina è aperta da sola) ---------- */
+const P = {
+  list: [], i: 0, cbs: [],
+  play(items, i, from) { this.list = items; this.i = i || 0; AX.player.play(items, this.i, from); if (!AX.player.available) this.hook(); },
+  hook() {
+    const a = AX.player._au; if (!a || a._ax) return; a._ax = 1;
+    a.addEventListener('ended', () => { if (this.i + 1 < this.list.length) { this.i++; a.src = new URL(this.list[this.i].url, location.href).href; a.play().catch(() => {}); } });
+    ['play', 'pause', 'loadedmetadata', 'ended', 'seeked'].forEach(ev => a.addEventListener(ev, () => this.cbs.forEach(cb => cb())));
+  },
+  now() {
+    if (AX.player.available) { try { return AX.player.now(); } catch (e) { return null; } }
+    const a = AX.player._au, it = this.list[this.i];
+    if (!a || !it || !a.src) return null;
+    return {id:it.id, title:it.title, artist:it.artist, album:it.album, cover:it.cover, playing:!a.paused, ext:true, t:a.currentTime || 0, d:isFinite(a.duration) ? a.duration : 0};
+  },
+  seek(t) { AX.player.seek(t); },
+  toggle() { AX.player.toggle(); },
+  onChange(cb) { if (AX.player.available) { try { return AX.player.onChange(cb); } catch (e) { return () => {}; } } this.cbs.push(cb); return () => {}; }
+};
+function riprendi(id, t) {
+  if (!(t > 5)) return;
+  let n = 0;
+  const iv = setInterval(() => {
+    const x = P.now(); n++;
+    if (x && x.id === id && (x.d > 0 || (n > 16 && x.playing))) { clearInterval(iv); if (Math.abs((x.t || 0) - t) > 3) P.seek(t); }
+    else if (n > 80 || (x && x.id && x.id !== id && n > 8)) clearInterval(iv);
+  }, 250);
+}
+function misuraBasso() {
+  let inset = 0;
+  try {
+    const fe = window.frameElement; if (fe) {
+      const pd = parent.document, r = fe.getBoundingClientRect();
+      for (const dy of [6, 30, 70]) {
+        const y = r.bottom - dy; if (y <= r.top) break;
+        const els = pd.elementsFromPoint(r.left + r.width / 2, y), k = els.indexOf(fe);
+        if (k <= 0) continue;
+        let top = Infinity;
+        for (const e of els.slice(0, k)) if (!e.contains(fe)) top = Math.min(top, e.getBoundingClientRect().top);
+        if (top < Infinity) inset = Math.max(inset, r.bottom - top);
+      }
+    }
+  } catch (e) {}
+  document.documentElement.style.setProperty('--axb', clamp(inset, 0, 220) + 'px');
+}
+function urlHost(blob) { try { return (AX.host ? parent : window).URL.createObjectURL(blob); } catch (e) { return URL.createObjectURL(blob); } }
+
+/* ---------- copertine ---------- */
+function coverHtml(b, cls) {
+  const sq = b.tipo === 'audio' ? ' sq' : '';
+  let u = b.coverUrl || '';
+  if (!u && b.cover) { u = S.covers.get(b.id); if (!u) { try { u = URL.createObjectURL(b.cover); S.covers.set(b.id, u); } catch (e) { u = ''; } } }
+  if (u) return `<img class="bcov${sq} ${cls || ''}" src="${esc(u)}" alt="" loading="lazy" data-t="${esc(b.titolo || '')}" data-au="${esc(b.autore || '')}">`;
+  return `<span class="bcov gcov${sq} ${cls || ''}" style="--h:${hashN(b.titolo || '') % 360}"><b>${esc(b.titolo || 'Senza titolo')}</b><i>${esc(b.autore || '')}</i></span>`;
+}
+async function coverPerLettore(b) {
+  if (b.coverUrl) return b.coverUrl;
+  if (!b.cover) return '';
+  const k = 'cover:' + b.id;
+  if (!S.urlsHost.has(k)) S.urlsHost.set(k, urlHost(b.cover));
+  return S.urlsHost.get(k);
+}
+
+/* ================= IMPORTAZIONE ================= */
+function occupato(t, s, pct) {
+  const b = $('busy');
+  if (t == null) { b.hidden = true; return; }
+  b.hidden = false; $('busyT').textContent = t; $('busyS').textContent = s || '';
+  $('busyB').style.width = (pct == null ? 0 : clamp(pct, 0, 100)) + '%';
+}
+async function importaFile(files) {
+  files = [...files]; if (!files.length) return;
+  const audio = [], fatti = [];
+  let k = 0;
+  for (const f of files) {
+    k++;
+    const est = (f.name.split('.').pop() || '').toLowerCase(), tipo = f.type || '';
+    const pre = files.length > 1 ? `(${k} di ${files.length}) ` : '';
+    try {
+      if (est === 'epub' || tipo === 'application/epub+zip') { occupato('Importazione EPUB…', pre + f.name, 0); fatti.push(await salvaTesto(await leggiEpub(f, p => occupato('Importazione EPUB…', pre + f.name, p * 100)))); }
+      else if (est === 'pdf' || tipo === 'application/pdf') { occupato('Importazione PDF…', pre + f.name, 0); fatti.push(await salvaTesto(await leggiPdf(f, (p, s) => occupato('Importazione PDF…', pre + (s || f.name), p * 100)))); }
+      else if (/^(txt|text|md|markdown)$/.test(est) || tipo.startsWith('text/plain')) { occupato('Importazione testo…', pre + f.name, 50); fatti.push(await salvaTesto(await leggiTxt(f))); }
+      else if (/^(html?|xhtml)$/.test(est) || tipo === 'text/html') { occupato('Importazione pagina…', pre + f.name, 50); fatti.push(await salvaTesto(await leggiHtml(f))); }
+      else if (tipo.startsWith('audio/') || /^(m4b|m4a|mp3|aac|ogg|oga|opus|wav|flac|mp4)$/.test(est)) audio.push(f);
+      else toast('Formato non supportato: ' + f.name);
+    } catch (e) { console.warn(e); toast(msgErr(e, 'Non riesco a leggere ' + f.name)); }
+  }
+  if (audio.length) { try { fatti.push(await importaAudio(audio)); } catch (e) { toast(/quota/i.test(e && (e.name + e.message)) ? 'Spazio insufficiente sul dispositivo' : msgErr(e, 'Audio non importato')); } }
+  occupato(null);
+  disegnaHome();
+  const ok = fatti.filter(Boolean);
+  if (ok.length === 1) { toast('Aggiunto: ' + ok[0].titolo); apriLibro(ok[0].id); }
+  else if (ok.length > 1) toast(ok.length + ' elementi aggiunti alla libreria');
+}
+async function salvaTesto(x) {
+  const capitoli = (x.capitoli || []).map(c => ({titolo:(c.titolo || '').trim(), testo:(c.testo || '').trim()})).filter(c => c.testo);
+  if (!capitoli.length) throw new Error('Nessun testo trovato in «' + (x.titolo || 'documento') + '»');
+  capitoli.forEach((c, i) => { if (!c.titolo) c.titolo = capitoli.length === 1 ? (x.titolo || 'Testo') : 'Capitolo ' + (i + 1); });
+  const id = nuovoId();
+  let parole = 0; for (const c of capitoli) parole += (c.testo.match(/\S+/g) || []).length;
+  await DB.put('testi', {id, capitoli});
+  const b = {id, tipo:'testo', formato:x.formato, titolo:x.titolo || 'Senza titolo', autore:x.autore || '', lingua:(x.lingua || 'it').toLowerCase(), cover:x.cover || null,
+    capitoli:capitoli.map(c => ({titolo:c.titolo, n:c.testo.length})), parole, segno:{c:0, p:0}, letto:0, aggiunto:Date.now(), aperto:0, audio:null};
+  await salvaLibro(b, true);
+  return b;
+}
+
+/* --- EPUB --- */
+const xmlDoc = t => new DOMParser().parseFromString(t, 'application/xml');
+function xhtmlDoc(t) {
+  let d = new DOMParser().parseFromString(t, 'application/xhtml+xml');
+  if (d.getElementsByTagName('parsererror').length) d = new DOMParser().parseFromString(t, 'text/html');
+  return d;
+}
+const cartella = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : '';
+function risolvi(base, href) { try { return decodeURIComponent(new URL(href, 'http://x/' + base).pathname.slice(1)); } catch (e) { return base + href; } }
+const BLOCCHI = new Set('p div h1 h2 h3 h4 h5 h6 li ul ol blockquote pre tr table section article header footer aside nav dt dd dl figcaption figure hr address center body main'.split(' '));
+function blocchi(root) {
+  const out = []; let buf = '';
+  const flush = () => { const t = buf.replace(/\s+/g, ' ').trim(); if (t) out.push(t); buf = ''; };
+  (function giro(n) {
+    for (const c of n.childNodes) {
+      if (c.nodeType === 3) buf += c.nodeValue;
+      else if (c.nodeType === 1) {
+        const tag = (c.localName || '').toLowerCase();
+        if (tag === 'script' || tag === 'style' || tag === 'head' || tag === 'title' || tag === 'svg') continue;
+        if (tag === 'br') { flush(); continue; }
+        if (tag === 'td' || tag === 'th') { buf += ' '; giro(c); buf += ' '; continue; }
+        const blk = BLOCCHI.has(tag);
+        if (blk) flush();
+        giro(c);
+        if (blk) flush();
+      }
+    }
+  })(root);
+  flush();
+  return out;
+}
+function titoloDa(d) { for (const t of ['h1', 'h2', 'h3']) { const h = d.getElementsByTagName(t)[0]; if (h) { const s = h.textContent.replace(/\s+/g, ' ').trim(); if (s && s.length < 140) return s; } } return ''; }
+async function leggiEpub(file, fase) {
+  await carica(JSZIP);
+  let zip;
+  try { zip = await window.JSZip.loadAsync(file); } catch (e) { throw new Error('Il file EPUB è danneggiato o protetto'); }
+  const trova = p => zip.file(p) || zip.file(new RegExp('^' + p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i'))[0] || null;
+  const leggi = async p => { const f = trova(p); return f ? f.async('string') : null; };
+  const cont = await leggi('META-INF/container.xml');
+  if (!cont) throw new Error('EPUB non valido (manca container.xml)');
+  const rf = xmlDoc(cont).getElementsByTagNameNS('*', 'rootfile')[0];
+  const opfPath = rf && rf.getAttribute('full-path');
+  const opfTxt = opfPath && await leggi(opfPath);
+  if (!opfTxt) throw new Error('EPUB non valido (manca il file OPF)');
+  if (trova('META-INF/encryption.xml') && /EncryptedData/.test(await leggi('META-INF/encryption.xml') || '')) {
+    const enc = await leggi('META-INF/encryption.xml');
+    if (/xhtml|html/i.test(enc)) throw new Error('Questo EPUB è protetto da DRM: non si può leggere qui');
+  }
+  const opf = xmlDoc(opfTxt), base = cartella(opfPath);
+  const md = n => { const e = opf.getElementsByTagNameNS('*', n)[0]; return e ? e.textContent.replace(/\s+/g, ' ').trim() : ''; };
+  const titolo = md('title') || senzaEst(file.name);
+  const autore = [...opf.getElementsByTagNameNS('*', 'creator')].map(e => e.textContent.replace(/\s+/g, ' ').trim()).filter(Boolean).join(', ');
+  const lingua = (md('language') || 'it').slice(0, 2);
+  const man = new Map();
+  for (const it of opf.getElementsByTagNameNS('*', 'item')) man.set(it.getAttribute('id'), {href:risolvi(base, it.getAttribute('href') || ''), tipo:it.getAttribute('media-type') || '', prop:it.getAttribute('properties') || ''});
+  const spineEl = opf.getElementsByTagNameNS('*', 'spine')[0];
+  const spine = [...opf.getElementsByTagNameNS('*', 'itemref')].map(r => man.get(r.getAttribute('idref'))).filter(Boolean);
+  // indice (EPUB 3: nav; EPUB 2: toc.ncx)
+  const toc = new Map();
+  const nav = [...man.values()].find(m => /(^|\s)nav(\s|$)/.test(m.prop));
+  if (nav) {
+    const t = await leggi(nav.href);
+    if (t) {
+      const d = xhtmlDoc(t), navs = [...d.getElementsByTagName('nav')];
+      const n = navs.find(x => /toc/.test(x.getAttribute('epub:type') || x.getAttributeNS('http://www.idpf.org/2007/ops', 'type') || '')) || navs[0];
+      if (n) for (const a of n.getElementsByTagName('a')) {
+        const h = a.getAttribute('href'); if (!h) continue;
+        const p = risolvi(cartella(nav.href), h.split('#')[0]);
+        const s = a.textContent.replace(/\s+/g, ' ').trim();
+        if (s && !toc.has(p)) toc.set(p, s);
+      }
+    }
+  }
+  if (!toc.size) {
+    const ncxId = spineEl && spineEl.getAttribute('toc');
+    const ncx = (ncxId && man.get(ncxId)) || [...man.values()].find(m => m.tipo === 'application/x-dtbncx+xml');
+    const t = ncx && await leggi(ncx.href);
+    if (t) for (const np of xmlDoc(t).getElementsByTagNameNS('*', 'navPoint')) {
+      const lab = np.getElementsByTagNameNS('*', 'text')[0], c = np.getElementsByTagNameNS('*', 'content')[0];
+      if (!lab || !c) continue;
+      const p = risolvi(cartella(ncx.href), (c.getAttribute('src') || '').split('#')[0]);
+      const s = lab.textContent.replace(/\s+/g, ' ').trim();
+      if (s && !toc.has(p)) toc.set(p, s);
+    }
+  }
+  // capitoli nell'ordine di lettura
+  const capitoli = [];
+  for (let i = 0; i < spine.length; i++) {
+    const m = spine[i]; fase && fase(i / spine.length);
+    if (!/html|xml/.test(m.tipo) && !/\.x?html?$/i.test(m.href)) continue;
+    const t = await leggi(m.href); if (!t) continue;
+    const d = xhtmlDoc(t);
+    const pars = blocchi(d.body || d.getElementsByTagName('body')[0] || d.documentElement);
+    if (!pars.length) continue;
+    const tt = toc.get(m.href);
+    if (!tt && toc.size && capitoli.length) { capitoli[capitoli.length - 1].pars.push(...pars); continue; }   // seguito del capitolo precedente
+    const tit = tt || titoloDa(d) || '';
+    if (tit && pars.length > 1 && pars[0].toLowerCase() === tit.toLowerCase()) pars.shift();
+    capitoli.push({titolo:tit, pars});
+  }
+  // copertina
+  let cov = [...man.values()].find(m => /cover-image/.test(m.prop));
+  if (!cov) { const meta = [...opf.getElementsByTagNameNS('*', 'meta')].find(x => x.getAttribute('name') === 'cover'); if (meta) cov = man.get(meta.getAttribute('content')); }
+  if (!cov || !/^image\//.test(cov.tipo)) cov = [...man.values()].find(m => /^image\//.test(m.tipo) && /cover|copertina/i.test(m.href)) || null;
+  let cover = null;
+  if (cov) { const f = trova(cov.href); if (f) { try { cover = new Blob([await f.async('arraybuffer')], {type:cov.tipo}); } catch (e) {} } }
+  fase && fase(1);
+  return {titolo, autore, lingua, cover, formato:'EPUB', capitoli:capitoli.map(c => ({titolo:c.titolo, testo:c.pars.join('\n')}))};
+}
+
+/* --- TXT, testo incollato, HTML --- */
+async function leggiTxt(file) {
+  const buf = await file.arrayBuffer();
+  let t = new TextDecoder('utf-8').decode(buf);
+  if ((t.match(/�/g) || []).length > 3) t = new TextDecoder('windows-1252').decode(buf);
+  const r = dividiTesto(t);
+  return Object.assign(r, {titolo:r.titoloTesto || senzaEst(file.name), formato:'TXT'});
+}
+async function leggiHtml(file) {
+  const d = new DOMParser().parseFromString(await file.text(), 'text/html');
+  const t = blocchi(d.body).join('\n\n');
+  return Object.assign(dividiTesto(t), {titolo:(d.title || '').trim() || senzaEst(file.name), formato:'HTML'});
+}
+const RE_CAP = /^(capitolo|cap\.|chapter|parte|libro|canto|atto|book|part)\s+([ivxlcdm]+|\d+|prim[oa]|second[oa]|terz[oa]|quart[oa]|quint[oa]|sest[oa]|settim[oa]|ottav[oa]|non[oa]|decim[oa]|one|two|three|four|five|first|second|third)\b.{0,70}$/i;
+const RE_SOLO = /^((prologo|epilogo|introduzione|prefazione|premessa|conclusione|postfazione|prologue|epilogue|preface|introduction)\.?|[IVXLC]{1,7}\.?|\d{1,3}\.)$/;
+function dividiTesto(t) {
+  t = String(t).replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const s = t.search(/\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG[^\n]*\n/i); if (s >= 0) t = t.slice(t.indexOf('\n', s) + 1);
+  const e = t.search(/\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG/i); if (e > 0) t = t.slice(0, e);
+  const vuote = (t.match(/\n[ \t]*\n/g) || []).length, righe = (t.match(/\n/g) || []).length;
+  let pars = vuote > 3 && vuote > righe / 12
+    ? t.split(/\n[ \t]*\n+/).map(p => p.replace(/\s*\n\s*/g, ' '))   // a capo «rigidi»: i paragrafi sono separati da righe vuote
+    : t.split('\n');
+  pars = pars.map(p => p.replace(/[ \t ]+/g, ' ').trim()).filter(Boolean);
+  const caps = []; let cur = null;
+  for (const p of pars) {
+    if (p.length < 90 && (RE_CAP.test(p) || RE_SOLO.test(p))) {
+      if (cur && !cur.pars.length && cur.titolo) { cur.titolo += ' · ' + p; continue; }
+      cur = {titolo:p, pars:[]}; caps.push(cur); continue;
+    }
+    if (!cur) { cur = {titolo:'', pars:[]}; caps.push(cur); }
+    cur.pars.push(p);
+  }
+  let capitoli = caps.filter(c => c.pars.length), titoloTesto = '';
+  // una sola riga breve prima del primo capitolo è il titolo del libro
+  if (capitoli.length > 1 && !capitoli[0].titolo && capitoli[0].pars.length === 1 && capitoli[0].pars[0].length < 80 && !/[.!?…:;,]$/.test(capitoli[0].pars[0])) titoloTesto = capitoli.shift().pars[0];
+  if (capitoli.length && !capitoli[0].titolo) capitoli[0].titolo = capitoli.length > 1 ? 'Inizio' : '';
+  if (capitoli.length <= 1) {   // nessun titolo di capitolo: si divide in parti di lunghezza simile
+    const tutti = capitoli.length ? capitoli[0].pars : [];
+    capitoli = []; let part = [], len = 0;
+    for (const p of tutti) { part.push(p); len += p.length; if (len > 24000) { capitoli.push({titolo:'', pars:part}); part = []; len = 0; } }
+    if (part.length) capitoli.push({titolo:'', pars:part});
+    if (capitoli.length > 1) capitoli.forEach((c, i) => { c.titolo = 'Parte ' + (i + 1); });
+  }
+  return {titoloTesto, capitoli:capitoli.map(c => ({titolo:c.titolo, testo:c.pars.join('\n')}))};
+}
+
+/* --- PDF (solo testo) --- */
+function righeInParagrafi(lines) {
+  lines = lines.map(l => l === '\f' ? l : l.replace(/\s+/g, ' ').trim());
+  const lens = lines.filter(l => l.length > 3).map(l => l.length).sort((a, b) => a - b);
+  const tip = lens.length ? lens[Math.floor(lens.length * .7)] : 60;
+  const out = []; let cur = '';
+  for (const l of lines) {
+    if (!l) { if (cur) { out.push(cur); cur = ''; } continue; }
+    if (l === '\f') { if (cur && /[.!?»"”…]$/.test(cur)) { out.push(cur); cur = ''; } continue; }   // fine pagina
+    if (/^[-–—\s]*\d{1,4}[-–—\s]*$/.test(l)) continue;   // numero di pagina
+    if (!cur && l.length < tip * 0.6 && /^[A-ZÀ-Ý0-9«"]/.test(l) && !/[.,;:]$/.test(l)) { out.push(l); continue; }   // titoletto
+    if (cur) cur = /[-‐]$/.test(cur) && /^[a-zà-ÿ]/.test(l) ? cur.replace(/[-‐]$/, '') + l : cur + ' ' + l;
+    else cur = l;
+    if (l.length < tip * 0.78 && /[.!?:»"”…)]$/.test(l)) { out.push(cur); cur = ''; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+async function leggiPdf(file, fase) {
+  await carica(PDFJS);
+  const lib = window.pdfjsLib || window['pdfjs-dist/build/pdf'];
+  if (!lib) throw new Error('Lettore PDF non disponibile');
+  lib.GlobalWorkerOptions.workerSrc = PDFWORKER;
+  let pdf;
+  try { pdf = await lib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise; }
+  catch (e) { throw new Error(/password/i.test(e && (e.name + e.message)) ? 'Il PDF è protetto da password' : 'Il PDF è danneggiato o non leggibile'); }
+  let titolo = senzaEst(file.name), autore = '';
+  try { const m = await pdf.getMetadata(); if (m && m.info) { if (m.info.Title && m.info.Title.trim().length > 2) titolo = m.info.Title.trim(); autore = (m.info.Author || '').trim(); } } catch (e) {}
+  const pagine = [];
+  let chars = 0;
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const pg = await pdf.getPage(i), tc = await pg.getTextContent();
+    const lines = []; let line = '', lastY = null;
+    for (const it of tc.items) {
+      if (!('str' in it)) continue;
+      const y = it.transform ? it.transform[5] : null;
+      if (lastY != null && y != null && Math.abs(y - lastY) > 2 && line && !it.hasEOL) { lines.push(line); line = ''; }
+      line += it.str; lastY = y;
+      if (it.hasEOL) { lines.push(line); line = ''; }
+    }
+    if (line) lines.push(line);
+    pagine.push(lines);
+    chars += lines.join('').trim().length;
+    fase && fase(i / pdf.numPages * .95, 'Pagina ' + i + ' di ' + pdf.numPages);
+    try { pg.cleanup(); } catch (e) {}
+  }
+  if (chars < 40) throw new Error('Questo PDF non contiene testo (è una scansione): non si può leggere');
+  // capitoli dall'indice del PDF, altrimenti gruppi di 10 pagine
+  let inizi = [];
+  try {
+    const ol = await pdf.getOutline();
+    if (ol) for (const o of ol) {
+      let dest = o.dest; if (typeof dest === 'string') dest = await pdf.getDestination(dest);
+      if (!Array.isArray(dest) || dest[0] == null) continue;
+      const idx = typeof dest[0] === 'number' ? dest[0] : await pdf.getPageIndex(dest[0]);
+      inizi.push({p:idx, titolo:(o.title || '').trim()});
+    }
+  } catch (e) { inizi = []; }
+  inizi = inizi.filter((x, i, a) => x.p >= 0 && x.p < pagine.length && (i === 0 || x.p > a[i - 1].p));
+  const capitoli = [];
+  if (inizi.length >= 2) {
+    if (inizi[0].p > 0) inizi.unshift({p:0, titolo:'Inizio'});
+    inizi.forEach((x, i) => { const fine = i + 1 < inizi.length ? inizi[i + 1].p : pagine.length; capitoli.push({titolo:x.titolo, testo:righeInParagrafi([].concat(...pagine.slice(x.p, fine).map(l => l.concat(['\f'])))).join('\n')}); });
+  } else {
+    for (let a = 0; a < pagine.length; a += 10) {
+      const b = Math.min(pagine.length, a + 10);
+      capitoli.push({titolo:pagine.length <= 10 ? titolo : 'Pagine ' + (a + 1) + '–' + b, testo:righeInParagrafi([].concat(...pagine.slice(a, b).map(l => l.concat(['\f'])))).join('\n')});
+    }
+  }
+  try { pdf.destroy(); } catch (e) {}
+  return {titolo, autore, formato:'PDF', capitoli};
+}
+
+/* --- file audio di audiolibri --- */
+function durataAudio(blob) {
+  return new Promise(res => {
+    let u = ''; const a = document.createElement('audio');
+    const fine = d => { clearTimeout(tm); try { URL.revokeObjectURL(u); } catch (e) {} a.removeAttribute('src'); res(isFinite(d) ? d : 0); };
+    const tm = setTimeout(() => fine(0), 5000);
+    a.preload = 'metadata'; a.onloadedmetadata = () => fine(a.duration); a.onerror = () => fine(0);
+    try { u = URL.createObjectURL(blob); a.src = u; } catch (e) { fine(0); }
+  });
+}
+function prefissoComune(nomi) {
+  if (nomi.length < 2) return nomi[0] || '';
+  let p = nomi[0];
+  for (const n of nomi) while (p && !n.startsWith(p)) p = p.slice(0, -1);
+  return p.replace(/[\s\-_.(\[]*(cap(itolo)?|ch(apter)?|parte|part|track|traccia)?[\s\-_.]*\d*$/i, '').trim();
+}
+async function importaAudio(files) {
+  files.sort((a, b) => a.name.localeCompare(b.name, 'it', {numeric:true}));
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
+  const id = nuovoId(), tracce = [];
+  let dim = 0;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    occupato('Importazione audio…', (files.length > 1 ? `(${i + 1} di ${files.length}) ` : '') + f.name, i / files.length * 100);
+    const blob = new Blob([f], {type:tipoAudio(f.name, f.type)});
+    await DB.put('file', {id:'aud:' + id + ':' + i, blob});
+    S.files.add('aud:' + id + ':' + i); dim += blob.size;
+    tracce.push({titolo:files.length === 1 ? 'Audiolibro' : senzaEst(f.name), durata:Math.round(await durataAudio(blob)), pronto:true});
+  }
+  const nomi = files.map(f => senzaEst(f.name));
+  const est = (files[0].name.split('.').pop() || 'audio').toUpperCase();
+  const b = {id, tipo:'audio', formato:est, titolo:prefissoComune(nomi) || nomi[0], autore:'', cover:null, aggiunto:Date.now(), aperto:0,
+    audio:{fonte:'file', tracce, ultima:0, dim}};
+  await salvaLibro(b, true);
+  return b;
+}
+
+/* ================= AUDIO DEI LIBRI (Mac, LibriVox, file) ================= */
+function tid(b, n) { const a = b.audio; return a.fonte === 'mac' ? `alib:${a.macId}:${n}` : a.fonte === 'librivox' ? `lv:${a.lvId}:${n}` : `aud:${b.id}:${n}`; }
+function urlRemoto(b, n) {
+  const a = b.audio, t = a.tracce[n];
+  if (a.fonte === 'mac') return AX.API + 'audiolibro/file/' + encodeURIComponent(a.macId) + '/' + (t && t.n != null ? t.n : n);
+  return t ? t.url || '' : '';
+}
+async function urlTraccia(b, n) {
+  const k = tid(b, n);
+  if (S.files.has(k)) {
+    if (S.urlsHost.has(k)) return S.urlsHost.get(k);
+    try { const r = await DB.get('file', k); if (r && r.blob) { const u = urlHost(r.blob); S.urlsHost.set(k, u); return u; } } catch (e) {}
+  }
+  return urlRemoto(b, n);
+}
+function mappaTracce(b) { if (b && b.audio && b.audio.tracce) b.audio.tracce.forEach((t, n) => S.tmap.set(tid(b, n), {bid:b.id, n})); }
+function tracceUsabili(b) { const a = b.audio; return a.tracce.map((t, n) => n).filter(n => a.fonte !== 'mac' || a.tracce[n].pronto || S.files.has(tid(b, n))); }
+function puntoDiRipresa(b) {
+  const a = b.audio, ok = tracceUsabili(b); if (!ok.length) return null;
+  let n = a.ultima != null && ok.includes(a.ultima) ? a.ultima : null;
+  if (n == null) { let best = null; for (const k of ok) { const p = S.pos.get(tid(b, k)); if (p && p.agg && (!best || p.agg > best.agg)) best = {k, agg:p.agg}; } n = best ? best.k : ok[0]; }
+  const p = S.pos.get(tid(b, n));
+  if (p && p.fatto) { const k = ok.indexOf(n); if (k + 1 < ok.length) return {n:ok[k + 1], t:0}; return {n:ok[0], t:0}; }
+  return {n, t:p && p.t > 5 ? p.t : 0};
+}
+async function ascolta(b, n) {
+  const a = b.audio; if (!a) return;
+  const ok = tracceUsabili(b);
+  if (!ok.length) { toast('Nessun capitolo pronto'); return; }
+  let t = 0;
+  if (n == null) { const r = puntoDiRipresa(b); n = r.n; t = r.t; }
+  else { const p = S.pos.get(tid(b, n)); t = p && !p.fatto && p.t > 5 ? p.t : 0; }
+  let usa = ok;
+  if (navigator.onLine === false) usa = ok.filter(k => S.files.has(tid(b, k)));
+  if (!usa.includes(n)) { toast('Sei offline: questo capitolo non è sul dispositivo'); return; }
+  const cover = await coverPerLettore(b);
+  const items = [];
+  for (const k of usa) items.push({id:tid(b, k), title:a.tracce[k].titolo || 'Capitolo ' + (k + 1), artist:b.autore || '', album:b.titolo, url:await urlTraccia(b, k), cover});
+  mappaTracce(b);
+  a.ultima = n;
+  if (S.libri.has(b.id)) { b.aperto = Date.now(); salvaLibro(b); }
+  try { P.play(items, usa.indexOf(n), b.titolo); } catch (e) { toast('Il lettore non risponde'); return; }
+  if (t > 5) riprendi(tid(b, n), t);
+  setTimeout(check, 1200);
+}
+
+// punto di ripresa: ogni 10 s si salva la posizione del capitolo in corso, se è di questo modulo
+let lastId = null;
+const nostro = id => id && PREF.some(p => String(id).startsWith(p));
+function check() {
+  const n = P.now();
+  const id = n && nostro(n.id) ? String(n.id) : null;
+  if (id !== lastId) {
+    lastId = id;
+    if (id) { const p = S.pos.get(id); if (p && !p.fatto && p.t > 5 && (n.t || 0) < 3) riprendi(id, p.t); }
+    ridisegnaAudio();
+  }
+  if (!id || !(n.t > 0)) return;
+  const prima = S.pos.get(id) || {id, t:0};
+  if (n.t < 3 && prima.t > 5 && !prima.fatto) return;
+  const p = Object.assign({}, prima, {id, t:n.t, agg:Date.now()});
+  if (n.d > 0) p.d = n.d;
+  if (p.d && n.t >= (p.d > 120 ? p.d - 20 : p.d - 2)) { p.fatto = true; p.t = 0; } else if (p.fatto && n.t > 20) p.fatto = false;
+  S.pos.set(id, p); DB.put('pos', p).catch(() => {});
+  const m = S.tmap.get(id), b = m && S.libri.get(m.bid);
+  if (b && b.audio) { if (b.audio.ultima !== m.n || Date.now() - (b.aperto || 0) > 60000) { b.audio.ultima = m.n; b.aperto = Date.now(); salvaLibro(b); } }
+  if (prima.fatto !== p.fatto) ridisegnaAudio();
+}
+function ridisegnaAudio() {
+  if (!$('vBook').hidden && S.bid) { const b = S.libri.get(S.bid); if (b && b.audio) { const el = $('aBlock'); if (el) el.innerHTML = audioHtml(b); } }
+  if (!$('vLv').hidden && S.lv) disegnaLvTracce();
+}
+
+/* --- scaricare sul dispositivo (Mac, LibriVox) --- */
+async function leggiCorpo(r, fase) {
+  const tot = +r.headers.get('content-length') || 0;
+  if (!r.body || !r.body.getReader) return r.blob();
+  const rd = r.body.getReader(), parti = []; let got = 0;
+  for (;;) { const {done, value} = await rd.read(); if (done) break; parti.push(value); got += value.length; fase(tot ? got / tot * 100 : Math.min(95, got / 4e5)); }
+  return new Blob(parti);
+}
+async function scaricaLibro(b) {
+  const a = b.audio; if (!a || S.dl.has(b.id)) return;
+  const da = tracceUsabili(b).filter(n => !S.files.has(tid(b, n)));
+  if (!da.length) { toast('Già tutto sul dispositivo'); return; }
+  const st = {k:0, tot:da.length, pct:0, ctrl:new AbortController()};
+  S.dl.set(b.id, st); ridisegnaAudio();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
+  try {
+    for (const n of da) {
+      st.k++; st.pct = 0; ridisegnaAudio();
+      const url = urlRemoto(b, n); let r = null;
+      try { r = await fetch(url, {signal:st.ctrl.signal}); if (!r.ok) r = null; } catch (e) { if (st.ctrl.signal.aborted) throw e; r = null; }
+      if (!r && a.fonte !== 'mac') {
+        if (!(await AX.stato()).ok) throw new Error('Il sito non permette di scaricare direttamente e il Mac non è raggiungibile');
+        r = await fetch(AX.API + 'proxy?url=' + encodeURIComponent(url), {signal:st.ctrl.signal});
+        if (!r.ok) r = null;
+      }
+      if (!r) throw new Error(a.fonte === 'mac' ? 'Il Mac non ha inviato il capitolo ' + (n + 1) : 'Capitolo ' + (n + 1) + ' non scaricabile');
+      let ultimo = 0;
+      const raw = await leggiCorpo(r, p => { st.pct = p; if (Date.now() - ultimo > 400) { ultimo = Date.now(); ridisegnaAudio(); } });
+      const blob = new Blob([raw], {type:tipoAudio(url, (r.headers.get('content-type') || '').split(';')[0])});
+      if (blob.size < 1024) throw new Error('Capitolo ' + (n + 1) + ': file non valido');
+      await DB.put('file', {id:tid(b, n), blob});
+      S.files.add(tid(b, n)); a.dim = (a.dim || 0) + blob.size;
+      salvaLibro(b);
+    }
+    toast('Audiolibro scaricato sul dispositivo');
+  } catch (e) {
+    toast(st.ctrl.signal.aborted ? 'Scaricamento interrotto' : /quota/i.test(e && (e.name + e.message)) ? 'Spazio insufficiente sul dispositivo' : msgErr(e, 'Scaricamento non riuscito: rete o Mac non raggiungibili'));
+  } finally { S.dl.delete(b.id); salvaLibro(b); ridisegnaAudio(); }
+}
+async function eliminaLocali(b) {
+  const a = b.audio; if (!a) return;
+  for (let n = 0; n < a.tracce.length; n++) {
+    const k = tid(b, n);
+    if (S.files.has(k)) { try { await DB.del('file', k); } catch (e) {} S.files.delete(k); }
+    const u = S.urlsHost.get(k); if (u) { S.urlsHost.delete(k); setTimeout(() => { try { (AX.host ? parent : window).URL.revokeObjectURL(u); } catch (e) {} }, 60000); }
+  }
+  a.dim = 0; salvaLibro(b, true);
+}
+const nLocali = b => b.audio ? b.audio.tracce.filter((t, n) => S.files.has(tid(b, n))).length : 0;
+
+/* --- audiolibro creato dal Mac --- */
+let pollTm = 0;
+function pollMac() {
+  clearTimeout(pollTm);
+  const attesa = [...S.libri.values()].some(b => b.audio && b.audio.fonte === 'mac' && !/fatto|errore|perso/.test(b.audio.stato || ''));
+  if (attesa) pollTm = setTimeout(async () => { await aggiornaLavoriMac(); pollMac(); }, 3000);
+}
+async function aggiornaLavoriMac() {
+  let j;
+  try { j = await AX.api('audiolibro', {timeout:10000}); } catch (e) { return false; }
+  S.lavori = (j && j.lavori) || [];
+  for (const b of S.libri.values()) {
+    if (!b.audio || b.audio.fonte !== 'mac') continue;
+    const l = S.lavori.find(x => String(x.id) === String(b.audio.macId));
+    if (!l) {
+      const tutte = b.audio.tracce.length && nLocali(b) === b.audio.tracce.length;
+      const st = tutte ? 'fatto' : 'perso';
+      if (b.audio.stato !== st || b.audio.suMac !== false) { b.audio.stato = st; b.audio.suMac = false; salvaLibro(b); }
+      continue;
+    }
+    daLavoro(b, l);
+  }
+  ridisegnaAudio();
+  disegnaMacJobs();
+  return true;
+}
+function daLavoro(b, l) {
+  const a = b.audio, caps = l.capitoli || [];
+  if (caps.length) a.tracce = caps.map((c, i) => ({titolo:c.titolo || (a.tracce[i] && a.tracce[i].titolo) || 'Capitolo ' + (i + 1), pronto:!!c.pronto, durata:+c.durata || 0, n:c.n != null ? c.n : i}));
+  const pronte = a.tracce.filter(t => t.pronto).length;
+  a.stato = l.stato === 'errore' ? 'errore' : (l.stato === 'fatto' || (a.tracce.length && pronte === a.tracce.length)) ? 'fatto' : (l.stato || 'in corso');
+  a.progresso = l.progresso != null ? +l.progresso : (a.tracce.length ? pronte / a.tracce.length * 100 : 0);
+  a.errore = l.errore || ''; a.suMac = true;
+  salvaLibro(b);
+}
+
+/* ================= VISTE ================= */
+const VIEWS = ['vHome', 'vBook', 'vLv', 'vRead'];
+const pos = {};
+let vista = 'vHome';
+function vai(v) {
+  pos[vista] = scrollY;
+  if (vista === 'vRead' && v !== 'vRead') { ttsStop(); document.body.style.background = ''; }
+  VIEWS.forEach(x => { $(x).hidden = x !== v; });
+  vista = v;
+  scrollTo(0, v === 'vHome' ? (pos.vHome || 0) : 0);
+  if (v === 'vHome') disegnaHome();
+}
+
+/* --- libreria --- */
+function avanzamento(b) {
+  if (b.tipo === 'audio') {
+    const a = b.audio, tot = a.tracce.length; if (!tot) return '';
+    const f = a.tracce.filter((t, n) => (S.pos.get(tid(b, n)) || {}).fatto).length;
+    if (!f && a.ultima == null && !b.aperto) return '<span class="pr new">Nuovo</span>';
+    return `<span class="pr">${f} di ${tot} ascoltati</span>`;
+  }
+  if (!b.aperto) return '<span class="pr new">Nuovo</span>';
+  return `<span class="pr">${Math.round((b.letto || 0) * 100)}%</span>`;
+}
+function tileHtml(b) {
+  return `<button class="btile" data-a="libro" data-id="${esc(b.id)}"><span class="cw">${coverHtml(b)}${b.audio ? `<span class="abadge">${IC.cuffie}</span>` : ''}</span><span class="tt">${esc(b.titolo)}</span><span class="au">${esc(b.autore || b.formato || '')}</span>${avanzamento(b)}</button>`;
+}
+function disegnaHome() {
+  const tutti = [...S.libri.values()];
+  const testi = tutti.filter(b => b.tipo === 'testo').sort((a, b) => (b.aperto || b.aggiunto) - (a.aperto || a.aggiunto));
+  const audio = tutti.filter(b => b.tipo === 'audio').sort((a, b) => (b.aperto || b.aggiunto) - (a.aperto || a.aggiunto));
+  $('gLibri').innerHTML = testi.length ? '<div class="bgrid">' + testi.map(tileHtml).join('') + '</div>'
+    : '<div class="empty"><b>Nessun libro</b>Tocca «Importa» per aggiungere un EPUB, un PDF o un file di testo, oppure incolla un testo.</div>';
+  $('sAudio').hidden = !audio.length;
+  $('gAudio').innerHTML = audio.length ? '<div class="bgrid">' + audio.map(tileHtml).join('') + '</div>' : '';
+  const ult = tutti.filter(b => b.aperto).sort((a, b) => b.aperto - a.aperto)[0];
+  if (ult) {
+    let sub, btn;
+    if (ult.tipo === 'audio') { const r = puntoDiRipresa(ult); sub = r ? (ult.audio.tracce[r.n].titolo || 'Capitolo ' + (r.n + 1)) + (r.t ? ' · ' + fmtOra(r.t) : '') : ''; btn = `<button class="btn pri sm" data-a="ascolta" data-id="${esc(ult.id)}">${IC.play} Ascolta</button>`; }
+    else { const c = (ult.segno || {}).c || 0; sub = 'Capitolo ' + (c + 1) + ' di ' + ult.capitoli.length + ' · ' + Math.round((ult.letto || 0) * 100) + '%'; btn = `<button class="btn pri sm" data-a="leggi" data-id="${esc(ult.id)}">${IC.libro} Leggi</button><button class="btn sm" data-a="leggivoce" data-id="${esc(ult.id)}">${IC.voce} Ascolta</button>`; }
+    $('cont').innerHTML = `<div class="cont"><button data-a="libro" data-id="${esc(ult.id)}" style="flex:none;width:84px" aria-label="Apri la scheda">${coverHtml(ult)}</button><div class="tx"><div class="lab">Continua</div><div class="tt">${esc(ult.titolo)}</div><div class="small">${esc(sub)}</div><div class="btns">${btn}</div></div></div>`;
+  } else $('cont').innerHTML = '';
+  disegnaMacJobs();
+}
+function disegnaMacJobs() {
+  const noti = new Set([...S.libri.values()].filter(b => b.audio && b.audio.fonte === 'mac').map(b => String(b.audio.macId)));
+  const l = (S.lavori || []).filter(x => !noti.has(String(x.id)));
+  $('sMac').hidden = !l.length;
+  $('macJobs').innerHTML = l.map(x => `<button class="row" data-a="macadd" data-id="${esc(x.id)}"><span class="ph" style="display:flex;align-items:center;justify-content:center;color:var(--accent)">${IC.cuffie}</span><span class="tx"><b>${esc(x.titolo || 'Audiolibro')}</b><span>${esc([x.autore, x.stato === 'fatto' ? 'pronto' : (x.stato || '') + (x.progresso != null && x.stato !== 'fatto' ? ' ' + Math.round(x.progresso) + '%' : '')].filter(Boolean).join(' · '))}</span></span><span class="pill">Aggiungi</span></button>`).join('');
+}
+function aggiungiDaMac(id) {
+  const l = (S.lavori || []).find(x => String(x.id) === String(id)); if (!l) return;
+  const b = {id:nuovoId(), tipo:'audio', formato:'Mac', titolo:l.titolo || 'Audiolibro', autore:l.autore || '', cover:null, aggiunto:Date.now(), aperto:0,
+    audio:{fonte:'mac', macId:l.id, tracce:[], stato:l.stato, progresso:l.progresso || 0, ultima:null}};
+  daLavoro(b, l); salvaLibro(b, true); mappaTracce(b);
+  pollMac(); apriLibro(b.id);
+}
+
+/* --- scheda del libro --- */
+function apriLibro(id) {
+  const b = S.libri.get(id); if (!b) return;
+  S.bid = id; mappaTracce(b);
+  disegnaLibro(b);
+  vai('vBook');
+  if (b.audio && b.audio.fonte === 'mac') aggiornaLavoriMac().then(pollMac);
+}
+function disegnaLibro(b) {
+  const meta = [];
+  if (b.tipo === 'testo') {
+    meta.push(b.formato || 'Testo', b.capitoli.length === 1 ? '1 capitolo' : b.capitoli.length + ' capitoli');
+    if (b.parole) meta.push('circa ' + fmtDur(b.parole / 230 * 60) + ' di lettura');
+  } else {
+    const tot = b.audio.tracce.reduce((s, t) => s + (t.durata || 0), 0);
+    meta.push(b.formato === 'Mac' ? 'Audiolibro creato con il Mac' : b.audio.fonte === 'librivox' ? 'Audiolibro LibriVox' : 'Audiolibro', b.audio.tracce.length + (b.audio.tracce.length === 1 ? ' traccia' : ' capitoli'));
+    if (tot) meta.push(fmtDur(tot));
+  }
+  let h = `<div class="bhead">${coverHtml(b)}<div class="tx"><h1>${esc(b.titolo)}</h1><div class="au">${esc(b.autore || '')}</div><div class="meta">${esc(meta.join(' · '))}</div></div></div>`;
+  if (b.tipo === 'testo') {
+    const s = b.segno || {c:0, p:0}, iniziato = b.aperto && (s.c > 0 || s.p > 0);
+    h += `<div class="btns" style="flex-direction:column;gap:10px">
+      <button class="btn pri big" data-a="leggi" data-id="${esc(b.id)}">${IC.libro} ${iniziato ? 'Continua a leggere' : 'Leggi'}</button>
+      <button class="btn big" data-a="leggivoce" data-id="${esc(b.id)}">${IC.voce} Leggi ad alta voce</button></div>
+      ${iniziato ? `<div class="small" style="text-align:center">Capitolo ${s.c + 1} di ${b.capitoli.length} · ${Math.round((b.letto || 0) * 100)}% letto</div>` : ''}
+      <div class="card mac" id="aBlock">${audioHtml(b)}</div>
+      <h2 class="h2">Capitoli</h2>
+      <div class="list">${b.capitoli.map((c, i) => `<button class="tr${i === s.c && b.aperto ? ' on' : ''}" data-a="leggicap" data-id="${esc(b.id)}" data-n="${i}"><span class="n">${i + 1}</span><span class="tx"><b>${esc(c.titolo)}</b><span>${esc(fmtDur(c.n / 6 / 230 * 60) || '1 min')} di lettura</span></span><span class="chev">›</span></button>`).join('')}</div>`;
+  } else {
+    h += `<div id="aBlock">${audioHtml(b)}</div>`;
+    if (b.descr) h += `<h2 class="h2">Descrizione</h2><p class="bdesc clamp" id="bDesc">${esc(b.descr)}</p><button class="more" data-a="descr">altro</button>`;
+  }
+  h += `<h2 class="h2">Dettagli</h2>
+    <div class="field"><label for="fTit">Titolo</label><input class="in" id="fTit" value="${esc(b.titolo)}"></div>
+    <div class="field"><label for="fAut">Autore</label><input class="in" id="fAut" value="${esc(b.autore || '')}" placeholder="Facoltativo"></div>
+    <div style="margin-top:18px"><button class="btn big danger" data-a="elimina" data-id="${esc(b.id)}">${IC.trash} Elimina dalla libreria</button></div>`;
+  $('bBody').innerHTML = h;
+  $('fTit').onchange = () => { const v = $('fTit').value.trim(); if (v) { b.titolo = v; salvaLibro(b); toast('Titolo aggiornato'); } };
+  $('fAut').onchange = () => { b.autore = $('fAut').value.trim(); salvaLibro(b); };
+}
+function audioHtml(b) {
+  const a = b.audio;
+  if (!a) {   // libro di testo senza audiolibro
+    return `<div class="mch">${IC.mac}Audiolibro con il Mac</div>
+      <p class="sub">Il Mac legge il libro con una voce dal suono umano e crea un audiolibro: lo ascolti con lo schermo bloccato, in auto e con le cuffie, e puoi scaricarlo per ascoltarlo senza rete.</p>
+      <button class="btn pri big" data-a="mkab" data-id="${esc(b.id)}">Crea audiolibro con il Mac</button>
+      ${S.mac && !S.mac.ok ? '<div class="small" style="margin-top:8px">Mac non raggiungibile in questo momento: accendilo con Atlante Musica.</div>' : ''}`;
+  }
+  let h = '';
+  const testo = b.tipo === 'testo';
+  if (testo) h += `<div class="mch">${IC.cuffie}Audiolibro${a.voce ? ' · voce ' + esc(a.voce) : ''}</div>`;
+  const stato = a.fonte === 'mac' ? (a.stato || 'in coda') : 'fatto';
+  const ok = tracceUsabili(b), loc = nLocali(b), tot = a.tracce.length;
+  if (stato === 'errore') {
+    h += `<div class="note"><b>Creazione non riuscita.</b> ${esc(a.errore || 'Il Mac ha incontrato un errore.')}</div>`;
+    if (testo) h += `<button class="btn pri big" data-a="mkab" data-id="${esc(b.id)}">Riprova</button>`;
+  } else if (stato === 'perso') {
+    h += `<div class="note">L'audiolibro non è più sul Mac${loc ? ` (sul dispositivo restano ${loc} capitoli)` : ''}.</div>`;
+    if (testo) h += `<button class="btn big" data-a="mkab" data-id="${esc(b.id)}">Crea di nuovo</button>`;
+  } else if (stato !== 'fatto') {
+    const pr = clamp(a.progresso || 0, 0, 100), pronte = a.tracce.filter(t => t.pronto).length;
+    h += `<div class="small" style="margin:6px 0">${stato === 'in coda' ? 'In coda sul Mac…' : 'Il Mac sta registrando: ' + pronte + ' di ' + (tot || '?') + ' capitoli pronti'} · ${Math.round(pr)}%</div>
+      <div class="bar"><i style="width:${pr}%"></i></div>
+      <div class="small" style="margin-top:6px">Puoi chiudere questa pagina: il Mac continua a lavorare.</div>`;
+  }
+  if (ok.length && stato !== 'errore') {
+    const r = puntoDiRipresa(b);
+    const lab = r && (r.t > 0 || r.n > 0 || a.ultima != null) && b.aperto ? 'Riprendi' + (r.n > 0 || tot > 1 ? ' · cap. ' + (r.n + 1) : '') : (stato === 'fatto' ? 'Ascolta' : 'Ascolta i capitoli pronti');
+    h += `<div class="btns" style="flex-direction:column;gap:10px;margin-top:12px"><button class="btn pri big" data-a="ascolta" data-id="${esc(b.id)}">${IC.play} ${esc(lab)}</button>`;
+    if (a.fonte !== 'file') {
+      const d = S.dl.get(b.id);
+      if (d) h += `<button class="btn big" data-a="stopdl" data-id="${esc(b.id)}">Scaricamento ${d.k} di ${d.tot} · ${Math.round(d.pct)}% — Interrompi</button>`;
+      else if (loc < ok.length) h += `<button class="btn big" data-a="scarica" data-id="${esc(b.id)}">${IC.dl} Scarica sul dispositivo${loc ? ` (mancano ${ok.length - loc})` : ''}</button>`;
+      if (loc && !d) h += `<button class="btn big danger" data-a="dellocali" data-id="${esc(b.id)}">${IC.trash} Elimina dal dispositivo${a.dim ? ' (' + esc(fmtMB(a.dim)) + ')' : ''}</button>`;
+    }
+    h += '</div>';
+    if (loc && a.fonte !== 'file') h += `<div class="small" style="text-align:center;margin-top:6px">${loc === tot ? 'Tutto sul dispositivo: si ascolta anche senza rete' : loc + ' di ' + tot + ' capitoli sul dispositivo'}</div>`;
+  }
+  if (tot && stato !== 'errore') {
+    const n = P.now(), cur = n && n.id;
+    h += `<h2 class="h2" style="font-size:18px;margin-top:20px">Capitoli</h2><div class="list" style="${testo ? 'background:var(--bg)' : ''}">` + a.tracce.map((t, k) => {
+      const id = tid(b, k), p = S.pos.get(id) || {}, usa = ok.includes(k), on = cur === id;
+      const dd = Math.max(t.durata || 0, p.d || 0);
+      const info = !usa ? 'in preparazione…' : p.fatto ? 'ascoltato' : p.t > 5 ? (dd > p.t + 30 ? 'restano ' + fmtDur(dd - p.t) : 'iniziato · ' + fmtOra(p.t)) : fmtDur(dd);
+      return `<button class="tr${on ? ' on' : ''}${p.fatto ? ' done' : ''}" data-a="${usa ? 'ascoltacap' : 'nulla'}" data-id="${esc(b.id)}" data-n="${k}"${usa ? '' : ' aria-disabled="true"'}><span class="n">${on && n.playing ? '♪' : k + 1}</span><span class="tx${usa ? '' : ' dis'}"><b>${esc(t.titolo || 'Capitolo ' + (k + 1))}</b><span>${esc(info || '')}${S.files.has(id) && a.fonte !== 'file' ? ' · sul dispositivo' : ''}</span></span>${p.fatto ? `<span class="ok">${IC.check}</span>` : usa ? `<span class="round" style="width:34px;height:34px">${IC.play}</span>` : '<span class="spinner"></span>'}</button>`;
+    }).join('') + '</div>';
+  }
+  if (a.fonte === 'mac' && a.suMac !== false && /fatto|errore/.test(stato)) h += `<div style="margin-top:12px"><button class="btn big danger" data-a="delmac" data-id="${esc(b.id)}">Elimina dal Mac</button></div>`;
+  return h;
+}
+
+/* --- conferme senza confirm(): secondo tocco entro 4 s --- */
+const conf = new Map();
+function confermato(btn, testo) {
+  const k = btn.dataset.a + btn.dataset.id;
+  if (conf.has(k)) { clearTimeout(conf.get(k).tm); conf.delete(k); return true; }
+  const orig = btn.innerHTML;
+  btn.classList.add('pri'); btn.textContent = testo || 'Tocca di nuovo per confermare';
+  conf.set(k, {tm:setTimeout(() => { conf.delete(k); if (btn.isConnected) { btn.classList.remove('pri'); btn.innerHTML = orig; } }, 4000)});
+  return false;
+}
+async function eliminaLibro(b) {
+  if (S.dl.has(b.id)) S.dl.get(b.id).ctrl.abort();
+  try {
+    if (b.audio) { await eliminaLocali(b); for (let n = 0; n < b.audio.tracce.length; n++) DB.del('pos', tid(b, n)).catch(() => {}); }
+    await DB.del('testi', b.id); await DB.del('libri', b.id);
+  } catch (e) {}
+  S.libri.delete(b.id);
+  const u = S.covers.get(b.id); if (u) { URL.revokeObjectURL(u); S.covers.delete(b.id); }
+  if (AX.store.get('libri-ultimo') === b.id) AX.store.set('libri-ultimo', null);
+  toast('Eliminato dalla libreria');
+  vai('vHome');
+}
+async function eliminaDalMac(b) {
+  try { await AX.api('audiolibro/' + encodeURIComponent(b.audio.macId), {method:'DELETE', timeout:15000}); }
+  catch (e) { toast(msgErr(e, 'Mac non raggiungibile')); return; }
+  const loc = nLocali(b);
+  if (!loc) {
+    if (b.tipo === 'audio') { await eliminaLibro(b); return; }
+    b.audio = null;
+  } else { b.audio.suMac = false; b.audio.stato = loc === b.audio.tracce.length ? 'fatto' : 'perso'; }
+  salvaLibro(b, true); toast('Eliminato dal Mac'); disegnaLibro(b);
+}
+
+/* ================= LETTORE ================= */
+const R = {b:null, testi:null, c:0, p:0, da:'vHome'};
+const ASP = Object.assign({dim:20, font:'serif', tema:'auto', int:1.6}, AX.store.get('libri-aspetto', {}));
+function applicaAspetto() {
+  const v = $('vRead'), t = $('rTxt');
+  v.dataset.tema = ASP.tema;
+  t.style.setProperty('--rdim', ASP.dim + 'px'); t.style.setProperty('--rint', ASP.int);
+  t.classList.toggle('serif', ASP.font === 'serif');
+  if (!v.hidden) document.body.style.background = getComputedStyle(v).getPropertyValue('--rbg') || '';
+}
+async function apriLettore(id, c, p, conVoce) {
+  const b = S.libri.get(id); if (!b || b.tipo !== 'testo') return;
+  let t = null; try { t = await DB.get('testi', id); } catch (e) {}
+  if (!t) { toast('Testo del libro non trovato'); return; }
+  R.b = b; R.testi = t.capitoli; R.da = vista === 'vRead' ? R.da : vista;
+  b.aperto = Date.now(); salvaLibro(b);
+  $('rLibro').textContent = b.titolo;
+  $('rTxt').lang = b.lingua || 'it';
+  vai('vRead');
+  applicaAspetto();
+  const s = b.segno || {c:0, p:0};
+  apriCap(c != null ? c : s.c, p != null ? p : (c != null ? 0 : s.p));
+  if (conVoce) ttsAvvia();
+}
+function barH() { return document.querySelector('.rbar').getBoundingClientRect().height; }
+function apriCap(c, p) {
+  const caps = R.testi; c = clamp(c || 0, 0, caps.length - 1);
+  R.c = c;
+  const cap = caps[c], pars = cap.testo.split('\n');
+  $('rTxt').innerHTML = `<h2 class="ctit" data-i="-1">${esc(cap.titolo)}</h2>` + pars.map((x, i) => `<p data-i="${i}">${esc(x)}</p>`).join('');
+  $('rCap').textContent = caps.length > 1 ? 'Capitolo ' + (c + 1) + ' di ' + caps.length : (R.b.formato || '');
+  $('rPrev').disabled = c === 0; $('rNext').disabled = c >= caps.length - 1;
+  p = clamp(p || 0, 0, pars.length - 1);
+  const el = p > 0 && $('rTxt').querySelector(`p[data-i="${p}"]`);
+  if (el) scrollTo(0, el.getBoundingClientRect().top + scrollY - barH() - 12); else scrollTo(0, 0);
+  segna(c, p);
+  aggiornaProg();
+}
+function segna(c, p) {
+  const b = R.b; if (!b) return;
+  R.p = p; b.segno = {c, p};
+  const tot = b.capitoli.reduce((s, x) => s + x.n, 0) || 1;
+  let prima = 0; for (let i = 0; i < c; i++) prima += b.capitoli[i].n;
+  const np = $('rTxt').querySelectorAll('p[data-i]').length || 1;
+  b.letto = clamp((prima + b.capitoli[c].n * (p / np)) / tot, 0, 1);
+  if (c === b.capitoli.length - 1 && p >= np - 2) b.letto = 1;
+  salvaLibro(b);
+}
+function aggiornaProg() {
+  const h = document.documentElement.scrollHeight - innerHeight;
+  $('rProg').style.width = (h > 0 ? clamp(scrollY / h * 100, 0, 100) : 100) + '%';
+}
+function parAlto() {   // primo paragrafo visibile sotto la barra
+  const ps = $('rTxt').querySelectorAll('p[data-i]'); if (!ps.length) return 0;
+  const y = barH() + 8; let lo = 0, hi = ps.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (ps[m].getBoundingClientRect().bottom < y) lo = m + 1; else hi = m; }
+  return lo;
+}
+const suScroll = throttle(() => {
+  if (vista !== 'vRead') return;
+  aggiornaProg();
+  if (!T.on) { const p = parAlto(); if (p !== R.p) segna(R.c, p); }
+}, 350);
+
+/* --- lettura ad alta voce sul dispositivo (Web Speech API) --- */
+const haVoce = 'speechSynthesis' in window && typeof SpeechSynthesisUtterance === 'function';
+const T = {on:false, attivo:false, p:-1, s:0, frasi:[], tok:0, errori:0, rate:clamp(+AX.store.get('libri-velocita', 1) || 1, .5, 2), wd:0, u:null, el:null, orig:''};
+const RATES = [.8, 1, 1.15, 1.3, 1.5, 1.75, 2];
+function voci() { try { return haVoce ? speechSynthesis.getVoices() || [] : []; } catch (e) { return []; } }
+const QUALITA = /premium|enhanced|migliorat|avanzat|ottimizzat|siri|natural|neural/i;
+function punteggio(v, lang) {
+  const l = (v.lang || '').toLowerCase().replace('_', '-'), n = (v.name || '') + ' ' + (v.voiceURI || '');
+  let s = 0;
+  if (l.startsWith(lang)) s += 100;
+  if (l === lang + '-' + lang) s += 4;
+  if (/premium/i.test(n)) s += 40;
+  if (/enhanced|migliorat|avanzat|ottimizzat/i.test(n)) s += 32;
+  if (/siri/i.test(n)) s += 26;
+  if (/natural|neural/i.test(n)) s += 24;
+  if (/google|microsoft/i.test(n)) s += 8;
+  if (/compact|espeak|eloquence/i.test(n)) s -= 15;
+  if (v.default) s += 2;
+  return s;
+}
+function linguaLibro() { return ((R.b && R.b.lingua) || 'it').slice(0, 2).toLowerCase(); }
+function vocePred() {
+  const vs = voci(); if (!vs.length) return null;
+  const lang = linguaLibro(), scelte = AX.store.get('libri-voce', {}) || {};
+  const s = scelte[lang] && vs.find(v => v.voiceURI === scelte[lang]);
+  if (s) return s;
+  return vs.slice().sort((a, b) => punteggio(b, lang) - punteggio(a, lang))[0];
+}
+function frasiDi(t) {
+  const out = []; let a = 0, m; const re = /[.!?…]+["»”’)\]]*\s+/g;
+  while ((m = re.exec(t))) { const b = m.index + m[0].length; if (b > a) { out.push(t.slice(a, b)); a = b; } }
+  if (a < t.length) out.push(t.slice(a));
+  const res = [];
+  for (let f of out) {
+    while (f.length > 260) { let k = f.lastIndexOf('; ', 230); if (k < 60) k = f.lastIndexOf(', ', 230); if (k < 60) k = f.lastIndexOf(' ', 230); if (k < 30) k = 230; res.push(f.slice(0, k + 1)); f = f.slice(k + 1); }
+    if (f) res.push(f);
+  }
+  return res.length ? res : [t];
+}
+function elPar(i) { return $('rTxt').querySelector(`[data-i="${i}"]`); }
+function nPar() { return $('rTxt').querySelectorAll('p[data-i]').length; }
+function ripristina() { if (T.el && T.el.isConnected) T.el.textContent = T.orig; T.el = null; }
+function prepara(p) {
+  ripristina();
+  T.p = p; const el = elPar(p); if (!el) { T.frasi = []; return; }
+  T.el = el; T.orig = el.textContent;
+  T.frasi = frasiDi(T.orig);
+  el.innerHTML = T.frasi.map((f, i) => `<span class="f" data-s="${i}">${esc(f)}</span>`).join('');
+}
+function evidenzia() {
+  if (!T.el) return;
+  T.el.querySelectorAll('.f.on').forEach(x => x.classList.remove('on'));
+  const sp = T.el.querySelector(`.f[data-s="${T.s}"]`); if (!sp) return;
+  sp.classList.add('on');
+  const r = sp.getBoundingClientRect(), top = barH() + 10, bot = innerHeight - 120 - (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--axb')) || 0);
+  if (r.top < top || r.bottom > bot) scrollTo({top:scrollY + r.top - top - innerHeight * .2, behavior:'smooth'});
+}
+function parla() {
+  const tok = ++T.tok;
+  clearTimeout(T.wd);
+  const f = T.frasi[T.s];
+  if (!f || !f.trim()) { avanza(tok); return; }
+  evidenzia();
+  if (T.p >= 0) segna(R.c, T.p);
+  const u = new SpeechSynthesisUtterance(f.trim());
+  const v = vocePred();
+  if (v) { u.voice = v; u.lang = v.lang; } else u.lang = linguaLibro() === 'it' ? 'it-IT' : linguaLibro();
+  u.rate = T.rate;
+  u.onend = () => { if (tok !== T.tok || !T.on) return; T.errori = 0; avanza(tok); };
+  u.onerror = ev => {
+    if (tok !== T.tok || !T.on) return;
+    if (ev && (ev.error === 'interrupted' || ev.error === 'canceled')) return;
+    if (++T.errori >= 3) { ttsPausa(); toast(ev && ev.error === 'not-allowed' ? 'Tocca ▶ per avviare la lettura' : 'La sintesi vocale non risponde su questo dispositivo'); }
+    else setTimeout(() => avanza(tok), 150);
+  };
+  T.u = u;   // riferimento: Safari altrimenti può perdere l'evento di fine
+  try { speechSynthesis.speak(u); } catch (e) { ttsPausa(); toast('Lettura ad alta voce non disponibile'); return; }
+  // sorveglianza: alcuni browser non segnalano la fine della frase
+  const stima = 4000 + f.length / (13 * T.rate) * 1000 * 2.5;
+  const guarda = () => { if (tok !== T.tok || !T.on) return; let parlando = false; try { parlando = speechSynthesis.speaking || speechSynthesis.pending; } catch (e) {} if (parlando) T.wd = setTimeout(guarda, 3000); else avanza(tok); };
+  T.wd = setTimeout(guarda, stima);
+}
+function avanza(tok) {
+  if (tok != null && tok !== T.tok) return;
+  if (!T.on) return;
+  T.s++;
+  if (T.s < T.frasi.length) { parla(); return; }
+  const n = nPar();
+  if (T.p + 1 < n) { prepara(T.p + 1); T.s = 0; parla(); return; }
+  if (R.c + 1 < R.testi.length) { ripristina(); apriCap(R.c + 1, 0); prepara(-1); T.s = 0; parla(); return; }
+  ttsStop(); toast('Fine del libro');
+}
+function aggiornaBarra() {
+  $('ttsBar').hidden = !T.attivo;
+  $('rTts').classList.toggle('on', T.attivo);
+  $('tPP').innerHTML = T.on ? IC.pause : IC.play;
+  $('tPP').setAttribute('aria-label', T.on ? 'Pausa' : 'Riprendi la lettura');
+  $('tRate').textContent = String(T.rate).replace('.', ',') + '×';
+}
+let wl = null;
+async function sveglia(on) {
+  try {
+    if (on && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => { wl = null; }); }
+    else if (!on && wl) { await wl.release(); wl = null; }
+  } catch (e) { wl = null; }
+}
+function sblocca() {   // iPhone: la prima frase deve partire dentro il tocco
+  if (!haVoce) return;
+  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}
+}
+function ttsAvvia(p) {
+  if (!haVoce) { toast('Questo browser non sa leggere ad alta voce'); return; }
+  const n = P.now();
+  if (n && n.playing) { try { P.toggle(); toast('Musica in pausa durante la lettura'); } catch (e) {} }
+  try { speechSynthesis.cancel(); speechSynthesis.resume(); } catch (e) {}
+  T.attivo = true; T.on = true; T.errori = 0;
+  prepara(p != null ? p : (scrollY < 40 && R.p === 0 ? -1 : parAlto()));
+  T.s = 0;
+  aggiornaBarra(); sveglia(true);
+  if (!voci().length) setTimeout(() => { if (T.on && !voci().length) toast('Nessuna voce installata: uso quella predefinita'); }, 1500);
+  parla();
+}
+function ttsPausa() { T.on = false; T.tok++; clearTimeout(T.wd); try { speechSynthesis.cancel(); } catch (e) {} aggiornaBarra(); sveglia(false); }
+function ttsRiprendi() { if (!T.attivo) return ttsAvvia(); T.on = true; T.errori = 0; try { speechSynthesis.resume(); } catch (e) {} aggiornaBarra(); sveglia(true); if (!T.el || !T.el.isConnected) { prepara(parAlto()); T.s = 0; } parla(); }
+function ttsStop() {
+  if (!T.attivo && !T.on) return;
+  T.on = false; T.attivo = false; T.tok++; clearTimeout(T.wd);
+  try { speechSynthesis.cancel(); } catch (e) {}
+  ripristina(); aggiornaBarra(); sveglia(false);
+}
+function ttsSalta(d) {
+  if (!T.attivo) return;
+  const era = T.on; T.tok++; clearTimeout(T.wd); try { speechSynthesis.cancel(); } catch (e) {}
+  let s = T.s + d;
+  if (s < 0) { if (T.p > -1) { prepara(T.p - 1); s = Math.max(0, T.frasi.length - 1); } else s = 0; }
+  else if (s >= T.frasi.length) { if (T.p + 1 < nPar()) { prepara(T.p + 1); s = 0; } else s = T.frasi.length - 1; }
+  T.s = s;
+  if (era) { T.on = true; parla(); } else evidenzia();
+}
+function ttsRiparti() { if (T.on) { T.tok++; clearTimeout(T.wd); try { speechSynthesis.cancel(); } catch (e) {} setTimeout(parla, 60); } }
+
+/* ================= FOGLI ================= */
+function apriSheet(html) {
+  const s = $('sheet'); $('sheetBody').innerHTML = html; s.hidden = false; $('pan').scrollTop = 0;
+  requestAnimationFrame(() => requestAnimationFrame(() => s.classList.add('open')));
+}
+function chiudiSheet() { const s = $('sheet'); s.classList.remove('open'); setTimeout(() => { if (!s.classList.contains('open')) s.hidden = true; }, 320); }
+
+function sheetIncolla() {
+  apriSheet(`<div class="shd"><button data-a="chiudi">Annulla</button><h2>Incolla testo</h2><button data-a="incollaok">Aggiungi</button></div>
+    <div class="field"><label for="pTit">Titolo</label><input class="in" id="pTit" placeholder="Es. Appunti di storia"></div>
+    <div class="field"><label for="pAut">Autore</label><input class="in" id="pAut" placeholder="Facoltativo"></div>
+    <div class="field"><label for="pTxt">Testo</label><textarea class="in" id="pTxt" rows="10" placeholder="Incolla qui il testo…" style="min-height:220px"></textarea></div>
+    <button class="btn pri big" data-a="incollaok">Aggiungi alla libreria</button>`);
+}
+async function incollaOk() {
+  const t = ($('pTxt') || {}).value || '';
+  if (t.trim().length < 2) { toast('Incolla prima un testo'); return; }
+  const r = dividiTesto(t);
+  const tit = $('pTit').value.trim() || r.titoloTesto || t.trim().split('\n')[0].slice(0, 60);
+  try {
+    const b = await salvaTesto(Object.assign(r, {titolo:tit, autore:$('pAut').value.trim(), formato:'Testo'}));
+    chiudiSheet(); toast('Aggiunto: ' + b.titolo); disegnaHome(); apriLibro(b.id);
+  } catch (e) { toast(e.message || 'Testo non salvato'); }
+}
+function sheetCapitoli() {
+  apriSheet(`<div class="shd"><span></span><h2>Capitoli</h2><button data-a="chiudi">Fine</button></div>
+    <div class="list">${R.testi.map((c, i) => `<button class="tr${i === R.c ? ' on' : ''}" data-a="vaicap" data-n="${i}"><span class="n">${i + 1}</span><span class="tx"><b>${esc(c.titolo)}</b></span>${i === R.c ? `<span class="ok">${IC.check}</span>` : ''}</button>`).join('')}</div>`);
+  const on = $('sheetBody').querySelector('.tr.on'); if (on) setTimeout(() => on.scrollIntoView({block:'center'}), 50);
+}
+function sheetAspetto() {
+  const temi = [['auto', 'Auto', 'var(--bg)', 'var(--fg)'], ['chiaro', 'Chiaro', '#fff', '#1c1c1e'], ['seppia', 'Seppia', '#f6efe1', '#4a3a28'], ['scuro', 'Scuro', '#121212', '#e4e4e6']];
+  apriSheet(`<div class="shd"><span></span><h2>Aspetto</h2><button data-a="chiudi">Fine</button></div>
+    <div class="lbl">Dimensione del testo</div>
+    <div class="sz"><button data-a="dim" data-d="-1" aria-label="Testo più piccolo" style="font-size:15px">A−</button><span class="v" id="aDim">${ASP.dim}</span><button data-a="dim" data-d="1" aria-label="Testo più grande" style="font-size:22px">A+</button></div>
+    <div class="lbl">Carattere</div>
+    <div class="seg" style="margin:0"><button data-a="font" data-v="serif" class="${ASP.font === 'serif' ? 'on' : ''}" style="font-family:Georgia,serif;min-height:40px">Classico</button><button data-a="font" data-v="sans" class="${ASP.font === 'sans' ? 'on' : ''}" style="min-height:40px">Moderno</button></div>
+    <div class="lbl">Tema</div>
+    <div class="temi">${temi.map(([k, n, bg, fg]) => `<button data-a="tema" data-v="${k}" class="${ASP.tema === k ? 'on' : ''}" style="background:${bg};color:${fg}">${n}</button>`).join('')}</div>
+    <div class="lbl">Interlinea</div>
+    <div class="seg" style="margin:0">${[[1.4, 'Compatta'], [1.6, 'Normale'], [1.85, 'Ampia']].map(([v, n]) => `<button data-a="int" data-v="${v}" class="${ASP.int === v ? 'on' : ''}" style="min-height:40px">${n}</button>`).join('')}</div>`);
+}
+function cambiaAspetto(k, v) {
+  const p = parAlto();
+  ASP[k] = v; AX.store.set('libri-aspetto', ASP); applicaAspetto();
+  const el = elPar(p); if (el && p > 0) scrollTo(0, el.getBoundingClientRect().top + scrollY - barH() - 12);
+  if (k !== 'dim') sheetAspetto(); else $('aDim').textContent = ASP.dim;
+}
+function sheetVoci(tutte) {
+  const lang = linguaLibro(), vs = voci();
+  const cur = vocePred();
+  const mie = vs.filter(v => (v.lang || '').toLowerCase().startsWith(lang)).sort((a, b) => punteggio(b, lang) - punteggio(a, lang));
+  const altre = vs.filter(v => !mie.includes(v)).sort((a, b) => (a.lang || '').localeCompare(b.lang || '') || a.name.localeCompare(b.name));
+  const riga = v => `<button class="vrow" data-a="voce" data-v="${esc(v.voiceURI)}"><span class="sel">${cur && v.voiceURI === cur.voiceURI ? IC.check : ''}</span><span class="tx"><b>${esc(v.name)}</b><span>${esc(v.lang)}${QUALITA.test(v.name + ' ' + v.voiceURI) ? ' · alta qualità' : ''}${v.localService === false ? ' · online' : ''}</span></span><span class="round" data-a="prova" data-v="${esc(v.voiceURI)}" role="button" aria-label="Prova ${esc(v.name)}" style="width:34px;height:34px">${IC.play}</span></button>`;
+  apriSheet(`<div class="shd"><span></span><h2>Voce e velocità</h2><button data-a="chiudi">Fine</button></div>
+    <div class="lbl">Velocità · <span id="vRateV">${String(T.rate).replace('.', ',')}×</span></div>
+    <input type="range" class="range" id="vRate" min="0.5" max="2" step="0.05" value="${T.rate}" aria-label="Velocità di lettura">
+    <div class="lbl">Voci ${lang === 'it' ? 'italiane' : '(' + esc(lang) + ')'}</div>
+    ${mie.length ? '<div class="list">' + mie.map(riga).join('') + '</div>' : `<div class="note">${vs.length ? 'Nessuna voce per questa lingua: viene usata la voce predefinita.' : 'Questo browser non ha ancora caricato voci di sintesi.'}</div>`}
+    ${altre.length ? (tutte ? '<div class="lbl">Altre lingue</div><div class="list">' + altre.map(riga).join('') + '</div>' : `<button class="btn big" data-a="vocitutte" style="margin-top:10px">Mostra le voci di altre lingue (${altre.length})</button>`) : ''}
+    <div class="card" style="margin-top:16px">
+      <b>Voci più naturali su iPhone e iPad</b>
+      <div class="sub" style="margin-top:6px">Apri <b>Impostazioni › Accessibilità › Contenuti letti › Voci › Italiano</b> e scarica una voce <b>Premium</b> o <b>Migliorata</b> (per esempio Federica, Alice, Luca o Emma). Poi chiudi e riapri questa pagina: la voce comparirà qui sopra.</div>
+      <div class="sub" style="margin-top:8px">Su Mac: <b>Impostazioni di Sistema › Accessibilità › Contenuti letti › Voce di sistema › Gestisci voci</b>.</div>
+      <div class="sub" style="margin-top:8px">La lettura si ferma quando lo schermo si blocca: per ascoltare in tasca o in auto usa «Crea audiolibro con il Mac».</div>
+    </div>`);
+  const r = $('vRate');
+  r.oninput = () => { T.rate = +r.value; $('vRateV').textContent = String(T.rate).replace('.', ',') + '×'; aggiornaBarra(); };
+  r.onchange = () => { AX.store.set('libri-velocita', T.rate); ttsRiparti(); };
+}
+function provaVoce(uri) {
+  const v = voci().find(x => x.voiceURI === uri); if (!v) return;
+  try {
+    const was = T.on; if (was) ttsPausa();
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(/^it/i.test(v.lang) ? 'Ciao! Leggerò il tuo libro con questa voce.' : 'Hello! I will read your book with this voice.');
+    u.voice = v; u.lang = v.lang; u.rate = T.rate; speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+/* --- «Crea audiolibro con il Mac» --- */
+async function sheetMac(b) {
+  apriSheet(`<div class="shd"><button data-a="chiudi">Annulla</button><h2>Audiolibro</h2><span style="width:60px"></span></div>
+    <p class="sub">Il Mac legge «${esc(b.titolo)}» con una voce dal suono umano e crea un file audio per ogni capitolo. Potrai ascoltarlo nel lettore di Musica, anche a schermo bloccato.</p>
+    <div id="mkBody"><div class="loading"><span class="spinner"></span>Collegamento al Mac…</div></div>`);
+  S.mac = await AX.stato(true);
+  const body = $('mkBody'); if (!body) return;
+  if (!S.mac.ok) { body.innerHTML = `<div class="note"><b>Mac non raggiungibile.</b> Accendi il Mac con il server di Atlante Musica, poi riprova. Nel frattempo puoi usare «Leggi ad alta voce» su questo dispositivo.</div><button class="btn big" data-a="mkab" data-id="${esc(b.id)}">Riprova</button>`; return; }
+  if (S.mac.say === false) { body.innerHTML = '<div class="note">Il Mac non ha la sintesi vocale («say») disponibile.</div>'; return; }
+  let vs = [];
+  try { vs = ((await AX.api('voci', {timeout:15000})) || {}).voci || []; } catch (e) { body.innerHTML = `<div class="note">${esc(msgErr(e, 'Il Mac non ha risposto: riprova tra poco'))}</div>`; return; }
+  const lang = (b.lingua || 'it').slice(0, 2);
+  const sc = v => punteggio({name:v.nome, lang:String(v.lingua || '').replace('_', '-'), voiceURI:''}, lang);
+  vs.sort((x, y) => sc(y) - sc(x));
+  const pref = AX.store.get('libri-macvoce', '');
+  const sel = vs.find(v => v.nome === pref && String(v.lingua || '').toLowerCase().startsWith(lang)) || vs[0];
+  const vel = clamp(+AX.store.get('libri-macvel', 180) || 180, 120, 280);
+  const ore = b.parole ? fmtDur(b.parole / vel * 60) : '';
+  body.innerHTML = `
+    <div class="field"><label for="mkVoce">Voce del Mac</label><select class="in" id="mkVoce">${vs.map(v => `<option value="${esc(v.nome)}"${sel && v.nome === sel.nome ? ' selected' : ''}>${esc(v.nome)} (${esc(v.lingua || '')})${QUALITA.test(v.nome) ? ' ★' : ''}</option>`).join('')}</select></div>
+    <div class="small" id="mkEs" style="margin:-4px 4px 8px">${esc(sel && sel.esempio || '')}</div>
+    <div class="field"><label for="mkVel">Velocità · <span id="mkVelV">${vel}</span> parole al minuto</label><input type="range" class="range" id="mkVel" min="120" max="280" step="5" value="${vel}"></div>
+    <div class="small" style="margin:0 4px 12px" id="mkDur">${b.capitoli.length} capitoli${ore ? ' · circa ' + ore + ' di audio' : ''}</div>
+    <div class="note">Per voci più naturali sul Mac: Impostazioni di Sistema › Accessibilità › Contenuti letti › Voce di sistema › Gestisci voci, e scarica una voce italiana «Premium» o «Migliorata». ★ = alta qualità.</div>
+    <button class="btn pri big" data-a="mkvia" data-id="${esc(b.id)}">Crea audiolibro</button>`;
+  $('mkVoce').onchange = () => { const v = vs.find(x => x.nome === $('mkVoce').value); $('mkEs').textContent = (v && v.esempio) || ''; };
+  $('mkVel').oninput = () => { const x = +$('mkVel').value; $('mkVelV').textContent = x; $('mkDur').textContent = b.capitoli.length + ' capitoli' + (b.parole ? ' · circa ' + fmtDur(b.parole / x * 60) + ' di audio' : ''); };
+}
+async function creaAudiolibro(b, btn) {
+  const voce = $('mkVoce').value, vel = +$('mkVel').value;
+  AX.store.set('libri-macvoce', voce); AX.store.set('libri-macvel', vel);
+  btn.disabled = true; btn.textContent = 'Invio del testo al Mac…';
+  try {
+    const t = await DB.get('testi', b.id);
+    const capitoli = t.capitoli.map(c => ({titolo:c.titolo, testo:c.titolo + '.\n\n' + c.testo.replace(/\n/g, '\n\n')}));
+    const j = await AX.api('audiolibro', {method:'POST', body:{titolo:b.titolo, autore:b.autore || '', voce, velocita:vel, capitoli}, timeout:120000});
+    if (!j || j.id == null) throw new Error('Il Mac non ha accettato il lavoro');
+    if (b.audio && b.audio.fonte === 'mac') await eliminaLocali(b);
+    b.audio = {fonte:'mac', macId:j.id, voce, velocita:vel, stato:'in coda', progresso:0, ultima:null, suMac:true, tracce:b.capitoli.map(c => ({titolo:c.titolo, pronto:false, durata:0}))};
+    salvaLibro(b, true); mappaTracce(b);
+    chiudiSheet(); toast('Il Mac sta creando l\'audiolibro');
+    disegnaLibro(b); aggiornaLavoriMac().then(pollMac);
+  } catch (e) { btn.disabled = false; btn.textContent = 'Crea audiolibro'; toast(msgErr(e, 'Il Mac non ha risposto: riprova')); }
+}
+
+/* ================= LIBRIVOX ================= */
+const LV_CHIPS = ['Pinocchio', 'I promessi sposi', 'Divina Commedia', 'Decameron', 'Il principe', 'Cuore', 'Le avventure di Sherlock Holmes', 'Alice'];
+const LINGUE = {Italian:'Italiano', English:'Inglese', German:'Tedesco', French:'Francese', Spanish:'Spagnolo', Latin:'Latino', Portuguese:'Portoghese', Dutch:'Olandese', Russian:'Russo', Greek:'Greco'};
+const proxyRaw = (url, ms) => AX.fetchT(AX.API + 'proxy?url=' + encodeURIComponent(url), {}, ms || 25000);
+function lvIdent(x) { const m = String(x.url_zip_file || '').match(/archive\.org\/(?:compress|download)\/([^/?#]+)/) || String(x.url_iarchive || '').match(/details\/([^/?#]+)/); return m ? m[1] : ''; }
+const lvCover = x => { const i = lvIdent(x); return i ? 'https://archive.org/services/img/' + i : ''; };
+const lvAutori = x => (x.authors || []).map(a => [a.first_name, a.last_name].filter(Boolean).join(' ')).join(', ');
+async function lvNota() {
+  S.mac = await AX.stato();
+  const n = $('lvNote');
+  n.hidden = S.mac.ok;
+  n.innerHTML = '<b>Mac non raggiungibile.</b> LibriVox si consulta tramite il Mac: accendilo con Atlante Musica per cercare e ascoltare gli audiolibri gratuiti. I libri già aggiunti alla libreria restano ascoltabili.';
+  return S.mac.ok;
+}
+let lvSeq = 0;
+async function lvCerca(q) {
+  q = (q || '').trim(); if (q.length < 2) return;
+  const seq = ++lvSeq;
+  $('lvRes').innerHTML = '<div class="loading"><span class="spinner"></span>Ricerca su LibriVox…</div>';
+  if (!(await lvNota())) { $('lvRes').innerHTML = ''; return; }
+  const campo = S.lvCampo;
+  const prova = async val => {
+    const r = await proxyRaw('https://librivox.org/api/feed/audiobooks/?format=json&limit=50&' + campo + '=' + encodeURIComponent(val), 30000);
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (r.status === 404 || (j && j.error && /not be found/i.test(j.error))) return [];
+    if (!r.ok) throw new Error((j && (j.errore || j.error)) || 'LibriVox non risponde');
+    return (j && j.books) || [];
+  };
+  try {
+    let l = await prova(campo === 'title' ? '^' + q : q);
+    if (!l.length && campo === 'title') l = await prova(q);
+    if (seq !== lvSeq) return;
+    if ($('lvIt').checked) l = l.filter(x => x.language === 'Italian');
+    l.sort((a, b) => (b.language === 'Italian') - (a.language === 'Italian'));
+    S.lvRis = l;
+    if (!l.length) { $('lvRes').innerHTML = `<div class="empty"><b>Nessun audiolibro trovato</b>${$('lvIt').checked ? 'Prova a togliere «Solo in italiano» o ' : 'Prova '}con un altro titolo.</div>`; return; }
+    $('lvRes').innerHTML = '<div class="list">' + l.map((x, i) => `<button class="row" data-a="lvapri" data-i="${i}"><img src="${esc(lvCover(x))}" alt="" loading="lazy"><span class="tx"><b>${esc(x.title)}</b><span>${esc([lvAutori(x), LINGUE[x.language] || x.language, x.totaltime && x.totaltime !== '00:00:00' ? fmtDur(x.totaltimesecs || durata(x.totaltime)) : ''].filter(Boolean).join(' · '))}</span></span><span class="chev">›</span></button>`).join('') + '</div>';
+  } catch (e) {
+    if (seq !== lvSeq) return;
+    $('lvRes').innerHTML = `<div class="empty"><b>Ricerca non riuscita</b>${esc(msgErr(e, 'LibriVox o il Mac non rispondono, riprova.'))}</div>`;
+  }
+}
+async function lvApri(x) {
+  S.lv = {x, tracce:null, err:''};
+  disegnaLv(); vai('vLv');
+  try {
+    const r = await proxyRaw(x.url_rss || ('https://librivox.org/rss/' + x.id), 30000);
+    if (!r.ok) throw new Error('Elenco dei capitoli non disponibile');
+    const d = new DOMParser().parseFromString((await r.text()).replace(/^﻿/, '').trim(), 'application/xml');
+    if (d.getElementsByTagName('parsererror').length) throw new Error('Elenco dei capitoli non leggibile');
+    const tr = [];
+    for (const it of d.getElementsByTagName('item')) {
+      const en = it.getElementsByTagName('enclosure')[0]; const url = en && en.getAttribute('url'); if (!url) continue;
+      const t = it.getElementsByTagName('title')[0], du = it.getElementsByTagName('itunes:duration')[0];
+      tr.push({titolo:(t ? t.textContent : '').replace(/\s+/g, ' ').trim() || 'Capitolo ' + (tr.length + 1), url:url.replace(/^http:/, 'https:'), durata:durata(du && du.textContent)});
+    }
+    if (S.lv && S.lv.x === x) { S.lv.tracce = tr; disegnaLv(); }
+  } catch (e) { if (S.lv && S.lv.x === x) { S.lv.err = msgErr(e, 'LibriVox o il Mac non rispondono: riprova.'); disegnaLv(); } }
+}
+const lvLibro = x => [...S.libri.values()].find(b => b.audio && b.audio.fonte === 'librivox' && String(b.audio.lvId) === String(x.id));
+function disegnaLv() {
+  const {x} = S.lv, gia = lvLibro(x);
+  $('lvBody').innerHTML = `<div class="bhead"><img class="bcov sq" src="${esc(lvCover(x))}" alt="" data-t="${esc(x.title)}" data-au="${esc(lvAutori(x))}"><div class="tx"><h1>${esc(x.title)}</h1><div class="au">${esc(lvAutori(x))}</div><div class="meta">${esc([LINGUE[x.language] || x.language, x.num_sections ? x.num_sections + ' capitoli' : '', fmtDur(x.totaltimesecs || durata(x.totaltime))].filter(Boolean).join(' · '))}</div></div></div>
+    <div class="btns" style="flex-direction:column;gap:10px">
+      <button class="btn pri big" data-a="lvplay" ${S.lv.tracce && S.lv.tracce.length ? '' : 'disabled'}>${IC.play} ${gia ? 'Riprendi' : 'Ascolta'}</button>
+      ${gia ? `<button class="btn big" data-a="libro" data-id="${esc(gia.id)}">Nella tua libreria ›</button>` : `<button class="btn big" data-a="lvadd" ${S.lv.tracce && S.lv.tracce.length ? '' : 'disabled'}>＋ Aggiungi alla libreria</button>`}
+    </div>
+    <p class="bdesc clamp" id="bDesc">${esc(pulisci(x.description, 3000))}</p><button class="more" data-a="descr">altro</button>
+    <h2 class="h2">Capitoli</h2><div id="lvTr"></div>
+    <div class="small" style="margin-top:12px">Audiolibro di pubblico dominio da LibriVox.org, letto da volontari.</div>`;
+  disegnaLvTracce();
+}
+function lvFinto(x) { return {id:'lv' + x.id, tipo:'audio', titolo:x.title, autore:lvAutori(x), coverUrl:lvCover(x), audio:{fonte:'librivox', lvId:x.id, tracce:S.lv.tracce || []}}; }
+function disegnaLvTracce() {
+  const el = $('lvTr'); if (!el || !S.lv) return;
+  if (S.lv.err) { el.innerHTML = `<div class="note">${esc(S.lv.err)}</div><button class="btn" data-a="lvri">Riprova</button>`; return; }
+  if (!S.lv.tracce) { el.innerHTML = '<div class="loading"><span class="spinner"></span>Caricamento dei capitoli…</div>'; return; }
+  if (!S.lv.tracce.length) { el.innerHTML = '<div class="empty">Nessun capitolo disponibile.</div>'; return; }
+  const n = P.now(), cur = n && n.id;
+  el.innerHTML = '<div class="list">' + S.lv.tracce.map((t, k) => {
+    const id = 'lv:' + S.lv.x.id + ':' + k, p = S.pos.get(id) || {}, on = cur === id;
+    const dd = Math.max(t.durata || 0, p.d || 0);
+    return `<button class="tr${on ? ' on' : ''}${p.fatto ? ' done' : ''}" data-a="lvcap" data-n="${k}"><span class="n">${on && n.playing ? '♪' : k + 1}</span><span class="tx"><b>${esc(t.titolo)}</b><span>${esc(p.fatto ? 'ascoltato' : p.t > 5 ? (dd > p.t + 30 ? 'restano ' + fmtDur(dd - p.t) : 'iniziato · ' + fmtOra(p.t)) : fmtDur(dd))}</span></span>${p.fatto ? `<span class="ok">${IC.check}</span>` : `<span class="round" style="width:34px;height:34px">${IC.play}</span>`}</button>`;
+  }).join('') + '</div>';
+}
+function lvAggiungi() {
+  const x = S.lv.x; if (lvLibro(x)) return lvLibro(x);
+  const b = {id:nuovoId(), tipo:'audio', formato:'LibriVox', titolo:x.title, autore:lvAutori(x), coverUrl:lvCover(x), cover:null, descr:pulisci(x.description, 3000),
+    lingua:x.language === 'Italian' ? 'it' : '', aggiunto:Date.now(), aperto:0, audio:{fonte:'librivox', lvId:x.id, tracce:S.lv.tracce.slice(), ultima:null}};
+  salvaLibro(b, true); mappaTracce(b);
+  return b;
+}
+function lvAscolta(n) {
+  if (!S.lv || !S.lv.tracce || !S.lv.tracce.length) return;
+  const b = lvLibro(S.lv.x) || lvFinto(S.lv.x);
+  if (!S.libri.has(b.id)) { mappaTracce(b); }
+  ascolta(b, n);
+  setTimeout(disegnaLvTracce, 1500);
+}
+
+/* ================= EVENTI ================= */
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-a]');
+  if (!b) {
+    if (e.target === $('sheet')) chiudiSheet();
+    else if (T.attivo && vista === 'vRead') { const p = e.target.closest('#rTxt [data-i]'); if (p) { const i = +p.dataset.i; T.tok++; try { speechSynthesis.cancel(); } catch (x) {} prepara(i); T.s = 0; if (T.on) parla(); else evidenzia(); } }
+    return;
+  }
+  const a = b.dataset.a, id = b.dataset.id, lib = id && S.libri.get(id);
+  switch (a) {
+    case 'home': vai('vHome'); break;
+    case 'incolla': sheetIncolla(); break;
+    case 'incollaok': incollaOk(); break;
+    case 'libro': apriLibro(id); break;
+    case 'leggi': apriLettore(id); break;
+    case 'leggivoce': sblocca(); apriLettore(id, null, null, true); break;
+    case 'leggicap': apriLettore(id, +b.dataset.n, 0); break;
+    case 'ascolta': if (lib) ascolta(lib); setTimeout(() => { if (vista === 'vHome') disegnaHome(); }, 600); break;
+    case 'ascoltacap': if (lib) ascolta(lib, +b.dataset.n); break;
+    case 'scarica': if (lib) scaricaLibro(lib); break;
+    case 'stopdl': { const d = S.dl.get(id); if (d) d.ctrl.abort(); break; }
+    case 'dellocali': if (lib && confermato(b, 'Tocca di nuovo per eliminare')) eliminaLocali(lib).then(() => { toast('Eliminato dal dispositivo'); ridisegnaAudio(); }); break;
+    case 'delmac': if (lib && confermato(b, 'Tocca di nuovo per eliminare dal Mac')) eliminaDalMac(lib); break;
+    case 'elimina': if (lib && confermato(b, 'Tocca di nuovo per eliminare')) eliminaLibro(lib); break;
+    case 'mkab': if (lib) sheetMac(lib); break;
+    case 'mkvia': if (lib) creaAudiolibro(lib, b); break;
+    case 'macadd': aggiungiDaMac(id); break;
+    case 'descr': { const d = $('bDesc'); if (d) { d.classList.toggle('clamp'); b.textContent = d.classList.contains('clamp') ? 'altro' : 'meno'; } break; }
+    case 'chiudi': chiudiSheet(); break;
+    // lettore
+    case 'rchiudi': vai(R.da && R.da !== 'vRead' ? R.da : 'vHome'); if (vista === 'vBook' && S.bid) disegnaLibro(S.libri.get(S.bid)); break;
+    case 'rprev': if (R.c > 0) { const t = T.attivo; ttsStop(); apriCap(R.c - 1, 0); if (t) { sblocca(); ttsAvvia(-1); } } break;
+    case 'rnext': if (R.c + 1 < R.testi.length) { const t = T.attivo; ttsStop(); apriCap(R.c + 1, 0); if (t) { sblocca(); ttsAvvia(-1); } } break;
+    case 'rcap': sheetCapitoli(); break;
+    case 'vaicap': { const t = T.attivo; ttsStop(); chiudiSheet(); apriCap(+b.dataset.n, 0); if (t) { sblocca(); ttsAvvia(-1); } break; }
+    case 'raspetto': sheetAspetto(); break;
+    case 'dim': cambiaAspetto('dim', clamp(ASP.dim + (+b.dataset.d) * 2, 14, 34)); break;
+    case 'font': cambiaAspetto('font', b.dataset.v); break;
+    case 'tema': cambiaAspetto('tema', b.dataset.v); break;
+    case 'int': cambiaAspetto('int', +b.dataset.v); break;
+    case 'tts': if (T.attivo) ttsStop(); else { sblocca(); ttsAvvia(); } break;
+    case 'ttoggle': if (T.on) ttsPausa(); else { sblocca(); ttsRiprendi(); } break;
+    case 'tprev': ttsSalta(-1); break;
+    case 'tnext': ttsSalta(1); break;
+    case 'trate': { const i = RATES.findIndex(r => r >= T.rate - .01); T.rate = RATES[(i + 1) % RATES.length]; AX.store.set('libri-velocita', T.rate); aggiornaBarra(); ttsRiparti(); break; }
+    case 'tvoce': sheetVoci(false); break;
+    case 'vocitutte': sheetVoci(true); break;
+    case 'tstop': ttsStop(); break;
+    case 'prova': e.stopPropagation(); provaVoce(b.dataset.v); break;
+    case 'voce': {
+      const v = voci().find(x => x.voiceURI === b.dataset.v); if (!v) break;
+      const lang = linguaLibro(), sc = AX.store.get('libri-voce', {}) || {};
+      sc[lang] = v.voiceURI; AX.store.set('libri-voce', sc);
+      $('sheetBody').querySelectorAll('.vrow .sel').forEach(x => { x.innerHTML = ''; });
+      b.querySelector('.sel').innerHTML = IC.check;
+      toast('Voce: ' + v.name); ttsRiparti(); break;
+    }
+    // LibriVox
+    case 'lvchip': $('lvQ').value = b.dataset.q; if (S.lvCampo !== 'title') { S.lvCampo = 'title'; [...$('lvCampo').children].forEach(x => x.classList.toggle('on', x.dataset.c === 'title')); } lvCerca(b.dataset.q); break;
+    case 'lvapri': lvApri(S.lvRis[+b.dataset.i]); break;
+    case 'lvri': lvApri(S.lv.x); break;
+    case 'lvplay': lvAscolta(); break;
+    case 'lvcap': lvAscolta(+b.dataset.n); break;
+    case 'lvadd': { const nb = lvAggiungi(); toast('Aggiunto alla libreria: ' + nb.titolo); disegnaLv(); break; }
+  }
+});
+document.querySelector('label[for="file"]').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file').click(); } });
+// copertina non scaricabile → copertina disegnata con titolo e autore
+document.addEventListener('error', e => {
+  const im = e.target;
+  if (!im || im.tagName !== 'IMG' || !im.classList.contains('bcov')) return;
+  const sp = document.createElement('span');
+  sp.className = im.className + ' gcov'; sp.style.setProperty('--h', hashN(im.dataset.t || '') % 360);
+  sp.innerHTML = `<b>${esc(im.dataset.t || '')}</b><i>${esc(im.dataset.au || '')}</i>`;
+  im.replaceWith(sp);
+}, true);
+$('file').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; importaFile(f); });
+$('tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-t]'); if (!b) return;
+  [...$('tabs').children].forEach(x => x.classList.toggle('on', x === b));
+  $('tLib').hidden = b.dataset.t !== 'lib'; $('tLv').hidden = b.dataset.t !== 'lv';
+  AX.store.set('libri-scheda', b.dataset.t);
+  if (b.dataset.t === 'lv') lvNota();
+});
+$('lvCampo').addEventListener('click', e => {
+  const b = e.target.closest('button[data-c]'); if (!b) return;
+  S.lvCampo = b.dataset.c; [...$('lvCampo').children].forEach(x => x.classList.toggle('on', x === b));
+  $('lvQ').placeholder = S.lvCampo === 'title' ? 'Titolo (es. Pinocchio)' : 'Cognome dell\'autore (es. Collodi)';
+  if ($('lvQ').value.trim()) lvCerca($('lvQ').value);
+});
+$('lvForm').addEventListener('submit', e => { e.preventDefault(); $('lvQ').blur(); lvCerca($('lvQ').value); });
+$('lvIt').addEventListener('change', () => { if ($('lvQ').value.trim()) lvCerca($('lvQ').value); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('sheet').hidden) chiudiSheet(); });
+addEventListener('scroll', suScroll, {passive:true});
+addEventListener('resize', () => { misuraBasso(); if (vista === 'vRead') aggiornaProg(); });
+document.addEventListener('visibilitychange', () => { check(); if (document.visibilityState === 'visible') { misuraBasso(); if (T.on) sveglia(true); } });
+addEventListener('pagehide', () => { check(); try { speechSynthesis.cancel(); } catch (e) {} });
+if (haVoce) { try { speechSynthesis.addEventListener('voiceschanged', () => { if (!$('sheet').hidden && $('vRate')) sheetVoci(false); }); } catch (e) {} }
+// trascinare file sulla pagina (Mac)
+addEventListener('dragover', e => { if (vista === 'vHome') e.preventDefault(); });
+addEventListener('drop', e => { if (vista !== 'vHome') return; e.preventDefault(); if (e.dataTransfer && e.dataTransfer.files.length) importaFile(e.dataTransfer.files); });
+
+/* ================= AVVIO ================= */
+(async function avvio() {
+  AX.header('Libri');
+  misuraBasso(); setInterval(misuraBasso, 3000);
+  $('lvChips').innerHTML = LV_CHIPS.map(q => `<button class="chip" data-a="lvchip" data-q="${esc(q)}">${esc(q)}</button>`).join('');
+  aggiornaBarra();
+  try {
+    const [libri, pos, keys] = await Promise.all([DB.all('libri'), DB.all('pos'), DB.keys('file')]);
+    libri.forEach(b => { S.libri.set(b.id, b); mappaTracce(b); });
+    pos.forEach(p => S.pos.set(p.id, p));
+    keys.forEach(k => S.files.add(k));
+  } catch (e) { S.db = false; $('dbNote').hidden = false; }
+  if (AX.store.get('libri-scheda') === 'lv') $('tabs').children[1].click();
+  disegnaHome();
+  setInterval(check, 10000);
+  P.onChange(throttle(check, 1000));
+  check();
+  voci();   // avvia il caricamento delle voci
+  S.mac = await AX.stato();
+  if (S.mac.ok) { await aggiornaLavoriMac(); pollMac(); disegnaHome(); }
+})();
+</script>
+</body>
+</html>
