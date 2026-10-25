@@ -33,6 +33,7 @@ do_POST e do_DELETE, prima di `gestisci`.
 Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale funnel`, porte 443, 8443 o 10000):
 
     python3 musica_libreria.py --imposta-password          # una volta: da Internet l'app chiede questa password
+                                                            # (o dalla pagina <app>/accesso aperta con Tailscale)
     tailscale funnel --bg --https=10000 8790
 
 Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
@@ -2114,7 +2115,8 @@ def gestisci_extra(h, metodo=None):
 # Dal Mac stesso, dalla rete di casa e dalla rete Tailscale (iPhone, Mac) l'app si apre come sempre, senza password:
 # `tailscale serve` aggiunge a ogni richiesta l'identità di chi la fa (Tailscale-User-Login) e toglie quella falsa.
 # Da Internet (`tailscale funnel`) le richieste arrivano con Tailscale-Funnel-Request e senza identità: per loro serve
-# la password, che si imposta sul Mac con
+# la password. Si sceglie dalla pagina <app>/accesso aperta dalla rete Tailscale (per cambiarla: <app>/accesso?cambia,
+# con quella di adesso) oppure sul Mac con
 #
 #     python3 musica_libreria.py --imposta-password [--cache ~/.atlante-musica]
 #
@@ -2367,11 +2369,26 @@ _MODULO_ACCESSO = """<p>@M</p>
 <input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required autofocus>
 <button type="submit">Entra</button>
 </form>"""
+# dalla rete Tailscale (o dal Mac): si sceglie la password per Internet, senza Terminale. Per cambiarla serve quella di adesso
+_MODULO_NUOVA = """<p>@M</p>
+<form method="post" action="@Raccesso">
+<input class="nome" type="text" name="nome" autocomplete="username" value="Atlante Musica" tabindex="-1" aria-hidden="true">
+@A<input type="password" name="nuova" autocomplete="new-password" minlength="8" placeholder="Nuova password (almeno 8 caratteri)" aria-label="Nuova password" required>
+<input type="password" name="ripeti" autocomplete="new-password" minlength="8" placeholder="Ripetila" aria-label="Ripeti la nuova password" required>
+<button type="submit">Salva la password</button>
+</form>"""
+_CAMPO_ATTUALE = """<input type="password" name="password" autocomplete="current-password" placeholder="Password di adesso" aria-label="Password di adesso" required>
+"""
 
 
 def _scrivi_pagina_accesso(h, codice, messaggio, errore=False, modulo=True, intestazioni=()):
     m = '<span class="err">%s</span>' % messaggio if errore else messaggio
-    c = _MODULO_ACCESSO.replace("@M", m) if modulo else "<p>%s</p>" % m
+    if modulo is True:
+        c = _MODULO_ACCESSO.replace("@M", m)
+    elif modulo:   # un altro modulo (scelta della password), con @M al posto del messaggio
+        c = modulo.replace("@M", m)
+    else:
+        c = "<p>%s</p>" % m
     corpo = _PAGINA_ACCESSO.replace("@C", c).replace("@R", _verso(h, "")).encode("utf-8")
     h.send_response(codice)
     h.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2384,8 +2401,45 @@ def _scrivi_pagina_accesso(h, codice, messaggio, errore=False, modulo=True, inte
         h.wfile.write(corpo)
 
 
-def _pagina_accesso(h, entrato):
-    """GET: la pagina con la password (o l'app, per chi è già dentro). POST: controlla la password."""
+def _nuova_password(h, dati):
+    """Dalla rete Tailscale o dal Mac: scelta (o cambio) della password per Internet."""
+    cambio = ACC.ha_password()
+    modulo = _MODULO_NUOVA.replace("@A", _CAMPO_ATTUALE if cambio else "")
+    if h.command != "POST":
+        return _scrivi_pagina_accesso(h, 200, ("Cambia la password per aprire l'app da Internet." if cambio else
+                                               "Scegli la password per aprire l'app da Internet, senza Tailscale. "
+                                               "Qui non serve: la chiede solo da fuori, una volta per dispositivo."), modulo=modulo)
+    if not _stessa_origine(h):
+        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True, modulo=modulo)
+    try:
+        q = parse_qs(dati.decode("utf-8"), max_num_fields=10)
+    except (UnicodeDecodeError, ValueError):
+        q = {}
+    nuova, ripeti = q.get("nuova", [""])[0], q.get("ripeti", [""])[0]
+    if cambio:
+        ip = _ip_cliente(h)
+        w = ACC.attesa(ip)
+        if w:
+            return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % (
+                (w + 59) // 60, "o" if w <= 60 else "i"), True, modulo=modulo, intestazioni=[("Retry-After", str(w))])
+        if not ACC.giusta(q.get("password", [""])[0]):
+            ACC.sbagliata(ip)
+            return _scrivi_pagina_accesso(h, 401, "La password di adesso è sbagliata.", True, modulo=modulo)
+        ACC.riuscita(ip)
+    if len(nuova) < 8:
+        return _scrivi_pagina_accesso(h, 400, "Servono almeno 8 caratteri.", True, modulo=modulo)
+    if nuova != ripeti:
+        return _scrivi_pagina_accesso(h, 400, "Le due password non sono uguali.", True, modulo=modulo)
+    ACC.imposta(nuova)
+    h._biscotto = _set_cookie(h, ACC.biscotto())   # firmato col segreto nuovo: questo dispositivo resta dentro
+    print("Atlante: password per Internet %s" % ("cambiata" if cambio else "impostata"), flush=True)
+    return _scrivi_pagina_accesso(h, 200, "Password salvata. Da Internet l'app la chiederà una volta per dispositivo; "
+                                  "dalla rete Tailscale nessuna differenza.<br><br><a href=\"@R./\">Apri Atlante Musica</a>", modulo=False)
+
+
+def _pagina_accesso(h, entrato, fidato):
+    """GET: la pagina con la password (o l'app, per chi è già dentro). POST: controlla la password.
+    Dalla rete Tailscale o dal Mac: scelta della password, se non c'è ancora (o con ?cambia, per cambiarla)."""
     dati = b""
     if h.command == "POST":
         try:
@@ -2399,12 +2453,15 @@ def _pagina_accesso(h, entrato):
     elif h.command not in ("GET", "HEAD"):
         h.close_connection = True
         return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True)
+    if fidato and (not ACC.ha_password() or "cambia" in parse_qs(urlsplit(h.path).query, keep_blank_values=True)
+                   or b"nuova=" in dati):
+        return _nuova_password(h, dati)
     if entrato:
         return _rimanda(h, _verso(h, "./"))
     attiva = ACC.ha_password()
     if not attiva:
         return _scrivi_pagina_accesso(h, 403 if h.command == "POST" else 200, "L'accesso da Internet non è ancora attivo: "
-                                      "la password si imposta sul Mac. Dalla rete Tailscale l'app si apre come sempre.", modulo=False)
+                                      "la password si sceglie aprendo questa pagina con Tailscale acceso.", modulo=False)
     if h.command != "POST":
         return _scrivi_pagina_accesso(h, 200, "Da Internet la musica del Mac è protetta da una password.")
     if not _stessa_origine(h):
@@ -2437,11 +2494,12 @@ def controlla_accesso(h):
     p = unquote(urlsplit(h.path).path)
     libero = LIBERI.match(p)
     scad = _biscotto_valido(h)
-    entrato = bool(scad) or _fidato(h)
+    fidato = _fidato(h)
+    entrato = bool(scad) or fidato
     if entrato and (not scad or scad - time.time() < ACCESSO_DURATA - ACCESSO_RINNOVO):
         h._biscotto = _set_cookie(h, ACC.biscotto())
     if libero and libero.group(1) == "accesso":
-        _pagina_accesso(h, entrato)
+        _pagina_accesso(h, entrato, fidato)
         return True
     if entrato or libero:
         return False
