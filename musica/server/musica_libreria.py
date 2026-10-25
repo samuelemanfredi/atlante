@@ -29,9 +29,18 @@ Serve anche le API dei moduli extra (pagine in x/, vedi x/CONTRATTO.md) sotto ap
 (yt-dlp), voci e audiolibro (`say` del Mac), ia (Ollama sul Mac), dispositivo. Opzioni: --video-dir, --libri-dir,
 --ia-modello, --ia-indirizzo. In un server esistente: `gestisci_extra(handler, metodo)` in do_GET, do_HEAD,
 do_POST e do_DELETE, prima di `gestisci`.
+
+Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale funnel`, porte 443, 8443 o 10000):
+
+    python3 musica_libreria.py --imposta-password          # una volta: da Internet l'app chiede questa password
+    tailscale funnel --bg --https=10000 8790
+
+Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
 """
 import argparse
+import getpass
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -40,12 +49,14 @@ import os
 import platform
 import queue
 import re
+import secrets
 import shutil
 import signal
 import socket
 import ssl
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2098,9 +2109,380 @@ def gestisci_extra(h, metodo=None):
     return True
 
 
+# ---------- accesso da Internet (Tailscale Funnel) ----------
+#
+# Dal Mac stesso, dalla rete di casa e dalla rete Tailscale (iPhone, Mac) l'app si apre come sempre, senza password:
+# `tailscale serve` aggiunge a ogni richiesta l'identità di chi la fa (Tailscale-User-Login) e toglie quella falsa.
+# Da Internet (`tailscale funnel`) le richieste arrivano con Tailscale-Funnel-Request e senza identità: per loro serve
+# la password, che si imposta sul Mac con
+#
+#     python3 musica_libreria.py --imposta-password [--cache ~/.atlante-musica]
+#
+# Chi la inserisce riceve un biscotto firmato che vale 400 giorni e si rinnova da solo usando l'app. Lo ricevono anche
+# i dispositivi della rete Tailscale: un iPhone che apre l'app con Tailscale acceso poi funziona anche senza.
+# Senza password impostata da Internet non si entra. Cambiare la password fa uscire tutti i dispositivi entrati con
+# quella vecchia (quelli della rete Tailscale rientrano da soli).
+
+ACC = None                        # Accesso, preparato da main()
+ACCESSO_BISCOTTO = "am_accesso"
+ACCESSO_DURATA = 400 * 86400      # il massimo che Safari e Chrome tengono
+ACCESSO_RINNOVO = 30 * 86400      # un biscotto con più di 30 giorni si rinnova alla prima richiesta
+ACCESSO_ITER = 240000             # PBKDF2: ogni tentativo costa al Mac circa un decimo di secondo
+ACCESSO_TENTATIVI = 5             # password sbagliate da uno stesso indirizzo in ACCESSO_FINESTRA, poi si aspetta
+ACCESSO_TENTATIVI_TUTTI = 25      # e da tutti gli indirizzi insieme
+ACCESSO_FINESTRA = 15 * 60
+# senza biscotto passano solo la pagina della password e quello che serve per installare l'app (manifest, icone),
+# e solo nella cartella principale dell'app: nessun altro indirizzo che finisca allo stesso modo (api/…/icon-1.png)
+LIBERI = re.compile(r"^/(accesso|manifest\.webmanifest|icon-(?:maskable-)?\d+\.png|apple-touch-icon(?:-precomposed)?\.png"
+                    r"|favicon\.ico)$")
+RETI_TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+
+
+class Accesso:
+    """Password (PBKDF2) e segreto che firma i biscotti, in <cache>/accesso.json (lo legge solo il proprietario)."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        self.dati, self.mtime = {}, None
+        self.errori = {}    # indirizzo -> istanti delle password sbagliate
+        self.tutti = []     # istanti di tutte le password sbagliate
+
+    def _aggiorna(self):
+        # la password si imposta da un altro processo (--imposta-password) mentre il server gira
+        try:
+            m = os.stat(self.file).st_mtime_ns
+        except OSError:
+            m = None
+        if m != self.mtime:
+            d = {}
+            if m is not None:
+                try:
+                    with open(self.file, encoding="utf-8") as f:
+                        d = json.load(f)
+                except (OSError, ValueError):
+                    d = {}
+            self.dati, self.mtime = (d if isinstance(d, dict) else {}), m
+
+    def _scrivi(self, d):
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, self.file)
+        self.dati, self.mtime = d, os.stat(self.file).st_mtime_ns
+
+    def _segreto(self):
+        self._aggiorna()
+        if not re.fullmatch(r"[0-9a-f]{64}", str(self.dati.get("segreto", ""))):
+            self._scrivi(dict(self.dati, segreto=secrets.token_hex(32)))
+        return bytes.fromhex(self.dati["segreto"])
+
+    def ha_password(self):
+        with self.blocco:
+            self._aggiorna()
+            return bool(self.dati.get("hash"))
+
+    def imposta(self, password):
+        sale = secrets.token_bytes(16)
+        h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), sale, ACCESSO_ITER)
+        with self.blocco:
+            self._aggiorna()
+            d = dict(self.dati, sale=sale.hex(), hash=h.hex(), iter=ACCESSO_ITER)
+            if self.dati.get("hash") or not self.dati.get("segreto"):
+                d["segreto"] = secrets.token_hex(32)   # password cambiata: i biscotti di prima non valgono più
+            self._scrivi(d)
+
+    def giusta(self, password):
+        with self.blocco:
+            self._aggiorna()
+            d = dict(self.dati)
+        try:
+            sale, atteso, n = bytes.fromhex(d["sale"]), bytes.fromhex(d["hash"]), int(d.get("iter") or ACCESSO_ITER)
+        except (KeyError, ValueError, TypeError):
+            return False
+        return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), sale, n), atteso)
+
+    def biscotto(self):
+        corpo = "%d.%s" % (int(time.time()) + ACCESSO_DURATA, secrets.token_hex(8))
+        with self.blocco:
+            k = self._segreto()
+        return corpo + "." + hmac.new(k, corpo.encode("ascii"), hashlib.sha256).hexdigest()
+
+    def scadenza(self, valore):
+        """Scadenza (in secondi) di un biscotto valido; 0 se è falso, scaduto o firmato con un segreto vecchio."""
+        m = re.fullmatch(r"([0-9]{1,12})\.([0-9a-f]{16})\.([0-9a-f]{64})", valore or "")
+        if not m:
+            return 0
+        with self.blocco:
+            self._aggiorna()
+            s = str(self.dati.get("segreto", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", s):
+            return 0
+        firma = hmac.new(bytes.fromhex(s), ("%s.%s" % (m.group(1), m.group(2))).encode("ascii"), hashlib.sha256).hexdigest()
+        scad, ora = int(m.group(1)), time.time()
+        if not hmac.compare_digest(firma, m.group(3)) or not ora < scad <= ora + ACCESSO_DURATA + 60:
+            return 0
+        return scad
+
+    def attesa(self, ip):
+        """Secondi da aspettare prima di riprovare la password da questo indirizzo (0: si può subito)."""
+        ora = time.time()
+        with self.blocco:
+            self.tutti = [t for t in self.tutti if ora - t < ACCESSO_FINESTRA]
+            mie = [t for t in self.errori.get(ip, []) if ora - t < ACCESSO_FINESTRA]
+            if mie:
+                self.errori[ip] = mie
+            else:
+                self.errori.pop(ip, None)
+            w = 0
+            if len(mie) >= ACCESSO_TENTATIVI:
+                w = max(w, mie[-ACCESSO_TENTATIVI] + ACCESSO_FINESTRA - ora)
+            if len(self.tutti) >= ACCESSO_TENTATIVI_TUTTI:
+                w = max(w, self.tutti[-ACCESSO_TENTATIVI_TUTTI] + ACCESSO_FINESTRA - ora)
+            return int(w) + 1 if w > 0 else 0
+
+    def sbagliata(self, ip):
+        ora = time.time()
+        with self.blocco:
+            if len(self.errori) > 5000:   # moltissimi indirizzi diversi: resta il limite su tutti insieme
+                self.errori.clear()
+            self.errori.setdefault(ip, []).append(ora)
+            self.tutti.append(ora)
+
+    def riuscita(self, ip):
+        with self.blocco:
+            self.errori.pop(ip, None)
+
+
+def _ip(testo):
+    try:
+        a = ipaddress.ip_address((testo or "").strip().split("%")[0])
+    except ValueError:
+        return None
+    return a.ipv4_mapped or a if a.version == 6 else a
+
+
+def _ip_tailscale(a):
+    return a is not None and any(a in r for r in RETI_TAILSCALE)
+
+
+def _fidato(h):
+    """Richiesta dal Mac stesso, dalla rete di casa o dalla rete Tailscale: non da Internet."""
+    if h.headers.get("Tailscale-Funnel-Request") is not None:
+        return False
+    vicino = _ip(h.client_address[0])
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:   # nessun proxy davanti: il Mac stesso o, con ATLANTE_ASCOLTO=0.0.0.0, la rete di casa
+        return vicino is not None and (vicino.is_loopback or vicino.is_private or vicino.is_link_local or _ip_tailscale(vicino))
+    if vicino is None or not vicino.is_loopback:
+        return False   # un proxy che non è tailscaled sul Mac: non si sa chi c'è dietro
+    if h.headers.get("Tailscale-User-Login"):
+        return True
+    ultimo = _ip(xff.split(",")[-1])   # l'ultimo l'ha scritto tailscaled, quelli prima possono essere inventati
+    return ultimo is not None and (ultimo.is_loopback or _ip_tailscale(ultimo))
+
+
+def _ip_cliente(h):
+    xff = h.headers.get("X-Forwarded-For")
+    vicino = _ip(h.client_address[0])
+    if xff and vicino is not None and vicino.is_loopback:
+        return xff.split(",")[-1].strip()[:64]
+    return h.client_address[0]
+
+
+def _biscotto_valido(h):
+    for parte in (h.headers.get("Cookie") or "").split(";"):
+        k, _, v = parte.strip().partition("=")
+        if k == ACCESSO_BISCOTTO:
+            s = ACC.scadenza(v.strip())
+            if s:
+                return s
+    return 0
+
+
+def _set_cookie(h, valore):
+    https = (h.headers.get("X-Forwarded-Proto") or "").lower() == "https" or isinstance(h.connection, ssl.SSLSocket)
+    return "%s=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax%s" % (ACCESSO_BISCOTTO, valore, ACCESSO_DURATA,
+                                                                  "; Secure" if https else "")
+
+
+def _verso(h, dove):
+    """`dove` (nella cartella dell'app) con un indirizzo relativo a questa richiesta: va bene anche sotto un prefisso."""
+    return "../" * max(0, urlsplit(h.path).path.count("/") - 1) + dove
+
+
+def _rimanda(h, dove):
+    h.send_response(303)
+    h.send_header("Location", dove)
+    h.send_header("Content-Length", "0")
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+
+
+_PAGINA_ACCESSO = """<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#fa2d48">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Musica">
+<link rel="manifest" href="@Rmanifest.webmanifest">
+<link rel="apple-touch-icon" href="@Rapple-touch-icon.png?v=2">
+<link rel="icon" href="@Ricon-192.png?v=2">
+<title>Atlante Musica</title>
+<style>
+:root{--bg:#fff;--fg:#000;--fg2:rgba(60,60,67,.6);--fill:rgba(118,118,128,.12);--accent:#fa2d48;--bad:#ff3b30;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#fff;--fg2:rgba(235,235,245,.6);--fill:rgba(118,118,128,.24);--accent:#fc3c54;--bad:#ff453a;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{background:var(--bg)}
+body{margin:0;color:var(--fg);font:17px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:400px;margin:0 auto;padding:max(48px,calc(env(safe-area-inset-top) + 32px)) 16px 40px;text-align:center}
+.ic{width:96px;height:96px;border-radius:22px;box-shadow:0 6px 20px rgba(0,0,0,.15)}
+h1{font-size:28px;margin:18px 0 6px}
+p{color:var(--fg2);margin:0 0 22px;font-size:15px}
+.err{color:var(--bad);font-weight:600}
+form{display:flex;flex-direction:column;gap:12px}
+input{font:inherit;color:inherit;width:100%;min-height:50px;padding:12px 14px;border:0;border-radius:12px;background:var(--fill);outline:none}
+input:focus{outline:2px solid var(--accent)}
+button{font:inherit;font-weight:600;min-height:50px;border:0;border-radius:12px;background:var(--accent);color:#fff;cursor:pointer}
+.nome{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+</style>
+</head>
+<body>
+<main>
+<img class="ic" src="@Rapple-touch-icon.png?v=2" alt="">
+<h1>Atlante Musica</h1>
+@C
+</main>
+</body>
+</html>
+"""
+_MODULO_ACCESSO = """<p>@M</p>
+<form method="post" action="@Raccesso">
+<input class="nome" type="text" name="nome" autocomplete="username" value="Atlante Musica" tabindex="-1" aria-hidden="true">
+<input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required autofocus>
+<button type="submit">Entra</button>
+</form>"""
+
+
+def _scrivi_pagina_accesso(h, codice, messaggio, errore=False, modulo=True, intestazioni=()):
+    m = '<span class="err">%s</span>' % messaggio if errore else messaggio
+    c = _MODULO_ACCESSO.replace("@M", m) if modulo else "<p>%s</p>" % m
+    corpo = _PAGINA_ACCESSO.replace("@C", c).replace("@R", _verso(h, "")).encode("utf-8")
+    h.send_response(codice)
+    h.send_header("Content-Type", "text/html; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    for k, v in intestazioni:
+        h.send_header(k, v)
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+
+
+def _pagina_accesso(h, entrato):
+    """GET: la pagina con la password (o l'app, per chi è già dentro). POST: controlla la password."""
+    dati = b""
+    if h.command == "POST":
+        try:
+            n = int(h.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 <= n <= 4096:
+            h.close_connection = True
+            return _scrivi_pagina_accesso(h, 413, "Richiesta non valida.", True)
+        dati = h.rfile.read(n)
+    elif h.command not in ("GET", "HEAD"):
+        h.close_connection = True
+        return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True)
+    if entrato:
+        return _rimanda(h, _verso(h, "./"))
+    attiva = ACC.ha_password()
+    if not attiva:
+        return _scrivi_pagina_accesso(h, 403 if h.command == "POST" else 200, "L'accesso da Internet non è ancora attivo: "
+                                      "la password si imposta sul Mac. Dalla rete Tailscale l'app si apre come sempre.", modulo=False)
+    if h.command != "POST":
+        return _scrivi_pagina_accesso(h, 200, "Da Internet la musica del Mac è protetta da una password.")
+    if not _stessa_origine(h):
+        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True)
+    ip = _ip_cliente(h)
+    w = ACC.attesa(ip)
+    if w:
+        return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
+                                      True, intestazioni=[("Retry-After", str(w))])
+    try:
+        pw = parse_qs(dati.decode("utf-8"), max_num_fields=10).get("password", [""])[0]
+    except (UnicodeDecodeError, ValueError):
+        pw = ""
+    if pw and ACC.giusta(pw):
+        ACC.riuscita(ip)
+        h._biscotto = _set_cookie(h, ACC.biscotto())
+        return _rimanda(h, _verso(h, "./"))
+    ACC.sbagliata(ip)
+    print("Atlante: password sbagliata da %s" % ip, flush=True)
+    return _scrivi_pagina_accesso(h, 401, "Password sbagliata.", True)
+
+
+def controlla_accesso(h):
+    """Da chiamare per prima in do_GET, do_HEAD, do_POST e do_DELETE. True se ha già risposto: pagina della password,
+    rimando lì o 401 per chi arriva da Internet senza biscotto valido. Se no la richiesta prosegue; quando serve, la
+    risposta porta un biscotto nuovo (h._biscotto, scritto da end_headers)."""
+    h._biscotto = None
+    if ACC is None:
+        return False
+    p = unquote(urlsplit(h.path).path)
+    libero = LIBERI.match(p)
+    scad = _biscotto_valido(h)
+    entrato = bool(scad) or _fidato(h)
+    if entrato and (not scad or scad - time.time() < ACCESSO_DURATA - ACCESSO_RINNOVO):
+        h._biscotto = _set_cookie(h, ACC.biscotto())
+    if libero and libero.group(1) == "accesso":
+        _pagina_accesso(h, entrato)
+        return True
+    if entrato or libero:
+        return False
+    if h.command not in ("GET", "HEAD"):
+        h.close_connection = True   # corpo non letto
+    elif h.headers.get("Sec-Fetch-Mode") == "navigate" or p.endswith("/") or p.endswith(".html"):
+        _rimanda(h, _verso(h, "accesso"))   # una pagina: si apre quella della password
+        return True
+    corpo = json.dumps({"errore": "Da Internet Atlante Musica chiede la password", "accesso": True},
+                       ensure_ascii=False).encode("utf-8")
+    h.send_response(401)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.send_header("X-Atlante-Accesso", "richiesto")   # l'app apre la pagina della password
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+    return True
+
+
+def _imposta_password(file):
+    if sys.stdin.isatty():
+        p = getpass.getpass("Nuova password per aprire Atlante Musica da Internet: ")
+        if p != getpass.getpass("Ripetila: "):
+            print("Le due password non sono uguali: non ho cambiato niente.", file=sys.stderr)
+            return 1
+    else:
+        p = sys.stdin.readline().rstrip("\r\n")
+    if len(p) < 8:
+        print("Password troppo corta: servono almeno 8 caratteri. Non ho cambiato niente.", file=sys.stderr)
+        return 1
+    Accesso(file).imposta(p)
+    print("Password impostata (%s). Da Internet l'app la chiede, dalla rete Tailscale no." % file)
+    return 0
+
+
 def main():
+    global ACC
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
-    ap.add_argument("cartelle", nargs="+", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
+    ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
     ap.add_argument("--cache", default="~/.atlante-musica", help="dove tenere indice e copertine")
     ap.add_argument("--app", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."), help="cartella dell'app (index.html)")
@@ -2113,7 +2495,15 @@ def main():
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
+    ap.add_argument("--imposta-password", action="store_true", help="imposta (o cambia) la password per aprire l'app "
+                    "da Internet con `tailscale funnel` e esce; la legge da tastiera o dalla prima riga dello standard input")
     a = ap.parse_args()
+    file_accesso = os.path.join(os.path.expanduser(a.cache), "accesso.json")
+    if a.imposta_password:
+        sys.exit(_imposta_password(file_accesso))
+    if not a.cartelle:
+        ap.error("serve almeno una cartella di musica")
+    ACC = Accesso(file_accesso)
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"
@@ -2141,19 +2531,27 @@ def main():
             return True
 
         def do_GET(self):
+            if controlla_accesso(self):
+                return
             if not gestisci_extra(self, "GET") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_GET()
 
         def do_HEAD(self):
+            if controlla_accesso(self):
+                return
             if not gestisci_extra(self, "HEAD") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
 
         def do_POST(self):
+            if controlla_accesso(self):
+                return
             if not gestisci_extra(self, "POST"):
                 self.close_connection = True   # corpo non letto
                 self.send_error(501, "Unsupported method ('POST')")
 
         def do_DELETE(self):
+            if controlla_accesso(self):
+                return
             if not gestisci_extra(self, "DELETE"):
                 self.close_connection = True
                 self.send_error(501, "Unsupported method ('DELETE')")
@@ -2167,12 +2565,17 @@ def main():
             q = unquote(p)
             if not PREFISSO.match(q) and not EXTRA.match(q) and (p.endswith("/") or p.endswith((".html", ".js", ".css", ".webmanifest"))):
                 self.send_header("Cache-Control", "no-cache")
+            b = getattr(self, "_biscotto", None)   # accesso da Internet: biscotto nuovo o rinnovato
+            if b:
+                self._biscotto = None
+                self.send_header("Set-Cookie", b)
             super().end_headers()
 
         def log_message(self, *x):
             pass
 
-    # ATLANTE_ASCOLTO=127.0.0.1 dietro Tailscale: il server non chiede codici, dalla rete di casa nessuno deve arrivarci
+    # ATLANTE_ASCOLTO=127.0.0.1 dietro Tailscale: dalla rete di casa nessuno deve arrivarci. La password la chiede
+    # solo a chi arriva da Internet (tailscale funnel): vedi controlla_accesso
     ascolto = os.environ.get("ATLANTE_ASCOLTO", "0.0.0.0")
     ThreadingHTTPServer.request_queue_size = 128   # con 5, dietro Tailscale le copertine davano 502
     srv = ThreadingHTTPServer((ascolto, a.porta), H)

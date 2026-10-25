@@ -13,10 +13,18 @@
     let t = $('axToast'); if (!t) { t = document.createElement('div'); t.id = 'axToast'; document.body.appendChild(t); }
     t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600);
   }
+  // da Internet senza password il Mac risponde 401: la pagina della password la apre l'app che ospita il modulo
+  function accesso() {
+    if (host && host.accesso) host.accesso(); else location.href = new URL('../accesso', location.href).href;
+  }
   // fetch con limite d'attesa (un Mac in stop può tenere la connessione aperta senza rispondere)
   async function fetchT(url, opt, ms) {
     const c = new AbortController(), tm = setTimeout(() => c.abort(), ms || 20000);
-    try { return await fetch(url, Object.assign({}, opt, {signal:c.signal})); } finally { clearTimeout(tm); }
+    try {
+      const r = await fetch(url, Object.assign({}, opt, {signal:c.signal}));
+      if (r.status === 401 && r.headers.get('X-Atlante-Accesso')) accesso();
+      return r;
+    } finally { clearTimeout(tm); }
   }
   // server del Mac: AX.api('stato'), AX.api('video', {method:'POST', body:{...}})
   async function api(path, opt) {

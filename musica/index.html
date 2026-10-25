@@ -664,10 +664,22 @@ const noKeep = new Set();     // brani tolti a mano dall'iPhone: ascoltandoli no
 // fetch con limite d'attesa: se il Mac non risponde non si resta appesi. Il limite vale anche per il contenuto:
 // se a metà risposta non arriva più niente per `ms` (Mac in stop, disco USB bloccato, rete che cambia) si annulla.
 const STREAMS = (() => { try { return !!new Response(new ReadableStream()).body; } catch (e) { return false; } })();
+// aperta da Internet (tailscale funnel) senza password o con una vecchia: il Mac risponde 401 e si apre la sua pagina
+// della password, che poi torna qui. Se sta suonando un brano già sull'iPhone si aspetta la pausa, per non interromperlo.
+let accessoChiesto = false;
+function chiediAccesso() {
+  if (accessoChiesto) return;
+  accessoChiesto = true;
+  const suona = () => { try { return ALLAU.some(a => !a.paused); } catch (e) { return false; } };
+  if (!suona()) { location.href = 'accesso'; return; }
+  toast('Da Internet il Mac chiede la password: si apre quando metti in pausa', true);
+  const t = setInterval(() => { if (!suona()) { clearInterval(t); location.href = 'accesso'; } }, 1000);
+}
 function fetchT(url, opt, ms) {
   const c = new AbortController(); let tm = setTimeout(() => c.abort(), ms);
   return fetch(url, Object.assign({}, opt, {signal:c.signal})).then(r => {
     clearTimeout(tm);
+    if (r.status === 401 && r.headers.get('X-Atlante-Accesso')) chiediAccesso();
     if (!r.body || !STREAMS) return r;
     const rd = r.body.getReader();
     const body = new ReadableStream({
@@ -2041,7 +2053,7 @@ window.AM = {
   seek(t) { try { au.currentTime = t; } catch (e) {} },
   now() { const t = curId && TT(curId); return t ? {id:t.ext ? t.id.slice(2) : t.id, title:t.title, artist:t.artist || '', album:t.album || '', cover:coverUrl(t.cover) ? new URL(coverUrl(t.cover), location.href).href : '', playing:!au.paused, ext:!!t.ext, t:au.currentTime || 0, d:isFinite(au.duration) ? au.duration : 0} : null; },
   onChange(cb) { xSubs.add(cb); return () => xSubs.delete(cb); },
-  toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }
+  toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }, accesso() { chiediAccesso(); }
 };
 ['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => auOn(n, xNotify));
 setInterval(() => { if (xSubs.size && !au.paused) xNotify(); }, 1000);

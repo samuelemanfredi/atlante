@@ -15,6 +15,8 @@ Il server sul Mac (`musica/server/musica_libreria.py`) serve sia l'app sia quest
 - Niente `alert()`/`confirm()`: usare `AX.toast` e controlli nella pagina.
 
 ## API del Mac (`AX.api(path, opt)` → JSON; errori: `{errore:"testo"}` con codice ≥ 400)
+Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 con `X-Atlante-Accesso: richiesto`: `AX.fetchT` (e quindi `AX.api`, `AX.proxy`) fa aprire all'app la pagina della password.
+
 | Metodo | Percorso | Risposta |
 |---|---|---|
 | GET | `stato` | `{ytdlp:bool, ffmpeg:bool, say:bool, ollama:bool, modelli:[nomi], video_dir, libri_dir, sistema}` |
