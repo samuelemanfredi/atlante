@@ -728,7 +728,7 @@ class Libreria:
 
 LIB = None
 INDIRIZZO = ""   # indirizzo https fisso dell'app (facoltativo): l'app lo propone a chi la apre in http
-PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna)(?:/([^/]+))?$")
+PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna|pezzo)(?:/([^/]+))?$")
 
 
 def _invia_file(h, percorso, tipo, intestazioni=None):
@@ -789,6 +789,24 @@ def _json(h, dati, stato=200):
         h.wfile.write(corpo)
 
 
+PEZZO_HZ = 11025   # basta per il ritmo (cassa, rullante, charleston fino a 5 kHz) e pesa poco: 30 s = 660 KB
+
+
+def _pezzo_wav(percorso, da, durata):
+    """WAV mono 11025 Hz di un pezzo di brano (da «da» secondi, lungo «durata», al più 60 s), decodificato da ffmpeg con
+    il taglio preciso al campione. None se ffmpeg manca. Il primo campione è proprio il secondo «da» del brano."""
+    ff = _programma("ffmpeg")
+    if not ff:
+        return None
+    da, durata = max(0.0, da), min(60.0, max(1.0, durata))
+    args = [ff, "-nostdin", "-v", "error", "-ss", "%.3f" % da, "-t", "%.3f" % durata, "-i", percorso,
+            "-map", "0:a:0", "-ac", "1", "-ar", str(PEZZO_HZ), "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
+    r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, env=_ambiente())
+    if r.returncode != 0 or len(r.stdout) < 64:
+        raise RuntimeError("ffmpeg: " + (r.stderr.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
+    return r.stdout
+
+
 def gestisci(h):
     """Da chiamare in do_GET / do_HEAD di un server esistente. True se ha risposto."""
     m = PREFISSO.match(unquote(urlsplit(h.path).path))
@@ -809,6 +827,30 @@ def gestisci(h):
                 _json(h, {"errore": "Brano non trovato: il disco di backup è collegato?"}, 404)
             else:
                 _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"))
+        elif cosa == "pezzo":   # inizio o fine di un brano, già decodificati: l'app ne misura i BPM per il mix a tempo
+            p = LIB.percorsi.get(arg or "")
+            q = parse_qs(urlsplit(h.path).query)
+            try:
+                da, durata = float((q.get("da") or ["0"])[0]), float((q.get("durata") or ["30"])[0])
+            except ValueError:
+                da = durata = None
+            if not p or not os.path.isfile(p):
+                _json(h, {"errore": "Brano non trovato: il disco di backup è collegato?"}, 404)
+            elif da is None:
+                _json(h, {"errore": "da e durata devono essere numeri"}, 400)
+            else:
+                corpo = _pezzo_wav(p, da, durata)
+                if corpo is None:
+                    _json(h, {"errore": "ffmpeg non è installato sul Mac: brew install ffmpeg"}, 501)
+                else:
+                    h._musica_risposto = True
+                    h.send_response(200)
+                    h.send_header("Content-Type", "audio/wav")
+                    h.send_header("Content-Length", str(len(corpo)))
+                    h.send_header("Cache-Control", "private, max-age=2592000")
+                    h.end_headers()
+                    if h.command != "HEAD":
+                        h.wfile.write(corpo)
         elif cosa == "copertina":
             nome = os.path.basename(arg or "")
             p = os.path.join(LIB.dir_copertine, nome)

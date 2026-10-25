@@ -306,6 +306,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
       <div class="qbar"><h4>Successivi<small id="qFrom"></small></h4>
         <button class="tg" id="tShuf" data-a="shuffle" aria-label="Casuale"></button>
         <button class="tg" id="tRep" data-a="repeat" aria-label="Ripeti"></button>
+        <button class="tg" id="tMix" data-a="mix" aria-label="Mix a tempo"></button>
       </div>
       <div class="qlist" id="qlist"></div>
     </div>
@@ -335,6 +336,8 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 <input type="file" id="plIn" multiple accept=".txt,.m3u,.m3u8,.xml,text/plain,text/xml" hidden>
 <input type="file" id="dirIn" multiple webkitdirectory hidden>
 <audio id="au" preload="auto" x-webkit-airplay="allow"></audio>
+<audio id="au2" preload="auto" x-webkit-airplay="allow"></audio>
+<audio id="auX" preload="auto" x-webkit-airplay="allow"></audio>
 
 <script>
 'use strict';
@@ -374,6 +377,7 @@ const I = {
   share:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M7 10.5H6a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V12A1.5 1.5 0 0 0 18 10.5h-1"/></g>',
   cast:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/></g><path d="M12 14.5l5 6H7z"/>',
   grid:'<path d="M4.5 3h5A1.5 1.5 0 0 1 11 4.5v5A1.5 1.5 0 0 1 9.5 11h-5A1.5 1.5 0 0 1 3 9.5v-5A1.5 1.5 0 0 1 4.5 3zm10 0h5A1.5 1.5 0 0 1 21 4.5v5a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 13 9.5v-5A1.5 1.5 0 0 1 14.5 3zm-10 10h5a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 9.5 21h-5A1.5 1.5 0 0 1 3 19.5v-5A1.5 1.5 0 0 1 4.5 13zm10 0h5a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5h-5a1.5 1.5 0 0 1-1.5-1.5v-5a1.5 1.5 0 0 1 1.5-1.5z"/>',
+  mix:'<path fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" d="M12 12c-1.8-2.4-3.4-4-5.5-4a4 4 0 0 0 0 8c2.1 0 3.7-1.6 5.5-4zm0 0c1.8 2.4 3.4 4 5.5 4a4 4 0 0 0 0-8c-2.1 0-3.7 1.6-5.5 4z"/>',
   close:'<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   down:'<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></g>',
   ok:'<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zm4.2 6.3-5.4 5.7-2.9-2.8-1.2 1.3 4.1 4 6.6-7z"/>',
@@ -428,7 +432,13 @@ const tabs = {home:[{v:'home'}], lib:[{v:'lib'}], search:[{v:'search'}], altro:[
 let tab = 'lib';
 let q = '';
 let lists = [];
-const au = $('au');
+// due lettori per la musica: nel passaggio a tempo il brano che finisce e quello che comincia suonano insieme, poi
+// «au» diventa quello nuovo. Il terzo (auX) è per podcast e audiolibri: non passa mai dal mixer, così suonano anche
+// quelli di altri siti (il mixer dell'iPhone li renderebbe muti)
+const DECKS = [$('au'), $('au2')], AUX = $('auX'), ALLAU = DECKS.concat(AUX);
+let au = DECKS[0];
+// eventi del lettore: arrivano da tutti e tre, ma contano solo quelli del lettore in uso
+const auOn = (ev, fn) => ALLAU.forEach(el => el.addEventListener(ev, e => { if (el === au) fn(e); }));
 let curUrl = null, curId = null;
 
 /* ---------- lettura dei tag ---------- */
@@ -1351,6 +1361,9 @@ async function load(i, play, at) {
     return;
   }
   S.qi = i;
+  xfAbort();
+  const el = t.ext ? AUX : au === AUX ? DECKS[0] : au;
+  if (el !== au) { au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} au = el; }
   if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null;
   if (t.ext) au.src = t.url;
   else if (f) { saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
@@ -1361,7 +1374,7 @@ async function load(i, play, at) {
   if (play) au.play().catch(() => {});
   updateNow(); saveState();
 }
-function stop() { loadTok++; seekOnLoad(0); au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} curId = null; S.queue = []; S.orig = []; S.qi = -1; if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null; updateNow(); saveState(); }
+function stop() { loadTok++; xfAbort(); seekOnLoad(0); au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} curId = null; S.queue = []; S.orig = []; S.qi = -1; if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null; updateNow(); saveState(); }
 function playList(ids, start, shuf, from) {
   if (!ids.length) return;
   errRun = 0;
@@ -1419,6 +1432,7 @@ function updateNow() {
   $('miniPP').setAttribute('aria-label', playing ? 'Pausa' : 'Riproduci'); $('bPP').setAttribute('aria-label', playing ? 'Pausa' : 'Riproduci');
   $('np').classList.toggle('paused', !playing);
   $('tShuf').innerHTML = ic('shuf'); $('tShuf').classList.toggle('on', S.shuffle);
+  $('tMix').innerHTML = ic('mix'); $('tMix').classList.toggle('on', MIX.on);
   $('tRep').innerHTML = ic(S.repeat === 'one' ? 'rep1' : 'rep'); $('tRep').classList.toggle('on', S.repeat !== 'off');
   $('bShufMain').innerHTML = ic('shuf'); $('bShufMain').classList.toggle('on', S.shuffle);
   $('bRepMain').innerHTML = ic(S.repeat === 'one' ? 'rep1' : 'rep'); $('bRepMain').classList.toggle('on', S.repeat !== 'off');
@@ -1475,9 +1489,9 @@ if ('mediaSession' in navigator) {
   sa('seekbackward', e => { au.currentTime = Math.max(0, au.currentTime - (e.seekOffset || 10)); });
   sa('seekforward', e => { au.currentTime = Math.min(au.duration || 0, au.currentTime + (e.seekOffset || 10)); });
 }
-au.addEventListener('play', () => { updateNow(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
-au.addEventListener('pause', () => { updateNow(); saveState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
-au.addEventListener('timeupdate', tick);
+auOn('play', () => { updateNow(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+auOn('pause', () => { updateNow(); saveState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
+auOn('timeupdate', tick);
 // brano del Mac che ha suonato davvero (HEARD secondi effettivi, i salti non contano; metà per i brani brevissimi): resta sull'iPhone
 function playedSecs() { let s = 0; const p = au.played; for (let i = 0; i < p.length; i++) s += p.end(i) - p.start(i); return s; }
 function checkHeard() {
@@ -1485,11 +1499,11 @@ function checkHeard() {
   const d = au.duration, need = isFinite(d) && d > 0 ? Math.min(HEARD, d / 2) : HEARD;
   if (playedSecs() >= need) { keptFor = curId; keep(curId); }
 }
-au.addEventListener('timeupdate', checkHeard);
-au.addEventListener('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
-au.addEventListener('ended', () => { checkHeard(); next(true); });
+auOn('timeupdate', checkHeard);
+auOn('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
+auOn('ended', () => { checkHeard(); next(true); });
 let countFor = null, errRun = 0;
-au.addEventListener('playing', () => {
+auOn('playing', () => {
   errRun = 0;
   const id = curId, t = T.get(id); if (!t) return;
   if (countFor === id) { countFor = null; t.plays = (t.plays || 0) + 1; t.last = Date.now(); dbPut('meta', t).catch(() => {}); }
@@ -1500,7 +1514,7 @@ async function streamWhy(t) {
   try { const r = await fetchT(API + 'file/' + encodeURIComponent(t.sid), {method:'HEAD', cache:'no-store'}, 6000); return r.ok ? 'ok' : r.status === 404 ? 'disk' : 'mac'; }
   catch (e) { return 'mac'; }
 }
-au.addEventListener('error', async () => {
+auOn('error', async () => {
   if (!au.getAttribute('src')) return;
   const id = curId, t = TT(id), stream = !!t && t.remote && !saved.has(t.id);
   countFor = null; errRun++;
@@ -1517,14 +1531,276 @@ au.addEventListener('error', async () => {
   if (S.qi < S.queue.length - 1) setTimeout(() => { if (id === curId) next(false); }, 600);
 });
 
+/* ---------- mix a tempo: passaggio tra i brani adattato ai BPM ----------
+   Negli ultimi secondi il brano che finisce accelera o rallenta (senza cambiare tonalità) fino ai BPM del successivo;
+   il successivo parte sul battito e i battiti dei due restano allineati mentre il volume passa dall'uno all'altro.
+   I BPM si misurano sui 30 s finali del brano in corso e sui 30 s iniziali del successivo (dal file sull'iPhone, o dal Mac
+   che manda il pezzo già decodificato), una volta sola per brano. Se i ritmi non si riconoscono o sono troppo lontani,
+   resta una dissolvenza normale. */
+const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0};
+let userVol = 1;
+function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iPhone il volume dei lettori non si cambia: lo fa il mixer)
+  const g = el._g == null ? 1 : el._g;
+  if (MIX.gains.has(el)) { el.volume = 1; return; }
+  try { el.volume = Math.max(0, Math.min(1, userVol * g)); } catch (e) {}
+}
+function setGain(el, g) { el._g = g; if (MIX.gains.has(el)) { const n = MIX.gains.get(el).gain; try { n.cancelScheduledValues(MIX.ctx.currentTime); n.setValueAtTime(g, MIX.ctx.currentTime); } catch (e) { n.value = g; } } else applyVol(el); }
+// iPhone e iPad: il volume dei lettori è fisso, la dissolvenza passa da un piccolo mixer (Web Audio). Si prepara al primo
+// tocco (serve un gesto) e con la sessione audio «playback», che lo lascia suonare anche a schermo bloccato.
+const NEEDS_MIXER = isIOS;
+function mixerInit() {
+  if (MIX.ctx || !NEEDS_MIXER || !MIX.on || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    else return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
+    const ctx = new AudioContext({latencyHint:'playback'});
+    DECKS.forEach(el => { const g = ctx.createGain(); ctx.createMediaElementSource(el).connect(g); g.connect(ctx.destination); MIX.gains.set(el, g); applyVol(el); });
+    MIX.ctx = ctx; ctx.resume().catch(() => {});
+    ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && !au.paused && au !== AUX) ctx.resume().catch(() => {}); });
+  } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
+}
+addEventListener('pointerdown', () => { mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {}); }, {capture:true, passive:true});
+// controllo di sicurezza: se a schermo bloccato l'iPhone ferma il mixer mentre la musica dovrebbe suonare, al ritorno
+// il mixer si spegne per sempre (il mix resta a tempo, con un taglio sul battito invece della dissolvenza)
+document.addEventListener('visibilitychange', () => {
+  if (!MIX.ctx) return;
+  if (document.hidden) { setTimeout(() => { if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && au !== AUX) ls.set('am-mix-noweb-ko', true); }, 2500); return; }
+  if (ls.get('am-mix-noweb-ko', false)) { ls.set('am-mix-noweb', true); ls.set('am-mix-noweb-ko', false); toast('La dissolvenza è stata spenta: a schermo bloccato fermava la musica. Il mix a tempo resta.', true); setTimeout(() => location.reload(), 3000); }
+  else if (MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+});
+function setMix(on) {
+  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else mixerInit();
+  updateNow(); toast(on ? 'Mix a tempo: gli ultimi ' + MIX.X + ' secondi si adattano ai BPM del brano successivo' : 'Mix a tempo disattivato');
+}
+
+/* misura dei BPM: flusso spettrale (FFT 1024, passo 128 a 11025 Hz ≈ 86 misure al secondo), autocorrelazione con
+   le armoniche e preferenza per i tempi tra 90 e 160, poi la fase del primo battito con un pettine sui colpi */
+const BPMC = new Map(Object.entries(ls.get('am-bpm', {})));
+let bpmT = 0;
+function bpmPut(k, v) { BPMC.set(k, v); clearTimeout(bpmT); bpmT = setTimeout(() => { let e = [...BPMC.entries()]; if (e.length > 4000) e = e.slice(-4000); ls.set('am-bpm', Object.fromEntries(e)); }, 2000); }
+const FFTN = 1024, FFT_TW = (() => { const c = new Float32Array(FFTN / 2), s = new Float32Array(FFTN / 2); for (let i = 0; i < FFTN / 2; i++) { c[i] = Math.cos(-2 * Math.PI * i / FFTN); s[i] = Math.sin(-2 * Math.PI * i / FFTN); } return [c, s]; })();
+const HANN = (() => { const w = new Float32Array(FFTN); for (let i = 0; i < FFTN; i++) w[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFTN - 1)); return w; })();
+function fftMag(re, im, out) {   // FFT reale sul posto (radice 2), modulo dei primi out.length canali
+  const n = FFTN;
+  for (let i = 1, j = 0; i < n; i++) { let b = n >> 1; for (; j & b; b >>= 1) j ^= b; j ^= b; if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+  for (let len = 2; len <= n; len <<= 1) {
+    const h = len >> 1, st = n / len;
+    for (let i = 0; i < n; i += len) for (let k = 0; k < h; k++) {
+      const c = FFT_TW[0][k * st], s = FFT_TW[1][k * st], a = i + k, b = a + h;
+      const tr = re[b] * c - im[b] * s, ti = re[b] * s + im[b] * c;
+      re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+    }
+  }
+  for (let k = 0; k < out.length; k++) out[k] = Math.hypot(re[k], im[k]);
+}
+function beatGrid(x, sr) {
+  const H = 128, fps = sr / H, nF = Math.floor((x.length - FFTN) / H);
+  if (nF < fps * 8) return null;   // meno di 8 s: troppo poco per un tempo affidabile
+  const K = Math.min(FFTN / 2, Math.round(5000 / (sr / FFTN)));
+  const re = new Float32Array(FFTN), im = new Float32Array(FFTN), mag = new Float32Array(K), prev = new Float32Array(K), on = new Float32Array(nF);
+  for (let f = 0; f < nF; f++) {
+    const o = f * H; for (let i = 0; i < FFTN; i++) { re[i] = x[o + i] * HANN[i]; im[i] = 0; }
+    fftMag(re, im, mag);
+    let sum = 0; for (let k = 1; k < K; k++) { const l = Math.log1p(100 * mag[k]); const d = l - prev[k]; if (d > 0) sum += d; prev[k] = l; }
+    on[f] = f ? sum : 0;
+  }
+  // via la tendenza lenta (media mobile di ~1 s), restano i colpi
+  const W = Math.round(fps), env = new Float32Array(nF); let acc = 0;
+  for (let f = 0; f < nF; f++) { acc += on[f]; if (f >= W) acc -= on[f - W]; const m = acc / Math.min(f + 1, W); env[f] = Math.max(0, on[f] - m); }
+  const maxLag = Math.ceil(4 * 60 * fps / 70) + 2, ac = new Float32Array(maxLag + 1);
+  for (let L = 0; L <= maxLag; L++) { let s2 = 0; for (let f = L; f < nF; f++) s2 += env[f] * env[f - L]; ac[L] = s2 / (nF - L); }
+  if (!(ac[0] > 0)) return null;
+  const aci = l => { const a = Math.floor(l), b = l - a; return a + 1 <= maxLag ? ac[a] * (1 - b) + ac[a + 1] * b : 0; };
+  let best = 0, bs = -1, tot = 0, n = 0;
+  for (let bpm = 70; bpm <= 190; bpm += 0.1) {
+    const L = 60 * fps / bpm;
+    // armoniche del battito più il mezzo battito (le crome): così 172 non diventa 115 (i 2/3) né 86 (la metà)
+    let sc = aci(L / 2); for (let k = 1; k <= 4; k++) sc += aci(k * L) / Math.sqrt(k);
+    const pr = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 122) / 1.0, 2));
+    sc *= pr; tot += sc; n++;
+    if (sc > bs) { bs = sc; best = bpm; }
+  }
+  const conf = bs / (tot / n);
+  const L = 60 * fps / best; let ph = 0, ps = -1;
+  const oni = l => { const a = Math.floor(l), b = l - a; return a + 1 < nF ? env[a] * (1 - b) + env[a + 1] * b : 0; };
+  for (let p = 0; p < L; p += 0.25) { let sc = 0; for (let t = p; t < nF - 1; t += L) sc += oni(t); if (sc > ps) { ps = sc; ph = p; } }
+  return {bpm:Math.round(best * 10) / 10, b0:(ph * H + FFTN / 2) / sr, c:Math.round(conf * 100) / 100};
+}
+function wavPCM(buf) {   // WAV mono PCM 16 bit (dal Mac) → campioni
+  const v = new DataView(buf); if (v.getUint32(0) !== 0x52494646) return null;
+  let p = 12, sr = 11025, ch = 1;
+  while (p + 8 <= v.byteLength) {
+    const id = v.getUint32(p), sz = v.getUint32(p + 4, true);
+    if (id === 0x666d7420) { ch = v.getUint16(p + 10, true); sr = v.getUint32(p + 12, true); }
+    if (id === 0x64617461) { const n = Math.floor(Math.min(sz, v.byteLength - p - 8) / 2 / ch), x = new Float32Array(n); for (let i = 0; i < n; i++) x[i] = v.getInt16(p + 8 + i * 2 * ch, true) / 32768; return {x, sr}; }
+    p += 8 + sz + (sz & 1);
+  }
+  return null;
+}
+async function decodeMono(buf) {   // file intero dall'iPhone → mono a 11025 Hz
+  const oc = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 1, 22050);
+  const ab = await new Promise((ok, ko) => { const r = oc.decodeAudioData(buf, ok, ko); if (r && r.then) r.then(ok, ko); });
+  const n = Math.floor(ab.length / 2), x = new Float32Array(n), cs = [];
+  for (let c = 0; c < ab.numberOfChannels; c++) cs.push(ab.getChannelData(c));
+  for (let i = 0; i < n; i++) { let s2 = 0; for (const d of cs) s2 += d[2 * i] + d[2 * i + 1]; x[i] = s2 / (2 * cs.length); }
+  return {x, sr:ab.sampleRate / 2, dur:ab.duration};
+}
+// griglia dei battiti di un pezzo del brano: part 'i' = primi 30 s, 'f' = ultimi 30 s. b0 è in secondi del brano.
+const gridWait = new Map();
+function grid(id, part) {
+  const k = id + '|' + part; if (BPMC.has(k)) return Promise.resolve(BPMC.get(k));
+  if (gridWait.has(k)) return gridWait.get(k);
+  const pr = (async () => {
+    const t = T.get(id); if (!t) return null;
+    let seg = null, da = 0;
+    const f = await getFile(id);
+    if (f) {
+      if (f.size > 60e6) return null;
+      const d = await decodeMono(await f.arrayBuffer());
+      da = part === 'i' ? 0 : Math.max(0, d.dur - 30);
+      const a = Math.floor(da * d.sr), b = part === 'i' ? Math.min(d.x.length, Math.floor(30 * d.sr)) : d.x.length;
+      seg = {x:d.x.subarray(a, b), sr:d.sr};
+    } else if (t.remote && SRV && t.sid) {
+      const dur = t.duration || 0; if (part === 'f' && !dur) return null;
+      da = part === 'i' ? 0 : Math.max(0, dur - 30);
+      const r = await fetchT(API + 'pezzo/' + encodeURIComponent(t.sid) + '?da=' + da.toFixed(3) + '&durata=30', {}, 20000);
+      if (!r.ok) return null;
+      seg = wavPCM(await r.arrayBuffer());
+    }
+    if (!seg) return null;
+    await new Promise(ok => setTimeout(ok, 0));
+    const g = beatGrid(seg.x, seg.sr); if (!g) return null;
+    const v = {bpm:g.bpm, b0:Math.round((da + g.b0) * 1000) / 1000, c:g.c};
+    bpmPut(k, v); return v;
+  })().catch(() => null).finally(() => gridWait.delete(k));
+  gridWait.set(k, pr); return pr;
+}
+
+// prossimo brano della coda come lo sceglierebbe la fine del brano (-1: niente passaggio)
+function nextIdx() {
+  if (!S.queue.length || S.repeat === 'one') return -1;
+  if (S.qi < S.queue.length - 1) return S.qi + 1;
+  return S.repeat === 'all' && S.queue.length > 1 ? 0 : -1;
+}
+const otherDeck = () => au === DECKS[0] ? DECKS[1] : DECKS[0];
+const wrap = x => x - Math.round(x);   // fase in [-0.5, 0.5)
+async function xfPrepare(P) {
+  const [ga, gb] = await Promise.all([grid(P.idA, 'f'), grid(P.idB, 'i')]);
+  if (MIX.plan !== P) return;
+  const d = au.duration, X = MIX.X;
+  P.ga = ga; P.gb = gb; P.r = 1; P.f = 1; P.match = false;
+  if (ga && gb && ga.c >= 1.15 && gb.c >= 1.15) {
+    let bf = 1, be = 9; for (const f of [0.5, 1, 2]) { const e = Math.abs(gb.bpm * f / ga.bpm - 1); if (e < be) { be = e; bf = f; } }
+    if (be <= 0.12) { P.match = true; P.f = bf; P.r = gb.bpm * bf / ga.bpm; }
+  }
+  const TA = 60 / (P.ga ? P.ga.bpm : 120);
+  let tS = d - X * P.r;
+  if (P.match) { const k = Math.round((tS - ga.b0) / TA); tS = ga.b0 + k * TA; if (d - tS < X * P.r * 0.7) tS -= TA * Math.ceil((X * P.r * 0.7 - (d - tS)) / TA); }
+  P.tS = tS; P.tR = tS - 4; P.startB = P.match ? gb.b0 : 0;
+  // il successivo, pronto sull'altro lettore, fermo sul primo battito
+  const tb = T.get(P.idB), el = otherDeck(), f = await getFile(P.idB);
+  if (MIX.plan !== P || !tb) return;
+  if (P.url) URL.revokeObjectURL(P.url);
+  P.url = f ? URL.createObjectURL(f) : null;
+  el.playbackRate = 1; setGain(el, 0); P.el = el;
+  // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito
+  el.muted = true;
+  el.addEventListener('playing', () => { el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; if (MIX.plan === P) P.st = 'ready'; }, {once:true});
+  el.src = P.url || API + 'file/' + encodeURIComponent(tb.sid);
+  const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
+}
+function xfAbort() {
+  const A = MIX.act; if (A) xfEnd();
+  const P = MIX.plan; MIX.plan = null;
+  if (P) {
+    if (P.el && P.el !== au) { P.el.muted = false; P.el.pause(); P.el.removeAttribute('src'); try { P.el.load(); } catch (e) {} setGain(P.el, 1); }
+    if (P.url && (!P.el || P.el !== au)) URL.revokeObjectURL(P.url);
+    if (P.idA === curId) au.playbackRate = 1;
+  }
+  setGain(au, 1); au.playbackRate = 1;
+}
+function xfStart(P) {
+  const out = au, inn = P.el;
+  checkHeard();   // il brano che finisce ha suonato: si salva come sempre
+  inn.playbackRate = 1;
+  try { inn.preservesPitch = true; inn.webkitPreservesPitch = true; } catch (e) {}
+  au = inn;
+  const p = inn.play(); if (p && p.catch) p.catch(() => {});
+  // da qui il brano in corso è il nuovo (titolo, schermata di blocco, coda), come in Apple Music durante la dissolvenza
+  S.qi = P.j; curId = P.idB; keptFor = null; countFor = P.idB;
+  const outUrl = curUrl; curUrl = P.url; P.url = null;
+  if (typeof dropOrph === 'function') dropOrph(); updateNow(); saveState(); markCur();
+  const W = Math.max(2, (out.duration - out.currentTime) / Math.max(0.5, out.playbackRate));
+  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P};
+  MIX.plan = null;
+  if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); xfEnd(); return; }   // iPhone senza mixer: niente dissolvenza, taglio sul battito
+  if (MIX.gains.size) {   // iPhone: curve di volume precise sull'orologio audio, anche a schermo bloccato
+    const N = 64, up = new Float32Array(N), dn = new Float32Array(N);
+    for (let i = 0; i < N; i++) { const q = i / (N - 1); up[i] = Math.sin(q * Math.PI / 2); dn[i] = Math.cos(q * Math.PI / 2); }
+    const t = MIX.ctx.currentTime;
+    try { const gi = MIX.gains.get(inn).gain, go = MIX.gains.get(out).gain; gi.cancelScheduledValues(t); go.cancelScheduledValues(t); gi.setValueCurveAtTime(up, t, W); go.setValueCurveAtTime(dn, t, W); inn._g = 1; out._g = 0; } catch (e) {}
+  }
+  xfLoop();
+}
+function xfEnd() {
+  const A = MIX.act; if (!A) return; MIX.act = null;
+  const out = A.out;
+  out.pause(); out.playbackRate = 1; out.removeAttribute('src'); try { out.load(); } catch (e) {}
+  setGain(out, 1); setGain(A.inn, 1);
+  if (A.outUrl) URL.revokeObjectURL(A.outUrl);
+}
+function xfRun() {
+  const A = MIX.act; if (!A) return;
+  const out = A.out, inn = A.inn, P = A.P;
+  const q = (performance.now() - A.t0) / 1000 / A.W;
+  if (q >= 1 || out.ended || out.paused && !inn.paused && q > 0.05) { xfEnd(); return; }
+  if (!MIX.gains.size) { setGain(inn, Math.sin(Math.min(1, q) * Math.PI / 2)); setGain(out, Math.cos(Math.min(1, q) * Math.PI / 2)); }
+  if (P.match && !inn.paused && inn.readyState >= 3) {
+    // i battiti del brano che finisce inseguono quelli del nuovo: piccola correzione di velocità (al più ±5%)
+    const TA = 60 / P.ga.bpm, TBe = 60 / (P.gb.bpm * P.f);
+    const e = wrap((out.currentTime - P.ga.b0) / TA - (inn.currentTime - P.gb.b0) / TBe);
+    const k = Math.max(-0.05, Math.min(0.05, -e * TBe / 1.5));
+    out.playbackRate = P.r * (1 + k);
+  }
+}
+function xfLoop() { clearInterval(MIX.loop); MIX.loop = setInterval(() => { if (MIX.act) xfRun(); else if (MIX.plan) xfTick(); else clearInterval(MIX.loop); }, 40); }
+function xfTick() {
+  if (MIX.act) { xfRun(); return; }
+  if (!MIX.on || au === AUX || au.paused) return;
+  const t = T.get(curId), d = au.duration, c = au.currentTime;
+  if (!t || !isFinite(d) || d < 45) return;
+  const j = nextIdx(), idB = j >= 0 ? S.queue[j] : null, tb = idB && T.get(idB);
+  if (!tb || idB === curId || !canPlay(idB) || tb.duration && tb.duration < 30) { if (MIX.plan) xfAbort(); return; }
+  let P = MIX.plan;
+  if (P && (P.idA !== curId || P.idB !== idB)) { xfAbort(); P = null; }
+  if (!P) { if (d - c > 40 || d - c < MIX.X + 2) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(() => { if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
+  if (P.st !== 'ready') return;
+  if (c < P.tR) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
+  if (c < P.tS) {   // accelera o rallenta piano verso i BPM del successivo (forma a S)
+    const q = Math.min(1, (c - P.tR) / Math.max(0.1, P.tS - P.tR)), sq = q * q * (3 - 2 * q);
+    au.playbackRate = 1 + (P.r - 1) * sq;
+    try { au.preservesPitch = true; au.webkitPreservesPitch = true; } catch (e) {}
+    return;
+  }
+  if (P.el.readyState < 3) { if (d - c < 3) xfAbort(); return; }   // il successivo non è ancora pronto: si aspetta il battito dopo
+  if (P.match) {   // si parte sul battito: se questo è già passato da più di un decimo, si aspetta il prossimo
+    const TA = 60 / P.ga.bpm, ph = wrap((c - P.ga.b0) / TA);
+    if (ph > 0.1 && ph < 0.45) return;
+  }
+  xfStart(P);
+}
+auOn('timeupdate', xfTick);
+auOn('pause', () => { if (MIX.act) xfEnd(); });
+auOn('seeking', () => { const P = MIX.plan; if (P && P.st === 'ready' && au.currentTime < P.tR) au.playbackRate = 1; });
+
 const seek = $('seek');
 seek.addEventListener('input', () => { dragging = true; const p = seek.value / 1000; seek.style.setProperty('--p', (p * 100) + '%'); const d = au.duration || 0; $('tCur').textContent = fmt(p * d); $('tRem').textContent = '-' + fmt(d - p * d); });
 seek.addEventListener('change', () => { const d = au.duration; if (d) au.currentTime = seek.value / 1000 * d; dragging = false; tick(); });
 const vol = $('vol');
 (function () { const a = new Audio(); a.volume = 0.5; if (a.volume !== 0.5 || isIOS) $('volRow').hidden = true; })();
 $('vLo').innerHTML = ic('spkLo'); $('vHi').innerHTML = ic('spkHi');
-vol.value = Math.round(ls.get('am-vol', 1) * 100); au.volume = vol.value / 100; vol.style.setProperty('--p', vol.value + '%');
-vol.addEventListener('input', () => { au.volume = vol.value / 100; vol.style.setProperty('--p', vol.value + '%'); ls.set('am-vol', au.volume); });
+vol.value = Math.round(ls.get('am-vol', 1) * 100); userVol = vol.value / 100; ALLAU.forEach(applyVol); vol.style.setProperty('--p', vol.value + '%');
+vol.addEventListener('input', () => { userVol = vol.value / 100; ALLAU.forEach(applyVol); vol.style.setProperty('--p', vol.value + '%'); ls.set('am-vol', userVol); });
 
 /* ---------- player a tutto schermo ---------- */
 const np = $('np');
@@ -1639,6 +1915,7 @@ document.addEventListener('click', e => {
     case 'closenp': closeNP(); break;
     case 'shuffle': setShuffle(!S.shuffle); break;
     case 'repeat': cycleRepeat(); break;
+    case 'mix': setMix(!MIX.on); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': load(+d.i, true); break;
     case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
@@ -1766,7 +2043,7 @@ window.AM = {
   onChange(cb) { xSubs.add(cb); return () => xSubs.delete(cb); },
   toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }
 };
-['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => au.addEventListener(n, xNotify));
+['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => auOn(n, xNotify));
 setInterval(() => { if (xSubs.size && !au.paused) xNotify(); }, 1000);
 function dlPill() {   // contatore dei download sull'iPhone, fisso a destra
   const p = $('dlpill'), n = DLQ.length, done = saved.size;
@@ -1786,7 +2063,7 @@ function castMark() {
 }
 // tasto sempre visibile dove il browser sa scegliere l'uscita (Safari su iPhone, iPad e Mac; Chrome): l'elenco mostra anche questo dispositivo
 $('bCast').hidden = !(au.webkitShowPlaybackTargetPicker || au.remote);
-au.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', castMark);
+auOn('webkitcurrentplaybacktargetiswirelesschanged', castMark);
 if (au.remote) ['connect', 'connecting', 'disconnect'].forEach(n => au.remote.addEventListener(n, castMark));
 async function shareTrack(id) {
   const t = TT(id); if (!t) return;
