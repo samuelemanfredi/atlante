@@ -614,5 +614,160 @@ class TestProxyInterno(unittest.TestCase):
             self.assertFalse(v(ip), ip)
 
 
+FUNNEL = {"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https",
+          "X-Forwarded-Host": "mac.esempio.ts.net:10000", "Host": "mac.esempio.ts.net:10000"}
+
+
+class TestAccesso(unittest.TestCase):
+    """Da Internet (tailscale funnel) serve la password; dalla rete Tailscale e dal Mac no."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-accesso-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c).avvia()
+        cls.file = os.path.join(cls.c["cache"], "accesso.json")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def imposta(self, pw):
+        r = subprocess.run([sys.executable, "-I", SERVER, "--imposta-password", "--cache", self.c["cache"]],
+                           input=(pw + "\n").encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+
+    def da_fuori(self, metodo, percorso, corpo=None, ip="203.0.113.7", biscotto=None, extra=None):
+        h = dict(FUNNEL, **{"X-Forwarded-For": ip})
+        if biscotto:
+            h["Cookie"] = "altro=1; am_accesso=" + biscotto
+        h.update(extra or {})
+        return richiesta(self.s.porta, metodo, percorso, corpo, intest=h)
+
+    def entra(self, pw, ip):
+        corpo = ("nome=Atlante+Musica&password=" + quote(pw)).encode("utf-8")
+        return self.da_fuori("POST", "/accesso", corpo, ip=ip,
+                             extra={"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:10000"})
+
+    @staticmethod
+    def biscotto(h):
+        for v in h.get_all("Set-Cookie") or []:
+            if v.startswith("am_accesso="):
+                return v
+        return None
+
+    def test_1_senza_password_da_fuori_non_si_entra(self):
+        if os.path.exists(self.file):
+            with open(self.file) as f:
+                self.assertNotIn("hash", json.load(f))
+        st, h, b = self.da_fuori("GET", "/", extra={"Sec-Fetch-Mode": "navigate"})
+        self.assertEqual((st, h["Location"]), (303, "accesso"))
+        st, h, b = self.da_fuori("GET", "/accesso")
+        self.assertEqual(st, 200)
+        self.assertIn("non è ancora attivo", b.decode("utf-8"))
+        self.assertNotIn("<form", b.decode("utf-8"))
+        st, h, b = self.entra("qualsiasi-cosa", "203.0.113.1")
+        self.assertEqual(st, 403)
+        self.assertIsNone(self.biscotto(h))
+
+    def test_2_dal_mac_e_da_tailscale_si_entra(self):
+        for intest in ({},   # il Mac stesso (127.0.0.1, nessun proxy)
+                       {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"},
+                       {"X-Forwarded-For": "100.101.1.2"},   # dispositivo della rete Tailscale senza identità
+                       {"X-Forwarded-For": "fd7a:115c:a1e0::1"}):
+            for p in ("/", "/api/extra/stato", "/x/prova.html"):
+                st, h, b = richiesta(self.s.porta, "GET", p, intest=intest)
+                self.assertEqual(st, 200, (p, intest))
+            self.assertIn("am_accesso=", self.biscotto(h) or "", intest)
+        # i biscotti dati in rete Tailscale valgono poi anche da Internet
+        v = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        self.assertEqual(self.da_fuori("GET", "/api/extra/stato", biscotto=v)[0], 200)
+
+    def test_3_da_fuori_senza_biscotto(self):
+        st, h, b = self.da_fuori("GET", "/", extra={"Sec-Fetch-Mode": "navigate"})
+        self.assertEqual((st, h["Location"]), (303, "accesso"))
+        st, h, b = self.da_fuori("GET", "/x/prova.html")
+        self.assertEqual((st, h["Location"]), (303, "../accesso"))
+        for metodo, p in (("GET", "/api/extra/stato"), ("GET", "/api/musica/catalogo"), ("GET", "/musica/api/extra/stato"),
+                          ("POST", "/api/extra/video"), ("DELETE", "/api/extra/audiolibro/x"), ("GET", "/x/kit.css"),
+                          ("GET", "/sw.js"), ("HEAD", "/api/musica/file/1")):
+            st, h, b = self.da_fuori(metodo, p, {} if metodo == "POST" else None)
+            self.assertEqual(st, 401, (metodo, p))
+            self.assertEqual(h["X-Atlante-Accesso"], "richiesto")
+            if metodo != "HEAD":
+                self.assertIs(json.loads(b.decode("utf-8"))["accesso"], True)
+            self.assertIsNone(self.biscotto(h))
+        # l'identità di Tailscale scritta da chi arriva da Internet non vale (tailscale serve la toglie, ma comunque)
+        self.assertEqual(self.da_fuori("GET", "/api/extra/stato", extra={"Tailscale-User-Login": "x@y.z"})[0], 401)
+        # un proxy davanti che non è tailscaled, o un indirizzo pubblico senza funnel: niente
+        self.assertEqual(richiesta(self.s.porta, "GET", "/api/extra/stato", intest={"X-Forwarded-For": "8.8.8.8"})[0], 401)
+        # per installare l'app: manifest e icone passano (qui non ci sono: 404, non 401)
+        for p in ("/manifest.webmanifest", "/apple-touch-icon.png", "/icon-192.png", "/icon-maskable-512.png"):
+            self.assertNotEqual(self.da_fuori("GET", p)[0], 401, p)
+        for p in ("/api/musica/file/icon-1.png", "/api/extra/video/file/apple-touch-icon.png", "/x/manifest.webmanifest"):
+            self.assertEqual(self.da_fuori("GET", p)[0], 401, p)
+
+    def test_4_password(self):
+        self.assertEqual(self.imposta("corta")[0], 1)
+        cod, out = self.imposta("una password di prova")
+        self.assertEqual(cod, 0, out)
+        self.assertNotIn("una password di prova", out)
+        self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
+        st, h, b = self.da_fuori("GET", "/accesso")
+        t = b.decode("utf-8")
+        self.assertEqual(st, 200)
+        self.assertIn('autocomplete="current-password"', t)
+        self.assertIn('href="manifest.webmanifest"', t)
+        self.assertEqual(h["Cache-Control"], "no-store")
+        # sbagliata
+        st, h, b = self.entra("sbagliata!!", "203.0.113.20")
+        self.assertEqual(st, 401)
+        self.assertIn("Password sbagliata", b.decode("utf-8"))
+        self.assertIsNone(self.biscotto(h))
+        # giusta: biscotto sicuro e ritorno all'app
+        st, h, b = self.entra("una password di prova", "203.0.113.20")
+        self.assertEqual((st, h["Location"]), (303, "./"))
+        c = self.biscotto(h)
+        for parte in ("HttpOnly", "Secure", "SameSite=Lax", "Path=/", "Max-Age=34560000"):
+            self.assertIn(parte, c)
+        v = c.split(";")[0].split("=", 1)[1]
+        for metodo, p in (("GET", "/"), ("GET", "/api/extra/stato"), ("GET", "/x/prova.html")):
+            self.assertEqual(self.da_fuori(metodo, p, biscotto=v)[0], 200, p)
+        # con il biscotto la pagina della password rimanda all'app
+        self.assertEqual(self.da_fuori("GET", "/accesso", biscotto=v)[0], 303)
+        # da un altro sito: no
+        st, h, b = self.da_fuori("POST", "/accesso", b"password=una+password+di+prova", ip="203.0.113.21",
+                                 extra={"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+        # biscotti falsi, ritoccati o scaduti
+        with open(self.file) as f:
+            seg = bytes.fromhex(json.load(f)["segreto"])
+        import hashlib, hmac
+        def firma(scad):
+            corpo = "%d.%s" % (scad, "0123456789abcdef")
+            return corpo + "." + hmac.new(seg, corpo.encode(), hashlib.sha256).hexdigest()
+        self.assertEqual(self.da_fuori("GET", "/api/extra/stato", biscotto=firma(int(time.time()) + 3600))[0], 200)
+        for falso in ("x", v[:-1] + ("0" if v[-1] != "0" else "1"), firma(int(time.time()) - 10),
+                      firma(int(time.time()) + 900 * 86400), "1.2.3", "é.é.é"):
+            self.assertEqual(self.da_fuori("GET", "/api/extra/stato", biscotto=falso)[0], 401, falso)
+        # cambiando password il biscotto di prima non vale più
+        self.assertEqual(self.imposta("un'altra password ancora")[0], 0)
+        self.assertEqual(self.da_fuori("GET", "/api/extra/stato", biscotto=v)[0], 401)
+        st, h, b = self.entra("un'altra password ancora", "203.0.113.22")
+        self.assertEqual(st, 303)
+
+    def test_5_troppi_tentativi(self):
+        if self.imposta("password per i tentativi")[0]:
+            self.fail("password non impostata")
+        for i in range(5):
+            self.assertEqual(self.entra("sbagliata %d" % i, "198.51.100.9")[0], 401)
+        st, h, b = self.entra("password per i tentativi", "198.51.100.9")   # giusta, ma deve aspettare
+        self.assertEqual(st, 429)
+        self.assertGreater(int(h["Retry-After"]), 0)
+        self.assertIsNone(self.biscotto(h))
+        self.assertEqual(self.entra("password per i tentativi", "198.51.100.10")[0], 303)   # un altro indirizzo sì
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
