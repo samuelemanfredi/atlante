@@ -708,6 +708,54 @@ class TestAccesso(unittest.TestCase):
         for p in ("/api/musica/file/icon-1.png", "/api/extra/video/file/apple-touch-icon.png", "/x/manifest.webmanifest"):
             self.assertEqual(self.da_fuori("GET", p)[0], 401, p)
 
+    def ha_password(self):
+        if not os.path.exists(self.file):
+            return False
+        with open(self.file) as f:
+            return "hash" in json.load(f)
+
+    def dal_tailscale(self, metodo, percorso, corpo=None):
+        h = {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com",
+             "X-Forwarded-Proto": "https", "Host": "mac.esempio.ts.net:8448"}
+        if corpo is not None:
+            h.update({"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:8448"})
+        return richiesta(self.s.porta, metodo, percorso, corpo, intest=h)
+
+    def test_3b_password_scelta_dalla_rete_tailscale(self):
+        self.assertFalse(self.ha_password())
+        # da Internet non si può scegliere
+        st, h, b = self.da_fuori("POST", "/accesso", b"nuova=da+internet+123&ripeti=da+internet+123",
+                                 extra={"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(st, 403)
+        self.assertFalse(self.ha_password())
+        # dalla rete Tailscale: modulo per la password nuova, senza quella di adesso
+        st, h, b = self.dal_tailscale("GET", "/accesso")
+        t = b.decode("utf-8")
+        self.assertEqual(st, 200)
+        self.assertIn('autocomplete="new-password"', t)
+        self.assertNotIn('name="password"', t)
+        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"nuova=corta&ripeti=corta")[0], 400)
+        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"nuova=abcdefgh1&ripeti=abcdefgh2")[0], 400)
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso", b"nuova=abcdefgh1&ripeti=abcdefgh1",
+                             intest={"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+        st, h, b = self.dal_tailscale("POST", "/accesso", b"nuova=scelta+su+iphone&ripeti=scelta+su+iphone")
+        self.assertEqual(st, 200)
+        self.assertIn("Password salvata", b.decode("utf-8"))
+        self.assertIn("Secure", self.biscotto(h))
+        self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
+        self.assertEqual(self.entra("scelta su iphone", "203.0.113.30")[0], 303)
+        # con la password già scelta: la pagina rimanda all'app; per cambiarla serve quella di adesso
+        self.assertEqual(self.dal_tailscale("GET", "/accesso")[0], 303)
+        st, h, b = self.dal_tailscale("GET", "/accesso?cambia")
+        self.assertIn('name="password"', b.decode("utf-8"))
+        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"nuova=un+altra+ancora&ripeti=un+altra+ancora")[0], 401)
+        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"password=sbagliata&nuova=un+altra+ancora&ripeti=un+altra+ancora")[0], 401)
+        st, h, b = self.dal_tailscale("POST", "/accesso", b"password=scelta+su+iphone&nuova=un+altra+ancora&ripeti=un+altra+ancora")
+        self.assertEqual(st, 200)
+        self.assertEqual(self.entra("scelta su iphone", "203.0.113.31")[0], 401)
+        self.assertEqual(self.entra("un altra ancora", "203.0.113.31")[0], 303)
+
     def test_4_password(self):
         self.assertEqual(self.imposta("corta")[0], 1)
         cod, out = self.imposta("una password di prova")
