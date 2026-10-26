@@ -636,7 +636,7 @@ async function importFiles(list) {
     T.set(id, m); known.add(src); added++;
     if (added % 10 === 1) render(true);
   }
-  if (added) rematch([...T.values()].filter(t => !t.remote && t.added >= t0));   // forse mancavano a una playlist importata
+  if (added) { nuoviGemelli(); rematch([...T.values()].filter(t => !t.remote && t.added >= t0)); }   // forse mancavano a una playlist importata
   render(true);
   const parts = [];
   if (added) parts.push(added === 1 ? '1 brano aggiunto' : added + ' brani aggiunti');
@@ -737,6 +737,7 @@ async function loadServer() {
   dbBatch('meta', put, del).catch(() => {});
   oldIds();
   if (put.length) rematch(put.filter(t => T.has(t.id)));   // brani nuovi o cambiati: forse sono quelli che mancavano alle playlist importate
+  nuoviGemelli();
   scaricaTutto();
   return true;
 }
@@ -786,7 +787,7 @@ function askPersist() {   // i brani salvati non devono sparire quando il telefo
 // scarica un brano del Mac nell'archivio del telefono: 'ok', 'net' (Mac non raggiungibile), 'disk' (il Mac risponde ma il file
 // non c'è: disco scollegato o brano cancellato), 'full' (spazio esaurito), 'wait' (ora non è nel catalogo; resta in coda)
 async function fetchTrack(id) {
-  if (saved.has(id)) return 'ok';
+  if (sulTel(id)) return 'ok';   // anche un suo doppione già salvato: non si scarica due volte
   const t = T.get(id); if (!t) return 'wait'; if (!t.remote) return 'ok';
   try {
     // no-store: il salvataggio non passa dalla cache HTTP, così non blocca né rallenta lo streaming dello stesso brano
@@ -801,6 +802,40 @@ async function fetchTrack(id) {
     return 'ok';
   } catch (e) { return e && e.name === 'QuotaExceededError' ? 'full' : 'net'; }
 }
+// doppioni: lo stesso brano due volte nella libreria (due dischi, due cartelle, un album e una raccolta, un file importato
+// che c'è anche sul Mac). Stesso titolo, parentesi comprese («(Live)» e «(8D Audio)» restano brani diversi), stessi artisti,
+// durata entro 3 secondi. Sull'iPhone se ne salva uno solo: gli altri suonano dal suo file e risultano già sull'iPhone.
+let GEMELLI = null;   // id -> ids dello stesso brano (solo per i brani che hanno doppioni); null = da ricalcolare
+const nuoviGemelli = () => { GEMELLI = null; };
+function gemelli() {
+  if (GEMELLI) return GEMELLI;
+  const per = new Map(); GEMELLI = new Map();
+  for (const t of T.values()) {
+    if (!t.title) continue;
+    const k = low(t.title) + '|' + nrmA(t.artist || t.albumArtist);
+    const g = per.get(k); if (g) g.push(t); else per.set(k, [t]);
+  }
+  for (const g of per.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => (a.duration || 0) - (b.duration || 0));
+    let cur = [g[0]];
+    const chiudi = () => { if (cur.length > 1) { const ids = cur.map(t => t.id); ids.forEach(id => GEMELLI.set(id, ids)); } };
+    for (let i = 1; i < g.length; i++) {
+      const a = cur[cur.length - 1].duration, b = g[i].duration;
+      if (!a || !b || b - a <= 3) cur.push(g[i]); else { chiudi(); cur = [g[i]]; }
+    }
+    chiudi();
+  }
+  return GEMELLI;
+}
+// un doppione di questo brano già sul telefono (salvato dal Mac o importato), se il brano stesso non c'è
+function gemelloSalvato(id) {
+  if (saved.has(id)) return null;
+  const g = gemelli().get(id); if (!g) return null;
+  for (const x of g) if (x !== id) { const t = T.get(x); if (t && (!t.remote || saved.has(x))) return x; }
+  return null;
+}
+const sulTel = id => saved.has(id) || !!gemelloSalvato(id);
 // «Scarica tutta la musica», di serie su ogni dispositivo: tutta la libreria del Mac finisce nell'archivio del telefono, un brano
 // alla volta in fondo alla coda (prima preferiti, playlist e più ascoltati, poi il resto per artista e album), così gli ascolti e
 // gli «Scarica» toccati a mano passano sempre davanti. I brani tolti a mano dall'iPhone non tornano da soli; se lo spazio
@@ -816,10 +851,18 @@ function scaricaTutto() {
   if (!tr.length) { ls.set('am-auto', [...AUTO]); return; }
   const rank = t => t.fav ? 0 : inPl.has(t.id) ? 1 : t.plays ? 2 : 3;
   tr.sort((a, b) => rank(a) - rank(b) || (b.plays || 0) - (a.plays || 0) || coll.compare(a.albumArtist || a.artist, b.albumArtist || b.artist) ||
-    coll.compare(a.album, b.album) || (a.disc || 0) - (b.disc || 0) || (a.track || 0) - (b.track || 0));
-  tr.forEach(t => AUTO.add(t.id)); ls.set('am-auto', [...AUTO]);
-  if (!ls.get('am-tutto-avviso', false)) { ls.set('am-tutto-avviso', true); toast('Scarico tutta la musica sull\'iPhone (' + tr.length + ' brani): si ferma in Libreria', true); }
-  queueDl(tr.map(t => t.id), true);
+    coll.compare(a.album, b.album) || (a.disc || 0) - (b.disc || 0) || (a.track || 0) - (b.track || 0) || (a.added || 0) - (b.added || 0));
+  // dei doppioni se ne scarica uno solo: il primo nell'ordine qui sopra, e nessuno se uno è già sul telefono, in coda o tolto a mano
+  const gm = gemelli(), presi = new Set(), scelti = [];
+  for (const t of tr) {
+    const g = gm.get(t.id);
+    if (g && g.some(x => x !== t.id && (presi.has(x) || q.has(x) || TOLTI.has(x) || dlCur === x || grabbing.has(x) || saved.has(x) || !(T.get(x) || {}).remote))) continue;
+    presi.add(t.id); scelti.push(t);
+  }
+  if (!scelti.length) { ls.set('am-auto', [...AUTO]); return; }
+  scelti.forEach(t => AUTO.add(t.id)); ls.set('am-auto', [...AUTO]);
+  if (!ls.get('am-tutto-avviso', false)) { ls.set('am-tutto-avviso', true); toast('Scarico tutta la musica sull\'iPhone (' + scelti.length + ' brani): si ferma in Libreria', true); }
+  queueDl(scelti.map(t => t.id), true);
 }
 function setTutto(on) {
   TUTTO = on; ls.set('am-tutto', on);
@@ -831,12 +874,15 @@ function setTutto(on) {
   }
   render(true); dlPill();
 }
-const dlReady = id => { const t = T.get(id); return !!t && !!t.remote && !saved.has(id) && !grabbing.has(id) && dlCur !== id; };
+const dlReady = id => { const t = T.get(id); return !!t && !!t.remote && !sulTel(id) && !grabbing.has(id) && dlCur !== id; };
 function queueDl(ids, quiet, front) {
   if (!DB) { if (!quiet) toast('Archivio del telefono non disponibile'); return; }
-  let n = 0, tolti = false; const add = [];
+  let n = 0, tolti = false; const add = [], gm = gemelli(), inCoda = new Set(DLQ);
   for (const id of ids) {
-    const t = T.get(id); if (!t || !t.remote || saved.has(id) || dlCur === id || grabbing.has(id)) continue;
+    const t = T.get(id); if (!t || !t.remote || sulTel(id) || dlCur === id || grabbing.has(id)) continue;
+    // un doppione già in coda (o appena aggiunto): basta quello
+    const g = gm.get(id); if (g && g.some(x => x !== id && (inCoda.has(x) || dlCur === x || grabbing.has(x)))) continue;
+    inCoda.add(id);
     if (!quiet) { noKeep.delete(id); if (TOLTI.delete(id)) tolti = true; AUTO.delete(id); }
     const k = DLQ.indexOf(id);
     if (k < 0) n++; else if (front) DLQ.splice(k, 1); else continue;
@@ -854,7 +900,7 @@ function queueDl(ids, quiet, front) {
 const HEARD = 10;
 function keep(id) {
   const t = T.get(id);
-  if (!DB || !t || !t.remote || saved.has(id) || noKeep.has(id) || TOLTI.has(id)) return;
+  if (!DB || !t || !t.remote || sulTel(id) || noKeep.has(id) || TOLTI.has(id)) return;
   heard.add(id); AUTO.delete(id);
   if (!grabbing.size && dlCur !== id) grab(id);
   const k = DLQ.indexOf(id); if (k >= 0) DLQ.splice(k, 1);
@@ -877,7 +923,7 @@ async function runDl() {
   if (dlBusy || !SRV || !DLQ.length) return; dlBusy = true; dlWait = false; dlDisk = false; clearTimeout(dlTimer); dlTimer = 0;
   let fails = 0, reread = false;
   while (SRV) {
-    for (let k = DLQ.length - 1; k >= 0; k--) { const t = T.get(DLQ[k]); if (saved.has(DLQ[k]) || (t && !t.remote)) DLQ.splice(k, 1); }
+    for (let k = DLQ.length - 1; k >= 0; k--) { const t = T.get(DLQ[k]); if (sulTel(DLQ[k]) || (t && !t.remote)) DLQ.splice(k, 1); }
     // i brani che ora non sono nel catalogo (Mac che sta leggendo il disco, disco scollegato) restano in coda per dopo
     const id = DLQ.find(dlReady); if (!id) break;
     dlCur = id; dlMark();
@@ -902,11 +948,11 @@ async function runDl() {
   if (dlWait && DLQ.length) dlTimer = setTimeout(() => { dlTimer = 0; if (SRV && !dlDisk) runDl(); else reconnect(true); }, 30000);
   render(true);
 }
-const isSaved = t => !t.remote || saved.has(t.id);
+const isSaved = t => !t.remote || sulTel(t.id);
 // appena aperta l'app il catalogo può metterci qualche secondo: intanto i brani del Mac si provano lo stesso (srvWait)
-const canPlay = id => { const t = TT(id); return !!t && (!!t.ext || !t.remote || saved.has(id) || SRV || srvWait); };
+const canPlay = id => { const t = TT(id); return !!t && (!!t.ext || !t.remote || sulTel(id) || SRV || srvWait); };
 function hasRemote() { if (SRVN) return true; for (const t of T.values()) if (t.remote) return true; return false; }
-const dlSign = (id, q) => saved.has(id) ? ic('ok') : dlCur === id || grabbing.has(id) || q.has(id) ? '…' : '';
+const dlSign = (id, q) => sulTel(id) ? ic('ok') : dlCur === id || grabbing.has(id) || q.has(id) ? '…' : '';
 const dlText = () => { const n = DLQ.length, rest = n + (n === 1 ? ' brano.' : ' brani.');
   if (!SRV) return 'Download in pausa finché il Mac non risponde: restano ' + rest;
   if (dlWait && dlDisk) return 'Download in pausa: il Mac non trova i brani. Il disco di backup è collegato? Riprendono da soli. Restano ' + rest;
@@ -915,7 +961,7 @@ const dlText = () => { const n = DLQ.length, rest = n + (n === 1 ? ' brano.' : '
   return 'Download in corso: restano ' + rest + ' Se chiudi l\'app, riprendono alla riapertura.'; };
 function dlMark() {   // aggiorna solo i segni ✓ / … e la riga di avanzamento, senza ridisegnare la pagina
   const q = new Set(DLQ);
-  document.querySelectorAll('.trk[data-id] .dl').forEach(el => { const id = el.closest('.trk').dataset.id; el.innerHTML = dlSign(id, q); el.setAttribute('aria-label', saved.has(id) ? 'Sull\'iPhone' : 'Sul Mac'); });
+  document.querySelectorAll('.trk[data-id] .dl').forEach(el => { const id = el.closest('.trk').dataset.id; el.innerHTML = dlSign(id, q); el.setAttribute('aria-label', sulTel(id) ? 'Sull\'iPhone' : 'Sul Mac'); });
   const b = $('dlbar'); if (b) b.textContent = dlText();
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !srvWait) reconnect(); });
@@ -1253,7 +1299,12 @@ const pages = {
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
     h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
     if (rem) {
-      let tot = 0, sul = 0; for (const t of T.values()) if (t.remote) { tot++; if (saved.has(t.id)) sul++; }
+      // brani diversi: un gruppo di doppioni conta una volta
+      const gm = gemelli(), visti = new Set(); let tot = 0, sul = 0;
+      for (const t of T.values()) if (t.remote) {
+        const g = gm.get(t.id); if (g) { if (visti.has(g)) continue; visti.add(g); }
+        tot++; if (g ? g.some(x => saved.has(x) || !(T.get(x) || {}).remote) : saved.has(t.id)) sul++;
+      }
       h += '<div class="lrows" style="margin-top:14px"><button class="lrow" data-a="tutto" role="switch" aria-checked="' + TUTTO + '"><span class="ic">' + ic('down') + '</span><span class="t">Scarica tutta la musica<small>' +
         sul + ' di ' + tot + ' brani sull\'iPhone</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button></div>';
     }
@@ -1388,7 +1439,13 @@ function markCur() {
 
 /* ---------- riproduzione ---------- */
 function saveState() { ls.set('am-play', {queue:S.queue, orig:S.orig, qi:S.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:au.currentTime || 0}); }
-async function getFile(id) { if (memFiles.has(id)) return memFiles.get(id); try { return await dbGet('files', id); } catch (e) { return null; } }
+async function getFile(id) {
+  if (memFiles.has(id)) return memFiles.get(id);
+  try { const f = await dbGet('files', id); if (f) return f; } catch (e) {}
+  const g = gemelloSalvato(id);   // un doppione già sul telefono: si usa il suo file
+  if (g) { if (memFiles.has(g)) return memFiles.get(g); try { return (await dbGet('files', g)) || null; } catch (e) {} }
+  return null;
+}
 // posizione da applicare quando il brano appena caricato ha i metadati. Una sola in attesa: se nel frattempo si sceglie
 // un altro brano, quella vecchia si toglie (altrimenti il brano nuovo partirebbe dal punto salvato del precedente)
 let seekH = null;
@@ -1419,7 +1476,7 @@ async function load(i, play, at) {
   if (el !== au) { au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} au = el; }
   if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null;
   if (t.ext) au.src = t.url;
-  else if (f) { saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
+  else if (f) { if (!gemelloSalvato(id)) saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
   else au.src = API + 'file/' + encodeURIComponent(t.sid);   // in streaming dal Mac: si salva sull'iPhone se suona davvero (keep)
   curId = id; keptFor = null;
   seekOnLoad(at);
@@ -1932,7 +1989,7 @@ function unsave(id) {   // «Togli dall'iPhone»: il file salvato si cancella, i
 async function savePl(p) { await dbPut('playlists', p).catch(() => {}); }
 async function delTrack(id) {
   const t = T.get(id); if (!t) return;
-  saved.delete(id); T.delete(id); await dbDel('meta', id).catch(() => {}); await dbDel('files', id).catch(() => {}); memFiles.delete(id);
+  saved.delete(id); T.delete(id); nuoviGemelli(); await dbDel('meta', id).catch(() => {}); await dbDel('files', id).catch(() => {}); memFiles.delete(id);
   for (const p of P) if (p.ids.indexOf(id) >= 0) { p.ids = p.ids.filter(x => x !== id); savePl(p); }
   if (t.cover && ![...T.values()].some(x => x.cover === t.cover)) { const c = C.get(t.cover); if (c) URL.revokeObjectURL(c.url); C.delete(t.cover); dbDel('covers', t.cover).catch(() => {}); }
   const wasCur = id === curId;
@@ -2031,7 +2088,7 @@ document.addEventListener('submit', async e => {
     const t = T.get(k); if (!t) return closeSheet();
     const val = n => (f.querySelector('[name=' + n + ']').value || '').trim();
     t.title = val('title') || t.title; t.artist = val('artist'); t.album = val('album'); t.albumArtist = val('albumArtist'); t.track = parseInt(val('track')) || 0;
-    await dbPut('meta', t).catch(() => {}); lastNowKey = ''; closeSheet(); updateNow(); render(true); toast('Informazioni salvate'); return;
+    nuoviGemelli(); await dbPut('meta', t).catch(() => {}); lastNowKey = ''; closeSheet(); updateNow(); render(true); toast('Informazioni salvate'); return;
   }
   const name = ($('nm').value || '').trim(); if (!name) { $('nm').focus(); return; }
   if (kind === 'newpl') {
@@ -2154,6 +2211,7 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
       S.queue = (S.queue || []).map(re); S.orig = (S.orig || []).map(re);
     }
     if (DB) (await rq(st('files').getAllKeys())).forEach(k => saved.add(k));
+    nuoviGemelli();
   } catch (e) {}
   const lt = ls.get('am-tab', null); tab = lt && tabs[lt] ? lt : (T.size ? 'home' : 'lib');
   render();   // subito la musica già sul telefono, poi quella del Mac
