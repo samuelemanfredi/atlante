@@ -67,6 +67,11 @@ img{max-width:100%;display:block}
 .lrow .ic{color:var(--accent);font-size:24px;width:28px;display:grid;place-items:center}
 .lrow .t{flex:1;min-width:0}
 .lrow .chev{color:var(--fg3);font-size:18px}
+.lrow small{display:block;font-size:13px;color:var(--fg2);margin-top:1px}
+.sw{flex:none;width:51px;height:31px;border-radius:16px;background:var(--fill);position:relative;transition:background .2s}
+.sw::after{content:'';position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.25);transition:transform .2s}
+.sw.on{background:#34c759}
+.sw.on::after{transform:translateX(20px)}
 
 /* griglia album */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:22px 16px}
@@ -732,6 +737,7 @@ async function loadServer() {
   dbBatch('meta', put, del).catch(() => {});
   oldIds();
   if (put.length) rematch(put.filter(t => T.has(t.id)));   // brani nuovi o cambiati: forse sono quelli che mancavano alle playlist importate
+  scaricaTutto();
   return true;
 }
 // playlist e coda della versione precedente: i brani del Mac mai ascoltati né preferiti avevano l'id senza «r».
@@ -795,19 +801,49 @@ async function fetchTrack(id) {
     return 'ok';
   } catch (e) { return e && e.name === 'QuotaExceededError' ? 'full' : 'net'; }
 }
+// «Scarica tutta la musica», di serie su ogni dispositivo: tutta la libreria del Mac finisce nell'archivio del telefono, un brano
+// alla volta in fondo alla coda (prima preferiti, playlist e più ascoltati, poi il resto per artista e album), così gli ascolti e
+// gli «Scarica» toccati a mano passano sempre davanti. I brani tolti a mano dall'iPhone non tornano da soli; se lo spazio
+// finisce ci si ferma e si riprova il giorno dopo. I brani nuovi sul disco del Mac si aggiungono da soli a ogni collegamento.
+let TUTTO = ls.get('am-tutto', true);
+const TOLTI = new Set(ls.get('am-tolti', []));   // tolti a mano dall'iPhone: non si risalvano da soli (finché non si tocca «Scarica»)
+const AUTO = new Set(ls.get('am-auto', []));     // messi in coda da «Scarica tutta la musica»: escono dalla coda se lo si spegne
+function scaricaTutto() {
+  if (!TUTTO || !DB || !SRV || SRVSCAN || !SRVN || Date.now() - ls.get('am-pieno', 0) < 86400000) return;
+  const q = new Set(DLQ), inPl = new Set(); P.forEach(p => p.ids.forEach(x => inPl.add(x)));
+  for (const x of AUTO) if (!q.has(x)) AUTO.delete(x);
+  const tr = [...T.values()].filter(t => t.remote && !saved.has(t.id) && !TOLTI.has(t.id) && !q.has(t.id) && dlCur !== t.id && !grabbing.has(t.id));
+  if (!tr.length) { ls.set('am-auto', [...AUTO]); return; }
+  const rank = t => t.fav ? 0 : inPl.has(t.id) ? 1 : t.plays ? 2 : 3;
+  tr.sort((a, b) => rank(a) - rank(b) || (b.plays || 0) - (a.plays || 0) || coll.compare(a.albumArtist || a.artist, b.albumArtist || b.artist) ||
+    coll.compare(a.album, b.album) || (a.disc || 0) - (b.disc || 0) || (a.track || 0) - (b.track || 0));
+  tr.forEach(t => AUTO.add(t.id)); ls.set('am-auto', [...AUTO]);
+  if (!ls.get('am-tutto-avviso', false)) { ls.set('am-tutto-avviso', true); toast('Scarico tutta la musica sull\'iPhone (' + tr.length + ' brani): si ferma in Libreria', true); }
+  queueDl(tr.map(t => t.id), true);
+}
+function setTutto(on) {
+  TUTTO = on; ls.set('am-tutto', on);
+  if (on) { ls.set('am-pieno', 0); scaricaTutto(); toast(DLQ.length ? 'Scarico tutta la musica: restano ' + DLQ.length + ' brani' : SRV ? 'Tutta la musica è già sull\'iPhone' : 'Si scarica tutto quando il Mac risponde'); }
+  else {
+    const n = DLQ.length; for (let k = DLQ.length - 1; k >= 0; k--) if (AUTO.has(DLQ[k])) DLQ.splice(k, 1);
+    AUTO.clear(); ls.set('am-auto', []); ls.set('am-dlq', DLQ);
+    toast('Download di tutta la musica fermato' + (n > DLQ.length ? ': ' + (n - DLQ.length) + ' brani tolti dalla coda' : ''));
+  }
+  render(true); dlPill();
+}
 const dlReady = id => { const t = T.get(id); return !!t && !!t.remote && !saved.has(id) && !grabbing.has(id) && dlCur !== id; };
 function queueDl(ids, quiet, front) {
   if (!DB) { if (!quiet) toast('Archivio del telefono non disponibile'); return; }
-  let n = 0; const add = [];
+  let n = 0, tolti = false; const add = [];
   for (const id of ids) {
     const t = T.get(id); if (!t || !t.remote || saved.has(id) || dlCur === id || grabbing.has(id)) continue;
-    if (!quiet) noKeep.delete(id);
+    if (!quiet) { noKeep.delete(id); if (TOLTI.delete(id)) tolti = true; AUTO.delete(id); }
     const k = DLQ.indexOf(id);
     if (k < 0) n++; else if (front) DLQ.splice(k, 1); else continue;
     add.push(id);
   }
   if (front) DLQ.unshift(...add); else DLQ.push(...add);
-  ls.set('am-dlq', DLQ);
+  ls.set('am-dlq', DLQ); if (tolti) ls.set('am-tolti', [...TOLTI]);
   if (!quiet) toast(n ? (n === 1 ? '1 brano in download' : n + ' brani in download') : 'Già salvati sull\'iPhone');
   askPersist();
   runDl(); if (quiet) dlMark(); else render(true);
@@ -818,8 +854,8 @@ function queueDl(ids, quiet, front) {
 const HEARD = 10;
 function keep(id) {
   const t = T.get(id);
-  if (!DB || !t || !t.remote || saved.has(id) || noKeep.has(id)) return;
-  heard.add(id);
+  if (!DB || !t || !t.remote || saved.has(id) || noKeep.has(id) || TOLTI.has(id)) return;
+  heard.add(id); AUTO.delete(id);
   if (!grabbing.size && dlCur !== id) grab(id);
   const k = DLQ.indexOf(id); if (k >= 0) DLQ.splice(k, 1);
   DLQ.unshift(id); ls.set('am-dlq', DLQ);
@@ -832,7 +868,7 @@ function grab(id) {
     grabbing.delete(id);
     // riuscito, o spazio esaurito: esce dalla coda. Altrimenti (Mac o disco non raggiungibili) ci resta e ci riprova la coda
     if (r === 'ok' || r === 'full') { const k = DLQ.indexOf(id); if (k >= 0) { DLQ.splice(k, 1); ls.set('am-dlq', DLQ); } }
-    if (r === 'full') toast('Spazio esaurito sull\'iPhone: il brano non resta salvato');
+    if (r === 'full') { ls.set('am-pieno', Date.now()); toast('Spazio esaurito sull\'iPhone: il brano non resta salvato'); }
     dlMark(); runDl();
   });
 }
@@ -849,7 +885,7 @@ async function runDl() {
     dlCur = null;
     const k = DLQ.indexOf(id);
     if (r === 'ok') { if (k >= 0) DLQ.splice(k, 1); fails = 0; dlDisk = false; }
-    else if (r === 'full') { DLQ.length = 0; toast('Spazio esaurito sull\'iPhone: download fermati'); }
+    else if (r === 'full') { DLQ.length = 0; ls.set('am-pieno', Date.now()); toast('Spazio esaurito sull\'iPhone: download fermati'); }
     else if (r === 'net' || r === 'disk') {
       if (k >= 0) DLQ.push(DLQ.splice(k, 1)[0]);
       dlDisk = r === 'disk';
@@ -1216,6 +1252,11 @@ const pages = {
     else if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span><button class="ba" data-a="rescan">Aggiorna</button></div>';
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
     h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
+    if (rem) {
+      let tot = 0, sul = 0; for (const t of T.values()) if (t.remote) { tot++; if (saved.has(t.id)) sul++; }
+      h += '<div class="lrows" style="margin-top:14px"><button class="lrow" data-a="tutto" role="switch" aria-checked="' + TUTTO + '"><span class="ic">' + ic('down') + '</span><span class="t">Scarica tutta la musica<small>' +
+        sul + ' di ' + tot + ' brani sull\'iPhone</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button></div>';
+    }
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
     h += '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + albums().sort((a, b) => b.added - a.added).slice(0, 24).map(tile).join('') + '</div>';
     return h;
@@ -1884,7 +1925,7 @@ function unsave(id) {   // «Togli dall'iPhone»: il file salvato si cancella, i
       if (was) au.play().catch(() => {});
     } else stop();
   }
-  noKeep.add(id);
+  noKeep.add(id); TOLTI.add(id); ls.set('am-tolti', [...TOLTI]);
   const k = DLQ.indexOf(id); if (k >= 0) { DLQ.splice(k, 1); ls.set('am-dlq', DLQ); }
   dbDel('files', id).catch(() => {}); saved.delete(id); render(true); toast('Tolto dall\'iPhone: resta sul Mac');
 }
@@ -1928,6 +1969,7 @@ document.addEventListener('click', e => {
     case 'shuffle': setShuffle(!S.shuffle); break;
     case 'repeat': cycleRepeat(); break;
     case 'mix': setMix(!MIX.on); break;
+    case 'tutto': setTutto(!TUTTO); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': load(+d.i, true); break;
     case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
