@@ -1493,9 +1493,11 @@ function playList(ids, start, shuf, from) {
   if (shuf) { const first = start == null ? null : ids[start]; let rest = shuffleArr(ids.filter((x, j) => j !== start || first == null)); if (first != null) rest = [first].concat(rest); S.queue = rest; S.shuffle = true; load(0, true); }
   else { S.queue = ids.slice(); S.shuffle = false; load(start || 0, true); }
 }
-function toggle() { if (!curId) { if (T.size) playList(songs().map(t => t.id), 0, true, 'Tutti i brani'); return; } if (au.paused) au.play().catch(() => {}); else au.pause(); }
+let pausaVoluta = 0;   // l'ultima pausa chiesta dall'utente (tasto, cuffie, schermata di blocco): il controllo dei passaggi la rispetta
+function toggle() { if (!curId) { if (T.size) playList(songs().map(t => t.id), 0, true, 'Tutti i brani'); return; } if (au.paused) au.play().catch(() => {}); else { pausaVoluta = Date.now(); au.pause(); } }
 function next(auto) {
   if (!S.queue.length) return;
+  if (auto && (S.repeat !== 'off' || S.qi < S.queue.length - 1)) controllaPassaggio();
   if (auto && S.repeat === 'one') { au.currentTime = 0; au.play().catch(() => {}); return; }
   if (S.qi < S.queue.length - 1) load(S.qi + 1, true);
   else if (S.repeat !== 'off') load(0, true);
@@ -1593,7 +1595,7 @@ function mediaMeta(t) {
 }
 if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession, sa = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) {} };
-  sa('play', () => au.play().catch(() => {})); sa('pause', () => au.pause());
+  sa('play', () => au.play().catch(() => {})); sa('pause', () => { pausaVoluta = Date.now(); au.pause(); });
   sa('previoustrack', prev); sa('nexttrack', () => next(false));
   sa('seekto', e => { if (e.seekTime != null) au.currentTime = e.seekTime; });
   sa('seekbackward', e => { au.currentTime = Math.max(0, au.currentTime - (e.seekOffset || 10)); });
@@ -1647,7 +1649,7 @@ auOn('error', async () => {
    I BPM si misurano sui 30 s finali del brano in corso e sui 30 s iniziali del successivo (dal file sull'iPhone, o dal Mac
    che manda il pezzo già decodificato), una volta sola per brano. Se i ritmi non si riconoscono o sono troppo lontani,
    resta una dissolvenza normale. */
-const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0};
+const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, unSolo:ls.get('am-mix-unlettore', false), prepT:0};
 let userVol = 1;
 function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iPhone il volume dei lettori non si cambia: lo fa il mixer)
   const g = el._g == null ? 1 : el._g;
@@ -1670,6 +1672,44 @@ function mixerInit() {
   } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
 }
 addEventListener('pointerdown', () => { mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {}); }, {capture:true, passive:true});
+// iPhone e iPad: un lettore può partire da solo (a fine brano, a schermo bloccato) solo se è già partito una volta durante
+// un tocco. Il passaggio a tempo fa partire il brano nuovo sull'ALTRO lettore: se quello non era mai stato toccato,
+// l'iPhone lo rifiutava e la musica si fermava. Al tocco che fa partire la musica i lettori liberi partono per un attimo
+// in silenzio: da lì in poi possono partire da soli.
+const SILENZIO = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';   // 0,05 s di silenzio
+function sbloccaLettori() {
+  if (!au.paused) return;   // solo a musica ferma (es. il tocco su ▶︎): un iPhone che non fa suonare due lettori insieme fermerebbe il brano
+  for (const el of DECKS) {
+    if (el._sbloccato || el.getAttribute('src')) continue;   // un lettore con un brano dentro non si tocca
+    el._sbloccato = true; el._rifiuta = false;
+    try {
+      el.muted = false; el.src = SILENZIO;
+      const fine = () => { if (el.getAttribute('src') === SILENZIO) { el.pause(); el.removeAttribute('src'); try { el.load(); } catch (e) {} } };
+      const pr = el.play();
+      if (pr && pr.then) pr.then(fine, () => { el._sbloccato = false; fine(); }); else fine();
+    } catch (e) { el._sbloccato = false; }
+  }
+}
+['touchend', 'click', 'keydown'].forEach(n => addEventListener(n, sbloccaLettori, {capture:true, passive:true}));
+// controllo dopo ogni passaggio automatico: se la musica si è fermata da sola (non per una pausa voluta), riparte;
+// se l'iPhone non la lascia ripartire su quel lettore, il brano riparte dallo stesso punto sull'altro (se è sbloccato)
+function controllaPassaggio() {
+  const t0 = Date.now();
+  setTimeout(() => {
+    if (!curId || pausaVoluta >= t0 || !au.paused || au === AUX) return;
+    const vecchio = au, pos = au.currentTime || 0, i = S.qi;
+    const pr = au.play();
+    if (pr && pr.catch) pr.catch(() => {
+      if (au !== vecchio || !au.paused || pausaVoluta >= t0) return;
+      const altro = DECKS.find(el => el !== vecchio && el._sbloccato);
+      if (!altro) return;
+      vecchio.removeAttribute('src'); try { vecchio.load(); } catch (e) {}
+      au = altro; load(i, true, pos);
+    });
+  }, 3500);
+}
+// un lettore che ha suonato con l'audio acceso può ripartire da solo
+DECKS.forEach(el => el.addEventListener('playing', () => { if (!el.muted && el.getAttribute('src') !== SILENZIO) { el._sbloccato = true; el._rifiuta = false; } }));
 // controllo di sicurezza: se a schermo bloccato l'iPhone ferma il mixer mentre la musica dovrebbe suonare, al ritorno
 // il mixer si spegne per sempre (il mix resta a tempo, con un taglio sul battito invece della dissolvenza)
 document.addEventListener('visibilitychange', () => {
@@ -1679,7 +1719,7 @@ document.addEventListener('visibilitychange', () => {
   else if (MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
 });
 function setMix(on) {
-  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else mixerInit();
+  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else { mixerInit(); MIX.unSolo = false; ls.set('am-mix-unlettore', false); }
   updateNow(); toast(on ? 'Mix a tempo: gli ultimi ' + MIX.X + ' secondi si adattano ai BPM del brano successivo' : 'Mix a tempo disattivato');
 }
 
@@ -1817,6 +1857,7 @@ async function xfPrepare(P) {
   el.muted = true;
   el.addEventListener('playing', () => { el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; if (MIX.plan === P) P.st = 'ready'; }, {once:true});
   el.src = P.url || API + 'file/' + encodeURIComponent(tb.sid);
+  MIX.prepT = Date.now();
   const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
 }
 function xfAbort() {
@@ -1835,13 +1876,15 @@ function xfStart(P) {
   inn.playbackRate = 1;
   try { inn.preservesPitch = true; inn.webkitPreservesPitch = true; } catch (e) {}
   au = inn;
-  const p = inn.play(); if (p && p.catch) p.catch(() => {});
+  const qiA = S.qi;
+  const p = inn.play(); if (p && p.catch) p.catch(() => { const A = MIX.act; if (A && A.inn === inn) xfRifiutato(A); });
   // da qui il brano in corso è il nuovo (titolo, schermata di blocco, coda), come in Apple Music durante la dissolvenza
   S.qi = P.j; curId = P.idB; keptFor = null; countFor = P.idB;
   const outUrl = curUrl; curUrl = P.url; P.url = null;
   if (typeof dropOrph === 'function') dropOrph(); updateNow(); saveState(); markCur();
   const W = Math.max(2, (out.duration - out.currentTime) / Math.max(0.5, out.playbackRate));
-  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P};
+  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P, qiA};
+  controllaPassaggio();
   MIX.plan = null;
   if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); xfEnd(); return; }   // iPhone senza mixer: niente dissolvenza, taglio sul battito
   if (MIX.gains.size) {   // iPhone: curve di volume precise sull'orologio audio, anche a schermo bloccato
@@ -1851,6 +1894,20 @@ function xfStart(P) {
     try { const gi = MIX.gains.get(inn).gain, go = MIX.gains.get(out).gain; gi.cancelScheduledValues(t); go.cancelScheduledValues(t); gi.setValueCurveAtTime(up, t, W); go.setValueCurveAtTime(dn, t, W); inn._g = 1; out._g = 0; } catch (e) {}
   }
   xfLoop();
+}
+// l'iPhone non ha lasciato partire il brano nuovo sull'altro lettore: si torna a quello vecchio, che suona fino alla fine
+// a volume pieno; alla fine il nuovo parte sullo stesso lettore (che può partire da solo). Il lettore rifiutato non si
+// usa più per i passaggi finché un tocco non lo sblocca.
+function xfRifiutato(A) {
+  MIX.act = null;
+  const {out, inn, P} = A;
+  inn._sbloccato = false; inn._rifiuta = true;
+  inn.pause(); inn.playbackRate = 1; inn.removeAttribute('src'); try { inn.load(); } catch (e) {}
+  if (curUrl) URL.revokeObjectURL(curUrl);
+  au = out; curUrl = A.outUrl; S.qi = A.qiA; curId = P.idA; keptFor = curId; countFor = null;
+  setGain(inn, 1); setGain(out, 1); out.playbackRate = 1;
+  if (out.paused && !out.ended) out.play().catch(() => {});
+  updateNow(); saveState(); markCur();
 }
 function xfEnd() {
   const A = MIX.act; if (!A) return; MIX.act = null;
@@ -1876,14 +1933,14 @@ function xfRun() {
 function xfLoop() { clearInterval(MIX.loop); MIX.loop = setInterval(() => { if (MIX.act) xfRun(); else if (MIX.plan) xfTick(); else clearInterval(MIX.loop); }, 40); }
 function xfTick() {
   if (MIX.act) { xfRun(); return; }
-  if (!MIX.on || au === AUX || au.paused) return;
+  if (!MIX.on || MIX.unSolo || au === AUX || au.paused) return;
   const t = T.get(curId), d = au.duration, c = au.currentTime;
   if (!t || !isFinite(d) || d < 45) return;
   const j = nextIdx(), idB = j >= 0 ? S.queue[j] : null, tb = idB && T.get(idB);
   if (!tb || idB === curId || !canPlay(idB) || tb.duration && tb.duration < 30) { if (MIX.plan) xfAbort(); return; }
   let P = MIX.plan;
   if (P && (P.idA !== curId || P.idB !== idB)) { xfAbort(); P = null; }
-  if (!P) { if (d - c > 40 || d - c < MIX.X + 2) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(() => { if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
+  if (!P) { if (d - c > 40 || d - c < MIX.X + 2 || otherDeck()._rifiuta) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(() => { if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
   if (P.st !== 'ready') return;
   if (c < P.tR) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
   if (c < P.tS) {   // accelera o rallenta piano verso i BPM del successivo (forma a S)
@@ -1900,7 +1957,15 @@ function xfTick() {
   xfStart(P);
 }
 auOn('timeupdate', xfTick);
-auOn('pause', () => { if (MIX.act) xfEnd(); });
+auOn('pause', () => {
+  if (MIX.act) xfEnd();
+  // il brano in corso si è fermato da solo proprio mentre si preparava il successivo sull'altro lettore: questo iPhone
+  // non lascia suonare due lettori insieme. Si riprende subito e da qui i passaggi restano su un lettore solo.
+  if (MIX.plan && !au.ended && Date.now() - (MIX.prepT || 0) < 3000 && pausaVoluta < MIX.prepT) {
+    xfAbort(); MIX.unSolo = true; ls.set('am-mix-unlettore', true);
+    au.play().catch(() => {});
+  }
+});
 auOn('seeking', () => { const P = MIX.plan; if (P && P.st === 'ready' && au.currentTime < P.tR) au.playbackRate = 1; });
 
 const seek = $('seek');
