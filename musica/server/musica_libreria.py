@@ -586,7 +586,8 @@ class Libreria:
                 continue
             qui = []
             for cart, sotto, files in os.walk(radice):
-                sotto[:] = [s for s in sotto if not s.startswith(".")]
+                # niente cartelle nascoste, né quelle dei caricamenti (Da controllare, Film, Tolti) se stanno qui dentro
+                sotto[:] = [s for s in sotto if not s.startswith(".") and os.path.join(cart, s) not in ESCLUSE]
                 for nome in files:
                     if nome.startswith(".") or os.path.splitext(nome)[1].lower() not in ESTENSIONI:
                         continue
@@ -729,16 +730,23 @@ class Libreria:
         if any(os.path.isdir(r) for r in self._mancanti):   # disco ricollegato: si rilegge subito (con l'indice è veloce)
             self.rileggi_presto(subito=True, attendi=5)
         pronti = CLIP.pronti() if CLIP else {}
+        corr, via = (CORR.tutte() if CORR else {}), (TOLTI.ids() if TOLTI else set())   # Gestione → Contenuti
         with self.blocco:
             pubblici = []
             for b in self.brani.values():
+                if b["id"] in via:
+                    continue   # tolto da Samuele: fuori dall'app di tutti finché non lo rimette
                 x = {k: v for k, v in b.items() if not k.startswith("_")}
+                if b["id"] in corr:
+                    x.update(corr[b["id"]])   # titolo, artista, album, copertina corretti: il file non cambia
                 if b["id"] in self.compilation:
                     x["compilation"] = True   # solo quando è vero: il catalogo di 10 000 brani resta leggero
                 if pronti and pronti.get(os.path.basename(b["_p"])) == b.get("_f"):
                     x["clip"] = True          # videoclip scaricato e allineato con questo file
                 pubblici.append(x)
         o = {"brani": pubblici, "aggiornato": int(self.ultima * 1000)}
+        if via:
+            o["tolti"] = sorted(via)   # l'app li toglie anche dai telefoni che li avevano salvati
         if INDIRIZZO:
             o["indirizzo"] = INDIRIZZO
         return o
@@ -1776,7 +1784,7 @@ def _mp3(ff, sorgente, copertina, tag, uscita):
 
 
 def _scarica_musica(coda, l, _dati):
-    dest_dir = _cartella_musica()
+    dest_dir = _cartella_carica("controllo_dir") if l.get("controllo") else _cartella_musica()
     ff = _programma("ffmpeg")
     tmp = tempfile.mkdtemp(prefix="musica-", dir=_cartella_tmp())
     avanza = lambda pct: coda.aggiorna(l["id"], progresso=round(min(pct, 100) * 0.8, 1))   # noqa: E731
@@ -1821,13 +1829,17 @@ def _scarica_musica(coda, l, _dati):
         os.replace(parziale, finale)
         coda.aggiorna(l["id"], progresso=95, nome=os.path.basename(finale), dimensione=os.path.getsize(finale),
                       _percorso=finale)
-        coda.aggiorna(l["id"], brano=_in_libreria(finale))
+        if l.get("controllo"):   # di un invitato: in «Da controllare», e una copia per il suo telefono
+            _da_controllare_scaricato(coda, l, finale)
+        else:
+            coda.aggiorna(l["id"], brano=_in_libreria(finale))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         _cancella(os.path.join(dest_dir, "." + l["id"] + ".tmp"))   # annullato o non riuscito a metà
 
 
-def _nuova_musica(corpo):
+def _nuova_musica(corpo, di=None, chi_nome=""):
+    """Un brano da scaricare. Con `di` (un invitato) il brano va in «Da controllare» e conta nel suo limite di oggi."""
     vid = str(corpo.get("id") or "").strip()
     url = str(corpo.get("url") or "").strip()
     if not vid and url:
@@ -1838,25 +1850,31 @@ def _nuova_musica(corpo):
         raise ErroreExtra(400, "Serve un brano della ricerca o il link (http o https) della sua pagina")
     if not _programma("yt-dlp"):
         raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
-    _cartella_musica()
+    if di and QUOTE:
+        QUOTE.controlla(di, STIMA_BRANO)
+    _cartella_carica("controllo_dir") if di else _cartella_musica()
     coda = _coda("musica")
     if vid:   # lo stesso brano chiesto di nuovo (due tocchi, due dispositivi): lo stesso lavoro, nessun doppione
         with coda.blocco:
             for l in reversed(list(coda.lavori.values())):
-                if l.get("yt") == vid and (l.get("stato") in ("in coda", "in corso") or
+                if l.get("yt") == vid and l.get("di") == di and (l.get("stato") in ("in coda", "in corso") or
                                            (l.get("stato") == "fatto" and os.path.isfile(l.get("_percorso") or ""))):
                     return l["id"]
+            if di and any(l.get("yt") == vid and not l.get("di") and l.get("stato") == "fatto" and
+                          os.path.isfile(l.get("_percorso") or "") for l in coda.lavori.values()):
+                raise ErroreExtra(409, "Questo brano è già nella libreria di Atlante: lo trovi tra i brani")
     testo = lambda k, n: str(corpo.get(k) or "").strip()[:n]   # noqa: E731
     return coda.aggiungi({"yt": vid, "url": "https://music.youtube.com/watch?v=" + vid if vid else url,
                           "titolo": testo("titolo", 300) or ("" if vid else url), "artista": testo("artista", 300),
                           "album": testo("album", 300), "copertina": testo("copertina", 1000),
-                          "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": ""})
+                          "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": "",
+                          **({"di": di, "chi_nome": chi_nome, "controllo": True, "caricamento": ""} if di else {})})
 
 
-def _annulla_musica(id_):
+def _annulla_musica(id_, di=None):
     coda = _coda("musica")
     l = coda.lavori.get(id_)
-    if not l:
+    if not l or l.get("di") != di:   # ognuno ferma solo i suoi
         raise ErroreExtra(404, "Scaricamento non trovato")
     if l.get("stato") in ("in coda", "in corso"):
         coda.annulla(id_)
@@ -2004,6 +2022,8 @@ def _gestione(h, metodo, resto, corpo):
     """Gestione → Persone: inviti, nuovi link, richieste degli invitati, revoche. Solo Samuele."""
     if _chi_e(h)["ruolo"] != "proprietario":
         raise ErroreExtra(403, "Solo Samuele può usare la Gestione")
+    if resto and resto[0] in GESTIONE_CARICA:   # Da controllare, richieste di film, Contenuti (parte 2)
+        return _gestione_carica(h, metodo, resto, corpo)
     if metodo not in ("GET", "POST", "DELETE"):
         raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
     if resto[:1] == ["idee"]:   # Gestione → Idee
@@ -4579,6 +4599,1181 @@ def _ascoltati(h, metodo, resto, corpo):
     raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/ascoltati/%s" % "/".join(resto))
 
 
+# ----- caricamenti, «Da controllare», film sul Cloud e contenuti (Gestione, parte 2) -----
+#
+# Dal tasto + dell'app, «Carica nella libreria»: il telefono manda il file a pezzi da 8 MB (ogni richiesta resta sotto i
+# 20 MB del server, e un caricamento interrotto riprende riscegliendo lo stesso file). Alla fine ffprobe controlla che
+# sia davvero un audio: il brano va in «Da controllare» con la sua scheda (chi, quando, caricato o scaricato, tag) e
+# Samuele lo ascolta, ne corregge i tag e lo approva (un file nuovo con i tag giusti nella cartella della musica
+# scaricata) o lo scarta (in «Scartati»: non si cancella niente). I brani caricati da Samuele entrano subito; passano da
+# qui anche quelli scaricati dagli invitati con «Cerca e scarica». I film: prima la richiesta (titolo e grandezza), poi il
+# sì di Samuele, poi il file direttamente nella cartella dei film (un film di molti GB non si copia due volte).
+# Ogni persona carica al più LIMITE_GIORNO al giorno (brani, film e, quando ci sarà, gli allegati della chat); Samuele no.
+# Gestione → Contenuti: correzioni dei tag in correzioni.json (il file del brano non cambia), «Togli» sposta il file in
+# «Tolti» sullo stesso disco, «Rimetti» lo riporta.
+#
+#   POST   caricamenti {tipo:"brano", nome, dimensione, modificato}  caricamento nuovo (lo stesso file a metà: si riprende)
+#   POST   caricamenti {tipo:"film", titolo, nome, dimensione, modificato}  richiesta di un film (Samuele: subito consentito)
+#   PUT    caricamenti/<id>?da=<byte>  un pezzo del file (il corpo sono i byte) -> {ricevuti, stato, …}
+#   GET    caricamenti                 i miei: {caricamenti:[a metà e film], brani:[in «Da controllare» e decisi], oggi}
+#   GET    caricamenti/<id>            DELETE caricamenti/<id> (annulla)     GET caricamenti/<id>/file (un mio brano)
+#   GET    film                        film nel Cloud (Samuele, nel modulo Video)     GET film/file/<nome> (con Range)
+#   gestione/controllo…  gestione/film/<id>/consenti|rifiuta  gestione/contenuti…   solo Samuele: vedi _gestione_carica
+
+GB = 1024 ** 3
+BRANO_MAX = 200 * 1024 * 1024
+FILM_MAX = 80 * GB
+PEZZO = 8 * 1024 * 1024             # sotto MAX_CORPO: un pezzo per richiesta
+LIMITE_GIORNO = 20 * GB             # per persona, brani + film + allegati della chat (--limite-giorno-gb)
+SPAZIO_MIN = 50 * GB                # sotto, il Mac mini non accetta caricamenti (--spazio-min-gb)
+STIMA_BRANO = 20 * 1024 * 1024      # un brano di «Cerca e scarica»: la grandezza vera si sa solo alla fine
+APERTI_MAX = 10                     # caricamenti a metà per persona
+ATTESA_BRANI_MAX = 200              # brani di una persona in attesa di Samuele
+FILM_ATTESA_MAX = 3                 # richieste di film di una persona non ancora decise
+SCADE_BRANO = 7 * 86400             # un brano lasciato a metà si toglie dopo una settimana
+SCADE_FILM = 30 * 86400             # un film a metà dopo un mese senza pezzi nuovi (80 GB a 20 GB al giorno: 4 giorni)
+TITOLO_FILM_MAX = 120
+TIPI_FILM = (".mp4", ".m4v", ".mov", ".mkv", ".webm")
+ID_CARICO = re.compile(r"^[0-9a-f]{16}$")
+GESTIONE_CARICA = ("controllo", "film", "contenuti")
+CONF.update(controllo_dir="~/Music/Atlante Da controllare", film_dir="~/Movies/Atlante Film",
+            tolti_dir="~/Music/Atlante Tolti")
+# cartelle che la libreria non legge mai, anche se stanno dentro una delle sue (Da controllare, Film, Tolti)
+ESCLUSE = set()
+CARIC = QUOTE = CORR = TOLTI = CTRL = None   # preparati da avvia_caricamenti()
+_blocco_controllo = threading.RLock()        # approva, scarta, correggi: una cosa alla volta sullo stesso brano
+
+
+class ErroreDati(ErroreExtra):
+    """Errore con altri campi per l'app: da dove riprendere un caricamento, i doppioni di un brano…"""
+
+    def __init__(self, codice, testo, **dati):
+        super().__init__(codice, testo)
+        self.dati = dati
+
+
+def _misura(n):
+    for u, k in (("GB", GB), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= k or u == "KB":
+            return ("%.1f" % (n / k)).rstrip("0").rstrip(".").replace(".", ",") + " " + u
+
+
+def _leggi_json(file, vuoto):
+    """Il contenuto di un file JSON; se c'è ma non si legge lo si mette da parte (.illeggibile) invece di sovrascriverlo."""
+    try:
+        with open(file, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except FileNotFoundError:
+        return vuoto
+    except (OSError, ValueError):
+        pass
+    try:
+        os.replace(file, "%s.illeggibile-%d" % (file, int(time.time())))
+        print("Atlante: %s non si legge: messo da parte" % file, flush=True)
+    except OSError:
+        pass
+    return vuoto
+
+
+def _scrivi_json(file, d):
+    os.makedirs(os.path.dirname(file) or ".", exist_ok=True)
+    tmp = "%s.%d.%d.tmp" % (file, os.getpid(), threading.get_ident())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, file)
+    except BaseException:
+        _cancella(tmp)
+        raise
+
+
+def _cartella_carica(chiave, crea=True):
+    """Una delle cartelle dei caricamenti; si crea solo se c'è quella che la contiene (un disco scollegato non deve
+    diventare una cartella vuota sul disco interno). Senza `crea`: None se non c'è."""
+    p = _cart(chiave)
+    if not os.path.isdir(p):
+        if not crea:
+            return None
+        if not os.path.isdir(os.path.dirname(p)):
+            raise ErroreExtra(503, "Cartella non raggiungibile (il disco è collegato?): %s" % p)
+        os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _libero_su(p):
+    """Byte liberi sul disco di `p` (o della prima cartella che esiste sopra): 0 se non si sa."""
+    while p and not os.path.isdir(p) and os.path.dirname(p) != p:
+        p = os.path.dirname(p)
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return 0
+
+
+def _sonda(percorso):
+    """Cosa c'è davvero nel file secondo ffprobe: {formato, durata, audio, video, immagini, tag}; None se non lo legge.
+    `video` conta i flussi video veri, `immagini` le copertine e le immagini ferme (una foto chiamata .mp4 non è un film)."""
+    fp = _programma("ffprobe")
+    if not fp:
+        raise ErroreExtra(503, "ffprobe non è installato sul Mac: brew install ffmpeg")
+    try:
+        r = subprocess.run([fp, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", percorso],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+                           env=_ambiente())
+        o = json.loads(r.stdout.decode("utf-8", "replace")) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        o = None
+    if not isinstance(o, dict):
+        return None
+    flussi = [s for s in o.get("streams") or [] if isinstance(s, dict)]
+    fmt = o.get("format") if isinstance(o.get("format"), dict) else {}
+    copertina = lambda s: (s.get("disposition") or {}).get("attached_pic") == 1   # noqa: E731
+    immagine = lambda s: copertina(s) or s.get("codec_name") in ("mjpeg", "png", "bmp", "gif", "webp")   # noqa: E731
+    try:
+        durata = float(fmt.get("duration") or 0)
+    except (TypeError, ValueError):
+        durata = 0.0
+    video = [s for s in flussi if s.get("codec_type") == "video"]
+    return {"formato": str(fmt.get("format_name") or ""), "durata": durata,
+            "audio": sum(1 for s in flussi if s.get("codec_type") == "audio"),
+            "video": sum(1 for s in video if not immagine(s)), "immagini": sum(1 for s in video if immagine(s)),
+            "tag": {str(k).lower(): str(v) for k, v in (fmt.get("tags") or {}).items()} if isinstance(fmt.get("tags"), dict) else {}}
+
+
+def _immagine(dati):
+    """Estensione di un'immagine mandata dall'app (copertina nuova): solo JPEG e PNG veri, al più 5 MB."""
+    if len(dati) > MAX_COPERTINA:
+        raise ErroreExtra(413, "Immagine troppo grande (al più 5 MB)")
+    if dati[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if dati[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    raise ErroreExtra(400, "Serve un'immagine JPEG o PNG")
+
+
+def _norma(s):
+    return re.sub(r"\W+", " ", (s or "").lower()).strip()
+
+
+def _chi_carica(h):
+    """(chiave, nome) di chi carica: "p" per Samuele (i suoi brani entrano subito, nessun limite), l'id della persona per
+    un invitato, "casa" dalla rete di casa (dispositivi senza nome: passano da «Da controllare» come gli invitati)."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"], (PERS.nome(chi["persona"]) if PERS else "") or "Invitato"
+    if chi["ruolo"] == "casa":
+        return "casa", "Rete di casa"
+    return "p", "Samuele"
+
+
+def _limite(di):
+    """Chiave del limite giornaliero: None (nessun limite) per Samuele."""
+    return None if di == "p" else di
+
+
+class Quote:
+    """Byte caricati oggi da ogni persona (brani, film e, in futuro, gli allegati della chat), in <cache>/extra/quote.json.
+    La chiave None è Samuele: nessun limite. Il giorno è quello del Mac mini: a mezzanotte si riparte da zero."""
+
+    def __init__(self, file, limite):
+        self.file, self.limite = file, int(limite)
+        self.blocco = threading.Lock()
+        self.dati = _leggi_json(file, {})
+
+    @staticmethod
+    def _oggi():
+        return time.strftime("%Y-%m-%d", time.localtime(time.time()))
+
+    def _voce(self, chiave):
+        x = self.dati.get(chiave)
+        if not isinstance(x, dict) or x.get("giorno") != self._oggi() or not isinstance(x.get("byte"), int):
+            x = {"giorno": self._oggi(), "byte": 0}
+        return x
+
+    def messaggio(self):
+        return "Hai raggiunto i %s di oggi: si riprende domani" % _misura(self.limite)
+
+    def usati(self, chiave):
+        if chiave is None:
+            return 0
+        with self.blocco:
+            return self._voce(chiave)["byte"]
+
+    def resta(self, chiave):
+        return max(0, self.limite - self.usati(chiave)) if chiave is not None else FILM_MAX * 1000
+
+    def controlla(self, chiave, n):
+        if chiave is not None and self.usati(chiave) + n > self.limite:
+            raise ErroreDati(429, self.messaggio(), limite=True)
+
+    def consuma(self, chiave, n, forza=False):
+        """Conta `n` byte di oggi; oltre il limite 429 (con `forza` si contano comunque: un brano già scaricato)."""
+        if chiave is None:
+            return
+        with self.blocco:
+            x = self._voce(chiave)
+            if not forza and x["byte"] + n > self.limite:
+                raise ErroreDati(429, self.messaggio(), limite=True)
+            x["byte"] += int(n)
+            oggi = self._oggi()
+            self.dati = {k: v for k, v in self.dati.items() if isinstance(v, dict) and v.get("giorno") == oggi}
+            self.dati[chiave] = x
+            _scrivi_json(self.file, self.dati)
+
+
+class Correzioni:
+    """Titolo, artista, album e copertina corretti da Samuele (Gestione → Contenuti), in <cache>/correzioni.json: si
+    applicano al catalogo, il file del brano non cambia. «Ripristina» le toglie."""
+    CAMPI = ("title", "artist", "album", "cover")
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        d = _leggi_json(file, {}).get("brani")
+        self.d = {k: v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
+
+    def tutte(self):
+        with self.blocco:
+            return {k: {c: v for c, v in (x.get("campi") or {}).items() if c in self.CAMPI} for k, x in self.d.items()}
+
+    def di(self, id_):
+        return self.tutte().get(id_, {})
+
+    def imposta(self, id_, campi, percorso):
+        """Campi nuovi; None toglie la correzione di quel campo (senza più correzioni il brano esce dal file)."""
+        with self.blocco:
+            x = self.d.setdefault(id_, {"campi": {}})
+            for k, v in campi.items():
+                if k in self.CAMPI:
+                    if v:
+                        x["campi"][k] = v
+                    else:
+                        x["campi"].pop(k, None)
+            x.update(quando=time.time(), percorso=percorso)
+            if not x["campi"]:
+                del self.d[id_]
+            _scrivi_json(self.file, {"brani": self.d})
+
+    def togli(self, id_):
+        with self.blocco:
+            if self.d.pop(id_, None) is None:
+                return False
+            _scrivi_json(self.file, {"brani": self.d})
+            return True
+
+
+class Tolti:
+    """Brani tolti dalla libreria (Gestione → Contenuti → Togli), in <cache>/extra/tolti.json: dov'era il file e dov'è
+    adesso, in «Tolti» sullo stesso disco. Il catalogo non li mostra; «Rimetti» riporta il file al suo posto."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        self.d = {k: v for k, v in _leggi_json(file, {}).items() if isinstance(v, dict) and v.get("id")}
+
+    def ids(self):
+        with self.blocco:
+            return {x["id"] for x in self.d.values()}
+
+    def elenco(self):
+        with self.blocco:
+            return sorted((dict(x, id_brano=x["id"], id=k) for k, x in self.d.items()), key=lambda x: -x.get("quando", 0))
+
+    def aggiungi(self, voce):
+        with self.blocco:
+            tid = secrets.token_hex(8)
+            self.d[tid] = dict(voce, quando=time.time())
+            _scrivi_json(self.file, self.d)
+            return tid
+
+    def prendi(self, tid):
+        with self.blocco:
+            x = self.d.get(tid)
+            return dict(x) if x else None
+
+    def togli(self, tid):
+        with self.blocco:
+            if self.d.pop(tid, None) is not None:
+                _scrivi_json(self.file, self.d)
+
+
+class DaControllare:
+    """Le schede dei brani di «Da controllare»: <id>.json accanto al file <id>.<est> (e alla copertina) nella cartella;
+    decisi, la scheda va in «Approvati» (il file nuovo è nella libreria) o, con il file, in «Scartati»."""
+    SOTTO = {"attesa": "", "approvato": "Approvati", "scartato": "Scartati"}
+
+    def __init__(self):
+        self.letti = {}   # percorso della scheda -> (mtime_ns, scheda)
+
+    def _leggi(self, p):
+        try:
+            m = os.stat(p).st_mtime_ns
+        except OSError:
+            return None
+        c = self.letti.get(p)
+        if c and c[0] == m:
+            return c[1]
+        try:
+            with open(p, encoding="utf-8") as f:
+                s = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(s, dict) or not ID_CARICO.match(str(s.get("id") or "")):
+            return None
+        if len(self.letti) > 5000:
+            self.letti.clear()
+        self.letti[p] = (m, s)
+        return s
+
+    def schede(self, stati=("attesa", "approvato", "scartato")):
+        base = _cartella_carica("controllo_dir", crea=False)
+        if not base:
+            return []
+        fuori = []
+        for stato in stati:
+            d = os.path.join(base, self.SOTTO[stato])
+            try:
+                nomi = [n for n in os.listdir(d) if n.endswith(".json") and not n.startswith(".")]
+            except OSError:
+                continue
+            for n in nomi:
+                s = self._leggi(os.path.join(d, n))
+                if s and s.get("stato") == stato:
+                    fuori.append(dict(s, _dir=d))
+        return sorted(fuori, key=lambda s: s.get("quando", 0))
+
+    def scheda(self, eid, stati=("attesa", "approvato", "scartato")):
+        if not ID_CARICO.match(eid or ""):
+            return None
+        base = _cartella_carica("controllo_dir", crea=False)
+        for stato in stati if base else ():
+            d = os.path.join(base, self.SOTTO[stato])
+            s = self._leggi(os.path.join(d, eid + ".json"))
+            if s and s.get("stato") == stato:
+                return dict(s, _dir=d)
+        return None
+
+    def scrivi(self, s):
+        d = s["_dir"]
+        os.makedirs(d, exist_ok=True)
+        _scrivi_json(os.path.join(d, s["id"] + ".json"), {k: v for k, v in s.items() if k != "_dir"})
+
+    def registra(self, sorgente, eid, campi):
+        """Un brano nuovo in «Da controllare»: il file diventa <id>.<est>, con la copertina e i tag letti dal file."""
+        base = _cartella_carica("controllo_dir")
+        est = os.path.splitext(campi.get("nome") or sorgente)[1].lower()
+        est = est if est in ESTENSIONI else os.path.splitext(sorgente)[1].lower() or ".mp3"
+        file_ = eid + est
+        os.replace(sorgente, os.path.join(base, file_))
+        p = os.path.join(base, file_)
+        t, nm = leggi_tag(p), da_nome(campi.get("nome") or file_)
+        info = campi.pop("_sonda", None) or {}
+        sonda = info.get("tag") or {}
+        tag = {"titolo": t.get("title") or sonda.get("title") or nm.get("title") or file_,
+               "artista": t.get("artist") or sonda.get("artist") or nm.get("artist") or "",
+               "album": t.get("album") or sonda.get("album") or ""}
+        tag = {k: " ".join(str(v).split())[:300] for k, v in tag.items()}
+        copertina = ""
+        pic = t.get("pic")
+        if pic and pic[0] and len(pic[0]) <= MAX_COPERTINA:
+            copertina = eid + (".png" if "png" in (pic[1] or "") else ".jpg")
+            with open(os.path.join(base, copertina), "wb") as f:
+                f.write(pic[0])
+        s = dict({"id": eid, "stato": "attesa", "quando": time.time(), "file": file_, "dimensione": os.path.getsize(p),
+                  "formato": info.get("formato", ""), "durata": round(info.get("durata") or t.get("duration") or 0, 2),
+                  "tag": tag, "originali": dict(tag), "copertina": copertina, "copertina_nuova": ""}, **campi)
+        s["_dir"] = base
+        self.scrivi(s)
+        return s
+
+    def sposta(self, s, stato, file_anche):
+        """La scheda (e con `file_anche` il file e le copertine) nella cartella del nuovo stato; senza, i file si tolgono:
+        sono copie (il brano approvato ha il suo file nuovo nella libreria)."""
+        vecchia, nuova = s["_dir"], os.path.join(_cartella_carica("controllo_dir"), self.SOTTO[stato])
+        os.makedirs(nuova, exist_ok=True)
+        for n in (s.get("file"), s.get("copertina"), s.get("copertina_nuova")):
+            if n and os.path.isfile(os.path.join(vecchia, n)):
+                if file_anche:
+                    os.replace(os.path.join(vecchia, n), os.path.join(nuova, n))
+                else:
+                    _cancella(os.path.join(vecchia, n))
+        vecchio = os.path.join(vecchia, s["id"] + ".json")
+        s = dict(s, stato=stato, deciso=time.time(), _dir=nuova)
+        self.scrivi(s)
+        _cancella(vecchio)
+        return s
+
+
+def _pubblica_scheda(s, tutto=False):
+    x = {"id": s["id"], "stato": s["stato"], "origine": s.get("origine", "caricato"), "titolo": s["tag"]["titolo"],
+         "artista": s["tag"]["artista"], "album": s["tag"]["album"], "nome": s.get("nome", ""),
+         "dimensione": s.get("dimensione", 0), "durata": s.get("durata", 0), "quando": s.get("quando", 0),
+         "deciso": s.get("deciso", 0)}
+    if tutto:
+        x.update(chi=s.get("chi", ""), chi_nome=s.get("chi_nome", ""), tag=dict(s["tag"]), originali=s.get("originali", {}),
+                 copertina=bool(s.get("copertina_nuova") or s.get("copertina")), url=s.get("url", ""),
+                 formato=s.get("formato", ""), finale=s.get("finale", ""), brano=s.get("brano", ""))
+    return x
+
+
+class Caricamenti:
+    """Caricamenti dal telefono (brani e film), in <cache>/extra/caricamenti.json. I byte arrivati stanno in un file
+    parziale sullo stesso disco della cartella finale (un film di 80 GB alla fine si sposta, non si copia): quello che
+    conta è la parte scritta e confermata (fsync) dopo ogni pezzo, così dopo un'interruzione si riprende da lì."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.RLock()
+        c = _leggi_json(file, {}).get("caricamenti")
+        self.c = {k: v for k, v in c.items() if isinstance(v, dict) and ID_CARICO.match(k)} if isinstance(c, dict) else {}
+        self.pezzi = {}   # id -> blocco: un pezzo alla volta per caricamento
+
+    def _salva(self):
+        _scrivi_json(self.file, {"caricamenti": self.c})
+
+    @staticmethod
+    def _parziale(s):
+        base = _cart("film_dir" if s["tipo"] == "film" else "controllo_dir")
+        return os.path.join(base, ".in arrivo", s["id"] + ".part")
+
+    @staticmethod
+    def pubblico(s):
+        x = {k: v for k, v in s.items() if not k.startswith("_") and k not in ("di", "modificato")}
+        x["pezzo"] = PEZZO
+        return x
+
+    def _riallinea(self, s):
+        """La parte arrivata è quella sul disco e nell'elenco insieme: un pezzo scritto a metà (Mac spento) si toglie."""
+        if s["stato"] not in ("in arrivo", "consentito"):
+            return
+        p = self._parziale(s)
+        if not os.path.isdir(os.path.dirname(os.path.dirname(p))):
+            return   # disco scollegato: si guarda quando torna
+        try:
+            n = os.path.getsize(p)
+        except OSError:
+            n = 0
+        if n < s["ricevuti"]:
+            s["ricevuti"] = n
+        elif n > s["ricevuti"]:
+            with open(p, "r+b") as f:
+                f.truncate(s["ricevuti"])
+
+    def pulisci(self):
+        """I caricamenti lasciati a metà troppo a lungo si tolgono (con il loro pezzo); quelli finiti escono dopo un mese."""
+        ora, cambiato = time.time(), False
+        with self.blocco:
+            for k, s in list(self.c.items()):
+                fermo = ora - s.get("aggiornato", s.get("creato", 0))
+                if s["stato"] in ("in arrivo", "consentito") and fermo > (SCADE_FILM if s["tipo"] == "film" else SCADE_BRANO):
+                    _cancella(self._parziale(s))
+                    s.update(stato="errore", errore="Rimasto a metà troppo a lungo: ricomincia da capo", ricevuti=0)
+                    cambiato = True
+                elif s["stato"] in ("fatto", "errore", "rifiutato") and fermo > 30 * 86400:
+                    del self.c[k]
+                    cambiato = True
+            if cambiato:
+                self._salva()
+
+    def nuovo(self, di, chi_nome, corpo):
+        tipo = corpo.get("tipo")
+        if tipo not in ("brano", "film"):
+            raise ErroreExtra(400, "Tipo non valido: brano o film")
+        nome = _nome_file(corpo.get("nome"), 200)
+        est = os.path.splitext(nome)[1].lower()
+        try:
+            dim = int(corpo.get("dimensione") or 0)
+            modificato = int(corpo["modificato"]) if corpo.get("modificato") is not None else None
+        except (TypeError, ValueError):
+            raise ErroreExtra(400, "Dimensione non valida")
+        if dim <= 0:
+            raise ErroreExtra(400, "Il file è vuoto")
+        titolo = ""
+        if tipo == "brano":
+            if est not in ESTENSIONI:
+                raise ErroreExtra(400, "Solo file audio: MP3, M4A, FLAC, WAV, AIFF, OGG")
+            if dim > BRANO_MAX:
+                raise ErroreExtra(413, "File troppo grande: al più 200 MB per brano")
+        else:
+            if est not in TIPI_FILM:
+                raise ErroreExtra(400, "Solo video: MP4, M4V, MOV, MKV, WEBM")
+            if dim > FILM_MAX:
+                raise ErroreExtra(413, "Film troppo grande: al più 80 GB")
+            titolo = " ".join(str(corpo.get("titolo") or "").split())[:TITOLO_FILM_MAX]
+            if not titolo:
+                raise ErroreExtra(400, "Serve il titolo del film")
+        if not _programma("ffprobe"):
+            raise ErroreExtra(503, "ffprobe non è installato sul Mac: brew install ffmpeg")
+        self.pulisci()
+        stati = ("in arrivo",) if tipo == "brano" else ("richiesta", "consentito")
+        with self.blocco:
+            for s in self.c.values():   # lo stesso file scelto di nuovo: si riprende quello di prima
+                if (s["di"], s["tipo"], s["nome"], s["dimensione"], s.get("modificato")) == (di, tipo, nome, dim, modificato) \
+                        and s["stato"] in stati:
+                    self._riallinea(s)
+                    return self.pubblico(s)
+            miei = [s for s in self.c.values() if s["di"] == di]
+            if tipo == "brano" and sum(1 for s in miei if s["tipo"] == "brano" and s["stato"] == "in arrivo") >= APERTI_MAX:
+                raise ErroreExtra(429, "Hai già %d caricamenti a metà: finiscili o annullali" % APERTI_MAX)
+            if tipo == "film" and di != "p" and sum(1 for s in miei if s["tipo"] == "film" and s["stato"] == "richiesta") >= FILM_ATTESA_MAX:
+                raise ErroreExtra(429, "Hai già %d film in attesa del sì di Samuele" % FILM_ATTESA_MAX)
+        if tipo == "brano":
+            if di != "p" and sum(1 for s in CTRL.schede(("attesa",)) if s.get("chi") == di) >= ATTESA_BRANI_MAX:
+                raise ErroreExtra(429, "Hai già %d brani in attesa di Samuele: aspetta che li controlli" % ATTESA_BRANI_MAX)
+            libero = _libero_su(_cart("controllo_dir"))
+            if libero - dim < SPAZIO_MIN:
+                raise ErroreExtra(507, "Sul Mac mini restano meno di %s liberi: i caricamenti sono fermi" % _misura(SPAZIO_MIN))
+        if QUOTE and QUOTE.resta(_limite(di)) <= 0:
+            raise ErroreDati(429, QUOTE.messaggio(), limite=True)
+        ora = time.time()
+        s = {"id": secrets.token_hex(8), "tipo": tipo, "di": di, "chi_nome": chi_nome, "nome": nome, "titolo": titolo,
+             "dimensione": dim, "modificato": modificato, "ricevuti": 0, "creato": ora, "aggiornato": ora, "errore": "",
+             "stato": "in arrivo" if tipo == "brano" else "richiesta"}
+        if tipo == "film" and di == "p":   # il film di Samuele non chiede il permesso a nessuno, ma lo spazio serve
+            self._spazio_film(s)
+            s["stato"] = "consentito"
+        with self.blocco:
+            self.c[s["id"]] = s
+            self._salva()
+        print("Atlante: %s carica %s «%s» (%s)" % (chi_nome, tipo, titolo or nome, _misura(dim)), flush=True)
+        return self.pubblico(s)
+
+    @staticmethod
+    def _spazio_film(s):
+        libero = _libero_su(_cart("film_dir"))
+        if libero < SPAZIO_MIN + s["dimensione"] - s.get("ricevuti", 0):
+            raise ErroreExtra(507, "Sul Cloud restano %s liberi: per questo film ne servono %s (il film più %s)" % (
+                _misura(libero), _misura(SPAZIO_MIN + s["dimensione"]), _misura(SPAZIO_MIN)))
+
+    def leggi(self, id_, di):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["di"] != di:
+                raise ErroreExtra(404, "Caricamento sconosciuto")
+            self._riallinea(s)
+            return self.pubblico(s)
+
+    def miei(self, di):
+        self.pulisci()
+        with self.blocco:
+            return [self.pubblico(s) for s in sorted(self.c.values(), key=lambda s: -s["creato"])
+                    if s["di"] == di and (s["tipo"] == "film" or s["stato"] != "fatto")]
+
+    def film(self, stati):
+        with self.blocco:
+            return [self.pubblico(s) for s in sorted(self.c.values(), key=lambda s: s["creato"])
+                    if s["tipo"] == "film" and s["stato"] in stati]
+
+    def finiti(self):
+        """Nome del film nella cartella -> chi l'ha caricato."""
+        with self.blocco:
+            return {s["finale"]: s.get("chi_nome", "") for s in self.c.values() if s["tipo"] == "film" and s.get("finale")}
+
+    def annulla(self, id_, di):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["di"] != di:
+                raise ErroreExtra(404, "Caricamento sconosciuto")
+            if s["stato"] in ("in arrivo", "consentito"):
+                _cancella(self._parziale(s))
+            del self.c[id_]
+            self._salva()
+
+    def decidi(self, id_, si):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["tipo"] != "film":
+                raise ErroreExtra(404, "Richiesta di film sconosciuta")
+            if s["stato"] != "richiesta":
+                raise ErroreExtra(409, "Richiesta già decisa")
+            if si:
+                self._spazio_film(s)
+            s.update(stato="consentito" if si else "rifiutato", deciso=time.time(), aggiornato=time.time())
+            self._salva()
+            print("Atlante: film «%s» di %s %s" % (s["titolo"], s["chi_nome"], "consentito" if si else "rifiutato"), flush=True)
+
+    def pezzo(self, id_, di, da, dati):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["di"] != di:
+                raise ErroreExtra(404, "Caricamento sconosciuto")
+            b = self.pezzi.setdefault(id_, threading.Lock())
+        if not b.acquire(timeout=60):
+            raise ErroreDati(409, "Un altro pezzo di questo file sta già arrivando", ricevuti=s["ricevuti"])
+        try:
+            with self.blocco:
+                if s["stato"] == "richiesta":
+                    raise ErroreExtra(409, "Il film aspetta ancora il consenso di Samuele")
+                if s["stato"] == "rifiutato":
+                    raise ErroreExtra(409, "Samuele non ha consentito questo film")
+                if s["stato"] not in ("in arrivo", "consentito"):
+                    raise ErroreDati(409, "Questo caricamento è già finito", ricevuti=s["ricevuti"], stato=s["stato"])
+                self._riallinea(s)
+                if da != s["ricevuti"]:
+                    raise ErroreDati(409, "Il Mac ha già %s di questo file: si riprende da lì" % _misura(s["ricevuti"]),
+                                     ricevuti=s["ricevuti"])
+                if not dati:
+                    raise ErroreExtra(400, "Pezzo vuoto")
+                if da + len(dati) > s["dimensione"]:
+                    raise ErroreExtra(400, "Il file è più grande di quanto annunciato: sceglilo di nuovo")
+            p = self._parziale(s)
+            _cartella_carica("film_dir" if s["tipo"] == "film" else "controllo_dir")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            # spazio: per un film resta da arrivare tutto il resto, per un brano conta questo pezzo
+            serve = s["dimensione"] - da if s["tipo"] == "film" else len(dati)
+            if _libero_su(os.path.dirname(p)) - serve < SPAZIO_MIN:
+                raise ErroreDati(507, "Sul Mac mini restano meno di %s liberi: il caricamento è fermo" % _misura(SPAZIO_MIN),
+                                 ricevuti=da)
+            if QUOTE:
+                try:
+                    QUOTE.controlla(_limite(di), len(dati))
+                except ErroreDati as e:
+                    e.dati["ricevuti"] = da
+                    raise
+            fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "r+b") as f:
+                f.truncate(da)
+                f.seek(da)
+                f.write(dati)
+                f.flush()
+                os.fsync(f.fileno())
+            if QUOTE:
+                QUOTE.consuma(_limite(di), len(dati), forza=True)
+            with self.blocco:
+                s.update(ricevuti=da + len(dati), aggiornato=time.time())
+                self._salva()
+            if s["ricevuti"] == s["dimensione"]:
+                try:
+                    self._fine(s, p)
+                except Exception as e:   # noqa: BLE001  il file arrivato tutto non resta bloccato «in arrivo»
+                    print("Atlante: caricamento %s non concluso: %s" % (s["id"], e), flush=True)
+                    _cancella(p)
+                    self._esito(s, stato="errore", errore="Il Mac non è riuscito a concludere: %s" %
+                                (e.testo if isinstance(e, ErroreExtra) else e))
+            return self.pubblico(s)
+        finally:
+            b.release()
+
+    def _fine(self, s, p):
+        """File arrivato tutto: ffprobe dice cos'è. Un brano va in «Da controllare» (quello di Samuele subito nella
+        libreria), un film nella cartella dei film; quello che non è un audio o un video si toglie."""
+        info = _sonda(p)
+        if s["tipo"] == "film":
+            if not info or not info["video"]:
+                _cancella(p)
+                return self._esito(s, stato="errore", errore="Il file non è un video: l'ho tolto")
+            dest = _libero(os.path.join(_cartella_carica("film_dir"), (_nome_file(s["titolo"], 150) or s["id"]) +
+                                        os.path.splitext(s["nome"])[1].lower()))
+            os.replace(p, dest)   # stesso disco: un attimo anche per 80 GB
+            print("Atlante: film «%s» nel Cloud: %s" % (s["titolo"], dest), flush=True)
+            return self._esito(s, stato="fatto", finale=os.path.basename(dest))
+        if not info or not info["audio"] or info["video"]:
+            _cancella(p)
+            return self._esito(s, stato="errore", errore="Il file non è un file audio: l'ho tolto")
+        with _blocco_controllo:
+            CTRL.registra(p, s["id"], {"origine": "caricato", "chi": s["di"], "chi_nome": s["chi_nome"], "nome": s["nome"],
+                                       "_sonda": info})
+        campi = {"stato": "fatto", "elemento": s["id"]}
+        if s["di"] == "p":   # Samuele: entra subito nella libreria (i tag si correggono in Contenuti)
+            try:
+                r = _approva(s["id"], forza=True)
+                campi.update(brano=r["brano"], finale=r["nome"])
+                if r.get("doppioni"):
+                    campi["avviso"] = "C'era già un brano con lo stesso artista e titolo"
+            except ErroreExtra as e:
+                campi["avviso"] = "È in «Da controllare»: %s" % e.testo
+        return self._esito(s, **campi)
+
+    def _esito(self, s, **campi):
+        with self.blocco:
+            s.update(campi, aggiornato=time.time())
+            self._salva()
+
+
+def avvia_caricamenti(cache, controllo_dir=None, film_dir=None, tolti_dir=None, limite_gb=None, spazio_gb=None):
+    """Cartelle, limite giornaliero e archivi dei caricamenti. Da chiamare prima della prima lettura della libreria:
+    le cartelle dei caricamenti non devono finire nel catalogo."""
+    global CARIC, QUOTE, CORR, TOLTI, CTRL, LIMITE_GIORNO, SPAZIO_MIN
+    for k, v in (("controllo_dir", controllo_dir), ("film_dir", film_dir), ("tolti_dir", tolti_dir)):
+        if v:
+            CONF[k] = v
+    if limite_gb is not None:
+        LIMITE_GIORNO = int(float(limite_gb) * GB)
+    if spazio_gb is not None:
+        SPAZIO_MIN = int(float(spazio_gb) * GB)
+    ESCLUSE.clear()
+    ESCLUSE.update(_cart(k) for k in ("controllo_dir", "film_dir", "tolti_dir"))
+    base = os.path.abspath(os.path.expanduser(cache))
+    CARIC = Caricamenti(os.path.join(base, "extra", "caricamenti.json"))
+    QUOTE = Quote(os.path.join(base, "extra", "quote.json"), LIMITE_GIORNO)
+    CORR = Correzioni(os.path.join(base, "correzioni.json"))
+    TOLTI = Tolti(os.path.join(base, "extra", "tolti.json"))
+    CTRL = DaControllare()
+
+
+def _brani_corretti():
+    """Voci della libreria con le correzioni di Samuele (e senza i brani tolti): [(voce corretta, voce originale)]."""
+    if LIB is None:
+        return []
+    corr, via = (CORR.tutte() if CORR else {}), (TOLTI.ids() if TOLTI else set())
+    with LIB.blocco:
+        voci = list(LIB.brani.values())
+    return [(dict(v, **corr[v["id"]]) if v["id"] in corr else v, v) for v in voci if v["id"] not in via]
+
+
+def _indice_doppioni():
+    idx = {}
+    for v, _ in _brani_corretti():
+        idx.setdefault((_norma(v.get("title")), _norma(v.get("artist"))), []).append(v)
+    return idx
+
+
+def _doppioni(tag, idx=None):
+    """Brani della libreria con lo stesso artista e titolo (maiuscole, accenti a parte no, punteggiatura sì)."""
+    t, a = _norma(tag.get("titolo")), _norma(tag.get("artista"))
+    if not t:
+        return []
+    idx = _indice_doppioni() if idx is None else idx
+    return [{"id": v["id"], "titolo": v.get("title", ""), "artista": v.get("artist", ""), "album": v.get("album", "")}
+            for v in idx.get((t, a), [])][:5]
+
+
+def _uscita(formato):
+    """Come diventa il file approvato: (modo, estensione, formato di ffmpeg). MP3, M4A e FLAC restano come sono (solo i
+    tag nuovi); WAV e AIFF diventano FLAC (senza perdita, con i tag che la libreria legge); il resto MP3 come il Cloud."""
+    f = set(formato.split(","))
+    if "mp3" in f:
+        return "copia", ".mp3", "mp3"
+    if "flac" in f:
+        return "copia", ".flac", "flac"
+    if f & {"mov", "mp4", "m4a", "aac"}:
+        return "copia", ".m4a", "ipod"
+    if f & {"wav", "aiff"}:
+        return "flac", ".flac", "flac"
+    return "mp3", ".mp3", "mp3"
+
+
+def _con_tag(ff, sorgente, copertina, tag, uscita, modo, muxer, adts=False):
+    """Il brano con i tag giusti in un file nuovo: l'audio copiato com'è (o convertito, vedi _uscita), gli altri tag di
+    prima, e la copertina nuova o quella che c'era."""
+    args = [ff, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", sorgente]
+    if copertina:
+        args += ["-i", copertina, "-map", "0:a:0", "-map", "1:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+    elif muxer in ("mp3", "flac", "ipod"):
+        args += ["-map", "0:a:0", "-map", "0:v?", "-c:v", "copy"]
+    else:
+        args += ["-map", "0:a:0"]
+    args += ["-map_metadata", "0"]
+    args += {"copia": ["-c:a", "copy"], "flac": ["-c:a", "flac"], "mp3": ["-c:a", "libmp3lame", "-q:a", "0"]}[modo]
+    if adts and muxer == "ipod" and modo == "copia":
+        args += ["-bsf:a", "aac_adtstoasc"]
+    for k, v in (("title", tag["titolo"]), ("artist", tag["artista"]), ("album", tag["album"])):
+        args += ["-metadata", "%s=%s" % (k, v)]
+    if muxer == "mp3":
+        args += ["-id3v2_version", "3"]
+    r = subprocess.run(args + ["-f", muxer, uscita], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, env=_ambiente(), timeout=TEMPO_YTDLP)
+    if r.returncode != 0:
+        _cancella(uscita)
+        raise RuntimeError("ffmpeg: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
+
+
+def _approva(eid, forza=False):
+    """Approva: un file nuovo con i tag corretti nella cartella della musica scaricata (fa parte della libreria di tutti).
+    Con un brano dello stesso artista e titolo già nella libreria, 409 con i doppioni (a meno di `forza`)."""
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",))
+        if not s:
+            raise ErroreExtra(404, "Questo brano non è (più) in «Da controllare»")
+        doppi = _doppioni(s["tag"])
+        if doppi and not forza:
+            raise ErroreDati(409, "C'è già nella libreria un brano con lo stesso artista e titolo", doppioni=doppi)
+        ff = _programma("ffmpeg")
+        if not ff:
+            raise ErroreExtra(503, "ffmpeg non è installato sul Mac: brew install ffmpeg")
+        dest = _cartella_musica()
+        sorgente = os.path.join(s["_dir"], s["file"])
+        if not os.path.isfile(sorgente):
+            raise ErroreExtra(404, "Il file del brano non è più in «Da controllare»")
+        cop = s.get("copertina_nuova") and os.path.join(s["_dir"], s["copertina_nuova"])
+        modo, est, muxer = _uscita(s.get("formato") or "")
+        prove = [(modo, est, muxer)] + ([("mp3", ".mp3", "mp3")] if modo != "mp3" else [])
+        t = s["tag"]
+        nome = _nome_file("%s - %s" % (t["artista"], t["titolo"]) if t["artista"] else t["titolo"], 180) or eid
+        parziale = os.path.join(dest, "." + eid + ".tmp")   # col punto davanti la libreria non lo legge
+        errore = None
+        for modo, est, muxer in prove:   # se la copia non va (codifica strana) si converte in MP3
+            for c in ([cop, None] if cop else [None]):   # un'immagine che ffmpeg non legge: senza copertina nuova
+                try:
+                    _con_tag(ff, sorgente, c, t, parziale, modo, muxer, adts="aac" in (s.get("formato") or "").split(","))
+                    errore = None
+                    break
+                except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                    errore = e
+            if errore is None:
+                break
+        if errore is not None:
+            raise ErroreExtra(500, "Il Mac non è riuscito a scrivere il brano: %s" % errore)
+        finale = _libero(os.path.join(dest, nome + est))
+        os.replace(parziale, finale)
+        brano = _in_libreria(finale)
+        CTRL.sposta(dict(s, finale=os.path.basename(finale), brano=brano), "approvato", False)
+    print("Atlante: approvato «%s» di %s" % (t["titolo"], s.get("chi_nome", "")), flush=True)
+    return {"ok": True, "brano": brano, "nome": os.path.basename(finale), "doppioni": doppi}
+
+
+def _da_controllare_scaricato(coda, l, percorso):
+    """Il brano scaricato da un invitato con «Cerca e scarica»: in «Da controllare», e il suo telefono ne prende una copia."""
+    eid = secrets.token_hex(8)
+    with _blocco_controllo:
+        s = CTRL.registra(percorso, eid, {"origine": "scaricato", "chi": l["di"], "chi_nome": l.get("chi_nome", ""),
+                                          "nome": l.get("nome") or os.path.basename(percorso), "url": l.get("url", ""),
+                                          "formato": "mp3" if percorso.endswith(".mp3") else ""})
+    if QUOTE:
+        QUOTE.consuma(l["di"], s["dimensione"], forza=True)
+    coda.aggiorna(l["id"], caricamento=eid, brano="", _percorso=os.path.join(s["_dir"], s["file"]))
+
+
+def _controllo_elenco():
+    idx = _indice_doppioni()
+    brani = []
+    for s in CTRL.schede(("attesa",)):
+        x = _pubblica_scheda(s, True)
+        x["doppioni"] = _doppioni(s["tag"], idx)
+        brani.append(x)
+    scartati = [_pubblica_scheda(s, True) for s in CTRL.schede(("scartato",))]
+    cartella = _cart("controllo_dir")
+    return {"brani": brani, "film": CARIC.film(("richiesta", "consentito")),
+            "scartati": sorted(scartati, key=lambda x: -x["deciso"])[:100],
+            "raggiungibile": os.path.isdir(cartella) or os.path.isdir(os.path.dirname(cartella)),
+            "libero": _libero_su(_cart("controllo_dir")), "libero_film": _libero_su(_cart("film_dir")),
+            "spazio_min": SPAZIO_MIN}
+
+
+def _nuove_caricamenti():
+    """Per il numero sul riquadro Gestione: brani da controllare e richieste di film da decidere."""
+    try:
+        return {"da_controllare": len(CTRL.schede(("attesa",))) if CTRL else 0,
+                "film": len(CARIC.film(("richiesta",))) if CARIC else 0}
+    except OSError:
+        return {"da_controllare": 0, "film": 0}
+
+
+def _correggi_scheda(eid, corpo):
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",))
+        if not s:
+            raise ErroreExtra(404, "Questo brano non è (più) in «Da controllare»")
+        for k in ("titolo", "artista", "album"):
+            if k in corpo:
+                v = " ".join(str(corpo.get(k) or "").split())[:300]
+                if k == "titolo" and not v:
+                    raise ErroreExtra(400, "Il titolo non può restare vuoto")
+                s["tag"][k] = v
+        CTRL.scrivi(s)
+        return _pubblica_scheda(s, True)
+
+
+def _copertina_scheda(h, metodo, eid, dati):
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",)) if metodo != "GET" else CTRL.scheda(eid)
+        if not s:
+            raise ErroreExtra(404, "Brano non trovato")
+        if metodo == "GET":
+            n = s.get("copertina_nuova") or s.get("copertina")
+            p = n and os.path.join(s["_dir"], n)
+            if not p or not os.path.isfile(p):
+                raise ErroreExtra(404, "Nessuna copertina")
+            return _invia_file(h, p, "image/png" if p.endswith(".png") else "image/jpeg", {"Cache-Control": "no-store"})
+        est = _immagine(dati) if metodo == "PUT" else ""   # un'immagine sbagliata non tocca quella che c'è
+        if s.get("copertina_nuova"):
+            _cancella(os.path.join(s["_dir"], s["copertina_nuova"]))
+            s["copertina_nuova"] = ""
+        if metodo == "PUT":
+            n = "%s-nuova-%d%s" % (eid, int(time.time()), est)
+            with open(os.path.join(s["_dir"], n), "wb") as f:
+                f.write(dati)
+            s["copertina_nuova"] = n
+        CTRL.scrivi(s)
+        return _json(h, {"ok": True})
+
+
+def _scarta(eid):
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",))
+        if not s:
+            raise ErroreExtra(404, "Questo brano non è (più) in «Da controllare»")
+        CTRL.sposta(s, "scartato", True)
+    print("Atlante: scartato «%s» di %s" % (s["tag"]["titolo"], s.get("chi_nome", "")), flush=True)
+
+
+def _contenuti(q):
+    """Ricerca nella libreria per Gestione → Contenuti (senza parole: gli ultimi arrivati)."""
+    parole = _parole(q).split()
+    with LIB.blocco:
+        percorsi = dict(LIB.percorsi)
+    corr = CORR.tutte() if CORR else {}
+    out = []
+    for v, o in _brani_corretti():
+        if parole:
+            testo = _parole(" ".join(str(x.get(k) or "") for x in (v, o) for k in ("title", "artist", "album")))
+            if not all(w in testo for w in parole):
+                continue
+        out.append(_voce_contenuti(v, o, percorsi.get(v["id"], ""), v["id"] in corr))
+    out.sort(key=(lambda x: (_norma(x["artista"]), _norma(x["titolo"]))) if parole else (lambda x: -x["aggiunto"]))
+    return {"brani": out[:100 if parole else 50], "trovati": len(out)}
+
+
+def _voce_contenuti(v, o, percorso, corretto):
+    return {"id": v["id"], "titolo": v.get("title", ""), "artista": v.get("artist", ""), "album": v.get("album", ""),
+            "copertina": v.get("cover"), "durata": v.get("duration", 0), "aggiunto": v.get("added", 0),
+            "corretto": corretto, "file": os.path.basename(percorso or ""),
+            "originale": {"titolo": o.get("title", ""), "artista": o.get("artist", ""), "album": o.get("album", ""),
+                          "copertina": o.get("cover")}}
+
+
+def _brano_libreria(bid):
+    p = LIB.percorsi.get(bid) if LIB and ID_CARICO.match(bid or "") else None
+    if not p or (TOLTI and bid in TOLTI.ids()):
+        raise ErroreExtra(404, "Brano non trovato nella libreria")
+    return p
+
+
+def _correggi_brano(bid, corpo):
+    p = _brano_libreria(bid)
+    with LIB.blocco:
+        orig = dict(LIB.brani.get(bid) or {})
+    campi = {}
+    for k, c in (("titolo", "title"), ("artista", "artist"), ("album", "album")):
+        if k in corpo:
+            v = " ".join(str(corpo.get(k) or "").split())[:300]
+            if v:   # vuoto: resta quello del file
+                campi[c] = None if v == (orig.get(c) or "") else v   # uguale al file: nessuna correzione
+    if campi:
+        CORR.imposta(bid, campi, p)
+    return _voce_brano(bid)
+
+
+def _voce_brano(bid):
+    for v, o in _brani_corretti():
+        if v["id"] == bid:
+            return _voce_contenuti(v, o, LIB.percorsi.get(bid, ""), bool(CORR.di(bid)))
+    raise ErroreExtra(404, "Brano non trovato nella libreria")
+
+
+def _copertina_brano(bid, dati):
+    p = _brano_libreria(bid)
+    est = _immagine(dati)
+    chiave = hashlib.sha1(dati).hexdigest()[:20] + est   # come le copertine lette dai file: si serve da api/musica/copertina
+    dest = os.path.join(LIB.dir_copertine, chiave)
+    if not os.path.exists(dest):
+        with open(dest + ".tmp", "wb") as f:
+            f.write(dati)
+        os.replace(dest + ".tmp", dest)
+    CORR.imposta(bid, {"cover": chiave}, p)
+    return _voce_brano(bid)
+
+
+def _togli(bid):
+    """Il file va in «Tolti» sullo stesso disco (ATLANTE_TOLTI_DIR se è sullo stesso disco del brano, se no la cartella
+    «.Tolti» nella cartella della libreria: si sposta, non si copia) e il brano esce dal catalogo di tutti."""
+    p = _brano_libreria(bid)
+    v = next((x for x, _ in _brani_corretti() if x["id"] == bid), {})
+    radice = next((r for r in LIB.cartelle if _dentro(p, r)), os.path.dirname(p))
+    dove = _cart("tolti_dir")
+    try:
+        sopra = dove
+        while not os.path.isdir(sopra) and os.path.dirname(sopra) != sopra:
+            sopra = os.path.dirname(sopra)
+        stesso = os.stat(p).st_dev == os.stat(sopra).st_dev and os.path.isdir(os.path.dirname(dove))
+    except OSError:
+        stesso = False
+    if not stesso:
+        dove = os.path.join(radice, ".Tolti")
+    dest = _libero(os.path.join(dove, os.path.relpath(p, radice)))
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(p, dest)
+    except OSError as e:
+        raise ErroreExtra(500, "Non riesco a spostare il file in «Tolti»: %s" % e)
+    tid = TOLTI.aggiungi({"id": bid, "percorso": p, "dove": dest, "titolo": v.get("title", ""), "artista": v.get("artist", ""),
+                          "album": v.get("album", "")})
+    with LIB.blocco:   # subito fuori dal catalogo; la rilettura del disco (in sottofondo) lo conferma
+        LIB.brani.pop(bid, None)
+        LIB.percorsi.pop(bid, None)
+    LIB.rileggi_presto(subito=True)
+    print("Atlante: tolto «%s» → %s" % (v.get("title", ""), dest), flush=True)
+    return {"ok": True, "tolto": tid}
+
+
+def _rimetti(tid):
+    t = TOLTI.prendi(tid) if ID_CARICO.match(tid or "") else None
+    if not t:
+        raise ErroreExtra(404, "Brano tolto sconosciuto")
+    if not os.path.isfile(t["dove"]):
+        raise ErroreExtra(404, "Il file non è più in «Tolti»: %s" % t["dove"])
+    dest = _libero(t["percorso"])
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(t["dove"], dest)
+    except OSError as e:
+        raise ErroreExtra(500, "Non riesco a rimettere il file al suo posto: %s" % e)
+    TOLTI.togli(tid)
+    return {"ok": True, "brano": _in_libreria(dest)}
+
+
+def _gestione_carica(h, metodo, resto, corpo):
+    """Gestione → Da controllare (brani e richieste di film) e Contenuti. Solo Samuele (lo controlla _gestione)."""
+    cosa, r = resto[0], resto[1:]
+
+    def solo(*metodi):
+        if metodo not in metodi:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    try:
+        if cosa == "controllo" and not r:
+            solo("GET")
+            return _json(h, _controllo_elenco())
+        if cosa == "controllo" and len(r) == 2 and r[1] == "file":
+            solo("GET")
+            s = CTRL.scheda(r[0])
+            p = s and os.path.join(s["_dir"], s["file"])
+            if not p or not os.path.isfile(p):
+                raise ErroreExtra(404, "File non trovato")
+            return _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"),
+                               {"X-Content-Type-Options": "nosniff"})
+        if cosa == "controllo" and len(r) == 2 and r[1] == "copertina":
+            solo("GET", "PUT", "DELETE")
+            return _copertina_scheda(h, metodo, r[0], getattr(h, "_grezzo", b""))
+        if cosa == "controllo" and len(r) == 1:
+            solo("POST")
+            return _json(h, {"brano": _correggi_scheda(r[0], corpo)})
+        if cosa == "controllo" and len(r) == 2 and r[1] in ("approva", "scarta"):
+            solo("POST")
+            if r[1] == "scarta":
+                _scarta(r[0])
+                return _json(h, {"ok": True})
+            return _json(h, _approva(r[0], bool(corpo.get("forza"))))
+        if cosa == "film" and len(r) == 2 and r[1] in ("consenti", "rifiuta"):
+            solo("POST")
+            CARIC.decidi(r[0], r[1] == "consenti")
+            return _json(h, {"ok": True})
+        if cosa == "contenuti" and LIB is None:
+            raise ErroreExtra(503, "Libreria non pronta")
+        if cosa == "contenuti" and not r:
+            solo("GET")
+            return _json(h, _contenuti((parse_qs(urlsplit(h.path).query).get("q") or [""])[0]))
+        if cosa == "contenuti" and r == ["tolti"]:
+            solo("GET")
+            return _json(h, {"tolti": TOLTI.elenco()})
+        if cosa == "contenuti" and len(r) == 3 and r[0] == "tolti" and r[2] == "rimetti":
+            solo("POST")
+            return _json(h, _rimetti(r[1]))
+        if cosa == "contenuti" and len(r) == 1:
+            solo("POST")
+            return _json(h, {"brano": _correggi_brano(r[0], corpo)})
+        if cosa == "contenuti" and len(r) == 2 and r[1] == "copertina":
+            solo("PUT")
+            return _json(h, {"brano": _copertina_brano(r[0], getattr(h, "_grezzo", b""))})
+        if cosa == "contenuti" and len(r) == 2 and r[1] == "ripristina":
+            solo("POST")
+            _brano_libreria(r[0])
+            CORR.togli(r[0])
+            return _json(h, {"brano": _voce_brano(r[0])})
+        if cosa == "contenuti" and len(r) == 2 and r[1] == "togli":
+            solo("POST")
+            return _json(h, _togli(r[0]))
+    except ErroreDati as e:
+        return _json(h, dict(e.dati, errore=e.testo), e.codice)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/%s" % "/".join(resto))
+
+
+def _caricamenti(h, metodo, resto, corpo):
+    """I caricamenti di chi fa la richiesta (anche gli invitati: ognuno vede e tocca solo i suoi)."""
+    di, nome = _chi_carica(h)
+    try:
+        if not resto:
+            if metodo == "POST":
+                return _json(h, CARIC.nuovo(di, nome, corpo))
+            if metodo != "GET":
+                raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+            brani = [_pubblica_scheda(s) for s in CTRL.schede() if s.get("chi") == di]
+            k = _limite(di)
+            return _json(h, {"caricamenti": CARIC.miei(di), "brani": sorted(brani, key=lambda x: -x["quando"]),
+                             "oggi": {"usati": QUOTE.usati(k), "limite": QUOTE.limite} if k is not None else None})
+        if not ID_CARICO.match(resto[0]):
+            raise ErroreExtra(404, "Caricamento sconosciuto")
+        if len(resto) == 1 and metodo == "GET":
+            return _json(h, CARIC.leggi(resto[0], di))
+        if len(resto) == 1 and metodo == "DELETE":
+            CARIC.annulla(resto[0], di)
+            return _json(h, {"ok": True})
+        if len(resto) == 1 and metodo == "PUT":
+            try:
+                da = int((parse_qs(urlsplit(h.path).query).get("da") or [""])[0])
+            except ValueError:
+                raise ErroreExtra(400, "Serve da: il byte da cui comincia il pezzo")
+            return _json(h, CARIC.pezzo(resto[0], di, da, getattr(h, "_grezzo", b"")))
+        if resto[1:] == ["file"] and metodo == "GET":   # un mio brano (la copia per il telefono di chi l'ha scaricato)
+            s = CTRL.scheda(resto[0])
+            p = s and s.get("chi") == di and os.path.join(s["_dir"], s["file"])
+            if not p or not os.path.isfile(p):
+                raise ErroreExtra(404, "Brano non trovato")
+            t = s["tag"]
+            nome_file = _nome_file("%s - %s" % (t["artista"], t["titolo"]) if t["artista"] else t["titolo"], 150) + \
+                os.path.splitext(p)[1]
+            return _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"),
+                               {"Content-Disposition": _disposizione(nome_file), "X-Content-Type-Options": "nosniff"})
+    except ErroreDati as e:
+        return _json(h, dict(e.dati, errore=e.testo), e.codice)
+    raise ErroreExtra(404 if metodo in ("GET", "PUT", "DELETE", "POST") else 405,
+                      "Richiesta sconosciuta: api/extra/caricamenti/%s" % "/".join(resto))
+
+
+def _film(h, metodo, resto):
+    """I film arrivati nel Cloud, per il modulo Video di Samuele (agli invitati non compaiono, come il modulo)."""
+    if metodo != "GET":
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    base = _cartella_carica("film_dir", crea=False)
+    if not resto:
+        chi, film = CARIC.finiti(), []
+        try:
+            voci = list(os.scandir(base)) if base else []
+        except OSError:
+            voci = []
+        for e in voci:
+            if e.is_file() and not e.name.startswith(".") and os.path.splitext(e.name)[1].lower() in TIPI_FILM:
+                st = e.stat()
+                film.append({"nome": e.name, "titolo": os.path.splitext(e.name)[0], "dimensione": st.st_size,
+                             "quando": st.st_mtime, "chi_nome": chi.get(e.name, "")})
+        return _json(h, {"film": sorted(film, key=lambda x: -x["quando"]), "cartella": _cart("film_dir"),
+                         "raggiungibile": bool(base)})
+    if len(resto) == 2 and resto[0] == "file":
+        n = resto[1]
+        p = base and os.path.join(base, n)
+        if (not p or n != os.path.basename(n) or n.startswith(".") or os.path.splitext(n)[1].lower() not in TIPI_FILM
+                or not os.path.isfile(p)):
+            raise ErroreExtra(404, "Film non trovato")
+        return _invia_file(h, p, TIPI_VIDEO.get(os.path.splitext(n)[1].lower(), "application/octet-stream"),
+                           {"Content-Disposition": _disposizione(n), "X-Content-Type-Options": "nosniff"})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/film/%s" % "/".join(resto))
+
+
+def _chi_scarica(h):
+    """Per «Cerca e scarica»: l'id dell'invitato (il brano va in «Da controllare»), None per Samuele e la rete di casa
+    (il brano entra nella libreria come sempre)."""
+    chi = _chi_e(h)
+    return chi["persona"] if chi["ruolo"] == "invitato" else None
+
+
+def _lavori_musica(h):
+    """Gli scaricamenti di chi chiede: un invitato vede solo i suoi, Samuele quelli che non sono degli invitati."""
+    di = _chi_scarica(h)
+    return [l for l in _coda("musica").elenco() if l.get("di") == di]
+
+
 # ----- voci e audiolibri con `say` -----
 
 _VOCI = {"t": 0.0, "say": "", "voci": []}
@@ -5264,13 +6459,17 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "musica" and not resto:
         solo("GET", "POST")
         if metodo == "GET":
-            _json(h, {"lavori": _coda("musica").elenco()})
+            _json(h, {"lavori": _lavori_musica(h)})
         else:
-            _json(h, {"id": _nuova_musica(corpo)})
+            _json(h, {"id": _nuova_musica(corpo, _chi_scarica(h), _chi_carica(h)[1])})
     elif cosa == "musica" and len(resto) == 2 and resto[1] == "annulla":
         solo("POST")
-        _annulla_musica(resto[0])
+        _annulla_musica(resto[0], _chi_scarica(h))
         _json(h, {"ok": True})
+    elif cosa == "caricamenti":   # Carica nella libreria e Carica un film (ognuno i suoi)
+        _caricamenti(h, metodo, resto, corpo)
+    elif cosa == "film":          # i film nel Cloud, per il modulo Video
+        _film(h, metodo, resto)
     elif cosa == "clip" and not resto:
         solo("GET")
         _json(h, CLIP.avanzamento() if CLIP else {"attivo": False})
@@ -5297,6 +6496,7 @@ def _instrada(h, metodo, parti, corpo):
         r = {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None}
         if chi["ruolo"] == "proprietario" and PERS:   # il riquadro Gestione mostra quante cose nuove aspettano Samuele
             r["nuove"] = {"richieste": sum(1 for x in PERS.richieste() if x["stato"] == "attesa")}
+            r["nuove"].update(_nuove_caricamenti())   # brani da controllare e film da decidere
         if chi["ruolo"] == "proprietario" and IDEE is not None:   # e le idee mandate dal riquadro «Idee»
             r.setdefault("nuove", {})["idee"] = IDEE.nuove()
         if chi["ruolo"] == "proprietario" and BLOCCO is not None and BLOCCO.attivo():
@@ -5358,6 +6558,7 @@ def gestisci_extra(h, metodo=None):
     h._musica_risposto = False
     try:
         dati = _leggi_corpo(h)
+        h._grezzo = dati   # PUT: i byte di un pezzo di file o di una copertina
         if metodo in ("POST", "DELETE", "PUT", "PATCH") and not _stessa_origine(h):
             raise ErroreExtra(403, "Richiesta da un altro sito: rifiutata")
         corpo = _da_json(dati) if metodo == "POST" else {}
@@ -6675,13 +7876,16 @@ def controlla_accesso(h):
     return True
 
 
-# un invitato ascolta e basta: la musica, i videoclip, i suoi dispositivi, chi è, i suoi inviti e le sue idee. Il resto
-# (proxy, scaricamenti, IA, voci, la Gestione, i moduli di «Altro») usa le risorse del Mac mini o è di Samuele
+# un invitato ascolta: la musica, i videoclip, i suoi dispositivi, chi è, i suoi inviti, le sue idee e i suoi ascolti; e
+# manda brani a Samuele (Cerca e scarica, Carica nella libreria: finiscono in «Da controllare»). Il resto (proxy, video,
+# IA, voci, la Gestione, gli altri moduli di «Altro») usa le risorse del Mac mini o è di Samuele
 PERMESSE_INVITATI = re.compile(
     r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
-    r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html|x/idee\.html)$"
+    r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/(?:inviti|idee|cerca|carica)\.html)$"
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
-    r"|extra/(?:io|inviti|idee|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?)"
+    r"|extra/(?:io|inviti|idee|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
+    # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria: ognuno i suoi
+    r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?)"
     r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?)$")
 # la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
@@ -6703,6 +7907,16 @@ def _permesso(h):
     if h.command != "HEAD":
         h.wfile.write(corpo)
     return False
+
+
+def _numero_ambiente(nome, predefinito):
+    """Un numero da una variabile d'ambiente del LaunchAgent; scritto male vale quello predefinito (e lo si dice)."""
+    v = os.environ.get(nome, "").strip()
+    try:
+        return float(v.replace(",", ".")) if v else predefinito
+    except ValueError:
+        print("Atlante: %s=%r non è un numero: uso %s" % (nome, v, predefinito), flush=True)
+        return predefinito
 
 
 def _imposta_password(file):
@@ -6757,6 +7971,18 @@ def main():
     ap.add_argument("--pubblico", default=os.environ.get("ATLANTE_PUBBLICO", ""),
                     help="indirizzo dell'app da Internet (tailscale funnel), es. https://mac-mini.tailnet.ts.net:10000/, "
                     "per i link d'invito (anche ATLANTE_PUBBLICO)")
+    # caricamenti (Gestione, parte 2): anche da variabili d'ambiente, come ATLANTE_MUSICA_DIR (vedi sopra il perché)
+    ap.add_argument("--controllo-dir", default=os.environ.get("ATLANTE_CONTROLLO_DIR") or CONF["controllo_dir"],
+                    help="cartella «Da controllare»: i brani caricati o scaricati dagli invitati aspettano lì il sì di "
+                    "Samuele (anche ATLANTE_CONTROLLO_DIR)")
+    ap.add_argument("--film-dir", default=os.environ.get("ATLANTE_FILM_DIR") or CONF["film_dir"],
+                    help="dove arrivano i film caricati dal telefono (anche ATLANTE_FILM_DIR)")
+    ap.add_argument("--tolti-dir", default=os.environ.get("ATLANTE_TOLTI_DIR") or CONF["tolti_dir"],
+                    help="dove vanno i brani tolti dalla libreria, se sta sullo stesso disco del brano (anche ATLANTE_TOLTI_DIR)")
+    ap.add_argument("--limite-giorno-gb", type=float, default=_numero_ambiente("ATLANTE_LIMITE_GIORNO_GB", 20),
+                    help="GB che ogni invitato può caricare al giorno, brani e film insieme (anche ATLANTE_LIMITE_GIORNO_GB)")
+    ap.add_argument("--spazio-min-gb", type=float, default=_numero_ambiente("ATLANTE_SPAZIO_MIN_GB", 50),
+                    help="sotto questi GB liberi il Mac non accetta caricamenti (anche ATLANTE_SPAZIO_MIN_GB)")
     ap.add_argument("--imposta-password", action="store_true", help="imposta (o cambia) la password per aprire l'app "
                     "da Internet con `tailscale funnel` e esce; la legge da tastiera o dalla prima riga dello standard input")
     ap.add_argument("--idee-nuove", action="store_true", help="scrive in testo semplice le idee nuove mandate dal riquadro "
@@ -6786,6 +8012,8 @@ def main():
     cartelle = list(a.cartelle)
     if not any(scaricati == c or _dentro(scaricati, c) for c in (os.path.abspath(os.path.expanduser(x)) for x in cartelle)):
         cartelle.append(scaricati)
+    # prima della prima lettura della libreria: le cartelle dei caricamenti non entrano nel catalogo
+    avvia_caricamenti(a.cache, a.controllo_dir, a.film_dir, a.tolti_dir, a.limite_giorno_gb, a.spazio_min_gb)
     avvia(cartelle, a.cache, indirizzo=indirizzo)
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
                 ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
@@ -6840,6 +8068,13 @@ def main():
             if not gestisci_extra(self, "DELETE"):
                 self.close_connection = True
                 self.send_error(501, "Unsupported method ('DELETE')")
+
+        def do_PUT(self):   # i pezzi dei caricamenti (brani, film) e le copertine nuove: il corpo sono i byte
+            if controlla_accesso(self) or not _permesso(self):
+                return
+            if not gestisci_extra(self, "PUT"):
+                self.close_connection = True
+                self.send_error(501, "Unsupported method ('PUT')")
 
         def end_headers(self):
             # pagina, service worker e manifest (e le pagine dei moduli in x/ con kit.js e kit.css): il browser chiede

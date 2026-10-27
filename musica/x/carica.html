@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Carica nella libreria</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Carica nella libreria: brani e film dal telefono al Mac mini, a pezzi da 8 MB (si riprende da dove si era fermato) */
+.btn.full{width:100%}
+.row .tx span.err{color:var(--bad);white-space:normal}
+.row .tx span.ok{color:var(--ok)}
+.row .tx span.lungo{white-space:normal}
+.row .bar{margin-top:6px}
+.row .acts{display:flex;gap:6px;flex:none}
+.ic{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:19px;flex:none;background:var(--fill)}
+.vuoto{color:var(--fg2);font-size:15px;padding:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="seg" id="schede"><button type="button" data-t="brani">Brani</button><button type="button" data-t="film">Film</button></div>
+  <div id="nomac" class="note" hidden>Il Mac non risponde: i caricamenti partono quando torna raggiungibile.</div>
+  <p class="small" id="oggi" hidden></p>
+
+  <section id="p-brani">
+    <p class="sub" id="dettoBrani"></p>
+    <div class="card">
+      <input type="file" id="fileBrani" accept="audio/*,.mp3,.m4a,.m4b,.aac,.flac,.wav,.aif,.aiff,.ogg,.oga,.opus" multiple hidden>
+      <button class="btn pri full" id="scegliBrani">Scegli i brani</button>
+      <p class="small">MP3, M4A, FLAC, WAV, AIFF, OGG · al più 200 MB per brano. Un caricamento interrotto riprende da dove si era fermato: basta scegliere di nuovo lo stesso file.</p>
+    </div>
+    <div id="coda" class="list" hidden></div>
+    <h2 class="h2">I miei caricamenti</h2>
+    <div id="miei" class="list"></div>
+  </section>
+
+  <section id="p-film" hidden>
+    <p class="sub" id="dettoFilm"></p>
+    <div class="card">
+      <div class="field"><label for="titolo">Titolo del film</label><input class="in" id="titolo" maxlength="120" placeholder="Titolo" autocomplete="off"></div>
+      <input type="file" id="fileFilm" accept="video/*,.mp4,.m4v,.mov,.mkv,.webm" hidden>
+      <div class="btns"><button class="btn" id="scegliFilm" style="flex:1">Scegli il file</button></div>
+      <p class="small" id="filmScelto">MP4, MOV, M4V, MKV, WEBM · al più 80 GB.</p>
+      <button class="btn pri full" id="chiediFilm" disabled></button>
+    </div>
+    <div class="note">Durante il caricamento tieni l'app aperta e lo schermo acceso: in sottofondo il telefono ferma i caricamenti. Se si ferma, riaprila e scegli di nuovo lo stesso file: riprende da dove era arrivato. Meglio con il Wi-Fi.</div>
+    <h2 class="h2">I miei film</h2>
+    <div id="film" class="list"></div>
+  </section>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api, host} = AX;
+AX.header('Carica nella libreria');
+
+let IO = {ruolo:''}, dati = {caricamenti:[], brani:[], oggi:null}, giro = 0;
+const samuele = () => IO.ruolo === 'proprietario';
+const FILE = new Map();      // id del caricamento -> File scelto (finché la pagina è aperta)
+const IN_CORSO = new Map();  // id -> {inviati, totale, velocita, fermo}
+const CODA = [];             // brani scelti adesso: {file, id, stato, testo}
+const misura = n => { n = +n || 0; for (const [u, k] of [['GB', 1073741824], ['MB', 1048576], ['KB', 1024]]) if (n >= k || u === 'KB') return (Math.round(n / k * 10) / 10).toString().replace('.', ',') + ' ' + u; };
+const pausa = ms => new Promise(r => setTimeout(r, ms));
+function quando(t) {
+  if (!t) return '';
+  const d = new Date(t * 1000), ora = new Date(), hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const giorni = Math.floor((new Date(ora.toDateString()) - new Date(d.toDateString())) / 86400000);
+  return giorni <= 0 ? 'oggi alle ' + hm : giorni === 1 ? 'ieri alle ' + hm : giorni < 30 ? giorni + ' giorni fa' : d.toLocaleDateString('it-IT');
+}
+function mancano(info) {
+  if (!info || !info.velocita) return '';
+  const s = (info.totale - info.inviati) / info.velocita;
+  return ' · ' + misura(info.velocita) + '/s' + (s > 90 ? ' · mancano ' + (s > 5400 ? Math.round(s / 3600) + ' ore' : Math.round(s / 60) + ' min') : '');
+}
+
+/* ---------- schermo acceso durante un caricamento (Safari 16.4+) ---------- */
+let blocco = null;
+async function schermoAcceso(si) {
+  try {
+    if (si && !blocco && navigator.wakeLock) { blocco = await navigator.wakeLock.request('screen'); blocco.addEventListener('release', () => { blocco = null; }); }
+    if (!si && blocco) { await blocco.release(); blocco = null; }
+  } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && IN_CORSO.size) schermoAcceso(true); if (!document.hidden) carica(); });
+
+/* ---------- il motore: pezzi da 8 MB, dal punto in cui il Mac è arrivato ---------- */
+async function invia(file, s) {
+  let da = s.ricevuti || 0, errori = 0, t0 = Date.now(), b0 = da;
+  const info = {inviati:da, totale:file.size, velocita:0, fermo:false};
+  IN_CORSO.set(s.id, info); schermoAcceso(true); disegna();
+  try {
+    while (da < file.size) {
+      if (info.fermo) return Object.assign({}, s, {ricevuti:da, fermo:true});
+      const fine = Math.min(file.size, da + (s.pezzo || 8388608));
+      let r, j = null;
+      try {
+        r = await AX.fetchT(AX.API + 'caricamenti/' + encodeURIComponent(s.id) + '?da=' + da,
+          {method:'PUT', body:file.slice(da, fine), headers:{'Content-Type':'application/octet-stream'}}, 300000);
+        try { j = await r.json(); } catch (e) {}
+      } catch (e) {   // rete persa (o telefono in sottofondo): si riprova un po', poi ci si ferma
+        if (++errori > 6) throw new Error('Connessione con il Mac persa: riprendi quando torna');
+        await pausa(Math.min(30000, errori * 4000)); continue;
+      }
+      if (r.status === 409 && j && typeof j.ricevuti === 'number' && !j.stato) { da = j.ricevuti; continue; }   // il Mac dice da dove
+      if (!r.ok) { const e = new Error((j && j.errore) || ('Il Mac ha risposto ' + r.status)); e.codice = r.status; throw e; }
+      errori = 0; s = j; da = j.ricevuti; info.inviati = da;
+      const sec = (Date.now() - t0) / 1000; if (sec > 2) info.velocita = (da - b0) / sec;
+      disegna();
+      if (j.stato !== 'in arrivo' && j.stato !== 'consentito') return j;
+    }
+    return s;
+  } finally { IN_CORSO.delete(s.id); if (!IN_CORSO.size) schermoAcceso(false); }
+}
+
+/* ---------- brani ---------- */
+async function caricaBrani(files) {
+  for (const f of files) CODA.push({file:f, stato:'attesa', testo:'in coda'});
+  disegnaCoda();
+  if (caricaBrani.attivo) return;
+  caricaBrani.attivo = true;
+  try {
+    for (const x of CODA) {
+      if (x.stato !== 'attesa') continue;
+      x.stato = 'invio'; x.testo = 'preparo…'; disegnaCoda();
+      try {
+        let s = await api('caricamenti', {method:'POST', body:{tipo:'brano', nome:x.file.name, dimensione:x.file.size, modificato:x.file.lastModified || null}});
+        x.id = s.id; FILE.set(s.id, x.file);
+        if (s.ricevuti) x.testo = 'riprendo da ' + misura(s.ricevuti);
+        s = await invia(x.file, s);
+        if (s.fermo) { x.stato = 'fermo'; x.testo = 'fermato: scegli di nuovo il file per riprendere'; }
+        else if (s.stato === 'fatto') {
+          x.stato = 'fatto';
+          x.testo = samuele() ? (s.brano ? 'nella libreria' + (s.avviso ? ' · ' + s.avviso : '') : s.avviso || 'arrivato') : 'arrivato: Samuele lo controlla';
+          if (samuele() && s.brano && host && host.libreria) host.libreria().catch(() => {});
+        } else { x.stato = 'errore'; x.testo = s.errore || 'non riuscito'; }
+      } catch (e) {
+        x.stato = 'errore'; x.testo = e.message;
+        if (e.codice === 429 || e.codice === 507) {   // limite di oggi o disco quasi pieno: si fermano anche gli altri
+          CODA.forEach(y => { if (y.stato === 'attesa') { y.stato = 'errore'; y.testo = 'fermo: ' + e.message; } });
+          toast(e.message);
+        }
+      }
+      disegnaCoda(); carica();
+    }
+  } finally { caricaBrani.attivo = false; }
+}
+function disegnaCoda() {
+  const L = CODA.slice(-30);
+  $('coda').hidden = !L.length;
+  $('coda').innerHTML = L.map(x => {
+    const info = x.id && IN_CORSO.get(x.id), pct = info ? Math.floor(info.inviati / Math.max(1, info.totale) * 100) : 0;
+    const t = info ? 'invio ' + pct + '% di ' + misura(info.totale) + mancano(info) : x.testo;
+    return '<div class="row"><span class="ic">' + (x.stato === 'fatto' ? '✅' : x.stato === 'errore' ? '⚠️' : '⬆️') + '</span><span class="tx"><b>' + esc(x.file.name) + '</b>' +
+      '<span class="' + (x.stato === 'errore' ? 'err' : x.stato === 'fatto' ? 'ok' : '') + '">' + esc(t) + '</span>' +
+      (info ? '<div class="bar"><i style="width:' + Math.max(2, pct) + '%"></i></div>' : '') + '</span>' +
+      (info ? '<span class="acts"><button class="btn sm" data-ferma="' + esc(x.id) + '">Ferma</button></span>' : '') + '</div>';
+  }).join('');
+}
+
+/* ---------- film ---------- */
+let filmFile = null;
+function aggiornaFilm() {
+  const t = $('titolo').value.trim();
+  $('chiediFilm').disabled = !t || !filmFile;
+  $('chiediFilm').textContent = samuele() ? 'Carica nel Cloud' : 'Chiedi a Samuele';
+  $('filmScelto').textContent = filmFile ? filmFile.name + ' · ' + misura(filmFile.size) : 'MP4, MOV, M4V, MKV, WEBM · al più 80 GB.';
+}
+async function caricaFilm(s, file) {
+  if (IN_CORSO.has(s.id)) return;
+  if (!file || file.name !== s.nome || file.size !== s.dimensione) { toast('Scegli lo stesso file: ' + s.nome + ' (' + misura(s.dimensione) + ')'); return; }
+  FILE.set(s.id, file);
+  try {
+    const r = await invia(file, s);
+    if (r.fermo) toast('Fermato: riprendi quando vuoi');
+    else if (r.stato === 'fatto') toast('«' + s.titolo + '» è nel Cloud');
+    else if (r.stato === 'errore') toast(r.errore || 'Non riuscito');
+  } catch (e) { toast(e.message); }
+  carica();
+}
+let riscegli = '';   // film per cui si sta scegliendo di nuovo il file
+$('fileFilm').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (riscegli) { const s = dati.caricamenti.find(x => x.id === riscegli); riscegli = ''; if (s) caricaFilm(s, f); return; }
+  filmFile = f;
+  if (!$('titolo').value.trim()) $('titolo').value = f.name.replace(/\.[^.]+$/, '').replace(/[._]+/g, ' ').trim();
+  aggiornaFilm();
+});
+$('scegliFilm').onclick = () => { riscegli = ''; $('fileFilm').click(); };
+$('titolo').addEventListener('input', aggiornaFilm);
+$('chiediFilm').onclick = async () => {
+  const titolo = $('titolo').value.trim(); if (!titolo || !filmFile) return;
+  $('chiediFilm').disabled = true;
+  try {
+    const s = await api('caricamenti', {method:'POST', body:{tipo:'film', titolo, nome:filmFile.name, dimensione:filmFile.size, modificato:filmFile.lastModified || null}});
+    FILE.set(s.id, filmFile);
+    $('titolo').value = ''; const f = filmFile; filmFile = null; aggiornaFilm();
+    await carica();
+    if (s.stato === 'consentito') caricaFilm(s, f);
+    else toast('Richiesta mandata a Samuele: quando dice sì, carichi il film da qui');
+  } catch (e) { toast(e.message); aggiornaFilm(); }
+};
+
+/* ---------- elenchi ---------- */
+const STATI_BRANO = {attesa:['In attesa di Samuele', ''], approvato:['Nella libreria', 'ok'], scartato:['Samuele non l\'ha messo nella libreria', 'err']};
+function rigaSessione(s) {
+  const info = IN_CORSO.get(s.id), film = s.tipo === 'film', ho = FILE.get(s.id);
+  const pct = Math.floor((info ? info.inviati : s.ricevuti) / Math.max(1, s.dimensione) * 100);
+  let t, cl = '', az = '';
+  if (info) { t = 'invio ' + pct + '% · ' + misura(info.inviati) + ' di ' + misura(s.dimensione) + mancano(info); az = '<button class="btn sm" data-ferma="' + esc(s.id) + '">Ferma</button>'; }
+  else if (s.stato === 'richiesta') { t = 'In attesa del sì di Samuele · ' + misura(s.dimensione); az = '<button class="btn sm" data-via="' + esc(s.id) + '">Ritira</button>'; }
+  else if (s.stato === 'consentito' || s.stato === 'in arrivo') {
+    t = (film ? (s.ricevuti ? 'Arrivato ' + pct + '% · ' : 'Samuele ha detto sì · ') : 'A metà: ' + pct + '% · ') + misura(s.dimensione);
+    az = '<button class="btn sm pri" data-vai="' + esc(s.id) + '">' + (ho ? (s.ricevuti ? 'Riprendi' : 'Carica') : 'Scegli il file') + '</button><button class="btn sm" data-via="' + esc(s.id) + '">Annulla</button>';
+  } else if (s.stato === 'fatto') { t = film ? 'Nel Cloud ✓' : 'Arrivato'; cl = 'ok'; az = '<button class="btn sm" data-via="' + esc(s.id) + '">Togli dall\'elenco</button>'; }
+  else if (s.stato === 'rifiutato') { t = 'Samuele non l\'ha consentito'; cl = 'err'; az = '<button class="btn sm" data-via="' + esc(s.id) + '">Togli dall\'elenco</button>'; }
+  else { t = s.errore || 'Non riuscito'; cl = 'err'; az = '<button class="btn sm" data-via="' + esc(s.id) + '">Togli dall\'elenco</button>'; }
+  return '<div class="row"><span class="ic">' + (film ? '🎬' : '🎵') + '</span><span class="tx"><b>' + esc(film ? s.titolo : s.nome) + '</b><span class="lungo ' + cl + '">' + esc(t) + '</span>' +
+    (info || (s.ricevuti && s.ricevuti < s.dimensione) ? '<div class="bar"><i style="width:' + Math.max(2, pct) + '%"></i></div>' : '') +
+    (!info && !ho && (s.stato === 'consentito' || s.stato === 'in arrivo') ? '<span class="small lungo">Per continuare scegli di nuovo «' + esc(s.nome) + '»</span>' : '') +
+    '</span><span class="acts">' + az + '</span></div>';
+}
+function disegna() {
+  const o = dati.oggi;
+  $('oggi').hidden = !o;
+  if (o) $('oggi').textContent = 'Oggi hai caricato ' + misura(o.usati) + ' di ' + misura(o.limite) + ' (brani e film insieme). Oltre, il caricamento si ferma e riprende domani da dove era arrivato.';
+  const sess = dati.caricamenti || [], brani = sess.filter(s => s.tipo === 'brano'), film = sess.filter(s => s.tipo === 'film');
+  const el = dati.brani || [];
+  $('miei').innerHTML = brani.map(rigaSessione).join('') + el.map(b => {
+    const [t, cl] = STATI_BRANO[b.stato] || [b.stato, ''];
+    return '<div class="row"><span class="ic">' + (b.origine === 'scaricato' ? '🔎' : '🎵') + '</span><span class="tx"><b>' + esc(b.titolo) + '</b><span>' +
+      esc([b.artista, b.origine === 'scaricato' ? 'scaricato con Cerca e scarica' : 'caricato', quando(b.quando)].filter(Boolean).join(' · ')) + '</span>' +
+      '<span class="lungo ' + cl + '">' + esc(t) + '</span></span></div>';
+  }).join('') || '<div class="vuoto">Niente, per ora.</div>';
+  $('film').innerHTML = film.map(rigaSessione).join('') || '<div class="vuoto">Nessun film, per ora.</div>';
+  disegnaCoda();
+}
+async function carica() {
+  clearTimeout(giro);
+  try { dati = await api('caricamenti', {timeout:15000}); $('nomac').hidden = true; }
+  catch (e) { $('nomac').hidden = false; }
+  disegna();
+  // una richiesta di film in attesa: ogni tanto si guarda se Samuele ha risposto
+  if ((dati.caricamenti || []).some(s => s.stato === 'richiesta')) giro = setTimeout(carica, 20000);
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-ferma],[data-via],[data-vai],[data-t]'); if (!b) return;
+  const d = b.dataset;
+  if (d.t) { mostra(d.t); return; }
+  if (d.ferma) { const i = IN_CORSO.get(d.ferma); if (i) i.fermo = true; return; }
+  if (d.via) { api('caricamenti/' + encodeURIComponent(d.via), {method:'DELETE'}).then(carica, err => toast(err.message)); return; }
+  if (d.vai) {
+    const s = (dati.caricamenti || []).find(x => x.id === d.vai); if (!s) return;
+    const f = FILE.get(s.id);
+    if (f) { if (s.tipo === 'film') caricaFilm(s, f); else caricaBrani([f]); return; }
+    if (s.tipo === 'film') { riscegli = s.id; $('fileFilm').click(); } else $('fileBrani').click();   // lo stesso file riprende da solo
+  }
+});
+$('scegliBrani').onclick = () => $('fileBrani').click();
+$('fileBrani').addEventListener('change', e => { const fl = [...(e.target.files || [])]; e.target.value = ''; if (fl.length) caricaBrani(fl); });
+function mostra(t) {
+  document.querySelectorAll('#schede button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  $('p-brani').hidden = t !== 'brani'; $('p-film').hidden = t !== 'film';
+}
+addEventListener('beforeunload', e => { if (IN_CORSO.size) { e.preventDefault(); e.returnValue = ''; } });
+
+(async () => {
+  mostra(new URLSearchParams(location.search).get('film') ? 'film' : 'brani');
+  try { IO = await api('io', {timeout:8000}); } catch (e) {}
+  $('dettoBrani').textContent = samuele() ? 'I brani entrano subito nella libreria di tutti, con i tag del file (si correggono in Gestione → Contenuti).'
+    : 'I brani arrivano a Samuele: li ascolta e li mette nella libreria di tutti. Finché non lo fa, li trovi qui sotto.';
+  $('dettoFilm').textContent = samuele() ? 'Il film va direttamente nel Cloud, nella cartella dei film, e lo trovi in «Video».'
+    : 'Prima chiedi a Samuele: quando dice sì, carichi il film da qui, direttamente nel suo Cloud.';
+  aggiornaFilm();
+  carica();
+})();
+</script>
+</body>
+</html>

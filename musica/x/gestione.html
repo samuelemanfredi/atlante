@@ -59,11 +59,18 @@
 .rconf{background:var(--fill);border-radius:10px;padding:10px 12px;margin:10px 0 0}
 details.rimp{margin:10px 0 0;font-size:14px}
 details.rimp summary{color:var(--link);cursor:pointer}
+/* sezioni della Gestione in altre pagine (parte 2): Da controllare, Contenuti */
+.sezioni .tile{position:relative;color:inherit}
+.sezioni .tile .n{position:absolute;top:10px;right:10px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--accent);color:#fff;font-size:13px;font-weight:700;line-height:22px;text-align:center}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="avviso" id="clavviso" hidden></div>
+  <div class="grid sezioni" id="sezioni">
+    <a class="tile" href="controllo.html"><span class="ic">📥</span><b>Da controllare</b><span>Brani e film da approvare</span><span class="n" id="nControllo" hidden></span></a>
+    <a class="tile" href="contenuti.html"><span class="ic">🎼</span><b>Contenuti</b><span>Correggi, togli, rimetti</span></a>
+  </div>
   <div id="richieste" hidden>
     <h2 class="h2">Richieste</h2>
     <div class="list" id="rlist"></div>
@@ -474,6 +481,8 @@ ascolti();
   leggi();
   if (location.hash === '#rete') setTimeout(() => $('rete').scrollIntoView({block:'start'}), 60);
 })();
+// quante cose aspettano in «Da controllare» (brani e richieste di film)
+api('io').then(io => { const n = ((io.nuove || {}).da_controllare || 0) + ((io.nuove || {}).film || 0); $('nControllo').hidden = !n; $('nControllo').textContent = n; }, () => {});
 </script>
 </body>
 </html>

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Contenuti</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Gestione → Contenuti: correzioni di titolo, artista, album e copertina della libreria, Togli e Rimetti (solo Samuele) */
+.search{display:flex;gap:10px;margin:0 0 6px}
+.search input{flex:1;min-height:42px;padding:8px 12px;border:0;border-radius:12px;background:var(--fill);outline:none;-webkit-appearance:none;appearance:none}
+.row .tx span.lungo{white-space:normal}
+.cop{width:48px;height:48px;border-radius:6px;flex:none;object-fit:cover;background:var(--fill)}
+.det{padding:4px 14px 14px;border-bottom:.5px solid var(--sep)}
+.det:last-child{border-bottom:0}
+.chev{color:var(--fg3);font-size:20px;flex:none}
+.vuoto{color:var(--fg2);font-size:15px;padding:14px}
+.acts{display:flex;gap:6px;flex:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <form id="f" class="search" role="search">
+    <input id="q" type="search" enterkeyhint="search" maxlength="200" placeholder="Titolo, artista o album" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Cerca nella libreria">
+    <button class="btn pri" type="submit">Cerca</button>
+  </form>
+  <p class="small">Le correzioni valgono nell'app di tutti; il file sul disco non cambia, e «Ripristina» le toglie. «Togli» fa sparire il brano dall'app di tutti e sposta il file in «Tolti», sullo stesso disco: da qui lo rimetti quando vuoi.</p>
+  <p class="small" id="stato"></p>
+  <div class="list" id="ris"></div>
+  <h2 class="h2" id="hTolti" hidden>Tolti</h2>
+  <div class="list" id="tolti" hidden></div>
+  <input type="file" id="imm" accept="image/*" hidden>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api, host, player} = AX;
+AX.header('Contenuti');
+$('axBack').textContent = '‹ Gestione';
+$('axBack').onclick = () => { location.href = 'gestione.html'; };
+
+let R = [], T = [], aperto = '', conferma = '', perCopertina = '', nCerca = 0;
+const copUrl = k => k ? new URL('../api/musica/copertina/' + encodeURIComponent(k), location.href).href : '';
+function quando(t) { return t ? new Date(t * 1000).toLocaleDateString('it-IT') : ''; }
+
+async function cerca() {
+  const q = $('q').value.trim(), n = ++nCerca;
+  $('stato').textContent = q ? 'Cerco…' : '';
+  try {
+    const j = await api('gestione/contenuti?q=' + encodeURIComponent(q), {timeout:30000});
+    if (n !== nCerca) return;
+    R = j.brani || [];
+    $('stato').textContent = q ? (j.trovati ? j.trovati + (j.trovati === 1 ? ' brano' : ' brani') + (j.trovati > R.length ? ' (i primi ' + R.length + ')' : '') : 'Nessun brano trovato') : 'Aggiunti di recente';
+  } catch (e) { if (n === nCerca) { R = []; $('stato').textContent = e.message; } }
+  disegna();
+}
+async function caricaTolti() {
+  try { T = (await api('gestione/contenuti/tolti', {timeout:15000})).tolti || []; } catch (e) { T = []; }
+  $('hTolti').hidden = $('tolti').hidden = !T.length;
+  $('tolti').innerHTML = T.map(t => '<div class="row"><span class="tx"><b>' + esc(t.titolo) + '</b><span>' + esc([t.artista, t.album, 'tolto il ' + quando(t.quando)].filter(Boolean).join(' · ')) + '</span>' +
+    '<span class="small lungo">' + esc(t.dove) + '</span></span><span class="acts"><button class="btn sm pri" data-rimetti="' + esc(t.id) + '">Rimetti</button></span></div>').join('');
+}
+
+function campo(k, etichetta, v, orig) {
+  return '<div class="field"><label for="c-' + k + '">' + etichetta + (orig && orig !== v ? ' <span class="small">(sul file: «' + esc(orig) + '»)</span>' : '') + '</label>' +
+    '<input class="in" id="c-' + k + '" data-k="' + k + '" value="' + esc(v) + '" maxlength="300" autocomplete="off"></div>';
+}
+function disegna() {
+  $('ris').hidden = !R.length && !$('q').value.trim();
+  $('ris').innerHTML = R.map(b => {
+    let h = '<button class="row" data-apri="' + esc(b.id) + '">' + (b.copertina ? '<img class="cop" alt="" loading="lazy" src="' + esc(copUrl(b.copertina)) + '">' : '<span class="cop"></span>') +
+      '<span class="tx"><b>' + esc(b.titolo) + '</b><span>' + esc([b.artista, b.album].filter(Boolean).join(' · ')) + '</span>' + (b.corretto ? '<span class="pill ok">corretto</span>' : '') + '</span>' +
+      '<span class="chev">' + (aperto === b.id ? '⌄' : '›') + '</span></button>';
+    if (aperto === b.id) {
+      const o = b.originale || {};
+      h += '<div class="det" data-det="' + esc(b.id) + '">' +
+        '<div class="btns"><button class="btn sm" data-ascolta="' + esc(b.id) + '">▶︎ Ascolta</button><span class="small" style="align-self:center">' + esc(b.file) + '</span></div>' +
+        campo('titolo', 'Titolo', b.titolo, o.titolo) + campo('artista', 'Artista', b.artista, o.artista) + campo('album', 'Album', b.album, o.album) +
+        '<div class="btns"><button class="btn sm" data-cop="' + esc(b.id) + '">' + (b.copertina ? 'Cambia la copertina' : 'Scegli una copertina') + '</button></div>' +
+        '<div class="btns"><button class="btn pri" style="flex:1" data-salva="' + esc(b.id) + '">Salva</button>' +
+        (b.corretto ? '<button class="btn" data-ripristina="' + esc(b.id) + '">Ripristina</button>' : '') +
+        '<button class="btn" data-togli="' + esc(b.id) + '"' + (conferma === b.id ? ' style="background:var(--bad);color:#fff"' : '') + '>' + (conferma === b.id ? 'Tocca ancora: togli' : 'Togli') + '</button></div></div>';
+    }
+    return h;
+  }).join('') || '<div class="vuoto">Nessun brano.</div>';
+  document.querySelectorAll('img.cop').forEach(i => { i.onerror = () => { i.style.visibility = 'hidden'; }; });
+}
+function aggiorna(b) { const k = R.findIndex(x => x.id === b.id); if (k >= 0) R[k] = b; disegna(); if (host && host.libreria) host.libreria().catch(() => {}); }
+async function comeJpeg(file) {   // quadrata, al più 1000 px, JPEG (anche le foto HEIC dell'iPhone)
+  try {
+    const bmp = await createImageBitmap(file), lato = Math.min(bmp.width, bmp.height), m = Math.min(1000, lato);
+    const cv = document.createElement('canvas'); cv.width = cv.height = m;
+    cv.getContext('2d').drawImage(bmp, (bmp.width - lato) / 2, (bmp.height - lato) / 2, lato, lato, 0, 0, m, m);
+    return await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9)) || file;
+  } catch (e) { return file; }
+}
+$('imm').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0], id = perCopertina; e.target.value = ''; perCopertina = '';
+  if (!f || !id) return;
+  try {
+    const blob = await comeJpeg(f);
+    const r = await AX.fetchT(AX.API + 'gestione/contenuti/' + encodeURIComponent(id) + '/copertina', {method:'PUT', body:blob, headers:{'Content-Type':blob.type || 'image/jpeg'}}, 60000);
+    let j = null; try { j = await r.json(); } catch (x) {}
+    if (!r.ok) throw new Error((j && j.errore) || 'Il Mac ha risposto ' + r.status);
+    toast('Copertina cambiata per tutti'); aggiorna(j.brano);
+  } catch (err) { toast(err.message); }
+});
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-apri],[data-ascolta],[data-cop],[data-salva],[data-ripristina],[data-togli],[data-rimetti]'); if (!b) return;
+  const d = b.dataset;
+  if (d.apri) { aperto = aperto === d.apri ? '' : d.apri; conferma = ''; disegna(); return; }
+  if (d.ascolta) {
+    const x = R.find(y => y.id === d.ascolta); if (!x) return;
+    if (!(host && host.suona && host.suona([x.id], 0, 'Contenuti')))
+      player.play([{id:'contenuti:' + x.id, title:x.titolo, artist:x.artista, album:x.album, url:new URL('../api/musica/file/' + encodeURIComponent(x.id), location.href).href, cover:copUrl(x.copertina)}], 0, 'Contenuti');
+    return;
+  }
+  if (d.cop) { perCopertina = d.cop; $('imm').click(); return; }
+  if (d.salva) {
+    const det = document.querySelector('[data-det="' + d.salva + '"]'), corpo = {};
+    det.querySelectorAll('input[data-k]').forEach(i => { corpo[i.dataset.k] = i.value.trim(); });
+    if (!corpo.titolo) { toast('Il titolo non può restare vuoto'); return; }
+    try { aggiorna((await api('gestione/contenuti/' + encodeURIComponent(d.salva), {method:'POST', body:corpo})).brano); toast('Salvato: vale nell\'app di tutti'); }
+    catch (err) { toast(err.message); }
+    return;
+  }
+  if (d.ripristina) {
+    try { aggiorna((await api('gestione/contenuti/' + encodeURIComponent(d.ripristina) + '/ripristina', {method:'POST'})).brano); toast('Tornato com\'è nel file'); }
+    catch (err) { toast(err.message); }
+    return;
+  }
+  if (d.togli) {
+    if (conferma !== d.togli) { conferma = d.togli; disegna(); setTimeout(() => { if (conferma === d.togli) { conferma = ''; disegna(); } }, 4000); return; }
+    conferma = '';
+    try {
+      await api('gestione/contenuti/' + encodeURIComponent(d.togli) + '/togli', {method:'POST'});
+      toast('Tolto: il file è in «Tolti»'); R = R.filter(x => x.id !== d.togli); aperto = ''; disegna(); caricaTolti();
+      if (host && host.libreria) host.libreria().catch(() => {});
+    } catch (err) { toast(err.message); }
+    return;
+  }
+  if (d.rimetti) {
+    b.disabled = true;
+    try { await api('gestione/contenuti/tolti/' + encodeURIComponent(d.rimetti) + '/rimetti', {method:'POST', timeout:120000}); toast('Rimesso nella libreria'); if (host && host.libreria) host.libreria().catch(() => {}); }
+    catch (err) { toast(err.message); }
+    caricaTolti(); cerca();
+  }
+});
+$('f').addEventListener('submit', e => { e.preventDefault(); $('q').blur(); aperto = ''; cerca(); });
+cerca(); caricaTolti();
+</script>
+</body>
+</html>

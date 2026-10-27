@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Da controllare</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Gestione → Da controllare: i brani caricati o scaricati dagli invitati e le richieste di film, solo per Samuele */
+.btn.full{width:100%}
+.btn.danger{background:var(--bad);color:#fff}
+.row .tx span.lungo{white-space:normal}
+.row .acts{display:flex;gap:6px;flex:none}
+.cop{width:52px;height:52px;border-radius:6px;flex:none;object-fit:cover;background:var(--fill)}
+.det{padding:4px 14px 14px;border-bottom:.5px solid var(--sep)}
+.det:last-child{border-bottom:0}
+.avviso{background:rgba(255,159,10,.16);color:var(--fg);border-radius:10px;padding:10px 12px;margin:10px 0;font-size:15px}
+.chev{color:var(--fg3);font-size:20px;flex:none}
+.vuoto{color:var(--fg2);font-size:15px;padding:14px}
+details summary{cursor:pointer;color:var(--accent);font-weight:600;padding:8px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="nomac" class="note" hidden></div>
+  <div id="boxFilm" hidden>
+    <h2 class="h2">Richieste di film</h2>
+    <p class="small" id="spazioFilm"></p>
+    <div class="list" id="film"></div>
+  </div>
+  <h2 class="h2">Brani</h2>
+  <p class="small">Caricati o scaricati dalle persone che hai invitato: finché non li approvi non sono nella libreria di nessuno. Approva scrive un file nuovo con i tag corretti nella cartella della musica scaricata.</p>
+  <div class="list" id="brani"></div>
+  <details id="boxScartati" hidden>
+    <summary>Scartati</summary>
+    <p class="small">Restano nella cartella «Scartati» di «Da controllare» sul Mac: non si cancella niente.</p>
+    <div class="list" id="scartati"></div>
+  </details>
+  <input type="file" id="imm" accept="image/*" hidden>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api, player} = AX;
+AX.header('Da controllare');
+$('axBack').textContent = '‹ Gestione';
+$('axBack').onclick = () => { location.href = 'gestione.html'; };
+
+let D = {brani:[], film:[], scartati:[]}, aperto = '', perCopertina = '', conferma = '';
+const misura = n => { n = +n || 0; for (const [u, k] of [['GB', 1073741824], ['MB', 1048576], ['KB', 1024]]) if (n >= k || u === 'KB') return (Math.round(n / k * 10) / 10).toString().replace('.', ',') + ' ' + u; };
+function quando(t) {
+  if (!t) return '';
+  const d = new Date(t * 1000), ora = new Date(), hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const giorni = Math.floor((new Date(ora.toDateString()) - new Date(d.toDateString())) / 86400000);
+  return giorni <= 0 ? 'oggi alle ' + hm : giorni === 1 ? 'ieri alle ' + hm : giorni < 30 ? giorni + ' giorni fa' : d.toLocaleDateString('it-IT');
+}
+const durata = s => { s = Math.round(s || 0); return s ? Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') : ''; };
+const copUrl = (id, v) => AX.API + 'gestione/controllo/' + encodeURIComponent(id) + '/copertina?v=' + (v || 0);
+let versione = Date.now();
+
+async function carica() {
+  try { D = await api('gestione/controllo', {timeout:20000}); $('nomac').hidden = true; }
+  catch (e) { $('nomac').hidden = false; $('nomac').textContent = 'Non riesco a leggere «Da controllare»: ' + e.message; }
+  if (D.raggiungibile === false) { $('nomac').hidden = false; $('nomac').textContent = 'La cartella «Da controllare» non è raggiungibile: il disco del Cloud è collegato?'; }
+  disegna();
+}
+
+function disegnaFilm() {
+  const F = D.film || [];
+  $('boxFilm').hidden = !F.length;
+  $('spazioFilm').textContent = 'Sul Cloud restano liberi ' + misura(D.libero_film) + '. Un film parte solo se dopo restano almeno ' + misura(D.spazio_min) + '.';
+  $('film').innerHTML = F.map(f => {
+    const sotto = [f.chi_nome, misura(f.dimensione), f.nome, quando(f.creato)].filter(Boolean).join(' · ');
+    const az = f.stato === 'richiesta' ? '<button class="btn sm pri" data-ok="' + esc(f.id) + '">Consenti</button><button class="btn sm" data-no="' + esc(f.id) + '">Rifiuta</button>'
+      : '<span class="pill ok">consentito</span>';
+    const pct = Math.floor((f.ricevuti || 0) / Math.max(1, f.dimensione) * 100);
+    return '<div class="row"><span class="tx"><b>' + esc(f.titolo) + '</b><span class="lungo">' + esc(sotto) + '</span>' +
+      (f.stato === 'consentito' ? '<span class="small">Arrivato ' + pct + '% (' + misura(f.ricevuti) + ')</span><div class="bar"><i style="width:' + Math.max(2, pct) + '%"></i></div>' : '') +
+      '</span><span class="acts">' + az + '</span></div>';
+  }).join('');
+}
+
+let bozza = {};   // quello che Samuele sta scrivendo nel brano aperto: un ridisegno (tornando all'app) non lo perde
+function campo(id, k, etichetta, v) {
+  if (bozza.id === id && bozza[k] != null) v = bozza[k];
+  return '<div class="field"><label for="c-' + k + '">' + etichetta + '</label><input class="in" id="c-' + k + '" data-k="' + k + '" value="' + esc(v) + '" maxlength="300" autocomplete="off"></div>';
+}
+function disegna() {
+  bozza = {id:aperto};
+  document.querySelectorAll('[data-det="' + aperto + '"] input[data-k]').forEach(i => { bozza[i.dataset.k] = i.value; });
+  disegnaFilm();
+  const B = D.brani || [];
+  $('brani').innerHTML = B.map(b => {
+    const chi = (b.origine === 'scaricato' ? 'scaricato da ' : 'caricato da ') + (b.chi_nome || '?');
+    const sotto = [b.artista, chi, quando(b.quando)].filter(Boolean).join(' · ');
+    let h = '<button class="row" data-apri="' + esc(b.id) + '">' + (b.copertina ? '<img class="cop" alt="" src="' + copUrl(b.id, versione) + '">' : '<span class="cop"></span>') +
+      '<span class="tx"><b>' + esc(b.titolo) + '</b><span>' + esc(sotto) + '</span>' + (b.doppioni.length ? '<span class="pill warn">già nella libreria?</span>' : '') + '</span>' +
+      '<span class="chev">' + (aperto === b.id ? '⌄' : '›') + '</span></button>';
+    if (aperto === b.id) {
+      h += '<div class="det" data-det="' + esc(b.id) + '">' +
+        '<div class="btns"><button class="btn sm" data-ascolta="' + esc(b.id) + '">▶︎ Ascolta</button><span class="small" style="align-self:center">' +
+        esc([durata(b.durata), misura(b.dimensione), b.formato, b.nome].filter(Boolean).join(' · ')) + '</span></div>' +
+        (b.url ? '<p class="small">Da <a href="' + esc(b.url) + '" target="_blank" rel="noopener noreferrer">' + esc(b.url) + '</a></p>' : '') +
+        campo(b.id, 'titolo', 'Titolo', b.tag.titolo) + campo(b.id, 'artista', 'Artista', b.tag.artista) + campo(b.id, 'album', 'Album', b.tag.album) +
+        '<div class="btns"><button class="btn sm" data-cop="' + esc(b.id) + '">' + (b.copertina ? 'Cambia la copertina' : 'Scegli una copertina') + '</button></div>' +
+        (b.doppioni.length ? '<div class="avviso">C\'è già nella libreria: ' + b.doppioni.map(d => '«' + esc(d.titolo) + '» di ' + esc(d.artista) + (d.album ? ' (' + esc(d.album) + ')' : '')).join(', ') + '.</div>' : '') +
+        '<div class="btns"><button class="btn pri" style="flex:1" data-approva="' + esc(b.id) + '">Approva</button>' +
+        '<button class="btn" data-scarta="' + esc(b.id) + '"' + (conferma === b.id ? ' style="background:var(--bad);color:#fff"' : '') + '>' + (conferma === b.id ? 'Tocca ancora: scarta' : 'Scarta') + '</button></div>' +
+        '<div data-esito></div></div>';
+    }
+    return h;
+  }).join('') || '<div class="vuoto">Niente da controllare.</div>';
+  const S = D.scartati || [];
+  $('boxScartati').hidden = !S.length;
+  $('scartati').innerHTML = S.map(b => '<div class="row"><span class="tx"><b>' + esc(b.titolo) + '</b><span>' +
+    esc([b.artista, (b.origine === 'scaricato' ? 'scaricato da ' : 'caricato da ') + (b.chi_nome || '?'), 'scartato ' + quando(b.deciso)].filter(Boolean).join(' · ')) + '</span></span></div>').join('');
+  document.querySelectorAll('img.cop').forEach(i => { i.onerror = () => { i.style.visibility = 'hidden'; }; });
+}
+
+// i tag scritti nei campi (se cambiati) si salvano prima di approvare
+async function salvaCampi(id) {
+  const b = (D.brani || []).find(x => x.id === id), det = document.querySelector('[data-det="' + id + '"]');
+  if (!b || !det) return b;
+  const nuovi = {}; let cambiati = false;
+  det.querySelectorAll('input[data-k]').forEach(i => { nuovi[i.dataset.k] = i.value.trim(); if (i.value.trim() !== (b.tag[i.dataset.k] || '')) cambiati = true; });
+  if (!cambiati) return b;
+  if (!nuovi.titolo) throw new Error('Il titolo non può restare vuoto');
+  const r = await api('gestione/controllo/' + encodeURIComponent(id), {method:'POST', body:nuovi});
+  Object.assign(b, r.brano);
+  return b;
+}
+async function approva(id, forza) {
+  const det = document.querySelector('[data-det="' + id + '"]'), esito = det && det.querySelector('[data-esito]');
+  try {
+    await salvaCampi(id);
+    if (esito) esito.innerHTML = '<p class="small">Scrivo il file nuovo…</p>';
+    const r = await AX.fetchT(AX.API + 'gestione/controllo/' + encodeURIComponent(id) + '/approva',
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({forza:!!forza})}, 300000);
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (r.status === 409 && j && j.doppioni) {
+      if (esito) {
+        esito.innerHTML = '<div class="avviso">' + esc(j.errore) + ': ' + j.doppioni.map(d => '«' + esc(d.titolo) + '» di ' + esc(d.artista)).join(', ') + '.</div>' +
+          '<div class="btns"><button class="btn sm pri" data-forza="' + esc(id) + '">Approva lo stesso</button></div>';
+      }
+      return;
+    }
+    if (!r.ok) throw new Error((j && j.errore) || 'Il Mac ha risposto ' + r.status);
+    toast('Nella libreria: ' + j.nome);
+    aperto = '';
+    if (AX.host && AX.host.libreria) AX.host.libreria().catch(() => {});
+  } catch (e) { if (esito) esito.innerHTML = '<p class="small" style="color:var(--bad)">' + esc(e.message) + '</p>'; else toast(e.message); return; }
+  carica();
+}
+// copertina scelta dal telefono: quadrata, al più 1000 px, in JPEG (anche le foto HEIC dell'iPhone)
+async function comeJpeg(file) {
+  try {
+    const bmp = await createImageBitmap(file), lato = Math.min(bmp.width, bmp.height), m = Math.min(1000, lato);
+    const cv = document.createElement('canvas'); cv.width = cv.height = m;
+    cv.getContext('2d').drawImage(bmp, (bmp.width - lato) / 2, (bmp.height - lato) / 2, lato, lato, 0, 0, m, m);
+    return await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9)) || file;
+  } catch (e) { return file; }
+}
+$('imm').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0], id = perCopertina; e.target.value = ''; perCopertina = '';
+  if (!f || !id) return;
+  try {
+    const blob = await comeJpeg(f);
+    const r = await AX.fetchT(AX.API + 'gestione/controllo/' + encodeURIComponent(id) + '/copertina', {method:'PUT', body:blob, headers:{'Content-Type':blob.type || 'image/jpeg'}}, 60000);
+    let j = null; try { j = await r.json(); } catch (x) {}
+    if (!r.ok) throw new Error((j && j.errore) || 'Il Mac ha risposto ' + r.status);
+    versione = Date.now(); toast('Copertina nuova: si scrive nel file quando approvi');
+  } catch (err) { toast(err.message); }
+  carica();
+});
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-apri],[data-ascolta],[data-cop],[data-approva],[data-forza],[data-scarta],[data-ok],[data-no]'); if (!b) return;
+  const d = b.dataset;
+  if (d.apri) { aperto = aperto === d.apri ? '' : d.apri; conferma = ''; disegna(); return; }
+  if (d.ascolta) {
+    const x = D.brani.find(y => y.id === d.ascolta); if (!x) return;
+    player.play([{id:'controllo:' + x.id, title:x.tag.titolo, artist:x.tag.artista, album:x.tag.album,
+      url:AX.API + 'gestione/controllo/' + encodeURIComponent(x.id) + '/file', cover:x.copertina ? copUrl(x.id, versione) : ''}], 0, 'Da controllare');
+    return;
+  }
+  if (d.cop) { perCopertina = d.cop; $('imm').click(); return; }
+  if (d.approva) { b.disabled = true; await approva(d.approva, false); b.disabled = false; return; }
+  if (d.forza) { b.disabled = true; await approva(d.forza, true); return; }
+  if (d.scarta) {
+    if (conferma !== d.scarta) { conferma = d.scarta; disegna(); setTimeout(() => { if (conferma === d.scarta) { conferma = ''; disegna(); } }, 4000); return; }
+    conferma = '';
+    try { await api('gestione/controllo/' + encodeURIComponent(d.scarta) + '/scarta', {method:'POST'}); toast('Scartato: è nella cartella «Scartati»'); aperto = ''; }
+    catch (err) { toast(err.message); }
+    carica(); return;
+  }
+  if (d.ok || d.no) {
+    b.disabled = true;
+    try { await api('gestione/film/' + encodeURIComponent(d.ok || d.no) + '/' + (d.ok ? 'consenti' : 'rifiuta'), {method:'POST'}); toast(d.ok ? 'Consentito: ora può caricare il film' : 'Rifiutato'); }
+    catch (err) { toast(err.message); }
+    carica();
+  }
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) carica(); });
+carica();
+</script>
+</body>
+</html>

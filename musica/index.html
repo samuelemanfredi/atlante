@@ -754,10 +754,12 @@ async function loadServer() {
     const m = Object.assign({fav:false, plays:0, last:0}, old || {}, {id, sid:b.id, remote:true, src:'srv|' + b.id,
       title:b.title || '', artist:b.artist || '', album:b.album || '', albumArtist:b.albumArtist || '', track:b.track || 0, disc:b.disc || 0,
       year:b.year || '', genre:b.genre || '', duration:b.duration || (old && old.duration) || 0, added:b.added || (old && old.added) || Date.now(),
-      compilation:!!b.compilation, cover: old && old.cover && !old.cover.startsWith('s:') ? old.cover : (b.cover ? 's:' + b.cover : null)});
+      // la copertina già salvata sul telefono resta, a meno che sul Mac non sia cambiata (Gestione → Contenuti)
+      compilation:!!b.compilation, cover: old && old.cover && !old.cover.startsWith('s:') && (!b.cover || old.cover === 'm' + b.cover.replace(/\.\w+$/, '')) ? old.cover : (b.cover ? 's:' + b.cover : null)});
     delete m.gone;
     if (!old || JSON.stringify(old) !== JSON.stringify(m)) put.push(m);
     T.set(id, m);
+    if (old && old.cover && old.cover !== m.cover && m.cover && saved.has(id)) keepCover(m);   // copertina nuova anche offline
   }
   // brani non più nel catalogo: restano in libreria solo se già sull'iPhone; gli altri si nascondono,
   // ma se hanno preferito, ascolti o playlist se ne tiene nota per quando il disco torna
@@ -769,6 +771,14 @@ async function loadServer() {
     }
     // disco collegato e letto tutto: i brani in coda che non ci sono più (cancellati dal disco) escono dalla coda
     if (SRVN) { const n = DLQ.length; for (let k = n - 1; k >= 0; k--) if (!T.has(DLQ[k]) && !GONE.has(DLQ[k])) DLQ.splice(k, 1); if (DLQ.length !== n) ls.set('am-dlq', DLQ); }
+  }
+  // brani tolti da Samuele (Gestione → Contenuti): spariscono anche dai telefoni che li avevano salvati; preferito,
+  // ascolti e playlist restano annotati per quando li rimette
+  for (const x of Array.isArray(j.tolti) ? j.tolti : []) {
+    const id = 'r' + x, t = T.get(id); if (!t || now.has(id)) continue;
+    T.delete(id); saved.delete(id); memFiles.delete(id); dbDel('files', id).catch(() => {});
+    const k = DLQ.indexOf(id); if (k >= 0) { DLQ.splice(k, 1); ls.set('am-dlq', DLQ); }
+    if (t.fav || t.plays || P.some(p => p.ids.indexOf(id) >= 0)) { t.gone = true; GONE.set(id, t); put.push(t); } else del.push(id);
   }
   dbBatch('meta', put, del).catch(() => {});
   // la copia vecchia si toglie e il brano si riscarica in silenzio. Troppi insieme = il disco è stato copiato o
@@ -1439,7 +1449,7 @@ const pages = {
       xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
         '<button class="xtile' + (m.k === 'gestione' && (IO.nuove || {}).youtube_bloccato ? ' xyt' : '') + '" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
           (m.k === 'gestione' && nuoveGestione() ? '<span class="xn" aria-label="cose nuove">' + nuoveGestione() + '</span>' : '') + '</button>').join('') + '</div>').join('') +
-      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, la tua interfaccia e la chat.</p>' : '') + ascAltro();
+      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: la tua interfaccia e la chat.</p>' : '') + ascAltro();
   },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
@@ -2083,7 +2093,11 @@ function addSheet() {
     '<div class="nota">YouTube Music, YouTube e link da altri siti: i brani scaricati entrano nella libreria del Mac.</div></form></div>' +
     '<div class="grp"><div class="smsg"><b>Aggiungi musica</b>I file vengono copiati in questa app e restano su questo dispositivo.</div>' +
     '<button class="acc" data-a="pickfiles"><span class="l">Scegli file audio</span>' + ic('file') + '</button>' +
-    '<button class="acc" data-a="impl"><span class="l">Importa playlist di Apple Music</span>' + ic('plist') + '</button>' + (isIOS ? '' : '<button class="acc" data-a="pickdir"><span class="l">Scegli una cartella</span>' + ic('folder') + '</button>') + '</div>' + cancel);
+    '<button class="acc" data-a="impl"><span class="l">Importa playlist di Apple Music</span>' + ic('plist') + '</button>' + (isIOS ? '' : '<button class="acc" data-a="pickdir"><span class="l">Scegli una cartella</span>' + ic('folder') + '</button>') + '</div>' +
+    // sul Mac, per tutti: i brani di chi non è Samuele passano da «Da controllare», i film chiedono prima il suo sì
+    '<div class="grp"><div class="smsg"><b>Carica sul Mac</b>' + (IO.ruolo === 'proprietario' ? 'I brani entrano nella libreria di tutti, i film nel Cloud.' : 'Samuele li controlla prima di metterli nella libreria di tutti.') + '</div>' +
+    '<button class="acc" data-a="caricax"><span class="l">Carica nella libreria</span>' + ic('file') + '</button>' +
+    '<button class="acc" data-a="caricax" data-v="film=1"><span class="l">Carica un film</span>' + ic('down') + '</button></div>' + cancel);
 }
 function nameSheet(title, val, action, k) {
   openSheet('<div class="grp"><form class="sform" data-f="' + action + '" data-k="' + (k || '') + '"><label for="nm">' + title + '</label><input id="nm" maxlength="80" value="' + esc(val || '') + '" placeholder="' + (action === 'devnome' ? 'Nome del dispositivo' : 'Titolo playlist') + '" autocomplete="off"><div class="row2"><button type="button" data-a="closesheet">Annulla</button><button class="pri" type="submit">' + (action === 'newpl' ? 'Crea' : 'Salva') + '</button></div></form></div>');
@@ -2176,6 +2190,7 @@ document.addEventListener('click', e => {
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
     case 'xopen': openX(d.k); break;
+    case 'caricax': closeSheet(); openX('carica', d.v ? '?' + d.v : ''); break;
     case 'dlpill': closeX(); setTab('lib'); toast(dlText()); break;
     case 'sharecur': if (curId) shareTrack(curId); else toast('Nessun brano in riproduzione'); break;
     case 'm-share': closeSheet(); shareTrack(d.id); break;
@@ -2266,6 +2281,7 @@ const XIDEE = {k:'idee', t:'Idee', d:'Proponi come migliorare l\'app', i:'💡',
 const XMODS = [
   {g:'Ascolta', m:[
     {k:'cerca', t:'Cerca e scarica musica', d:'YouTube Music, YouTube, link da altri siti', i:'🔎', c:'#fa2d48'},
+    {k:'carica', t:'Carica nella libreria', d:'Brani e film dal telefono al Mac', i:'⬆️', c:'#34c759'},
     {k:'podcast', t:'Podcast', d:'Cerca, iscriviti, ascolta e scarica', i:'🎙️', c:'#8e44ec'},
     {k:'libri', t:'Libri e audiolibri', d:'Leggi, fatti leggere, crea audiolibri', i:'📚', c:'#ff9500'},
     {k:'video', t:'Video e streaming', d:'Servizi di streaming e download', i:'🎬', c:'#ff3b30'},
@@ -2281,8 +2297,10 @@ const XMODS = [
 // chi è questo dispositivo per il Mac: Samuele (con la Gestione), casa (la rete di casa: come Samuele, senza Gestione) o
 // una persona invitata (ascolta e basta: dei moduli solo «Invita un amico» e «Idee»). Il Mac controlla comunque ogni richiesta.
 let IO = ls.get('am-io', {ruolo:'', persona:null});
-const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti, accessi e idee', i:'🛡️', c:'#636366'}]};
-const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}, XIDEE]}];
+const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, Da controllare, contenuti, idee e rete', i:'🛡️', c:'#636366'}]};
+const XINVITATI = [{g:'Per te', m:[{k:'cerca', t:'Cerca e scarica musica', d:'Il brano arriva sul tuo telefono e a Samuele', i:'🔎', c:'#fa2d48'},
+  {k:'carica', t:'Carica nella libreria', d:'Brani e film per Samuele', i:'⬆️', c:'#34c759'},
+  {k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}, XIDEE]}];
 // «Rete e VPN» per tutti: dice se questo dispositivo arriva dal Mac mini con Tailscale e come accenderlo (agli invitati
 // spiega che non serve). Il VPN del telefono non si accende da una pagina web: si apre l'app Tailscale.
 const XRETE = {g:'Rete', m:[{k:'rete', t:'Rete e VPN', d:'Tailscale su questo dispositivo', i:'🌐', c:'#0a84ff'}]};
@@ -2302,7 +2320,31 @@ async function ioCarica() {
     // un invitato non si ritrova migliaia di brani sul telefono senza averlo chiesto: «Scarica tutto» lo accende lui
     if (IO.ruolo === 'invitato' && !tuttoScelto()) tuttoSpento();
     if (prima !== JSON.stringify(IO)) render(true);
+    if (IO.ruolo === 'invitato') copieScaricati();
   } catch (e) {}
+}
+/* ---------- brani scaricati da un invitato con «Cerca e scarica»: una copia sul suo telefono ----------
+   Finché Samuele non li approva non sono nella libreria di nessuno: chi li ha scaricati li ha come brani importati. */
+const COPIE = new Set(ls.get('am-copie', []));   // brani di «Da controllare» già copiati su questo telefono
+let copieInCorso = null;
+function copieScaricati() {
+  if (IO.ruolo !== 'invitato' || !SRV) return Promise.resolve();
+  if (copieInCorso) return copieInCorso;
+  copieInCorso = (async () => {
+    try {
+      const r = await fetchT(XAPI + 'caricamenti', {cache:'no-store'}, 10000); if (!r.ok) return;
+      const j = await r.json();
+      for (const b of j.brani || []) {
+        if (b.origine !== 'scaricato' || b.stato !== 'attesa' || COPIE.has(b.id)) continue;
+        const f = await fetchT(XAPI + 'caricamenti/' + encodeURIComponent(b.id) + '/file', {cache:'no-store'}, 60000); if (!f.ok) continue;
+        const blob = await f.blob();
+        const nome = (b.artista ? b.artista + ' - ' : '') + (b.titolo || 'Brano') + '.mp3';
+        await importFiles([new File([blob], nome.replace(/[\\/:*?"<>|]+/g, ' '), {type:blob.type || 'audio/mpeg', lastModified:Date.now()})]);
+        COPIE.add(b.id); ls.set('am-copie', [...COPIE]);
+      }
+    } catch (e) {} finally { copieInCorso = null; }
+  })();
+  return copieInCorso;
 }
 const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entrano in libreria né in «Brani»
 const TT = id => T.get(id) || EXT.get(id);
@@ -2330,6 +2372,7 @@ window.AM = {
   toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }, accesso() { chiediAccesso(); },
   // brani della libreria del Mac (id del catalogo, es. quelli appena scaricati da «Cerca e scarica»)
   libreria() { return reconnect(true); },   // rilegge il catalogo: i brani nuovi compaiono e si salvano sull'iPhone
+  copie() { return copieScaricati(); },      // «Cerca e scarica» di un invitato: la copia del brano sul suo telefono
   suona(ids, start, from) { const L = (ids || []).map(x => 'r' + x).filter(x => T.has(x)); if (L.length) playList(L, start || 0, false, from || ''); return L.length; },
   dopo(id) { const x = 'r' + id; if (!T.has(x)) return false; playNext(x); return true; }
 };
