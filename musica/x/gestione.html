@@ -18,6 +18,17 @@
 .link{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;background:var(--fill);border-radius:8px;padding:8px 10px;margin:8px 0}
 .qr{display:block;margin:10px auto;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:8px}
 .chev{color:var(--fg3);font-size:20px}
+/* Idee */
+.idea{padding:12px 14px;border-bottom:.5px solid var(--sep)}
+.idea:last-child{border-bottom:0}
+.idea.nuova{box-shadow:inset 3px 0 0 var(--accent)}
+.idea .itop{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.idea .itop .tx{flex:1;min-width:0}
+.idea .itop .tx b,.idea .itop .tx span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.idea .itop .tx span{font-size:13px;color:var(--fg2)}
+.idea select.in{width:auto;min-height:34px;padding:4px 10px;flex:none;font-size:15px}
+.idea .testo{white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0 10px}
+.idea textarea.in{min-height:44px;font-size:15px;background:var(--bg)}
 </style>
 </head>
 <body>
@@ -37,6 +48,12 @@
   <h2 class="h2">I tuoi dispositivi</h2>
   <p class="small">Quelli entrati come Samuele (con Tailscale o con la password). Se ne vedi uno che non è tuo, revocalo.</p>
   <div class="list" id="tlist"></div>
+  <div id="idee">
+    <h2 class="h2">Idee <span class="pill" id="ideenuove" hidden></span></h2>
+    <p class="small">Le manda chi usa l'app dal riquadro «Idee». Claude legge le nuove dal Mac mini e te le sottopone; qui ne cambi lo stato e scrivi una nota, che vedete solo tu e Claude.</p>
+    <div class="seg" id="ideefiltro"><button class="on" data-f="aperte">Aperte</button><button data-f="tutte">Tutte</button></div>
+    <div class="list" id="ideelist"></div>
+  </div>
 </div>
 <script src="kit.js"></script>
 <script>
@@ -67,7 +84,7 @@ function quando(t) {
 // testo da mandare con il link (Condividi): per ora Atlante fa ascoltare e salvare i brani; si allunga con le parti nuove
 function messaggio(nome, link) {
   return 'Ciao ' + nome + '! Ti ho invitato su Atlante Musica, la mia libreria musicale. Apri questo link sul telefono e sei dentro: ' +
-    'puoi ascoltare tutto e salvare i brani sul telefono.\n' + link;
+    'puoi ascoltare tutto e salvare i brani sul telefono. Se ti viene un\'idea per migliorarla, mandamela dalla sezione «Idee»: le leggo tutte.\n' + link;
 }
 // qrcode-generator 1.4.4 (MIT) tenuta in x/qrcode.js: nella Gestione niente codice da altri siti
 async function caricaQR() {
@@ -167,6 +184,51 @@ $('invita').onclick = async () => {
 };
 $('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('invita').click(); });
 disegna();
+</script>
+<script>
+'use strict';
+// ----- Gestione → Idee: le idee mandate dal riquadro «Idee», con stato e nota di Samuele -----
+(function () {
+  const {$, esc, toast, api} = AX;
+  const STATI = [['nuova', 'Nuova'], ['proposta', 'Proposta'], ['accettata', 'Accettata'], ['scartata', 'Scartata'], ['fatta', 'Fatta']];
+  const APERTE = ['nuova', 'proposta', 'accettata'];
+  const nomeStato = k => (STATI.find(x => x[0] === k) || [k, k])[1];
+  let filtro = 'aperte', L = [];
+  async function disegnaIdee() {
+    try { L = (await api('gestione/idee')).idee; }
+    catch (e) { $('ideelist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le idee</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+    const nuove = L.filter(x => x.stato === 'nuova').length;
+    $('ideenuove').hidden = !nuove;
+    $('ideenuove').textContent = nuove + (nuove === 1 ? ' nuova' : ' nuove');
+    const V = filtro === 'tutte' ? L : L.filter(x => APERTE.includes(x.stato));
+    $('ideelist').innerHTML = V.length ? V.map(x => '<div class="idea' + (x.stato === 'nuova' ? ' nuova' : '') + '" data-i="' + esc(x.id) + '">' +
+      '<div class="itop"><span class="tx"><b>' + esc(x.nome || 'Persona') + '</b><span>' + esc(quando(x.creato)) + '</span></span>' +
+      '<select class="in" aria-label="Stato dell\'idea">' + STATI.map(([k, t]) => '<option value="' + k + '"' + (k === x.stato ? ' selected' : '') + '>' + t + '</option>').join('') + '</select></div>' +
+      '<div class="testo">' + esc(x.testo) + '</div>' +
+      '<textarea class="in" maxlength="2000" rows="2" aria-label="Nota" placeholder="Nota per te e per Claude (es. «sì, fallo così…»)">' + esc(x.nota || '') + '</textarea>' +
+      '<div class="btns" hidden><button class="btn sm pri" data-salva>Salva la nota</button></div></div>').join('') :
+      '<div class="row"><span class="tx"><span>' + (L.length ? 'Nessuna idea aperta: le altre sono in «Tutte».' : 'Nessuna idea, per ora.') + '</span></span></div>';
+    $('ideelist').querySelectorAll('.idea').forEach(box => {
+      const id = box.dataset.i, sel = box.querySelector('select'), nota = box.querySelector('textarea'), salva = box.querySelector('.btns');
+      sel.onchange = async () => {
+        try { await api('gestione/idee/' + id, {method:'POST', body:{stato:sel.value}}); toast('Stato: ' + nomeStato(sel.value)); }
+        catch (e) { toast(e.message); }
+        disegnaIdee();
+      };
+      nota.oninput = () => { salva.hidden = false; };
+      salva.querySelector('button').onclick = async () => {
+        try { await api('gestione/idee/' + id, {method:'POST', body:{nota:nota.value}}); salva.hidden = true; toast('Nota salvata'); }
+        catch (e) { toast(e.message); }
+      };
+    });
+  }
+  $('ideefiltro').querySelectorAll('button').forEach(b => b.onclick = () => {
+    filtro = b.dataset.f;
+    $('ideefiltro').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    disegnaIdee();
+  });
+  disegnaIdee();
+})();
 </script>
 </body>
 </html>

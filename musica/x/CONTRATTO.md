@@ -41,6 +41,8 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | DELETE | `audiolibro/<id>` | `{ok:true}` |
 | GET | `ia` | `{attiva:bool, modelli:[...], modello}` |
 | POST | `ia` `{prompt, sistema, json:bool, modello}` | `{testo}` — IA locale (Ollama su `localhost:11434`), tempo massimo 180 s |
+| GET | `idee` | `{idee:[{id,testo,creato,stato}], restano, max_caratteri, max_giorno}` — le idee di chi chiede (anche un invitato), la più recente per prima; `stato` = nuova, proposta, accettata, scartata, fatta |
+| POST | `idee` `{testo}` | `{idea, restano}` — al più 2000 caratteri e 10 idee al giorno per persona (429 oltre) |
 | GET | `dispositivo` | `{nome, sistema, versione, avvio, memoria:{totale,libera}, dischi:[{nome,percorso,totale,libero}], pulizia:[{nome,percorso,dimensione}]}` |
 
 ## API dell'app che ospita (`AX.player`, oppure `parent.AM`)
@@ -59,4 +61,5 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | `naviga.html` | navigatore GPS con musica (comandi del lettore sempre visibili), istruzioni vocali, vignette autostradali con link ufficiali, scheda veicolo da foto e targa |
 | `benessere.html` | conta calorie (Open Food Facts), «Settimana» (dispendio dal calendario .ics, bilancio dieta e integratori, confronto prezzi), Trainer |
 | `strumenti.html` | ricerca del prezzo migliore, negozi per categoria, risolutore di test (crocette e domande aperte), carte fedeltà e di pagamento, gestore dispositivo |
+| `idee.html` | «Idee»: l'invito a proporre miglioramenti dell'app, il modulo per mandarne una e «Le tue idee» con lo stato (aperto anche agli invitati); le idee di tutti sono in Gestione → Idee |
 | `studio.html` | Atlante UCI (accesso con le proprie credenziali), notizie di ciclismo, allenamenti creati dall'IA su qualsiasi argomento, Assistente Idee |

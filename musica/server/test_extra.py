@@ -1935,6 +1935,20 @@ class TestIdee(unittest.TestCase):
         self.assertLess(t.index(a["id"]), t.index(b["id"]))   # nell'ordine in cui sono arrivate
         self.assertIn("proposta 1", t)
 
+    def test_pagina_e_riquadri(self):
+        with open(os.path.join(QUI, "..", "x", "idee.html"), encoding="utf-8") as f:
+            pagina = f.read()
+        for frase in ("Hai un'idea per Atlante Musica?",
+                      "Atlante Musica cresce insieme a chi la usa. Se c'è qualcosa che ti manca, che non capisci o che "
+                      "faresti diversamente, scrivilo qui: basta anche una frase. Ogni idea arriva a Samuele, che le legge "
+                      "tutte e decide cosa costruire.",
+                      "Manda un'idea", "Grazie! La tua idea è arrivata."):
+            self.assertIn(frase, pagina)
+        with open(os.path.join(QUI, "..", "index.html"), encoding="utf-8") as f:
+            app = f.read()
+        self.assertRegex(app, r"const XINVITATI = \[.*XIDEE")   # anche gli invitati vedono il riquadro
+        self.assertRegex(app, r"\{g:'Per te', m:\[\s*XIDEE,")
+
 
 class TestIdeeServer(unittest.TestCase):
     """Le rotte delle idee: ognuno manda le sue e le rivede, la Gestione (solo Samuele) le vede tutte e ne cambia lo

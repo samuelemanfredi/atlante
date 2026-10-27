@@ -1427,7 +1427,7 @@ const pages = {
       xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
         '<button class="xtile" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
           (m.k === 'gestione' && nuoveGestione() ? '<span class="xn" aria-label="cose nuove">' + nuoveGestione() + '</span>' : '') + '</button>').join('') + '</div>').join('') +
-      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, idee, la tua interfaccia e la chat.</p>' : '');
+      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, la tua interfaccia e la chat.</p>' : '');
   },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
@@ -2260,6 +2260,8 @@ addEventListener('drop', e => { e.preventDefault(); dragN = 0; $('drop').hidden 
 let toastT = 0;
 /* ---------- moduli extra (scheda Altro) ---------- */
 // ogni modulo è una pagina in x/, aperta in un riquadro: la musica continua e i suoi comandi restano qui sotto
+// «Idee» è per tutti, anche per gli invitati: chi usa l'app propone come migliorarla, Samuele le legge in Gestione
+const XIDEE = {k:'idee', t:'Idee', d:'Proponi come migliorare l\'app', i:'💡', c:'#ff9f0a'};
 const XMODS = [
   {g:'Ascolta', m:[
     {k:'cerca', t:'Cerca e scarica musica', d:'YouTube Music, YouTube, link da altri siti', i:'🔎', c:'#fa2d48'},
@@ -2270,15 +2272,16 @@ const XMODS = [
   {g:'In viaggio', m:[
     {k:'naviga', t:'Navigatore', d:'GPS con la tua musica, vignette, veicolo', i:'🧭', c:'#007aff'}]},
   {g:'Per te', m:[
+    XIDEE,
     {k:'benessere', t:'Benessere', d:'Calorie, Settimana, Trainer', i:'💪', c:'#34c759'},
     {k:'studio', t:'Studio e idee', d:'Atlante UCI, ciclismo, allenamenti, idee', i:'🚴', c:'#5856d6'},
     {k:'strumenti', t:'Strumenti', d:'Prezzi, negozi, test, carte, dispositivo', i:'🧰', c:'#8e8e93'}]}
 ];
 // chi è questo dispositivo per il Mac: Samuele (con la Gestione), casa (la rete di casa: come Samuele, senza Gestione) o
-// una persona invitata (ascolta e basta: dei moduli solo «Invita un amico»). Il Mac controlla comunque ogni richiesta.
+// una persona invitata (ascolta e basta: dei moduli solo «Invita un amico» e «Idee»). Il Mac controlla comunque ogni richiesta.
 let IO = ls.get('am-io', {ruolo:'', persona:null});
-const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti e accessi', i:'🛡️', c:'#1c1c1e'}]};
-const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}]}];
+const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti, accessi e idee', i:'🛡️', c:'#1c1c1e'}]};
+const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}, XIDEE]}];
 // quante cose nuove aspettano Samuele (richieste d'invito…): il numero sul riquadro Gestione
 const nuoveGestione = () => Object.values(IO.nuove || {}).reduce((a, n) => a + (+n || 0), 0);
 function xmodsVisibili() {
