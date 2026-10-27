@@ -95,6 +95,9 @@ details.rimp summary{color:var(--link);cursor:pointer}
   <h2 class="h2" id="classifiche">Classifiche e musica libera</h2>
   <p class="small">Ogni giorno il Mac mini rilegge le classifiche più note e ne fa playlist per l'app di tutti, con i brani che hai già: dai servizi commerciali non si scarica niente. I brani nuovi arrivano da soli dai siti di musica libera (Jamendo, Internet Archive), con la licenza Creative Commons scritta nei tag, nella cartella «Musica libera».</p>
   <div id="cl"><p class="small">Un momento…</p></div>
+  <h2 class="h2" id="testi">Testi e karaoke</h2>
+  <p class="small">Il Mac mini cerca il testo di ogni brano (file .lrc accanto al brano, tag, LRCLIB) e con Whisper mette ogni parola al tempo in cui viene cantata. I brani senza testo li trascrive dalla voce. La traduzione la fa l'IA del Mac se c'è, se no MyMemory.</p>
+  <div id="ts"><p class="small">Un momento…</p></div>
   <h2 class="h2">Ascolti in Atlante</h2>
   <p class="small">Le stesse classifiche che vedono tutti: di una persona si vede solo quello che ha scelto di condividere.</p>
   <div class="list" id="alist"></div>
@@ -371,6 +374,42 @@ ascolti();
       $('cl').innerHTML = h;
     }
     document.querySelectorAll('[data-riprova]').forEach(x => x.onclick = () => riprova(x));
+  }
+  disegna();
+  setInterval(() => { if (document.visibilityState === 'visible') disegna(); }, 15000);
+})();
+</script>
+<script>
+// ----- Gestione → Testi e karaoke (api/extra/gestione/testi) -----
+(function () {
+  const {$, esc, toast, api} = AX;
+  const n = (c, k) => (c && c[k]) || 0;
+  async function riprova(b) {
+    b.disabled = true;
+    try { await api('gestione/testi/riprova', {method:'POST'}); toast('Riprovo adesso'); } catch (e) { toast(e.message); }
+    setTimeout(disegna, 2500);
+  }
+  async function disegna() {
+    let j;
+    try { j = await api('gestione/testi'); }
+    catch (e) { $('ts').innerHTML = '<p class="small">Non riesco a leggere lo stato: ' + esc(e.message) + '</p>'; return; }
+    if (!j.attivo) { $('ts').innerHTML = '<div class="card"><p class="small">Spenti su questo Mac (ATLANTE_TESTI=0 nel servizio del server).</p></div>'; return; }
+    const c = j.conteggi || {}, w = j.whisper || {}, tr = j.traduzioni || {}, o = j.ora || {};
+    const cercati = n(c, 'cercati'), tot = j.totale || 0;
+    let h = '<div class="card"><div class="numeri"><div><b>' + n(c, 'con_testo') + '</b><span>con il testo</span></div>' +
+      '<div><b>' + (n(c, 'parole_fonte') + n(c, 'parole_allineate')) + '</b><span>parole a tempo</span></div>' +
+      '<div><b>' + n(c, 'strumentali') + '</b><span>strumentali</span></div></div>';
+    h += '<p class="small">' + cercati + ' brani cercati su ' + tot + (n(c, 'da_cercare') ? ' · ' + n(c, 'da_cercare') + ' da cercare' : '') +
+      ' · ' + n(c, 'parole_allineate') + ' allineati alla voce · ' + n(c, 'parole_stimate') + ' con le parole stimate · ' +
+      n(c, 'parole_nessuna') + ' senza tempi · ' + n(c, 'trascritti') + ' trascritti dalla voce · ' + n(c, 'senza_testo') + ' senza testo' +
+      (n(c, 'da_allineare') ? ' · ' + n(c, 'da_allineare') + ' da allineare' : '') + (n(c, 'non_allineati') ? ' · ' + n(c, 'non_allineati') + ' non allineabili' : '') + '</p>';
+    h += '<p class="small">Whisper: <b>' + esc(w.stato || '') + '</b>' + (w.modello ? ' · modello ' + esc(w.modello) : '') + '</p>';
+    h += '<p class="small">LRCLIB: ' + esc(j.lrclib || '') + ' · Traduzioni: ' + esc(tr.motore || 'nessun traduttore') + ' (' + (tr.fatte || 0) + ' fatte' + (tr.in_coda ? ', ' + tr.in_coda + ' in coda' : '') + ')</p>';
+    const adesso = [o.cerca && 'cerco «' + o.cerca + '»', o.allinea && 'allineo «' + o.allinea + '»', o.traduce && 'traduco «' + o.traduce + '»'].filter(Boolean);
+    if (adesso.length) h += '<p class="small">Adesso: ' + esc(adesso.join(' · ')) + '</p>';
+    h += '<div class="btns"><button class="btn sm" data-tsriprova>Riprova adesso</button></div></div>';
+    $('ts').innerHTML = h;
+    document.querySelectorAll('[data-tsriprova]').forEach(x => x.onclick = () => riprova(x));
   }
   disegna();
   setInterval(() => { if (document.visibilityState === 'visible') disegna(); }, 15000);

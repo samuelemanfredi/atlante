@@ -356,6 +356,9 @@ class Server:
         # la musica libera si ferma sotto i 200 GB liberi: qui non deve contare il disco di chi lancia le prove
         # (l'aggiornamento automatico le lancia sul Mac mini, dove il disco interno può averne meno)
         env.setdefault("ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB", "0")
+        # testi e karaoke: spenti nelle prove che non li riguardano (niente LRCLIB vero, niente Whisper né Homebrew);
+        # le loro prove li accendono con LRCLIB, ffmpeg e Whisper finti (TestTesti)
+        env.setdefault("ATLANTE_TESTI", "0")
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         self.log = open(os.path.join(self.base, "server-%d.log" % self.porta), "wb")
@@ -7008,6 +7011,450 @@ class TestPosizioneJS(unittest.TestCase):
         finally:
             s.ferma()
             shutil.rmtree(base, ignore_errors=True)
+
+
+# ----- testi e karaoke: fonti dei testi, parole a tempo (Whisper finto), traduzioni, API -----
+
+FINTO_FFMPEG_TESTI = r'''
+import os, shutil, struct, sys
+a = sys.argv[1:]
+ingresso, uscita = a[a.index("-i") + 1], a[-1]
+if not os.path.isfile(ingresso):
+    sys.stderr.write("ingresso mancante\n")
+    sys.exit(1)
+n = 16000   # un secondo di silenzio a 16 kHz: a Whisper (finto) basta sapere quale brano è
+with open(uscita, "wb") as f:
+    f.write(b"RIFF" + struct.pack("<I", 36 + 2 * n) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+            + b"data" + struct.pack("<I", 2 * n) + bytes(2 * n))
+if os.path.isfile(ingresso + ".parole.json"):
+    shutil.copy(ingresso + ".parole.json", uscita + ".parole.json")
+'''
+
+# whisper-cli finto: l'aiuto con le opzioni, e per ogni WAV le parole scritte accanto al brano ({lingua, parole: [[t, w]]})
+# in JSON «pieno» (-ojf) come lo scrive whisper.cpp, con il tempo DTW (t_dtw, centesimi di secondo) di ogni pezzo
+FINTO_WHISPER = r'''
+import json, os, sys
+a = sys.argv[1:]
+if a[:1] == ["-h"]:
+    sys.stderr.write("usage: whisper-cli [options] file0 file1 ...\n  -ojf,      --output-json-full\n  -np,       --no-prints\n"
+                     "  -l LANG,   --language LANG\n             --prompt PROMPT\n  -dtw MODEL --dtw MODEL\n"
+                     "  -nfa,      --no-flash-attn\n  -sns,      --suppress-nst\n")
+    sys.exit(0)
+with open(os.path.join(os.environ["FINTO_DIR"], "whisper.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(a) + "\n")
+wav, out = a[a.index("-f") + 1], a[a.index("-of") + 1]
+try:
+    with open(wav + ".parole.json", encoding="utf-8") as f:
+        d = json.load(f)
+except OSError:
+    d = {"lingua": "en", "parole": []}
+tok = [{"text": "[_BEG_]", "offsets": {"from": 0, "to": 0}, "id": 50365, "p": 0.9, "t_dtw": -1}]
+for t, w in d["parole"]:
+    pezzi = [w] if len(w) < 6 else [w[:3], w[3:]]   # le parole lunghe in due pezzi, come i token veri
+    for k, x in enumerate(pezzi):
+        tok.append({"text": (" " if k == 0 else "") + x, "offsets": {"from": int(t * 1000), "to": int(t * 1000) + 300},
+                    "id": 1000 + k, "p": d.get("p", 0.9), "t_dtw": int(round(t * 100)) + k * 10})
+tok.append({"text": "[_TT_500]", "offsets": {"from": 10000, "to": 10000}, "id": 50865, "p": 0.9, "t_dtw": -1})
+j = {"result": {"language": d.get("lingua", "en")},
+     "transcription": [{"offsets": {"from": 0, "to": 10000}, "text": " ".join(w for _, w in d["parole"]), "tokens": tok}]}
+with open(out + ".json", "w", encoding="utf-8") as f:
+    json.dump(j, f)
+'''
+
+LRC_SINCRO = "[ar:Artista A]\n[00:10.00]Il sole sorge piano sul mare\n[00:14.00]e tu mi guardi ancora\n" \
+             "[00:30.00]Il sole sorge piano sul mare\n"
+LYRICSFILE = """version: '1.0'
+metadata:
+  title: Parole esatte
+  artist_name: Artista B
+  instrumental: false
+lines:
+- text: Hello world
+  start_ms: 5000
+  end_ms: 6500
+  words:
+  - text: 'Hello '
+    start_ms: 5000
+    end_ms: 5600
+  - text: world
+    start_ms: 5700
+    end_ms: 6500
+- text: Second line
+  start_ms: 8000
+  words:
+  - text: 'Second '
+    start_ms: 8000
+  - text: line
+    start_ms: 8600
+"""
+
+
+class FintoLrclib(http.server.BaseHTTPRequestHandler):
+    """LRCLIB finto: /api/get (con la durata chiesta) e /api/search, e le richieste ricevute."""
+    richieste = []
+    VOCI = {
+        "canzone sincronizzata": {"trackName": "Canzone sincronizzata", "artistName": "Artista A", "albumName": "Album",
+                                  "instrumental": False, "hasWordSync": False, "plainLyrics": "x",
+                                  "syncedLyrics": LRC_SINCRO},
+        "parole esatte": {"trackName": "Parole esatte", "artistName": "Artista B", "instrumental": False,
+                          "hasWordSync": True, "plainLyrics": "Hello world\nSecond line",
+                          "syncedLyrics": "[00:05.00]Hello world\n[00:08.00]Second line", "lyricsfile": LYRICSFILE},
+        "solo testo": {"trackName": "Solo testo", "artistName": "Artista C", "instrumental": False,
+                       "plainLyrics": "Prima riga del testo\nseconda riga del testo", "syncedLyrics": None},
+        "strumentale": {"trackName": "Strumentale", "artistName": "Artista D", "instrumental": True,
+                        "plainLyrics": None, "syncedLyrics": None},
+    }
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoLrclib.richieste.append((u.path, q))
+        v = self.VOCI.get((q.get("track_name") or q.get("q") or "").lower())
+        if u.path == "/api/get":
+            if not v or v["trackName"] == "Solo testo":   # «Solo testo» si trova solo cercando
+                return self._manda(404, {"code": 404, "name": "TrackNotFound"})
+            return self._manda(200, dict(v, duration=float(q.get("duration") or 0)))
+        if u.path == "/api/search":
+            return self._manda(200, [dict(v, duration=0)] if v else [])
+        self._manda(404, {})
+
+    def _manda(self, codice, dati):
+        b = json.dumps(dati).encode("utf-8")
+        self.send_response(codice)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+
+class FintoMyMemory(http.server.BaseHTTPRequestHandler):
+    """MyMemory finto: «EN: <riga>», e le richieste ricevute."""
+    richieste = []
+
+    def do_GET(self):
+        q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        FintoMyMemory.richieste.append(q)
+        da, a = q.get("langpair", "|").split("|")
+        b = json.dumps({"responseStatus": 200, "responseData": {"translatedText": "%s: %s" % (a.upper(), q.get("q"))}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+
+def mp3_con_testo(percorso, titolo, artista, uslt):
+    """MP3 piccolissimo con titolo, artista e il testo in un frame USLT (UTF-16)."""
+    def frame(fid, d):
+        return fid.encode() + len(d).to_bytes(4, "big") + b"\x00\x00" + d
+    corpo = frame("TIT2", b"\x01" + titolo.encode("utf-16")) + frame("TPE1", b"\x01" + artista.encode("utf-16")) + \
+        frame("USLT", b"\x01ita" + "".encode("utf-16") + b"\x00\x00" + uslt.encode("utf-16"))
+    n = len(corpo)
+    with open(percorso, "wb") as f:
+        f.write(b"ID3\x03\x00\x00" + bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo)
+        f.write((b"\xff\xfb\x90\x00" + bytes(413)) * 3)
+
+
+class TestTestiLettori(unittest.TestCase):
+    """Le parti senza server: LRC (anche esteso), Lyricsfile YAML, tag, stima e allineamento delle parole, Whisper."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_testi")
+
+    def test_lrc(self):
+        m = self.m
+        r = m.leggi_lrc("[ar:X]\n[offset:+500]\n[00:10.50]Prima riga\n[00:15.00][01:00.00]Ritornello\n[00:20.00]\n")
+        self.assertEqual([(x["t"], x["x"]) for x in r], [(10.0, "Prima riga"), (14.5, "Ritornello"), (19.5, ""),
+                                                        (59.5, "Ritornello")])
+        r = m.leggi_lrc("[00:12.00]<00:12.00>Ciao <00:12.50>bella <00:13.40>gente<00:14.00>\n[00:15.00]Ri<00:15.30>pe")
+        self.assertEqual(r[0]["p"], [[12.0, None, "Ciao "], [12.5, None, "bella "], [13.4, 14.0, "gente"]])
+        self.assertEqual(r[1]["p"], [[15.0, None, "Ri"], [15.3, None, "pe"]])
+        self.assertEqual(m.leggi_lrc("solo testo\nsenza tempi"), [])
+
+    def test_lyricsfile(self):
+        strum, righe = self.m.leggi_lyricsfile(LYRICSFILE)
+        self.assertFalse(strum)
+        self.assertEqual(righe[0]["p"], [[5.0, 5.6, "Hello "], [5.7, 6.5, "world"]])
+        self.assertEqual((righe[1]["t"], righe[1]["x"]), (8.0, "Second line"))
+        rientrato = 'metadata:\n  instrumental: false\nlines:\n  - text: "A \\"b\\" \\u00e8"\n    start_ms: 1000\n' \
+                    '    words: []\n'
+        self.assertEqual(self.m.leggi_lyricsfile(rientrato)[1][0]["x"], 'A "b" è')
+        self.assertEqual(self.m.leggi_lyricsfile("metadata:\n  instrumental: true\nlines: []\n"), (True, []))
+        self.assertIsNone(self.m.leggi_lyricsfile("lines:\n- text: |\n    blocco\n"))
+
+    def test_tag(self):
+        m, d = self.m, tempfile.mkdtemp(prefix="atlante-testi-tag-")
+        try:
+            p = os.path.join(d, "a.mp3")
+            mp3_con_testo(p, "T", "A", "Prima riga\nSeconda riga")
+            self.assertEqual(m.testo_dai_tag(p), ("testo", "Prima riga\nSeconda riga"))
+
+            def box(t, x):
+                return struct.pack(">I", 8 + len(x)) + t + x
+            dati = box(b"data", struct.pack(">I", 1) + bytes(4) + "[00:01.00]Riga M4A".encode())
+            moov = box(b"moov", box(b"udta", box(b"meta", bytes(4) + box(b"ilst", box(b"\xa9lyr", dati)))))
+            q = os.path.join(d, "b.m4a")
+            with open(q, "wb") as f:
+                f.write(box(b"ftyp", b"M4A " + bytes(4)) + moov)
+            self.assertEqual(m.testo_dai_tag(q), ("testo", "[00:01.00]Riga M4A"))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_stima(self):
+        righe = self.m.leggi_lrc("[00:10.00]Questa è una riga cantata\n[00:13.00]E poi un'altra\n[00:40.00]Dopo l'assolo")
+        self.m.completa_tempi(righe, 50)
+        for k, r in enumerate(righe):
+            t = [p[0] for p in r["p"]]
+            self.assertEqual(t, sorted(t))
+            self.assertTrue(all(p[1] > p[0] for p in r["p"]))
+            if k + 1 < len(righe):
+                self.assertLessEqual(r["f"], righe[k + 1]["t"])
+        self.assertLess(righe[1]["f"], 20)   # prima dell'assolo la riga dura quanto le sue sillabe
+
+    def test_allineamento(self):
+        m = self.m
+        testo = [("verso uno qui comincia la canzone", 5.0), ("ritornello cantato insieme", 12.0),
+                 ("verso due va avanti", 25.0), ("ritornello cantato insieme", 32.0)]
+        vero, sentite = [], []
+        for x, t0 in testo:
+            t = t0 + 0.3
+            for k, w in enumerate(x.split()):
+                vero.append(round(t, 3))
+                if k != 2:   # Whisper perde una parola per riga e ne capisce male un'altra
+                    sentite.append((t, None, w[:-1] + "x" if k == 3 else w))
+                t += 0.6
+        sentite.insert(3, (6.0, None, "eh"))   # e se ne inventa una
+        righe = m.leggi_lrc("\n".join("[00:%05.2f]%s" % (t0, x) for x, t0 in testo))
+        nuove = [{"t": r["t"], "f": None, "x": r["x"], "p": [[None, None, w] for w in m._pezzi(r["x"])]} for r in righe]
+        quota = m.allinea_parole(nuove, sentite, True)
+        m.completa_tempi(nuove, 45)
+        self.assertGreaterEqual(quota, 0.7)
+        trovati = [p[0] for r in nuove for p in r["p"]]
+        self.assertLess(max(abs(a - b) for a, b in zip(trovati, vero)), 0.35)
+        # il ritornello ripetuto: ogni copia prende i tempi suoi
+        self.assertAlmostEqual(nuove[1]["p"][0][0], 12.3, places=2)
+        self.assertAlmostEqual(nuove[3]["p"][0][0], 32.3, places=2)
+
+    def test_parole_sentite(self):
+        j = {"transcription": [{"tokens": [
+            {"text": "[_BEG_]", "offsets": {"from": 0, "to": 0}, "t_dtw": -1},
+            {"text": " Ciao", "offsets": {"from": 100, "to": 600}, "p": 0.9, "t_dtw": 45},
+            {"text": " bel", "offsets": {"from": 600, "to": 900}, "p": 0.9, "t_dtw": 80},
+            {"text": "la", "offsets": {"from": 900, "to": 1100}, "p": 0.9, "t_dtw": 95},
+            {"text": " [Musica]", "offsets": {"from": 1100, "to": 1500}, "p": 0.5, "t_dtw": 120},
+            {"text": "[_TT_250]", "offsets": {"from": 5000, "to": 5000}, "t_dtw": -1}]}]}
+        self.assertEqual([(t, w) for t, _f, w, _p in self.m.parole_sentite(j)], [(0.45, "Ciao"), (0.8, "bella")])
+        finte = {"transcription": [{"tokens": [{"text": " Sottotitoli", "offsets": {"from": 0, "to": 900}, "p": 0.9,
+                                                 "t_dtw": 10}, {"text": " a cura di", "p": 0.9, "t_dtw": 100}]}]}
+        self.assertEqual(self.m.righe_da_voce(finte), [])
+
+    def test_lingua(self):
+        m = self.m
+        self.assertEqual(m.lingua_testo("io non so perché ti amo così tanto amore mio"), "it")
+        self.assertEqual(m.lingua_testo("I don't know why you love me baby"), "en")
+        self.assertEqual(m.lingua_testo("Привет как дела"), "ru")
+        self.assertEqual(m.lingua_testo("こんにちは世界"), "ja")
+        self.assertEqual(m.lingua_testo("xyz"), "")
+
+    def test_dtw(self):
+        w = self.m.Whisper(tempfile.mkdtemp(prefix="atlante-whisper-"))
+        try:
+            self.assertEqual(w.dtw(), "large.v3.turbo")
+            w.modello = "medium-q5_0"
+            self.assertEqual(w.dtw(), "medium")
+        finally:
+            shutil.rmtree(w.dir, ignore_errors=True)
+
+    def test_invitati(self):
+        self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/musica/testo/abc123"))
+        self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/musica/testo"))
+        self.assertFalse(self.m.PERMESSE_INVITATI.match("/api/extra/gestione/testi"))
+
+
+class TestTestiServer(unittest.TestCase):
+    """Il lavoro in sottofondo sul server vero: LRCLIB, ffmpeg, Whisper e MyMemory finti; testi dal file .lrc, dai tag,
+    da LRCLIB (righe, parole, solo testo, strumentale), trascritti dalla voce; traduzioni; ripresa dopo un riavvio."""
+
+    BRANI = {   # nome del file: (titolo, artista, parole sentite da Whisper [[t, parola]], lingua)
+        "A - Canzone sincronizzata.mp3": ("Canzone sincronizzata", "Artista A",
+                                          [[10.4, "Il"], [10.8, "sole"], [11.3, "sorge"], [11.9, "piano"], [12.4, "sul"],
+                                           [12.8, "mare"], [14.2, "e"], [14.5, "tu"], [14.9, "mi"], [15.2, "guardi"],
+                                           [15.9, "ancora"], [30.5, "Il"], [30.9, "sole"], [31.4, "sorge"],
+                                           [32.0, "piano"], [32.5, "sul"], [32.9, "mare"]], "it"),
+        "B - Parole esatte.mp3": ("Parole esatte", "Artista B", [], "en"),
+        "C - Solo testo.mp3": ("Solo testo", "Artista C", [[3.0, "Prima"], [3.5, "riga"], [3.9, "del"], [4.2, "testo"],
+                                                            [7.0, "seconda"], [7.6, "riga"], [8.0, "del"], [8.3, "testo"]],
+                               "it"),
+        "D - Strumentale.mp3": ("Strumentale", "Artista D", [], "en"),
+        "E - Mai sentita.mp3": ("Mai sentita", "Artista E", [[2.0, "questa"], [2.4, "canzone"], [2.9, "non"], [3.1, "la"],
+                                                              [3.3, "conosce"], [3.9, "nessuno"], [4.5, "proprio"]], "it"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-srv-")
+        cls.c = prepara_cartelle(cls.base)
+        for nome, codice in (("ffmpeg", FINTO_FFMPEG_TESTI), ("whisper-cli", FINTO_WHISPER)):
+            p = os.path.join(cls.c["bin"], nome)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("#!%s\n%s" % (sys.executable, codice))
+            os.chmod(p, 0o755)
+        for nome, (titolo, artista, parole, lingua) in cls.BRANI.items():
+            p = os.path.join(cls.c["musica"], nome)
+            scrivi_mp3(p, titolo, artista)
+            with open(p + ".parole.json", "w", encoding="utf-8") as f:
+                json.dump({"lingua": lingua, "parole": parole}, f)
+        # testo nei tag (USLT, senza tempi) e un file .lrc esteso accanto al brano
+        p = os.path.join(cls.c["musica"], "F - Nei tag.mp3")
+        mp3_con_testo(p, "Nei tag", "Artista F", "Canto nel tag\nsenza i tempi")
+        with open(p + ".parole.json", "w", encoding="utf-8") as f:
+            json.dump({"lingua": "it", "parole": [[1.0, "Canto"], [1.4, "nel"], [1.7, "tag"], [4.0, "senza"], [4.5, "i"],
+                                                  [4.7, "tempi"]]}, f)
+        p = os.path.join(cls.c["musica"], "G - Con il file.mp3")
+        scrivi_mp3(p, "Con il file", "Artista G")
+        with open(os.path.join(cls.c["musica"], "G - Con il file.lrc"), "w", encoding="utf-8") as f:
+            f.write("[00:02.00]<00:02.00>Parole <00:02.70>dal <00:03.10>file<00:03.80>\n")
+        cls.modello = os.path.join(cls.base, "ggml-finto.bin")
+        with open(cls.modello, "wb") as f:
+            f.write(b"lmgg")
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclib)
+        cls.mm = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoMyMemory)
+        for s in (cls.lrc, cls.mm):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        FintoLrclib.richieste, FintoMyMemory.richieste = [], []
+        cls.ambiente = {"ATLANTE_TESTI": "1", "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                        "ATLANTE_LRCLIB_INTERVALLO": "0", "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"),
+                        "ATLANTE_WHISPER_FILE_MODELLO": cls.modello, "ATLANTE_WHISPER_ANTICIPO": "0",
+                        "ATLANTE_MYMEMORY": "http://127.0.0.1:%d" % cls.mm.server_address[1]}
+        cls.s = cls.avvia()
+        cls.ids = {}
+        cat = aspetta(lambda: (lambda j: j if len(j.get("brani") or []) == 7 else None)(
+            cls.s.json("GET", "/api/musica/catalogo")), 30)
+        for b in cat["brani"]:
+            cls.ids[b["title"]] = b["id"]
+
+    @classmethod
+    def avvia(cls):
+        with unittest.mock.patch.dict(os.environ, cls.ambiente):
+            return Server(cls.base, cls.c).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.lrc.shutdown()
+        cls.mm.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def finito(self, tempo=60):
+        def pronto():
+            j = self.s.json("GET", "/api/extra/gestione/testi")
+            c = j.get("conteggi") or {}
+            return j if j.get("totale") == 7 and c.get("cercati") == 7 and not c.get("da_allineare") else None
+        j = aspetta(pronto, tempo, 0.3)
+        self.assertTrue(j, "lavoro non finito: %s\n%s" % (self.s.json("GET", "/api/extra/gestione/testi"),
+                                                         self.s.leggi_log()[-3000:]))
+        return j
+
+    def leggi(self, titolo, lingua=""):
+        return self.s.json("GET", "/api/musica/testo/%s%s" % (self.ids[titolo], "?lingua=" + lingua if lingua else ""))
+
+    def test_1_tutti_i_brani(self):
+        j = self.finito()
+        c = j["conteggi"]
+        self.assertEqual((c.get("strumentali"), c.get("con_testo"), c.get("trascritti")), (1, 6, 1), j)
+        self.assertEqual(j["whisper"]["stato"], "pronto")
+        self.assertIn("MyMemory", j["traduzioni"]["motore"])   # l'IA del Mac non risponde nelle prove
+
+    def test_2_lrclib_righe_allineate_alla_voce(self):
+        self.finito()
+        t = self.leggi("Canzone sincronizzata")
+        self.assertEqual((t["stato"], t["fonte"], t["parole"], t["lingua"], t["allineamento"]),
+                         ("trovato", "lrclib", "allineate", "it", "fatto"))
+        r = t["righe"]
+        self.assertEqual([x["x"] for x in r], ["Il sole sorge piano sul mare", "e tu mi guardi ancora",
+                                               "Il sole sorge piano sul mare"])
+        self.assertEqual([p[0] for p in r[0]["p"]], [10.4, 10.8, 11.3, 11.9, 12.4, 12.8])   # i tempi della voce
+        self.assertEqual(r[2]["p"][0][0], 30.5)   # il ritornello ripetuto prende i tempi suoi
+        self.assertTrue(all(p[1] > p[0] for x in r for p in x["p"]))
+        # a Whisper: lingua del testo, testo come suggerimento, DTW del modello e niente flash attention
+        with open(os.path.join(self.c["finto"], "whisper.log"), encoding="utf-8") as f:
+            chiamate = [json.loads(x) for x in f]
+        a = next(x for x in chiamate if "Il sole sorge" in " ".join(x))
+        self.assertEqual(a[a.index("-l") + 1], "it")
+        self.assertEqual(a[a.index("--dtw") + 1], "large.v3.turbo")
+        self.assertIn("-nfa", a)
+        self.assertTrue(a[a.index("--prompt") + 1].startswith("Il sole sorge piano sul mare"))
+
+    def test_3_altre_fonti(self):
+        self.finito()
+        t = self.leggi("Parole esatte")   # Lyricsfile di LRCLIB con le parole: niente Whisper
+        self.assertEqual((t["fonte"], t["parole"], t["allineamento"]), ("lrclib", "fonte", ""))
+        self.assertEqual(t["righe"][0]["p"], [[5.0, 5.6, "Hello "], [5.7, 6.5, "world"]])
+        t = self.leggi("Solo testo")      # solo testo (trovato cercando): i tempi delle righe li dà la voce
+        self.assertEqual((t["fonte"], t["parole"]), ("lrclib", "allineate"))
+        self.assertEqual([x["t"] for x in t["righe"]], [3.0, 7.0])
+        t = self.leggi("Strumentale")
+        self.assertEqual((t["stato"], t["righe"]), ("strumentale", []))
+        t = self.leggi("Mai sentita")     # nessun testo in giro: lo trascrive Whisper
+        self.assertEqual((t["stato"], t["fonte"], t["parole"]), ("trovato", "voce", "allineate"))
+        self.assertEqual(t["righe"][0]["x"], "questa canzone non la conosce nessuno proprio")
+        t = self.leggi("Nei tag")
+        self.assertEqual((t["fonte"], t["parole"], [x["x"] for x in t["righe"]]),
+                         ("tag", "allineate", ["Canto nel tag", "senza i tempi"]))
+        self.assertEqual(t["righe"][1]["p"][0][0], 4.0)
+        t = self.leggi("Con il file")     # LRC esteso accanto al brano: le parole sono quelle del file
+        self.assertEqual((t["fonte"], t["parole"]), ("file", "fonte"))
+        self.assertEqual(t["righe"][0]["p"], [[2.0, 2.7, "Parole "], [2.7, 3.1, "dal "], [3.1, 3.8, "file"]])
+
+    def test_4_traduzione(self):
+        self.finito()
+        t = self.leggi("Canzone sincronizzata", "en")
+        self.assertIn(t["traduzione"]["stato"], ("in corso", "pronta"))
+        tr = aspetta(lambda: (lambda x: x if x["stato"] == "pronta" else None)(
+            self.leggi("Canzone sincronizzata", "en")["traduzione"]), 20, 0.2)
+        self.assertTrue(tr, self.s.leggi_log()[-2000:])
+        self.assertEqual(tr["righe"], ["EN: Il sole sorge piano sul mare", "EN: e tu mi guardi ancora",
+                                       "EN: Il sole sorge piano sul mare"])
+        self.assertEqual(tr["motore"], "MyMemory")
+        richieste = [q for q in FintoMyMemory.richieste if q["langpair"] == "it|en"]
+        self.assertEqual(len(richieste), 2)   # il ritornello ripetuto si traduce una volta sola
+        self.assertEqual(self.leggi("Canzone sincronizzata", "it")["traduzione"]["stato"], "uguale")
+        self.assertEqual(self.leggi("Canzone sincronizzata", "xx")["traduzione"]["stato"], "lingua non disponibile")
+        self.assertEqual(self.leggi("Strumentale", "en")["traduzione"]["stato"], "senza testo")
+
+    def test_5_brano_che_il_mac_non_ha(self):
+        j = self.s.json("GET", "/api/musica/testo?titolo=Canzone%20sincronizzata%20(Official%20Video)"
+                               "&artista=Artista%20A&album=&durata=200")
+        self.assertEqual((j["stato"], j["fonte"], j["parole"]), ("trovato", "lrclib", "stimate"))
+        self.assertNotIn("allineamento", j)
+        self.assertEqual(j["righe"][1]["p"][0][0], 14.0)
+        n = len(FintoLrclib.richieste)
+        self.s.json("GET", "/api/musica/testo?titolo=Canzone%20sincronizzata&artista=Artista%20A&durata=200")
+        self.assertEqual(len(FintoLrclib.richieste), n)   # la seconda volta dalla cache del Mac
+        self.assertEqual(self.s.json("GET", "/api/musica/testo?titolo=", codice=400)["errore"], "Serve il titolo del brano")
+        self.s.json("GET", "/api/musica/testo/sconosciuto", codice=404)
+
+    def test_6_ripresa_dopo_un_riavvio(self):
+        self.finito()
+        type(self).s.ferma()
+        n, w = len(FintoLrclib.richieste), os.path.getsize(os.path.join(self.c["finto"], "whisper.log"))
+        type(self).s = self.avvia()
+        self.finito()
+        t = self.leggi("Canzone sincronizzata")
+        self.assertEqual(t["parole"], "allineate")
+        self.assertEqual(len(FintoLrclib.richieste), n)   # niente ricerche né allineamenti rifatti
+        self.assertEqual(os.path.getsize(os.path.join(self.c["finto"], "whisper.log")), w)
+
+    def test_7_gestione_riprova(self):
+        self.assertEqual(self.s.json("POST", "/api/extra/gestione/testi/riprova", {}), {"ok": True})
+        self.s.json("GET", "/api/extra/gestione/testi/altro", codice=404)
 
 
 if __name__ == "__main__":

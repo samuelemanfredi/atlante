@@ -290,6 +290,34 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .ctrls .pp{font-size:50px;width:78px;height:78px}
 .vol{display:flex;align-items:center;gap:12px;opacity:.85;font-size:13px}
 .npbot{display:flex;justify-content:space-around;margin-top:16px}
+/* testo e karaoke (come Apple Music): la luce scorre dentro le parole, lettera per lettera */
+.npl{flex:1;display:none;flex-direction:column;min-height:0}
+#np.l .npart,#np.l .npmeta,#np.l .npq{display:none}
+#np.l .npl{display:flex}
+.nplhead .cb{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:19px;background:rgba(255,255,255,.14);opacity:.8}
+.nplhead .cb.on{opacity:1;background:rgba(255,255,255,.32)}
+.lyr{flex:1;overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y;margin:0 -8px;padding:18vh 8px 46vh;scrollbar-width:none;-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 7%,#000 78%,transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 7%,#000 78%,transparent 100%)}
+.lyr::-webkit-scrollbar{display:none}
+.ly-r{display:block;margin:0 0 .75em;font-size:clamp(24px,7.4vw,32px);line-height:1.2;font-weight:800;letter-spacing:-.012em;color:rgba(255,255,255,.34);cursor:pointer;transition:color .45s,filter .45s;-webkit-tap-highlight-color:transparent;overflow-wrap:break-word}
+.lyr.sync:not(.mano) .ly-r:not(.ora),.lyr.sync:not(.mano) .ly-g:not(.ora){filter:blur(1.1px)}
+.ly-o{display:block}
+.ly-p{position:relative;top:0;transition:top .35s ease;white-space:pre-wrap}
+.ly-r.ora .ly-p.s{color:#fff;top:-2px;text-shadow:0 0 14px rgba(255,255,255,.28)}
+.ly-r.ora .ly-p.c{top:-2px;color:transparent;-webkit-text-fill-color:transparent;background-image:linear-gradient(90deg,#fff 0,#fff var(--x,0px),rgba(255,255,255,.34) calc(var(--x,0px) + .45em));-webkit-background-clip:text;background-clip:text}
+.ly-r.rtl{direction:rtl;text-align:right}
+.ly-r.ora.rtl .ly-p.c{background-image:linear-gradient(270deg,#fff 0,#fff var(--x,0px),rgba(255,255,255,.34) calc(var(--x,0px) + .45em))}
+.ly-t{display:block;margin-top:.3em;font-size:.6em;line-height:1.25;font-weight:650;color:rgba(255,255,255,.4);transition:color .45s}
+.ly-r.ora .ly-t{color:rgba(255,255,255,.78)}
+.lyr.libero .ly-r{color:rgba(255,255,255,.88);cursor:default}
+.ly-sp{height:.9em}
+.ly-g{display:flex;gap:10px;align-items:center;width:110px;height:44px;margin:0 0 .75em;padding:0 2px;cursor:pointer;transition:filter .45s}
+.ly-g i{width:12px;height:12px;border-radius:50%;background:rgba(255,255,255,.34);transition:background .3s}
+.ly-g.ora{animation:lyRespira 2.4s ease-in-out infinite}
+.ly-g i.s{background:#fff}
+@keyframes lyRespira{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+.ly-msg{font-size:24px;font-weight:700;color:rgba(255,255,255,.6);padding:4vh 0}
+.ly-fonte{margin-top:2.2em;font-size:13px;font-weight:600;color:rgba(255,255,255,.45)}
+.npbot button.spento{opacity:.35}
 .npbot button{width:44px;height:36px;display:grid;place-items:center;font-size:22px;opacity:.75;border-radius:8px}
 .npbot button.on{opacity:1;background:rgba(255,255,255,.18)}
 
@@ -377,6 +405,10 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
       </div>
       <div class="qlist" id="qlist"></div>
     </div>
+    <div class="npl" id="npl">
+      <div class="npqhead nplhead"><div class="art" id="nplArt"></div><div class="tx"><b id="nplT"></b><span id="nplA"></span></div><button class="cb" id="nplTrad" data-a="lytrad" aria-label="Traduzione" hidden></button></div>
+      <div class="lyr" id="lyr"></div>
+    </div>
     <div class="npmeta"><div class="tx"><b id="npT"></b><span id="npA"></span></div>
       <button class="cb" id="npFav" data-a="favcur" aria-label="Preferito"></button>
       <button class="cb" id="npMore" data-a="morecur" aria-label="Altro"></button>
@@ -390,7 +422,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
     </div>
     <button class="npdev" id="npDev" data-a="devs" hidden></button>
     <div class="vol" id="volRow"><span id="vLo"></span><input type="range" class="rg" id="vol" min="0" max="100" value="100" aria-label="Volume"><span id="vHi"></span></div>
-    <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bCast" data-a="cast" aria-label="AirPlay: ascolta su un altro dispositivo" hidden></button><button id="bDev" data-a="devs" aria-label="Dispositivi: comanda o sposta la musica"></button><button id="bVid" data-a="video" aria-label="Video"></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bShare" data-a="sharecur" aria-label="Condividi"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
+    <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bCast" data-a="cast" aria-label="AirPlay: ascolta su un altro dispositivo" hidden></button><button id="bDev" data-a="devs" aria-label="Dispositivi: comanda o sposta la musica"></button><button id="bVid" data-a="video" aria-label="Video"></button><button id="bLyr" data-a="lyrics" aria-label="Testo"></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bShare" data-a="sharecur" aria-label="Condividi"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
   </div>
 </section>
 
@@ -1798,6 +1830,8 @@ function updateNow() {
       $('miniT').textContent = t.title; $('miniA').textContent = t.artist || UNK_ART;
       $('npT').textContent = t.title; $('npA').textContent = t.artist || UNK_ART;
       $('npqT').textContent = t.title; $('npqA').textContent = t.artist || UNK_ART;
+      $('nplArt').outerHTML = art(t.cover).replace('<span class="art ', '<span id="nplArt" class="art ');
+      $('nplT').textContent = t.title; $('nplA').textContent = t.artist || UNK_ART;
       ensureColor(t.cover);
       const [c1, c2, c3] = npColor(t.cover);
       $('np').style.setProperty('--npbg', 'linear-gradient(180deg,' + c1 + ' 0%,' + c3 + ' 55%,' + c2 + ' 100%)');
@@ -1810,6 +1844,7 @@ function updateNow() {
   $('qFrom').textContent = S.from ? 'Da ' + S.from : '';
   if ($('np').classList.contains('q')) renderQueue();
   markCur();
+  lyCambio();
 }
 function renderQueue() {
   const up = S.queue.slice(S.qi + 1);
@@ -2482,13 +2517,251 @@ vol.addEventListener('input', () => {
 
 /* ---------- player a tutto schermo ---------- */
 const np = $('np');
-function openNP() { if (!curId && !RC.id) return; np.classList.add('open'); document.documentElement.style.overflow = 'hidden'; setTimeout(vidGiro, 50); }
+function openNP() { if (!curId && !RC.id) return; np.classList.add('open'); document.documentElement.style.overflow = 'hidden'; setTimeout(vidGiro, 50); setTimeout(() => lyGiro(true), 60); }
 function closeNP() { np.classList.remove('open'); np.style.transform = ''; document.documentElement.style.overflow = ''; }
 (function swipe() {
   let y0 = null, dy = 0, t0 = 0;
-  np.addEventListener('touchstart', e => { if (e.target.closest('.qlist,input')) return; y0 = e.touches[0].clientY; dy = 0; t0 = Date.now(); }, {passive:true});
+  np.addEventListener('touchstart', e => { if (e.target.closest('.qlist,.lyr,input')) return; y0 = e.touches[0].clientY; dy = 0; t0 = Date.now(); }, {passive:true});
   np.addEventListener('touchmove', e => { if (y0 == null) return; dy = Math.max(0, e.touches[0].clientY - y0); if (dy > 4) { np.classList.add('drag'); np.style.transform = 'translateY(' + dy + 'px)'; } }, {passive:true});
   np.addEventListener('touchend', () => { if (y0 == null) return; np.classList.remove('drag'); const fast = dy > 60 && Date.now() - t0 < 250; if (dy > 140 || fast) closeNP(); else np.style.transform = ''; y0 = null; });
+})();
+
+/* ---------- Testo e karaoke (come in Apple Music) ----------
+   Il testo arriva dal Mac (api/musica/testo/<id>; per i brani che il Mac non ha, api/musica/testo?titolo=…): righe con
+   i pezzi (parole o sillabe) e il loro tempo. La luce non accende la parola tutta insieme: scorre dentro le parole,
+   lettera per lettera, al tempo del canto, più lenta sulle vocali (le note tenute) e veloce sulle consonanti.
+   Tocchi una parola e il brano va lì; nelle pause strumentali (i tre puntini) il punto toccato vale il suo secondo.
+   Sotto ogni riga, se scelta, la traduzione. Il testo resta sul telefono (cache «atlante-testi») per l'ascolto offline.
+   Da ricordare: «RIGHE DAL TESTO, PAROLE DALLA VOCE» (i tempi), «LA LUCE SCORRE, NON SI ACCENDE» (il karaoke). */
+I.lyr = '<path d="M4.5 3h15A2.5 2.5 0 0 1 22 5.5v10a2.5 2.5 0 0 1-2.5 2.5H9.2l-4.5 3.6c-.66.52-1.7.06-1.7-.79V18A2.5 2.5 0 0 1 2 15.5v-10A2.5 2.5 0 0 1 4.5 3zm3.2 5.2c-1.1 0-1.9.8-1.9 1.9 0 1 .7 1.8 1.7 1.9-.1.7-.6 1.3-1.3 1.6l.4.9c1.6-.5 2.9-1.9 2.9-3.9v-.4c0-1.2-.8-2-1.8-2zm5.3 0c-1.1 0-1.9.8-1.9 1.9 0 1 .7 1.8 1.7 1.9-.1.7-.6 1.3-1.3 1.6l.4.9c1.6-.5 2.9-1.9 2.9-3.9v-.4c0-1.2-.8-2-1.8-2z"/>';
+I.trad = '<path d="M4 4h9v2H9.9c-.4 2-1.2 3.7-2.3 5.1.9.8 2 1.5 3.2 2l-.8 1.9c-1.4-.6-2.7-1.4-3.7-2.4C5.2 13.6 3.9 14.4 2.4 15l-.8-1.9c1.3-.5 2.4-1.2 3.3-2.1C4 9.9 3.3 8.6 2.9 7.2l1.9-.6c.3 1 .8 2 1.5 2.9.7-1 1.2-2.2 1.5-3.5H4V4zm11.2 5h2.2l4.6 11h-2.3l-1.1-2.8h-4.6L12.9 20h-2.3l4.6-11zm1.1 2.6-1.6 4.1h3.2l-1.6-4.1z"/>';
+const LY_LINGUE = [['it', 'Italiano'], ['en', 'English'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'],
+  ['pt', 'Português'], ['nl', 'Nederlands'], ['ca', 'Català'], ['ro', 'Română'], ['pl', 'Polski'], ['cs', 'Čeština'],
+  ['hu', 'Magyar'], ['sv', 'Svenska'], ['da', 'Dansk'], ['no', 'Norsk'], ['fi', 'Suomi'], ['el', 'Ελληνικά'],
+  ['tr', 'Türkçe'], ['ru', 'Русский'], ['uk', 'Українська'], ['hr', 'Hrvatski'], ['sq', 'Shqip'], ['ar', 'العربية'],
+  ['he', 'עברית'], ['hi', 'हिन्दी'], ['zh', '中文'], ['ja', '日本語'], ['ko', '한국어'], ['vi', 'Tiếng Việt'],
+  ['id', 'Bahasa Indonesia'], ['th', 'ไทย']];
+var LY = {chiave:'', dati:null, v:'', tv:'', voci:[], ora:-1, pz:null, mano:0, raf:0, poll:0, giri:0, trad:ls.get('am-trad', ''),
+  url:'', carica:0, alt:false};
+const LY_VOC = /[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]/i;
+const LY_RTL = /[֐-ࣿ]/;
+const LY_PAUSA = 4.5;    // una pausa più lunga (intro, assolo, finale) mostra i tre puntini, toccabili secondo per secondo
+const lyNp = () => np.classList.contains('l');
+function lyBrano() {   // il brano di cui mostrare il testo: quello che suona qui o, col telecomando, sull'altro dispositivo
+  if (RC.id) {
+    const b = RC.dev && RC.dev.stato && RC.dev.stato.brano; if (!b) return null;
+    return {chiave:'rc|' + (b.sid || b.titolo + '|' + b.artista), sid:b.sid || '', title:b.titolo || '', artist:b.artista || '',
+      album:b.album || '', durata:b.durata || 0};
+  }
+  const t = curId && TT(curId); if (!t) return null;
+  return {chiave:curId, sid:inLib(t) ? t.sid : '', title:t.title || '', artist:t.artist || '', album:t.album || '', durata:t.duration || au.duration || 0};
+}
+const lyOra = () => RC.id ? rcPos(RC.dev) : au.currentTime || 0;
+function lyUrl(b, conLingua) {
+  const l = conLingua && LY.trad ? 'lingua=' + encodeURIComponent(LY.trad) : '';
+  if (b.sid) return API + 'testo/' + encodeURIComponent(b.sid) + (l ? '?' + l : '');
+  return API + 'testo?titolo=' + encodeURIComponent(b.title) + '&artista=' + encodeURIComponent(b.artist) + '&album=' + encodeURIComponent(b.album) +
+    '&durata=' + Math.round(b.durata || 0) + (l ? '&' + l : '');
+}
+async function lyCache(chiave, j) {   // copia sul telefono, per quando il Mac non risponde
+  try {
+    if (!('caches' in window)) return null;
+    const c = await caches.open('atlante-testi'), k = new Request('testi/' + encodeURIComponent(chiave) + '?l=' + (LY.trad || ''), {method:'GET'});
+    if (j === undefined) { const r = await c.match(k); return r ? r.json() : null; }
+    await c.put(k, new Response(JSON.stringify(j), {headers:{'Content-Type':'application/json'}}));
+  } catch (e) {}
+  return null;
+}
+function lyCambio() {   // da updateNow: è cambiato il brano?
+  if (!LY) return;
+  const b = lyBrano(), k = b ? b.chiave : '';
+  if (k === LY.chiave) return;
+  LY.chiave = k; LY.dati = null; LY.v = LY.tv = ''; LY.giri = 0; clearTimeout(LY.poll);
+  lyBottone(); lyDisegna();
+  if (b) lyCarica();
+}
+async function lyCarica() {
+  const b = lyBrano(); if (!b) return;
+  const chiave = b.chiave, n = ++LY.carica;
+  clearTimeout(LY.poll);
+  let j = null;
+  if (SRV || b.sid || RC.id) {
+    try { const r = await fetchT(lyUrl(b, true), {cache:'no-store'}, 15000); if (r.ok) j = await r.json(); } catch (e) {}
+  }
+  if (n !== LY.carica || chiave !== LY.chiave) return;   // nel frattempo è cambiato il brano
+  if (j && j.righe) lyCache(chiave, j);
+  else j = await lyCache(chiave);
+  if (n !== LY.carica || chiave !== LY.chiave) return;
+  if (j) lyUsa(j);
+  else if (!LY.dati) { LY.dati = {stato:SRV ? 'errore' : 'offline', righe:[]}; lyBottone(); lyDisegna(); }
+  // si richiede finché il Mac lavora: ricerca, parole allineate alla voce, traduzione
+  const tr = j && j.traduzione, attesa = !j ? 0 : j.stato === 'cerco' ? 3000 : tr && tr.stato === 'in corso' ? 3000 :
+    (j.allineamento === 'in coda' || j.allineamento === 'in corso') ? 15000 : 0;
+  if (attesa && LY.giri++ < 80) LY.poll = setTimeout(lyCarica, attesa);
+}
+function lyUsa(j) {
+  const tr = j.traduzione && j.traduzione.stato === 'pronta' ? j.traduzione.righe : null;
+  const tv = tr ? JSON.stringify(tr).length + ':' + LY.trad : '';
+  const cambiato = !LY.dati || j.v !== LY.v || j.stato !== LY.dati.stato || tv !== LY.tv;
+  LY.dati = j; LY.v = j.v || ''; LY.tv = tv;
+  if (j.traduzione && j.traduzione.stato === 'non riuscita' && lyNp() && !LY.avvisato) { LY.avvisato = true; toast('Traduzione non riuscita: ' + (j.traduzione.motivo || 'riprovo più tardi')); }
+  lyBottone();
+  if (cambiato) lyDisegna();
+}
+function lyHa() { const d = LY.dati; return !!(d && d.righe && d.righe.some(r => r.x)); }
+function lyBottone() {
+  const b = $('bLyr'); if (!b) return;
+  b.classList.toggle('on', lyNp());
+  b.classList.toggle('spento', !!LY.dati && !lyHa() && LY.dati.stato !== 'cerco');
+  const t = $('nplTrad'); if (t) { t.classList.toggle('on', !!LY.trad); t.hidden = !lyHa(); }
+}
+function lyPesi(x) {   // peso di ogni lettera: le vocali si tengono (3), le consonanti passano (1), spazi e segni quasi niente
+  const c = [0]; let s = 0;
+  for (let i = 0; i < x.length; i++) { const ch = x[i]; s += /\s/.test(ch) ? 0.15 : LY_VOC.test(ch) ? 3 : /[0-9A-Za-zÀ-￿]/.test(ch) ? 1 : 0.3; c.push(s); }
+  return c;
+}
+function lyMsg(t) { return '<div class="ly-msg">' + esc(t) + '</div>'; }
+function lyDisegna() {
+  const box = $('lyr'); if (!box) return;
+  const d = LY.dati; LY.voci = []; LY.ora = -1; LY.pz = null;
+  box.classList.remove('sync', 'libero');
+  if (!d) { box.innerHTML = lyBrano() ? lyMsg('Cerco il testo…') : ''; return; }
+  if (!lyHa()) {
+    box.innerHTML = lyMsg(d.stato === 'cerco' ? 'Cerco il testo…' : d.stato === 'strumentale' ? 'Brano strumentale' :
+      d.stato === 'spento' ? 'I testi sono spenti sul Mac' : d.stato === 'offline' ? 'Il testo arriva quando il Mac risponde' :
+      d.stato === 'errore' ? 'Il testo non si è caricato: riprovo più tardi' : 'Nessun testo trovato per questo brano');
+    return;
+  }
+  const righe = d.righe, tr = d.traduzione && d.traduzione.stato === 'pronta' ? d.traduzione.righe : null;
+  const conTempi = righe.some(r => r.x && r.t != null && r.p && r.p.length);
+  box.classList.add(conTempi ? 'sync' : 'libero');
+  const dur = (lyBrano() || {}).durata || 0, h = [];
+  const pausa = (t0, t1) => { const k = LY.voci.length; LY.voci.push({pausa:true, t:t0, f:t1, pezzi:[]}); h.push('<div class="ly-g" data-a="lyseek" data-k="' + k + '"><i></i><i></i><i></i></div>'); };
+  let fine = 0;
+  righe.forEach((r, i) => {
+    if (!r.x) { if (!conTempi) h.push('<div class="ly-sp"></div>'); return; }
+    if (conTempi && r.t != null) {
+      if (r.t - fine > LY_PAUSA && (fine > 0 || r.t > LY_PAUSA)) pausa(fine, r.t);
+      fine = r.f != null ? r.f : r.t;
+    }
+    const k = LY.voci.length, rtl = LY_RTL.test(r.x);
+    const v = {t:r.t, f:r.f, el:null, pezzi:[]};
+    LY.voci.push(v);
+    let corpo = '';
+    if (conTempi && r.p && r.p.length) {
+      corpo = r.p.map((p, j) => { v.pezzi.push({t:p[0], f:p[1], x:p[2], c:lyPesi(p[2])}); return '<span class="ly-p" data-a="lyseek" data-k="' + k + '" data-j="' + j + '">' + esc(p[2]) + '</span>'; }).join('');
+    } else corpo = esc(r.x);
+    const t = tr && tr[i] ? '<span class="ly-t" data-a="lyseek" data-k="' + k + '">' + esc(tr[i]) + '</span>' : '';
+    h.push('<div class="ly-r' + (rtl ? ' rtl' : '') + '" data-a="lyseek" data-k="' + k + '"><span class="ly-o">' + corpo + '</span>' + t + '</div>');
+  });
+  if (conTempi && dur && dur - fine > LY_PAUSA + 2) pausa(fine, dur);
+  const fonte = {file:'dal file del brano', tag:'dai tag del brano', lrclib:'da LRCLIB', voce:'trascritto dalla voce: può avere errori'}[d.fonte] || '';
+  const parole = d.parole === 'fonte' ? 'parole a tempo dalla fonte' : d.parole === 'allineate' ? 'parole allineate alla voce' :
+    d.parole === 'stimate' ? (d.allineamento === 'in coda' || d.allineamento === 'in corso' ? 'parole stimate: l\'allineamento alla voce è in arrivo' : 'parole stimate dentro la riga') : 'testo senza tempi';
+  const trs = d.traduzione ? {pronta:'traduzione: ' + (d.traduzione.motore || ''), 'in corso':'traduzione in arrivo…', uguale:'il testo è già in questa lingua',
+    'non riuscita':'traduzione non riuscita'}[d.traduzione.stato] || '' : '';
+  h.push('<div class="ly-fonte">' + esc(['Testo ' + fonte, parole, trs].filter(Boolean).join(' · ')) + '</div>');
+  box.innerHTML = h.join('');
+  const els = box.querySelectorAll('.ly-r,.ly-g');
+  els.forEach(el => { const v = LY.voci[+el.dataset.k]; if (v) v.el = el; });
+  box.querySelectorAll('.ly-p').forEach(el => { const v = LY.voci[+el.dataset.k]; if (v && v.pezzi[+el.dataset.j]) v.pezzi[+el.dataset.j].el = el; });
+  lyGiro(true);
+}
+// la riga (o la pausa) di adesso: l'ultima cominciata; una riga resta accesa fino alla successiva (al più 2 s dopo la fine)
+function lyIndice(c) {
+  const V = LY.voci; let lo = 0, hi = V.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (V[m].t != null && V[m].t <= c + 0.04) { k = m; lo = m + 1; } else if (V[m].t == null) { lo = m + 1; } else hi = m - 1; }
+  if (k >= 0 && !V[k].pausa && V[k].f != null && c > V[k].f + 2 && (!V[k + 1] || V[k + 1].pausa)) return -1;
+  return k;
+}
+function lyBordi(pz) {   // dove finisce ogni lettera del pezzo, misurato una volta quando il pezzo comincia
+  if (pz.b) return pz.b;
+  const el = pz.el, n = el && el.firstChild, b = [];
+  if (!n || n.nodeType !== 3) return (pz.b = b);
+  const base = el.getBoundingClientRect(), r = document.createRange();
+  for (let i = 0; i < n.length; i++) { r.setStart(n, i); r.setEnd(n, i + 1); const q = r.getBoundingClientRect(); b.push([q.left - base.left, q.right - base.left]); }
+  pz.w = base.width;
+  return (pz.b = b);
+}
+function lyLuce(pz, c, rtl) {   // fin dove arriva la luce dentro il pezzo, in pixel: lettere pesate (vocali lente)
+  const p = Math.max(0, Math.min(1, (c - pz.t) / Math.max(0.05, pz.f - pz.t))), C = pz.c, b = lyBordi(pz);
+  if (!b.length) return 0;
+  const w = p * C[C.length - 1]; let i = 0;
+  while (i < b.length - 1 && C[i + 1] <= w) i++;
+  const q = Math.max(0, Math.min(1, (w - C[i]) / Math.max(1e-6, C[i + 1] - C[i])));
+  const x = b[i][0] + q * (b[i][1] - b[i][0]);
+  return rtl ? (pz.w || 0) - x : x;
+}
+function lyGiro(subito) {   // a ogni fotogramma: riga accesa, pezzi cantati, luce del pezzo di adesso, scorrimento
+  cancelAnimationFrame(LY.raf); LY.raf = 0;
+  if (!lyNp() || !np.classList.contains('open') || document.hidden || !LY.voci.length || !$('lyr').classList.contains('sync')) return;
+  const c = lyOra(), k = lyIndice(c), V = LY.voci;
+  if (k !== LY.ora) {
+    if (LY.ora >= 0 && V[LY.ora] && V[LY.ora].el) {
+      const e = V[LY.ora].el; e.classList.remove('ora'); e.querySelectorAll('i.s').forEach(d => d.classList.remove('s'));
+      V[LY.ora].pezzi.forEach(p => { if (p.el) { p.el.classList.remove('c', 's'); p.el.style.removeProperty('--x'); } });
+    }
+    LY.ora = k; LY.pz = null;
+    if (k >= 0 && V[k].el) { V[k].el.classList.add('ora'); lyScorri(V[k].el, subito); }
+  }
+  const v = k >= 0 ? V[k] : null;
+  if (v && v.pausa) {
+    const p = Math.max(0, Math.min(1, (c - v.t) / Math.max(0.1, v.f - v.t)));
+    v.el.querySelectorAll('i').forEach((d, j) => d.classList.toggle('s', p >= (j + 1) / 3 - 0.001));
+  } else if (v) {
+    const rtl = v.el.classList.contains('rtl');
+    for (const pz of v.pezzi) {
+      if (!pz.el) continue;
+      const fatto = c >= pz.f, adesso = !fatto && c >= pz.t;
+      pz.el.classList.toggle('s', fatto);
+      pz.el.classList.toggle('c', adesso);
+      if (adesso) pz.el.style.setProperty('--x', lyLuce(pz, c, rtl).toFixed(1) + 'px');
+    }
+  }
+  LY.raf = requestAnimationFrame(() => lyGiro(false));
+}
+function lyScorri(el, subito) {   // la riga di adesso a un terzo dall'alto; non se hai appena scorso tu
+  const box = $('lyr'); if (!box || Date.now() - LY.mano < 4000) return;
+  const top = el.offsetTop - box.clientHeight * 0.28;
+  try { box.scrollTo({top:Math.max(0, top), behavior:subito ? 'auto' : 'smooth'}); } catch (e) { box.scrollTop = Math.max(0, top); }
+}
+function lySalta(el, ev) {   // tocco su una parola, una riga, una traduzione o i puntini di una pausa
+  const v = LY.voci[+el.dataset.k]; if (!v) return;
+  let t = v.t;
+  if (el.dataset.j != null && v.pezzi[+el.dataset.j]) t = v.pezzi[+el.dataset.j].t;
+  else if (v.pausa) { const r = el.getBoundingClientRect(), q = r.width ? Math.max(0, Math.min(1, ((ev && ev.clientX) - r.left) / r.width)) : 0; t = v.t + q * (v.f - v.t); }
+  if (t == null || !isFinite(t)) return;
+  t = Math.max(0, t - 0.05);
+  LY.mano = 0; LY.ora = -1;
+  if (RC.id) { rcInvia('seek', {t}); if (!(RC.dev && RC.dev.stato && RC.dev.stato.suona)) rcInvia('toggle'); }
+  else { au.currentTime = t; tick(); if (au.paused) toggle(); }
+  lyGiro(false);
+}
+function lyApri() {
+  if (lyNp()) { np.classList.remove('l'); lyBottone(); cancelAnimationFrame(LY.raf); return; }
+  np.classList.remove('q'); $('bQ').classList.remove('on');
+  np.classList.add('l'); lyBottone();
+  if (!LY.dati || LY.dati.stato === 'errore' || LY.dati.stato === 'offline') lyCarica();
+  lyDisegna();
+}
+function lyTradScegli() {
+  openSheet('<div class="grp"><div class="smsg"><b>Traduzione</b>Sotto ogni riga, nella lingua che scegli. La fa il Mac mini: con la sua IA se c\'è, se no con MyMemory.</div>' +
+    '<button data-a="lytrad-l" data-v=""><span class="l">Nessuna traduzione</span>' + (LY.trad ? '' : ic('check')) + '</button>' +
+    LY_LINGUE.map(([c, n]) => '<button data-a="lytrad-l" data-v="' + c + '"><span class="l">' + esc(n) + '</span>' + (LY.trad === c ? ic('check') : '') + '</button>').join('') + '</div>' + cancel);
+}
+function lyTradUsa(c) {
+  closeSheet();
+  LY.trad = c; ls.set('am-trad', c); LY.avvisato = false; LY.giri = 0;
+  toast(c ? 'Traduzione in ' + (LY_LINGUE.find(x => x[0] === c) || ['', c])[1] : 'Traduzione spenta');
+  lyBottone(); lyCarica();
+}
+$('bLyr').innerHTML = ic('lyr'); $('nplTrad').innerHTML = ic('trad');
+(function () {
+  const box = $('lyr');
+  const mano = () => { LY.mano = Date.now(); box.classList.add('mano'); clearTimeout(LY.manoT); LY.manoT = setTimeout(() => box.classList.remove('mano'), 4000); };
+  box.addEventListener('touchstart', mano, {passive:true});
+  box.addEventListener('wheel', mano, {passive:true});
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) lyGiro(true); });
 })();
 
 /* ---------- Playlist di Atlante (fatte dal Mac mini) e «Crea con l'IA» ---------- */
@@ -2982,7 +3255,11 @@ document.addEventListener('click', e => {
     case 'repeat': cycleRepeat(); break;
     case 'mix': setMix(!MIX.on); break;
     case 'tutto': setTutto(!TUTTO); break;
-    case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
+    case 'lyrics': lyApri(); break;
+    case 'lytrad': lyTradScegli(); break;
+    case 'lytrad-l': lyTradUsa(d.v || ''); break;
+    case 'lyseek': lySalta(b, e); break;
+    case 'queue': np.classList.remove('l'); lyBottone(); np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': saltaA(+d.i, () => load(+d.i, true), true); break;   // col mix al salto, come «Successivo»
     case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
     case 'morecur': if (curId) trackMenu(curId); break;
@@ -3329,11 +3606,12 @@ function rcMostra() {   // il lettore di questo dispositivo mostra il brano dell
   const key = 'rc|' + RC.id + '|' + tr.title + '|' + tr.cover + '|' + RC.nome + '|' + !!s.bloccato;
   if (key !== lastNowKey) {
     lastNowKey = key;
-    ['miniArt', 'npArt', 'npqArt'].forEach(n => { $(n).outerHTML = art(tr.cover).replace('<span class="art ', '<span id="' + n + '" class="art '); });
+    ['miniArt', 'npArt', 'npqArt', 'nplArt'].forEach(n => { $(n).outerHTML = art(tr.cover).replace('<span class="art ', '<span id="' + n + '" class="art '); });
     $('miniT').textContent = tr.title; $('miniA').textContent = 'Su ' + RC.nome + (tr.artist ? ' · ' + tr.artist : '');
     $('npT').textContent = tr.title; $('npA').textContent = tr.artist || '';
     $('npFav').innerHTML = ic(tr.fav ? 'star' : 'staro'); $('npMore').innerHTML = ic('more');
     $('npqT').textContent = tr.title; $('npqA').textContent = tr.artist || '';
+    $('nplT').textContent = tr.title; $('nplA').textContent = tr.artist || '';
     $('npDev').hidden = false; $('npDev').innerHTML = ic('devs') + '<span>' + esc(s.bloccato ? 'Tocca l\'app su ' + RC.nome + ' per farla suonare' : 'In riproduzione su ' + RC.nome) + '</span>';
     ensureColor(tr.cover);
     const [c1, c2, c3] = npColor(tr.cover);
@@ -3342,6 +3620,7 @@ function rcMostra() {   // il lettore di questo dispositivo mostra il brano dell
   if (!dragging) { const v = Math.round((s.vol == null ? 1 : s.vol) * 100); vol.value = v; vol.style.setProperty('--p', v + '%'); }
   rcTempo();
   markCur();
+  lyCambio();
 }
 function rcTempo() {
   if (!RC.id || dragging) return;
@@ -4024,7 +4303,7 @@ const UI_STATO = new Set(['on', 'cur', 'off', 'open', 'drag', 'paused', 'q', 'vi
 const UI_SALTA = new Set(['vl', 'morerows']);   // contenitori delle liste lunghe: ci sono o no secondo quante righe ha la lista
 const UI_RIP = '.trk,.tile,.qrow,.art,.grp', UI_RIGA = '.trk,.tile,.qrow';   // si ripetono: niente posizione né spostamenti
 // contenuti (titoli, artisti, album, nomi, numeri che cambiano): il testo non si cambia
-const UI_CONTENUTO = '.t1,.t2,.trk .tx,.tile .n,.tile .a,.hero .ht,.hero .ha,.hero .hm,.qrow,.shead,.npqhead,#miniT,#miniA,#npT,#npA,#qFrom,.l.dv,#npDev,.smsg,.foot,.dlbar,.banner .bt,.mixcard span span,[data-a="m-topl"],[data-a^="dev-"],[data-a="m-fav"],#view[data-v="artist"] h1.lt,#view[data-v="pick"] h1.lt,.xn,#toast,#dlpill,.times,.sfield';
+const UI_CONTENUTO = '.t1,.t2,.trk .tx,.tile .n,.tile .a,.hero .ht,.hero .ha,.hero .hm,.qrow,.shead,.npqhead,#miniT,#miniA,#npT,#npA,#qFrom,.l.dv,#npDev,.smsg,.foot,.dlbar,.banner .bt,.mixcard span span,[data-a="m-topl"],[data-a^="dev-"],[data-a="m-fav"],#view[data-v="artist"] h1.lt,#view[data-v="pick"] h1.lt,.xn,#toast,#dlpill,.times,.sfield,.npl';
 const UIS = {chi:'', base:{modifiche:{}, versione:0, pubblicato:0}, personale:{modifiche:{}, aggiornato:0}, bozza:null, pend:{personale:[], bozza:[]},
   ed:null, sel:null, ind:'', info:null, scheda:'testo', conferma:'', caricato:0};
 const uiHa = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
