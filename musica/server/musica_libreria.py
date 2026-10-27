@@ -1871,7 +1871,8 @@ def _annulla_musica(id_):
 # musica (azione «suona» con la coda). Tutto in memoria: chi non si fa sentire da DISP_VIVO secondi sparisce.
 
 DISP_VIVO = 60           # secondi: oltre, il dispositivo non compare più nell'elenco
-DISP_MAX = 30            # dispositivi ricordati (i più vecchi escono)
+DISP_MAX = 30            # dispositivi ricordati per persona (i più vecchi escono)
+DISP_MAX_TUTTI = 300     # e in tutto
 DISP_CORPO = 32 * 1024   # stato o comando, in JSON
 COMANDI_MAX = 50         # comandi in attesa per dispositivo
 COMANDO_SCADE = 30       # secondi: un comando non consegnato in tempo si scarta («riproduci» dieci minuti dopo no)
@@ -1881,10 +1882,17 @@ TIPI_DISP = ("iphone", "ipad", "android", "mac", "pc")
 ID_DISP = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
+NON_RAGGIUNGIBILE = "Dispositivo non raggiungibile: l'app su quel dispositivo è chiusa?"
+
+
 class Dispositivi:
+    """Telecomando tra i dispositivi. Ognuno è di una persona (`di`: "p" per Samuele, l'id per un invitato): l'elenco,
+    i comandi e lo stato restano tra i dispositivi della stessa persona. Un id di un'altra persona risponde come un
+    dispositivo che non c'è."""
+
     def __init__(self):
         self.cond = threading.Condition()
-        self.d = {}   # id -> {nome, tipo, stato, visto, comandi:[(creato, comando)]}
+        self.d = {}   # id -> {di, nome, tipo, stato, visto, comandi:[(creato, comando)]}
 
     @staticmethod
     def _misura(o, cosa):
@@ -1902,7 +1910,10 @@ class Dispositivi:
         x["comandi"] = []
         return c
 
-    def stato(self, id_, corpo):
+    def _suo(self, x, di):
+        return x is not None and x.get("di", "p") == di
+
+    def stato(self, id_, corpo, di="p"):
         if not ID_DISP.match(id_ or ""):
             raise ErroreExtra(400, "Dispositivo non valido")
         stato = corpo.get("stato") or {}
@@ -1912,34 +1923,41 @@ class Dispositivi:
         ora = time.time()
         with self.cond:
             x = self.d.get(id_)
+            if x is not None and not self._suo(x, di):
+                raise ErroreExtra(404, NON_RAGGIUNGIBILE)
             if x is None:
-                x = self.d[id_] = {"comandi": []}
+                x = self.d[id_] = {"comandi": [], "di": di}
             x.update(nome=nome, tipo=tipo, stato=stato, visto=ora)
-            if len(self.d) > DISP_MAX:   # escono quelli sentiti meno di recente (mai quello appena arrivato)
-                for v in sorted(self.d, key=lambda k: self.d[k].get("visto", 0))[:len(self.d) - DISP_MAX]:
+            # escono quelli sentiti meno di recente (mai quello appena arrivato): prima tra i dispositivi della stessa
+            # persona, così uno che ne inventa tanti non fa uscire quelli degli altri
+            suoi = [k for k, v in self.d.items() if v.get("di", "p") == di]
+            for v in sorted(suoi, key=lambda k: self.d[k].get("visto", 0))[:max(0, len(suoi) - DISP_MAX)]:
+                del self.d[v]
+            if len(self.d) > DISP_MAX_TUTTI:
+                for v in sorted(self.d, key=lambda k: self.d[k].get("visto", 0))[:len(self.d) - DISP_MAX_TUTTI]:
                     del self.d[v]
             return self._prendi(x, ora)
 
-    def elenco(self):
+    def elenco(self, di="p"):
         ora = time.time()
         with self.cond:
             return [{"id": i, "nome": x["nome"], "tipo": x["tipo"], "fa": round(ora - x["visto"], 1), "stato": x["stato"]}
                     for i, x in sorted(self.d.items(), key=lambda kv: -kv[1]["visto"])
-                    if "nome" in x and self._vivo(x, ora)]
+                    if "nome" in x and self._vivo(x, ora) and self._suo(x, di)]
 
-    def comando(self, id_, corpo):
+    def comando(self, id_, corpo, di="p"):
         self._misura(corpo, "Comando")
         if corpo.get("azione") not in AZIONI:
             raise ErroreExtra(400, "Azione non valida: %s" % ", ".join(AZIONI))
         ora = time.time()
         with self.cond:
             x = self.d.get(id_)
-            if x is None or "nome" not in x or not self._vivo(x, ora):
-                raise ErroreExtra(404, "Dispositivo non raggiungibile: l'app su quel dispositivo è chiusa?")
+            if x is None or "nome" not in x or not self._vivo(x, ora) or not self._suo(x, di):
+                raise ErroreExtra(404, NON_RAGGIUNGIBILE)
             x["comandi"] = (x["comandi"] + [(ora, dict(corpo))])[-COMANDI_MAX:]
             self.cond.notify_all()
 
-    def attendi(self, id_, secondi):
+    def attendi(self, id_, secondi, di="p"):
         """Comandi per il dispositivo appena ce n'è uno (al più `secondi`); intanto il dispositivo risulta vivo."""
         if not ID_DISP.match(id_ or ""):
             raise ErroreExtra(400, "Dispositivo non valido")
@@ -1948,6 +1966,8 @@ class Dispositivi:
             while True:
                 ora = time.time()
                 x = self.d.get(id_)
+                if x is not None and not self._suo(x, di):
+                    raise ErroreExtra(404, NON_RAGGIUNGIBILE)
                 if x is not None:
                     x["visto"] = ora
                     c = self._prendi(x, ora)
@@ -1959,6 +1979,12 @@ class Dispositivi:
 
 
 DISP = Dispositivi()
+
+
+def _di(h):
+    """Di chi sono i dispositivi di questa richiesta: "p" (Samuele, anche dalla rete di casa) o l'id dell'invitato."""
+    chi = getattr(h, "_chi", None)
+    return chi["persona"] if chi and chi["ruolo"] == "invitato" else "p"
 
 
 def _attesa(h):
@@ -3210,16 +3236,16 @@ def _instrada(h, metodo, parti, corpo):
         _json(h, {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None})
     elif cosa == "dispositivi" and not resto:
         solo("GET")
-        _json(h, {"dispositivi": DISP.elenco()})
+        _json(h, {"dispositivi": DISP.elenco(_di(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "stato":
         solo("POST")
-        _json(h, {"comandi": DISP.stato(resto[0], corpo)})
+        _json(h, {"comandi": DISP.stato(resto[0], corpo, _di(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comandi":
         solo("GET")
-        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h))})
+        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h), _di(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comando":
         solo("POST")
-        DISP.comando(resto[0], corpo)
+        DISP.comando(resto[0], corpo, _di(h))
         _json(h, {"ok": True})
     elif cosa == "voci" and not resto:
         solo("GET")

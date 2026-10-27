@@ -1420,6 +1420,35 @@ class TestAccesso(unittest.TestCase):
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io")
         self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "proprietario", "persona": None})
 
+    def test_9e_dispositivi_per_persona(self):
+        pid, v, t = self.invitato("Franca", ip="203.0.113.110")
+
+        def anna(metodo, p, corpo=None):
+            st, h, b = self.da_fuori(metodo, p, corpo, biscotto=v, extra=self.ORIGINE)
+            return st, (json.loads(b.decode("utf-8")) if b else None)
+
+        def samuele(metodo, p, corpo=None):
+            st, h, b = richiesta(self.s.porta, metodo, p, corpo)
+            return st, (json.loads(b.decode("utf-8")) if b else None)
+
+        self.assertEqual(samuele("POST", "/api/extra/dispositivi/samuele-iphone-1/stato", {"nome": "iPhone", "stato": {}})[0], 200)
+        self.assertEqual(anna("POST", "/api/extra/dispositivi/franca-telefono-1/stato", {"nome": "Telefono", "stato": {}})[0], 200)
+        self.assertEqual([x["id"] for x in anna("GET", "/api/extra/dispositivi")[1]["dispositivi"]], ["franca-telefono-1"])
+        self.assertEqual([x["id"] for x in samuele("GET", "/api/extra/dispositivi")[1]["dispositivi"]], ["samuele-iphone-1"])
+        # l'id di un dispositivo di Samuele non serve a niente a un'altra persona
+        self.assertEqual(anna("POST", "/api/extra/dispositivi/samuele-iphone-1/comando", {"azione": "pause"})[0], 404)
+        self.assertEqual(anna("POST", "/api/extra/dispositivi/samuele-iphone-1/stato", {"nome": "x", "stato": {}})[0], 404)
+        self.assertEqual(anna("GET", "/api/extra/dispositivi/samuele-iphone-1/comandi?attesa=0")[0], 404)
+        self.assertEqual(samuele("GET", "/api/extra/dispositivi/samuele-iphone-1/comandi?attesa=0")[1], {"comandi": []})
+        # e tanti dispositivi finti di un'altra persona non fanno uscire quelli di Samuele
+        for i in range(40):
+            anna("POST", "/api/extra/dispositivi/franca-finto-%04d/stato" % i, {"nome": "F", "stato": {}})
+        self.assertEqual([x["id"] for x in samuele("GET", "/api/extra/dispositivi")[1]["dispositivi"]], ["samuele-iphone-1"])
+        anna("POST", "/api/extra/dispositivi/franca-telefono-1/stato", {"nome": "Telefono", "stato": {}})
+        self.assertEqual(anna("POST", "/api/extra/dispositivi/franca-telefono-1/comando", {"azione": "pause"})[0], 200)
+        self.assertEqual(anna("GET", "/api/extra/dispositivi/franca-telefono-1/comandi?attesa=0")[1],
+                         {"comandi": [{"azione": "pause"}]})
+
 
 class FintaRichiesta:
     """Quanto basta di BaseHTTPRequestHandler per controlla_accesso (indirizzi che dal Mac non si possono fingere)."""
