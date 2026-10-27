@@ -431,9 +431,21 @@ function nuovoPeer(pid, offerente) {
   const stato = () => {
     const s = pc.connectionState || pc.iceConnectionState;
     if (s === 'connected' || s === 'completed') {
+      clearTimeout(p.perso);
       if (!p.collegato) { p.collegato = true; if (!C.inizio) { C.inizio = Date.now(); squillo(null); } }
+    } else if (s === 'disconnected' && C.orfana) {
+      // senza centralino: se il collegamento non torna entro pochi secondi, l'altro ha chiuso
+      clearTimeout(p.perso);
+      p.perso = setTimeout(() => {
+        const t = pc.connectionState || pc.iceConnectionState;
+        if (t === 'connected' || t === 'completed' || C.finita) return;
+        p.collegato = false;
+        if (![...C.peers.values()].some(x => x.collegato)) fine('Chiamata terminata', 'fatta'); else disegna();
+      }, 6000);
     } else if (s === 'failed' || s === 'closed') {
       p.collegato = false;
+      // senza centralino (riavviato a metà chiamata) nessuno dice che l'altro ha chiuso: lo dice il collegamento
+      if (C.orfana && ![...C.peers.values()].some(x => x.collegato)) return fine('Chiamata terminata', 'fatta');
       if (s === 'closed') return disegna();
       // collegamento perso: chi aveva offerto riprova (ICE restart), l'altro glielo chiede
       if (p.offerente) riavvia(p); else manda(p, 'riprova', {});
@@ -531,7 +543,7 @@ function media(p) {
 $('bSentire').onclick = () => { $('sentire').hidden = true; for (const p of C.peers.values()) if (p.audio) p.audio.play().catch(() => {}); };
 function chiudiPeer(pid) {
   const p = C.peers.get(pid); if (!p) return;
-  clearTimeout(p.tm);
+  clearTimeout(p.tm); clearTimeout(p.perso);
   try { p.pc.close(); } catch (e) {}
   if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
   p.stream.getTracks().forEach(t => t.stop());
