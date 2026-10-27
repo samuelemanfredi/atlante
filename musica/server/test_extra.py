@@ -1815,5 +1815,738 @@ class TestPersone(unittest.TestCase):
             self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
 
 
+# ----- classifiche e playlist: brani nuovi da soli (pagine e risposte finte salvate qui: nessuna richiesta a Internet) -----
+
+# i server delle prove non leggono mai le classifiche vere, anche se queste variabili ci sono (sul Mac mini nel servizio)
+for _v in ("ATLANTE_CLASSIFICHE", "ATLANTE_CLASSIFICHE_FINTE"):
+    os.environ.pop(_v, None)
+
+PAGINA_KWORB = """<!DOCTYPE html><html><body><table id="spotifyweekly" class="sortable">
+<thead><tr><th class="np">Pos</th><th class="np">P+</th><th class="mp">Artist and Title</th><th>Wks</th></tr></thead><tbody>
+<tr><td class="np">1</td><td class="np">=</td><td class="text mp"><div><a href="../artist/0Y5tJX1MQlPlqiwlOH1tJY.html">Travis Scott</a> - <a href="../track/42VsgItocQwOQC3XWZ8JNA.html">FE!N</a> (w/ <a href="../artist/699OTQXzgjhIYAHMy9RyPD.html">Playboi Carti</a>)</div></td><td>60</td></tr>
+<tr><td class="np">2</td><td class="np">+1</td><td class="text mp"><div><a href="../artist/1.html">Sfera Ebbasta</a>, <a href="../artist/2.html">Shiva</a> - <a href="../track/2.html">Mamma mia</a></div></td><td>3</td></tr>
+<tr><td class="np">3</td><td class="np">-1</td><td class="text mp"><div><a href="../artist/3.html">ROS&Eacute;</a> &amp; <a href="../artist/4.html">Bruno Mars</a> - <a href="../track/3.html">APT.</a></div></td><td>3</td></tr>
+</tbody></table></body></html>"""
+
+PAGINA_BILLBOARD = """<html><body><div class="chart-results-list">
+<div class="o-chart-results-list-row-container"><ul class="o-chart-results-list-row // lrv-a-unstyle-list">
+<li><span class="c-label  a-font-primary-bold-l u-font-size-32@tablet">1</span></li>
+<li class="lrv-u-width-100p"><ul><li class="o-chart-results-list__item">
+<h3 id="title-of-a-story" class="c-title  a-no-trucate a-font-primary-bold-s">
+	Die With A Smile
+</h3>
+<span class="c-label  a-no-trucate a-font-primary-s lrv-u-font-size-14@mobile-max">
+	Lady Gaga &amp; Bruno Mars
+</span></li></ul></li></ul></div>
+<div class="o-chart-results-list-row-container"><ul class="o-chart-results-list-row">
+<li><span class="c-label a-font-primary-bold-l">2</span><span class="c-label">NEW</span></li>
+<li><h3 id="title-of-a-story" class="c-title a-no-trucate">luther</h3>
+<span class="c-label a-no-trucate">Kendrick Lamar &amp; SZA</span></li></ul></div>
+</div>
+<h3 id="title-of-a-story" class="c-title">Gains in Weekly Performance</h3><span class="c-label a-no-trucate">Articolo</span>
+</body></html>"""
+
+PAGINA_UK = """<html><body>
+<div class="chart-item"><div class="chart-item-content"><div class="description block">
+<p><a class="chart-name font-bold inline-block" href="/songs/sabrina-carpenter-espresso/"><span class="badge new">New</span><span>ESPRESSO</span></a></p>
+<a class="chart-artist text-lg inline-block" href="/artist/sabrina-carpenter/"><span>SABRINA CARPENTER</span></a></div></div></div>
+<div class="chart-item chart-ad"><div class="ad">Pubblicità</div></div>
+<div class="chart-item"><div class="chart-item-content"><p><a class="chart-name font-bold" href="/songs/dua-lipa-new-rules/"><span>NEW RULES</span></a></p>
+<a class="chart-artist" href="/artist/dua-lipa/"><span>DUA LIPA</span></a></div></div>
+</body></html>"""
+
+PAGINA_FIMI = """<html><body><nav><a href="/album">Album</a> <a href="/singoli">Singoli</a></nav>
+<h2>Top Album</h2>
+<div class="chart-item"><div class="title">ALBUM CHE NON E UN BRANO</div><div class="artist">Qualcuno</div></div>
+<h2>Top Singoli</h2>
+""" + "".join('<div class="chart-item"><div class="position">%d</div><div class="title">%s</div><div class="artist">%s</div>'
+              '<div class="label">Etichetta</div></div>\n' % (i + 1, t, a) for i, (t, a) in enumerate((
+                  ("BALORDA NOSTALGIA", "OLLY"), ("TU CON CHI FAI L'AMORE", "THE KOLORS"), ("CUORICINI", "COMA_COSE"),
+                  ("FUORILEGGE", "ROSE VILLAIN"), ("NUN TE SCETÀ", "GEOLIER")))) + """
+<h2>Top Vinili</h2><div class="chart-item"><div class="title">VINILE</div><div class="artist">Altro</div></div>
+</body></html>"""
+
+PAGINA_TABELLA = """<html><body><table><tr><th>Pos.</th><th>Titolo</th><th>Artista</th></tr>
+""" + "".join("<tr><td>%d</td><td><a href='#'>%s</a></td><td>%s</td></tr>" % (i + 1, t, a) for i, (t, a) in enumerate((
+    ("Brano uno", "Artista uno"), ("Brano due", "Artista due"), ("Brano tre", "Artista tre"), ("Brano quattro", "Artista quattro"),
+    ("Brano cinque", "Artista cinque")))) + "</table></body></html>"
+
+RSS_APPLE = json.dumps({"feed": {"title": "Top Songs", "author": {"name": "Apple"}, "results": [
+    {"artistName": "Olly", "id": "1", "name": "Balorda nostalgia", "kind": "songs"},
+    {"artistName": "Kendrick Lamar & SZA", "id": "2", "name": "luther", "kind": "songs"}]}})
+
+PAGINA_APPLE = """<html><head><script type="application/ld+json">{"@type":"MusicPlaylist","name":"Top 100: Global"}</script></head>
+<body><script type="application/json" id="serialized-server-data">[{"data":{"sections":[{"items":[
+{"title":"Die With A Smile","artistName":"Lady Gaga & Bruno Mars","contentDescriptor":{"kind":"song"}},
+{"title":"APT.","artistName":"ROSÉ & Bruno Mars"}]}]}}]</script></body></html>"""
+
+PAGINA_SPOTIFY = """<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":
+{"entity":{"name":"RapCaviar","subtitle":"Spotify","trackList":[{"uri":"spotify:track:1","title":"Not Like Us","subtitle":"Kendrick Lamar",
+"isExplicit":true},{"uri":"spotify:track:2","title":"Timeless (with Playboi Carti)","subtitle":"The Weeknd, Playboi Carti"}]}}}}}}</script></body></html>"""
+
+PAGINA_CAMBIATA = "<html><body><h1>Manutenzione</h1><p>Torniamo presto.</p></body></html>"
+
+
+def modulo_server(nome):
+    """Il server caricato come modulo nelle prove (senza main(): nessun server in ascolto)."""
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location(nome, SERVER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def risultato(vid, titolo, artista, album="", explicit=False, durata=200):
+    """Un risultato della ricerca di YouTube Music com'è dopo _brano_ytm (prima di _ordina)."""
+    return {"id": vid, "titolo": titolo, "artista": artista, "album": album, "durata": durata, "copertina": "",
+            "explicit": explicit}
+
+
+def ricerca_playlist(voci):
+    """Risposta finta di youtubei/v1/search con playlist: (id, nome, sotto)."""
+    return {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {
+        "contents": [{"musicShelfRenderer": {"contents": [{"musicResponsiveListItemRenderer": {
+            "navigationEndpoint": {"browseEndpoint": {"browseId": vid}},
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": nome}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": sotto}]}}}]}}
+            for vid, nome, sotto in voci],
+            "continuations": [{"nextContinuationData": {"continuation": "PAGINA2"}}]}}]}}}}]}}}
+
+
+class Orologio:
+    """Il tempo delle prove: parte da adesso e va avanti solo quando lo si sposta."""
+
+    def __init__(self):
+        self.t = time.time()
+
+    def __call__(self):
+        return self.t
+
+
+class TestClassificheLettori(unittest.TestCase):
+    """Un lettore per fonte, con pagine finte; una pagina cambiata dà un elenco vuoto (la fonte si salta)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_cl_lettori")
+
+    def test_kworb(self):
+        self.assertEqual(self.m._cl_kworb(PAGINA_KWORB), [("Travis Scott", "FE!N"), ("Sfera Ebbasta, Shiva", "Mamma mia"),
+                                                          ("ROSÉ, Bruno Mars", "APT.")])
+
+    def test_billboard(self):
+        self.assertEqual(self.m._cl_billboard(PAGINA_BILLBOARD), [("Lady Gaga & Bruno Mars", "Die With A Smile"),
+                                                                  ("Kendrick Lamar & SZA", "luther")])
+
+    def test_uk(self):
+        # il segno «New» non entra nel titolo, «NEW RULES» resta intero
+        self.assertEqual(self.m._cl_uk(PAGINA_UK), [("SABRINA CARPENTER", "ESPRESSO"), ("DUA LIPA", "NEW RULES")])
+
+    def test_fimi(self):
+        r = self.m._cl_fimi(PAGINA_FIMI)
+        self.assertEqual(r[0], ("OLLY", "BALORDA NOSTALGIA"))
+        self.assertEqual(len(r), 5, r)   # solo i singoli: né l'album prima né il vinile dopo
+        self.assertEqual(r[4], ("GEOLIER", "NUN TE SCETÀ"))
+        self.assertEqual(self.m._cl_fimi(PAGINA_TABELLA)[1], ("Artista due", "Brano due"))   # anche una tabella
+
+    def test_apple(self):
+        self.assertEqual(self.m._cl_apple(RSS_APPLE), [("Olly", "Balorda nostalgia"), ("Kendrick Lamar & SZA", "luther")])
+        self.assertEqual(self.m._cl_apple(PAGINA_APPLE), [("Lady Gaga & Bruno Mars", "Die With A Smile"),
+                                                          ("ROSÉ & Bruno Mars", "APT.")])
+
+    def test_spotify(self):
+        self.assertEqual(self.m._cl_spotify(PAGINA_SPOTIFY), [("Kendrick Lamar", "Not Like Us"),
+                                                              ("The Weeknd, Playboi Carti", "Timeless (with Playboi Carti)")])
+
+    def test_pagina_cambiata(self):
+        m = self.m
+        for lettore in (m._cl_kworb, m._cl_billboard, m._cl_uk, m._cl_fimi, m._cl_apple, m._cl_spotify):
+            self.assertEqual(lettore(PAGINA_CAMBIATA), [], lettore.__name__)
+            self.assertEqual(lettore(""), [], lettore.__name__)
+        self.assertEqual(m._cl_apple("{non json"), [])
+
+    def test_leggi_pagine_finte(self):
+        m = self.m
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoWeb)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_CLASSIFICHE_FINTE": "http://127.0.0.1:%d" % srv.server_address[1]}):
+                f = [x for x in m.CL_FONTI if x["id"] == "spotify-it"][0]
+                self.assertEqual(m._cl_leggi(f), [("Eminem", "Without Me")])
+                with self.assertRaises(RuntimeError) as e:
+                    m._cl_leggi([x for x in m.CL_FONTI if x["id"] == "billboard"][0])
+                self.assertIn("404", str(e.exception))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_youtube_music(self):
+        m = self.m
+        classifiche = {"contents": {"singleColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
+            "sectionListRenderer": {"contents": [{"musicCarouselShelfRenderer": {
+                "header": {"musicCarouselShelfBasicHeaderRenderer": {"title": {"runs": [{"text": "Classifiche video"}]}}},
+                "contents": [
+                    {"musicTwoRowItemRenderer": {"title": {"runs": [{"text": "Top 100 video musicali Italia"}]},
+                                                 "navigationEndpoint": {"browseEndpoint": {"browseId": "VLPLvideoIT"}}}},
+                    {"musicTwoRowItemRenderer": {"title": {"runs": [{"text": "Top 100 brani Italia"}]},
+                                                 "navigationEndpoint": {"browseEndpoint": {"browseId": "VLPLbraniIT"}}}},
+                    {"musicTwoRowItemRenderer": {"title": {"runs": [{"text": "Rap italiano: novità"}]},
+                                                 "navigationEndpoint": {"browseEndpoint": {"browseId": "VLPLaltro"}}}}]}}]}}}}]}}}
+        pagina1 = {"contents": {"musicPlaylistShelfRenderer": {"contents": [
+            _brano_ytm("Brano000001", "Balorda nostalgia", ["Olly"], "Balorda nostalgia", "3:10", False),
+            _brano_ytm("Brano000002", "Cuoricini", ["Coma_Cose"], "Cuoricini", "2:58", False),
+            {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "SEGUE"}}}}]}}}
+        pagina2 = {"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [
+            _brano_ytm("Brano000003", "Fuorilegge", ["Rose Villain"], "Fuorilegge", "3:01", True)]}}]}
+        chieste = []
+
+        def ytm(percorso, corpo, extra=""):
+            chieste.append(corpo.get("browseId") or corpo.get("continuation"))
+            if corpo.get("browseId") == "FEmusic_charts":
+                self.assertEqual(corpo["formData"], {"selectedValues": ["IT"]})
+                return classifiche
+            return {"VLPLbraniIT": pagina1, "SEGUE": pagina2}.get(chieste[-1], {"contents": {}})
+        with unittest.mock.patch.object(m, "_cl_ytm", ytm):
+            r = m._cl_ytm_classifica("IT")
+        # prima la playlist dei brani (poi quella dei video); le altre playlist della pagina no
+        self.assertEqual(r, [("Olly", "Balorda nostalgia"), ("Coma_Cose", "Cuoricini"), ("Rose Villain", "Fuorilegge")])
+        self.assertEqual(chieste[:3], ["FEmusic_charts", "VLPLbraniIT", "SEGUE"])
+        self.assertNotIn("VLPLaltro", chieste)
+
+    def test_scopri_playlist(self):
+        m = self.m
+        risposta = ricerca_playlist([("VLRDCLAK5uy_a", "Pop italiano: le hit", "Playlist • YouTube Music • 250.000 visualizzazioni"),
+                                     ("UCartista", "Un artista", "Artista"),
+                                     ("VLPLcommunity", "Hit pop 2026", "Playlist • Mario • 1,2 Mln visualizzazioni"),
+                                     ("VLPLpiccola", "Pop nuovo", "Playlist • Anna • 12K views")])
+        corpi = []
+
+        def ytm(percorso, corpo, extra=""):
+            corpi.append((percorso, corpo, extra))
+            return risposta
+        with unittest.mock.patch.object(m, "_cl_ytm", ytm):
+            trovate, seguito = m._cl_scopri("pop italiano", m.CL_FILTRI_PLAYLIST[0], "")
+            m._cl_scopri("pop italiano", None, "PAGINA2")
+        self.assertEqual([p["id"] for p in trovate], ["VLPLcommunity", "VLRDCLAK5uy_a", "VLPLpiccola"])   # dalla più vista
+        self.assertEqual([p["viste"] for p in trovate], [1200000, 250000, 12000])
+        self.assertEqual(seguito, "PAGINA2")
+        self.assertEqual((corpi[0][0], corpi[0][1]["query"], corpi[0][1]["params"]), ("search", "pop italiano", m.CL_FILTRI_PLAYLIST[0]))
+        self.assertEqual(corpi[1][1], {"continuation": "PAGINA2"})
+        self.assertIn("ctoken=PAGINA2", corpi[1][2])
+
+    def test_viste(self):
+        for testo, n in (("1,2 Mln visualizzazioni", 1200000), ("350.000 visualizzazioni", 350000), ("1.5M views", 1500000),
+                         ("12K views", 12000), ("2 Mld di visualizzazioni", 2000000000), ("Playlist • YouTube Music", 0)):
+            self.assertEqual(self.m._cl_viste(testo), n, testo)
+
+
+class TestClassificheScelta(unittest.TestCase):
+    """Quale risultato di YouTube Music si scarica per un brano di una classifica, e quando un brano c'è già."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_cl_scelta")
+
+    def scegli(self, artista, titolo, risultati):
+        return self.m._cl_scegli(artista, titolo, self.m._ordina([dict(r) for r in risultati]))
+
+    def test_sempre_la_versione_explicit(self):
+        r, motivo = self.scegli("Eminem", "Without Me", [risultato("NoExplicit1", "Without Me", "Eminem"),
+                                                         risultato("Explicit001", "Without Me", "Eminem", explicit=True)])
+        self.assertEqual((r["id"], motivo), ("Explicit001", ""))
+        # c'è solo la versione censurata (clean, edited, radio edit): niente, mai la censurata
+        for t in ("Without Me (Clean)", "Without Me (Radio Edit)", "Without Me - Edited", "Without Me [Censored]"):
+            r, motivo = self.scegli("Eminem", "Without Me", [risultato("Pulita00001", t, "Eminem")])
+            self.assertEqual((r, motivo), (None, "censurata"), t)
+        # un brano senza versione explicit (nessuna parolaccia): va bene quella che c'è
+        r, motivo = self.scegli("Olly", "Balorda nostalgia", [risultato("Olly0000001", "Balorda nostalgia", "Olly")])
+        self.assertEqual(r["id"], "Olly0000001")
+        # «Clean» di Taylor Swift è il titolo, non una versione censurata
+        self.assertEqual(self.scegli("Taylor Swift", "Clean", [risultato("TaylorClean", "Clean", "Taylor Swift")])[0]["id"],
+                         "TaylorClean")
+
+    def test_niente_tributi_cover_karaoke(self):
+        falsi = [risultato("Tributo0001", "Lose Yourself", "Eminem Tribute Band"),
+                 risultato("Karaoke0001", "Lose Yourself (Karaoke Version)", "Karaoke Hits"),
+                 risultato("Cover000001", "Lose Yourself", "Piano Covers", album="Rap Hits on Piano"),
+                 risultato("Stile000001", "Lose Yourself (In the Style of Eminem)", "Eminem"),
+                 risultato("Altro000001", "Lose Yourself", "Altro Cantante")]
+        self.assertEqual(self.scegli("Eminem", "Lose Yourself", falsi), (None, "non trovato"))
+        r, _ = self.scegli("Eminem", "Lose Yourself", falsi + [risultato("Vero0000001", "Lose Yourself", "Eminem", explicit=True)])
+        self.assertEqual(r["id"], "Vero0000001")
+
+    def test_altre_versioni(self):
+        versioni = [risultato("Remix000001", "Houdini (Remix)", "Dua Lipa"), risultato("Live0000001", "Houdini (Live)", "Dua Lipa"),
+                    risultato("Veloce00001", "Houdini (Sped Up)", "Dua Lipa"), risultato("Acustica001", "Houdini - Acoustic", "Dua Lipa"),
+                    risultato("Strument001", "Houdini (Instrumental)", "Dua Lipa")]
+        self.assertEqual(self.scegli("Dua Lipa", "Houdini", versioni)[1], "non trovato")
+        self.assertEqual(self.scegli("Dua Lipa", "Houdini", versioni + [risultato("Houdini0001", "Houdini", "Dua Lipa")])[0]["id"],
+                         "Houdini0001")
+        # se è la classifica a volere il remix, il remix va bene
+        self.assertEqual(self.scegli("Dua Lipa", "Houdini (Remix)", versioni)[0]["id"], "Remix000001")
+
+    def test_artista_principale_tra_gli_esecutori(self):
+        self.assertEqual(self.scegli("Shiva", "Mamma mia", [risultato("Mamma000001", "Mamma mia", "Sfera Ebbasta e Shiva")])[0]["id"],
+                         "Mamma000001")
+        self.assertEqual(self.scegli("Travis Scott, Playboi Carti", "FE!N",
+                                     [risultato("Fein0000001", "FE!N (feat. Playboi Carti)", "Travis Scott", explicit=True)])[0]["id"],
+                         "Fein0000001")
+        self.assertEqual(self.scegli("ROSÉ & Bruno Mars", "APT.", [risultato("Apt00000001", "APT.", "ROSÉ & Bruno Mars")])[0]["id"],
+                         "Apt00000001")
+        self.assertEqual(self.scegli("Adele", "Hello", [risultato("Hello000001", "Hello", "Lionel Richie")]), (None, "non trovato"))
+        # durate assurde (un'ora di «mix», tre secondi)
+        self.assertEqual(self.scegli("Adele", "Hello", [risultato("Hello000002", "Hello", "Adele", durata=3600)])[0], None)
+
+    def test_stesso_brano_scritto_in_altro_modo(self):
+        m = self.m
+        for a, b in (("FE!N", "FE!N (feat. Playboi Carti)"), ("APT.", "Apt"), ("Perché", "perche"), ("N.Y. State", "NY State"),
+                     ("Shake That", "Shake That [Explicit]"), ("ESPRESSO", "Espresso"), ("Rock & Roll", "Rock and Roll")):
+            self.assertEqual(m._cl_titolo(a), m._cl_titolo(b), (a, b))
+            self.assertEqual(m._cl_chiave("Eminem", a), m._cl_chiave("eminem feat. Nate Dogg", b))
+        self.assertNotEqual(m._cl_titolo("사랑"), m._cl_titolo("노래"))   # titoli in altre scritture restano diversi
+        self.assertTrue(m._cl_titolo("사랑"))
+
+
+class TestClassificheLavoro(unittest.TestCase):
+    """Il lavoro in sottofondo, passo per passo, con fonti, ricerca e scaricamento finti e il tempo spostato a mano."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_cl_lavoro")
+        cls.m.CL_PAUSA = 0
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-classifiche-")
+        self.ora = Orologio()
+        self.pagine = {}          # id della fonte -> brani (o un'eccezione da sollevare)
+        self.predefinito = []     # brani delle fonti che non sono in self.pagine
+        self.risposte = {}        # ricerca -> risultati (o un'eccezione)
+        self.ricerche, self.scaricati, self.letture = [], [], []
+        self.libreria = []
+        self.libero = 7 * 1024 ** 4
+        self.playlist = {}        # (ricerca, filtro, seguito) -> ([playlist], seguito)
+        self.scoperte = []
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def leggi(self, f):
+        self.letture.append(f["id"])
+        x = self.pagine.get(f["id"], self.predefinito)
+        if isinstance(x, Exception):
+            raise x
+        return list(x)
+
+    def cerca(self, q):
+        self.ricerche.append(q)
+        x = self.risposte.get(q, [])
+        if isinstance(x, Exception):
+            raise x
+        return self.m._ordina([dict(r) for r in x])
+
+    def scarica(self, r):
+        self.scaricati.append(r["id"])
+        x = self.risposte.get("scarica " + r["id"])
+        if isinstance(x, Exception):
+            raise x
+        return {"nome": "%s - %s.mp3" % (r["artista"], r["titolo"]), "brano": "b%d" % len(self.scaricati), "percorso": ""}
+
+    def scopri(self, q, filtro, seguito):
+        self.scoperte.append((q, filtro, seguito))
+        x = self.playlist.get((q, filtro, seguito), ([], ""))
+        if isinstance(x, Exception):
+            raise x
+        return x
+
+    def nuovo(self, fonti=None, spotify=(), generi=()):
+        m = self.m
+        b = m.BloccoYouTube(os.path.join(self.base, "youtube-blocco.json"))
+        b.adesso = self.ora
+        c = m.Classifiche(os.path.join(self.base, "classifiche"), b)
+        c.adesso = self.ora
+        c.fonti = fonti if fonti is not None else [{"id": "prova", "nome": "Classifica di prova", "tipo": "finta", "quanti": 100}]
+        c.spotify, c.generi = list(spotify), list(generi)
+        c.leggi, c.cerca, c.scarica, c.scopri = self.leggi, self.cerca, self.scarica, self.scopri
+        c.libero = lambda: self.libero
+        c.catalogo = lambda: (len(self.libreria), list(self.libreria))
+        c.videoclip = lambda artista, titolo: ""
+        return c
+
+    def gira(self, c, massimo=200):
+        """Passi finché il lavoro non chiede di aspettare: restituisce quanto."""
+        for _ in range(massimo):
+            attesa = c.passo()
+            if attesa:
+                return attesa
+        self.fail("il lavoro non si ferma mai")
+
+    def test_una_classifica(self):
+        self.pagine["prova"] = [("Eminem", "Without Me"), ("Travis Scott, Playboi Carti", "FE!N"), ("Eminem", "Without Me"),
+                                ("Eminem", "Lose Yourself"), ("Artista", "Solo Pulita"), ("Olly", "Balorda nostalgia")]
+        self.risposte = {"Eminem Without Me": [risultato("NoExplicit1", "Without Me", "Eminem"),
+                                               risultato("Explicit001", "Without Me", "Eminem", "The Eminem Show", True)],
+                         "Eminem Lose Yourself": [risultato("Tributo0001", "Lose Yourself", "Eminem Tribute Band")],
+                         "Artista Solo Pulita": [risultato("Pulita00001", "Solo Pulita (Clean)", "Artista")],
+                         "Olly Balorda nostalgia": [risultato("Explicit001", "Without Me", "Eminem", explicit=True),
+                                                    risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
+        self.libreria = [("Travis Scott", "FE!N (feat. Playboi Carti)")]   # c'è già, scritto in un altro modo
+        c = self.nuovo()
+        self.assertEqual(self.gira(c), 3600)   # tutto fatto: aspetta
+        self.assertEqual(self.letture, ["prova"])
+        # il brano che la libreria ha già e il doppione della classifica: nessuna ricerca
+        self.assertEqual(self.ricerche, ["Eminem Without Me", "Eminem Lose Yourself", "Artista Solo Pulita", "Olly Balorda nostalgia"])
+        self.assertEqual(self.scaricati, ["Explicit001", "Olly0000001"])
+        r = c.riassunto()
+        self.assertEqual((r["attivo"], r["oggi"], r["totale"], r["blocco"], r["pausa"]), (True, 2, 2, None, None))
+        self.assertEqual([(u["titolo"], u["artista"], u["fonte"]) for u in r["ultimi"]],
+                         [("Balorda nostalgia", "Olly", "Classifica di prova"), ("Without Me", "Eminem", "Classifica di prova")])
+        self.assertEqual(r["classifiche"][0]["esito"], "ok")
+        self.assertEqual(r["classifiche"][0]["brani"], 5)   # senza il doppione
+        # la settimana dopo la classifica si rilegge, ma i brani già cercati non si cercano più
+        self.ora.t += 3 * 86400
+        self.assertEqual(self.gira(c), 3600)
+        self.assertEqual(self.letture, ["prova"])
+        self.ora.t += 5 * 86400
+        self.assertEqual(self.gira(c), 3600)
+        self.assertEqual(self.letture, ["prova", "prova"])
+        self.assertEqual(len(self.ricerche), 4)
+        self.assertEqual(c.riassunto()["oggi"], 0)   # è un altro giorno
+        self.assertEqual(c.riassunto()["totale"], 2)
+        # dopo tre mesi un brano non trovato si cerca di nuovo (forse ora c'è)
+        self.ora.t += 90 * 86400
+        self.gira(c)
+        self.assertEqual(self.ricerche[4:], ["Eminem Lose Yourself", "Artista Solo Pulita"])
+
+    def test_ripresa_dopo_il_riavvio(self):
+        self.pagine["prova"] = [("A%d" % i, "Brano %d" % i) for i in range(4)]
+        self.risposte = {"A%d Brano %d" % (i, i): [risultato("Brano%06d" % i, "Brano %d" % i, "A%d" % i)] for i in range(4)}
+        c = self.nuovo()
+        c.passo()   # la classifica
+        c.passo()   # il primo brano
+        self.assertEqual(self.scaricati, ["Brano000000"])
+        c = self.nuovo()   # il Mac mini si è riavviato
+        self.assertEqual(c.riassunto()["totale"], 1)
+        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 3)
+        self.gira(c)
+        self.assertEqual(self.letture, ["prova"])
+        self.assertEqual(self.scaricati, ["Brano%06d" % i for i in range(4)])
+        self.assertEqual(self.ricerche.count("A0 Brano 0"), 1)
+
+    def test_blocco_429_con_la_pausa_che_cresce(self):
+        m = self.m
+        self.pagine["prova"] = [("Eminem", "Without Me"), ("Olly", "Balorda nostalgia")]
+        self.risposte = {"Eminem Without Me": m.Bloccato("YouTube ha risposto 429 Too Many Requests"),
+                         "Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
+        c = self.nuovo()
+        inizio = self.ora.t
+        self.assertEqual(self.gira(c), 600)
+        b = c.riassunto()["blocco"]
+        self.assertEqual((b["tipo"], b["quando"], b["prossima"]), ("rallenta", inizio, inizio + 1800))
+        self.assertIn("429", b["motivo"])
+        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 2)   # il brano resta in coda
+        self.assertEqual(self.ricerche, ["Eminem Without Me"])
+        self.assertEqual(c.passo(), 600)   # fermo: nessuna richiesta a YouTube
+        self.assertEqual(self.ricerche, ["Eminem Without Me"])
+        attese = []
+        for pausa in (1800, 7200, 28800, 86400, 86400):   # ogni prova fallita allunga la pausa, poi una al giorno
+            self.ora.t = c.riassunto()["blocco"]["prossima"]
+            self.gira(c)
+            attese.append(c.riassunto()["blocco"]["prossima"] - self.ora.t)
+        self.assertEqual(attese, [7200, 28800, 86400, 86400, 86400])
+        self.assertEqual(len(self.ricerche), 6)   # una ricerca sola per ogni prova
+        self.assertEqual(c.riassunto()["blocco"]["quando"], inizio)   # l'ora del blocco resta quella della prima volta
+        # riavvio durante il blocco: resta fermo
+        c = self.nuovo()
+        self.assertIsNotNone(c.riassunto()["blocco"])
+        self.assertGreater(c.passo(), 0)
+        self.assertEqual(len(self.ricerche), 6)
+        # il blocco finisce: alla prova seguente si riparte e il brano rimasto in coda si fa
+        self.risposte["Eminem Without Me"] = [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]
+        self.ora.t = c.riassunto()["blocco"]["prossima"]
+        self.assertEqual(self.gira(c), 3600)
+        self.assertIsNone(c.riassunto()["blocco"])
+        self.assertEqual(self.scaricati, ["Explicit001", "Olly0000001"])
+
+    def test_robot_e_riprova_adesso(self):
+        m = self.m
+        self.pagine["prova"] = [("Eminem", "Without Me")]
+        self.risposte = {"Eminem Without Me": m.Bloccato("Sign in to confirm you’re not a bot")}
+        c = self.nuovo()
+        self.gira(c)
+        b = c.riassunto()["blocco"]
+        self.assertEqual((b["tipo"], b["prossima"] - b["quando"]), ("robot", 86400))   # una prova al giorno, da subito
+        self.ora.t += 3600
+        self.assertGreater(c.passo(), 0)
+        self.assertEqual(len(self.ricerche), 1)
+        # «Riprova adesso» in Gestione: una prova sola, subito
+        self.risposte["Eminem Without Me"] = [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]
+        c.riprova_adesso()
+        self.assertEqual(self.gira(c), 3600)
+        self.assertIsNone(c.riassunto()["blocco"])
+        self.assertEqual(self.scaricati, ["Explicit001"])
+        self.assertEqual(len(self.ricerche), 2)   # la prova serve anche al brano: nessuna ricerca in più
+
+    def test_blocco_durante_lo_scaricamento(self):
+        m = self.m
+        self.pagine["prova"] = [("Eminem", "Without Me"), ("Olly", "Balorda nostalgia")]
+        self.risposte = {"Eminem Without Me": [risultato("Explicit001", "Without Me", "Eminem", explicit=True)],
+                         "Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")],
+                         "scarica Explicit001": m._cl_errore("ERROR: [youtube] Explicit001: Sign in to confirm you're not a bot. "
+                                                             "Use --cookies-from-browser")}
+        c = self.nuovo()
+        self.gira(c)
+        self.assertEqual(c.riassunto()["blocco"]["tipo"], "robot")
+        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 2)
+        self.assertEqual(c.riassunto()["totale"], 0)
+        # gli errori: blocco, rete o brano che non va (questo si salta)
+        self.assertIsInstance(m._cl_errore("ERROR: unable to download video data: HTTP Error 429: Too Many Requests"), m.Bloccato)
+        self.assertIsInstance(m._cl_errore("ERROR: [youtube] x: The current session has been rate-limited by YouTube"), m.Bloccato)
+        self.assertIsInstance(m._cl_errore("ERROR: Unable to download webpage: <urlopen error [Errno 8] nodename nor servname "
+                                           "provided, or not known>"), m.Rete)
+        self.assertIsInstance(m._cl_errore("ERROR: [youtube] x: Video unavailable"), RuntimeError)
+        self.assertNotIsInstance(m._cl_errore("ERROR: [youtube] x: Video unavailable"), (m.Bloccato, m.Rete))
+        # un brano che non si scarica (video tolto) si salta, il lavoro continua
+        self.risposte["scarica Explicit001"] = m._cl_errore("ERROR: [youtube] Explicit001: Video unavailable")
+        c.riprova_adesso()
+        self.assertEqual(self.gira(c), 3600)
+        self.assertEqual(c.riassunto()["totale"], 1)
+        self.assertEqual(self.scaricati[-1], "Olly0000001")
+
+    def test_spazio_e_rete(self):
+        m = self.m
+        self.pagine["prova"] = [("Eminem", "Without Me")]
+        self.risposte = {"Eminem Without Me": [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]}
+        self.libero = 150 * 1024 ** 3   # sotto i 200 GB: fermo
+        c = self.nuovo()
+        self.assertEqual(self.gira(c), 1800)
+        self.assertIn("200 GB", c.riassunto()["pausa"]["motivo"])
+        self.assertEqual((self.letture, self.ricerche), ([], []))
+        self.libero = None   # disco scollegato
+        self.ora.t += 1801
+        self.assertEqual(self.gira(c), 1800)
+        self.assertIn("raggiungibile", c.riassunto()["pausa"]["motivo"])
+        self.libero = 7 * 1024 ** 4
+        self.ora.t += 1801
+        self.risposte["Eminem Without Me"] = m.Rete("timed out")
+        self.assertEqual(self.gira(c), 600)   # Internet o YouTube che non rispondono: il brano resta, si riprova
+        self.assertIn("non rispondono", c.riassunto()["pausa"]["motivo"])
+        self.assertIsNone(c.riassunto()["blocco"])
+        self.risposte["Eminem Without Me"] = [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]
+        self.ora.t += 601
+        self.assertEqual(self.gira(c), 3600)
+        self.assertEqual(self.scaricati, ["Explicit001"])
+
+    def test_fonte_che_non_si_legge(self):
+        fonti = [{"id": "uno", "nome": "Prima", "tipo": "finta"}, {"id": "due", "nome": "Seconda", "tipo": "finta"},
+                 {"id": "tre", "nome": "Terza", "tipo": "finta", "quanti": 1}]
+        self.pagine = {"uno": RuntimeError("il sito ha risposto 503"), "due": [],
+                       "tre": [("Olly", "Balorda nostalgia"), ("Eminem", "Without Me")]}
+        self.risposte = {"Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
+        c = self.nuovo(fonti)
+        self.assertEqual(self.gira(c), 3600)
+        self.assertEqual(self.ricerche, ["Olly Balorda nostalgia"])   # «quanti»: solo il primo della terza
+        esiti = {f["id"]: f for f in c.riassunto()["classifiche"]}
+        self.assertEqual((esiti["uno"]["esito"], esiti["due"]["esito"], esiti["tre"]["esito"]), ("errore", "errore", "ok"))
+        self.assertIn("503", esiti["uno"]["errore"])
+        self.assertIn("cambiato", esiti["due"]["errore"])
+        # una fonte che non si è letta si riprova il giorno dopo, non dopo una settimana
+        self.pagine["uno"] = [("Olly", "Balorda nostalgia")]
+        self.ora.t += 86401
+        self.gira(c)
+        self.assertEqual(self.letture, ["uno", "due", "tre", "uno", "due"])
+
+    def test_playlist_senza_fine(self):
+        m = self.m
+        f0, f1, f2 = m.CL_FILTRI_PLAYLIST
+        spotify = [("RapCaviar", "rap e hip hop", "37i9dQZF1DX0XUsuxWHRQd"), ("Today's Top Hits", "pop", "37i9dQZF1DXcBWIGoYBM5M")]
+        generi = [("pop", "pop hits"), ("rap italiano", "rap italiano")]
+        self.playlist = {("pop hits", f0, ""): ([{"id": "VLpop1", "nome": "Pop 1", "viste": 0}], "SEGUITO"),
+                         ("pop hits", f1, ""): ([{"id": "VLpop2", "nome": "Pop 2", "viste": 900}], ""),
+                         ("rap italiano", f0, ""): ([{"id": "VLrap1", "nome": "Rap 1", "viste": 0}], ""),
+                         ("pop hits", f0, "SEGUITO"): ([{"id": "VLpop3", "nome": "Pop 3", "viste": 0}], "")}
+        self.predefinito = [("Olly", "Balorda nostalgia")]
+        self.risposte = {"Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
+        c = self.nuovo(fonti=[], spotify=spotify, generi=generi)
+        self.assertEqual(self.gira(c), 3600)
+        # una di Spotify e una di YouTube Music a turno; su YouTube Music la prima di ogni genere, poi la seconda…
+        self.assertEqual(self.letture, ["sp:37i9dQZF1DX0XUsuxWHRQd", "yt:VLpop1", "sp:37i9dQZF1DXcBWIGoYBM5M", "yt:VLrap1",
+                                        "yt:VLpop2", "yt:VLpop3"])
+        self.assertIn(("pop hits", f0, "SEGUITO"), self.scoperte)   # le pagine dopo la prima: senza un numero massimo
+        self.assertIn(("rap italiano", f2, ""), self.scoperte)      # e anche la ricerca senza filtro
+        # le playlist fatte si rileggono dopo un mese (per i brani nuovi), non prima
+        self.ora.t += 10 * 86400
+        self.gira(c)
+        self.assertEqual(len(self.letture), 6)
+        self.ora.t += 25 * 86400
+        self.gira(c)
+        self.assertEqual(len(self.letture), 12)
+
+    def test_videoclip_nel_piano(self):
+        m = self.m
+        self.pagine["prova"] = [("Eminem", "Without Me")]
+        self.risposte = {"Eminem Without Me": [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]}
+        c = self.nuovo()
+        c.videoclip = lambda artista, titolo: "YVkUvmDQ3HY" if (artista, titolo) == ("Eminem", "Without Me") else ""
+        with unittest.mock.patch.object(m, "CLIP", object()):
+            self.gira(c)
+        with open(c.piano_clip, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"Eminem - Without Me.mp3": {"id": "YVkUvmDQ3HY"}})
+        # il piano dei videoclip lo legge insieme a quello principale (che vince se un nome c'è in tutti e due)
+        principale = os.path.join(self.base, "piano.json")
+        with open(principale, "w", encoding="utf-8") as f:
+            json.dump({"Altro - Brano.mp3": {"id": "abcdefghijk"}}, f)
+        v = m.Videoclip(principale, os.path.join(self.base, "clip"))
+        with unittest.mock.patch.object(m, "PIANI_AGGIUNTI", [c.piano_clip]):
+            self.assertEqual(v.leggi_piano(), {"Altro - Brano.mp3": "abcdefghijk", "Eminem - Without Me.mp3": "YVkUvmDQ3HY"})
+            with open(principale, "w", encoding="utf-8") as f:
+                json.dump({"Eminem - Without Me.mp3": {"id": "Principale1"}}, f)
+            os.utime(principale, (time.time() + 5, time.time() + 5))
+            self.assertEqual(v.leggi_piano(), {"Eminem - Without Me.mp3": "Principale1"})
+
+    def test_videoclip_fermi_durante_il_blocco(self):
+        m = self.m
+        b = m.BloccoYouTube(os.path.join(self.base, "blocco.json"))
+        b.adesso = self.ora
+        with unittest.mock.patch.object(m, "BLOCCO", b), unittest.mock.patch.object(m, "CL", None):
+            self.assertFalse(m._videoclip_fermo())
+            b.segnala("HTTP Error 429: Too Many Requests")
+            self.assertTrue(m._videoclip_fermo())
+            self.ora.t += 1800
+            self.assertFalse(m._videoclip_fermo())   # senza classifiche, la prova la fa il videoclip
+            with unittest.mock.patch.object(m, "CL", object()):
+                self.assertTrue(m._videoclip_fermo())   # con le classifiche la fa la ricerca
+            b.riuscito()
+            self.assertFalse(m._videoclip_fermo())
+
+    def test_gestione_solo_samuele(self):
+        m = self.m
+
+        class H:
+            _chi = {"ruolo": "casa", "persona": None, "chiave": None}
+        for ruolo in ("casa", "invitato"):
+            H._chi = dict(H._chi, ruolo=ruolo)
+            with self.assertRaises(m.ErroreExtra) as e:
+                m._gestione(H(), "GET", ["classifiche"], {})
+            self.assertEqual(e.exception.codice, 403)
+        for p in ("/api/extra/gestione/classifiche", "/api/extra/gestione/classifiche/riprova"):
+            self.assertIsNone(m.PERMESSE_INVITATI.match(p), p)   # agli invitati non arriva nemmeno
+
+
+class FintoWeb(http.server.BaseHTTPRequestHandler):
+    """Le pagine delle classifiche (indirizzo del sito + percorso) e YouTube Music, finti."""
+    blocca = False
+    ricerche = []
+    PAGINE = {"/kworb.net/spotify/country/it_weekly.html":
+              '<table><tr><td class="text mp"><div><a href="../artist/1.html">Eminem</a> - '
+              '<a href="../track/1.html">Without Me</a></div></td></tr></table>',
+              "/kworb.net/spotify/country/global_weekly.html":
+              '<table><tr><td class="text mp"><div><a href="../artist/2.html">Dua Lipa</a> - '
+              '<a href="../track/2.html">Houdini</a></div></td></tr></table>'}
+
+    def do_GET(self):
+        dati = self.PAGINE.get(self.path, "").encode("utf-8")
+        self.send_response(200 if dati else 404)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def do_POST(self):
+        corpo = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        q = str(corpo.get("query") or "").lower()
+        if "/search" in self.path:
+            FintoWeb.ricerche.append(q)
+        if "/search" in self.path and FintoWeb.blocca:
+            stato, d = 429, {"error": {"code": 429, "message": "Too Many Requests"}}
+        elif "/search" in self.path and q == "eminem without me":
+            stato, d = 200, RISPOSTA_YTM
+        elif "/search" in self.path and q == "dua lipa houdini":
+            stato, d = 200, {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
+                "sectionListRenderer": {"contents": [{"musicShelfRenderer": {"contents": [
+                    _brano_ytm("HoudiniRmx1", "Houdini (Remix)", ["Dua Lipa"], "Houdini", "3:10", True),
+                    _brano_ytm("HoudiniExp1", "Houdini", ["Dua Lipa"], "Radical Optimism", "3:05", True)]}}]}}}}]}}}
+        elif "/search" in self.path:
+            stato, d = 200, {"contents": {}}
+        else:
+            stato, d = 404, {"error": {"code": 404}}
+        dati = json.dumps(d).encode("utf-8")
+        self.send_response(stato)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def log_message(self, *x):
+        pass
+
+
+class TestClassificheServer(unittest.TestCase):
+    """Il server vero con ATLANTE_CLASSIFICHE=1, pagine e YouTube finti, yt-dlp e ffmpeg finti: un brano entra nella
+    libreria, YouTube blocca, Samuele lo vede in Gestione e sul riquadro (io), «Riprova adesso» e si riparte."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-classifiche-srv-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoWeb)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        finto = "http://127.0.0.1:%d" % cls.web.server_address[1]
+        cls.c["youtubei"] = finto
+        FintoWeb.blocca, FintoWeb.ricerche = False, []
+        # copertine e tutto il resto che andrebbe su Internet: verso un indirizzo dove non risponde nessuno
+        morto = "http://127.0.0.1:%d" % porta_libera()
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_CLASSIFICHE": "1", "ATLANTE_CLASSIFICHE_FINTE": finto,
+                                                   "http_proxy": morto, "https_proxy": morto, "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def stato(self):
+        return self.s.json("GET", "/api/extra/gestione/classifiche")
+
+    def test_dalla_classifica_alla_libreria(self):
+        r = aspetta(lambda: (lambda x: x if x["totale"] >= 1 else None)(self.stato()), 40, 0.1)
+        self.assertIsNotNone(r, "%r\n%s" % (self.stato(), self.s.leggi_log()))
+        FintoWeb.blocca = True   # dal prossimo brano YouTube risponde 429
+        self.assertEqual((r["ultimi"][0]["titolo"], r["ultimi"][0]["artista"]), ("Without Me", "Eminem"))
+        self.assertEqual(r["ultimi"][0]["fonte"], "Spotify Top 50 Italia")
+        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Eminem - Without Me.mp3")))
+        with open(os.path.join(self.c["finto"], "ffmpeg.log"), encoding="utf-8") as f:
+            tag = json.loads(f.read().strip().splitlines()[-1])["tag"]
+        self.assertEqual((tag["ITUNESADVISORY"], tag["purl"]), ("1", "https://music.youtube.com/watch?v=tqxRidAWER8"))
+        cat = self.s.json("GET", "/api/musica/catalogo")["brani"]
+        self.assertIn(("Without Me", "Eminem"), [(x["title"], x["artist"]) for x in cat])
+        # YouTube blocca: fermo, avviso in Gestione e nel riquadro di «Altro»
+        r = aspetta(lambda: (lambda x: x if x["blocco"] else None)(self.stato()), 40, 0.1)
+        self.assertIsNotNone(r, self.s.leggi_log())
+        self.assertEqual(r["blocco"]["tipo"], "rallenta")
+        self.assertEqual(self.s.json("GET", "/api/extra/io")["nuove"]["youtube_bloccato"], 1)
+        n = len(FintoWeb.ricerche)
+        time.sleep(1)
+        self.assertEqual(len(FintoWeb.ricerche), n)   # fermo davvero: nessuna richiesta
+        # «Riprova adesso»: una prova sola; il blocco è finito, si riparte col brano rimasto in coda (la versione giusta)
+        FintoWeb.blocca = False
+        self.assertEqual(self.s.json("POST", "/api/extra/gestione/classifiche/riprova", {}), {"ok": True})
+        r = aspetta(lambda: (lambda x: x if x["totale"] >= 2 else None)(self.stato()), 40, 0.1)
+        self.assertIsNotNone(r, "%r\n%s" % (self.stato(), self.s.leggi_log()))
+        self.assertIsNone(r["blocco"])
+        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Dua Lipa - Houdini.mp3")))
+        self.assertNotIn("youtube_bloccato", self.s.json("GET", "/api/extra/io").get("nuove", {}))
+        # le fonti che non esistono qui (404) si saltano e lo si dice
+        esiti = {f["id"]: f["esito"] for f in self.stato()["classifiche"]}
+        self.assertEqual((esiti["spotify-it"], esiti["spotify-mondo"]), ("ok", "ok"))
+        aspetta(lambda: self.stato()["classifiche"][-1]["esito"], 20, 0.2)
+        self.assertEqual({f["id"]: f["esito"] for f in self.stato()["classifiche"]}["billboard"], "errore")
+        # le scritture della Gestione: solo dalla stessa origine
+        self.s.json("POST", "/api/extra/gestione/classifiche/riprova", {}, codice=403, intest={"Origin": "https://altro.example"})
+        self.s.json("GET", "/api/extra/gestione/classifiche/nessuna", codice=404)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
