@@ -40,6 +40,7 @@ Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve 
 """
 import argparse
 import array
+import base64
 import collections
 import getpass
 import hashlib
@@ -2073,6 +2074,405 @@ def _attesa(h):
         raise ErroreExtra(400, "Attesa non valida")
 
 
+# ----- posizione condivisa, cifrata da telefono a telefono -----
+#
+# «Condividi la posizione» (richiesta di Samuele): chi è in Atlante (Samuele e invitati) manda la sua posizione a una o
+# più persone di Atlante, dal vivo per un tempo scelto (15 minuti, un'ora, finché non la ferma) oppure un punto solo; chi
+# la riceve vede «Nome condivide la sua posizione» e con «Raggiungilo» il Navigatore lo porta lì (x/posizione.js,
+# x/naviga.html). Il Mac mini fa solo da postino e le posizioni non le conosce: ogni telefono ha le sue chiavi (ECDH
+# P-256 nel browser; la privata non esce dal telefono, qui arriva solo la pubblica, in <cache>/chiavi.json) e cifra ogni
+# aggiornamento con una chiave nuova, cifrata a sua volta per ciascun dispositivo dei destinatari (x/cifra.js: lo stesso
+# schema e gli stessi formati della chat, x/chat-cifra.js). Il Mac mini sa chi condivide con chi, da quando e fino a
+# quando; della posizione tiene solo l'ultimo aggiornamento cifrato, in memoria (niente su disco), e lo dimentica alla
+# scadenza o quando la condivisione si ferma.
+#
+#   GET    chiavi                                 chi è in Atlante e le chiavi pubbliche dei suoi dispositivi
+#   POST   chiavi {id, chiave}                    questo dispositivo e la sua chiave pubblica (P-256 non compressa)
+#   GET    posizione?disp=&v=&attesa=25           le mie condivisioni e quelle verso di me (con `disp`, l'ultima
+#                                                 posizione cifrata per quel dispositivo); attesa lunga finché cambia
+#                                                 qualcosa rispetto alla versione `v` già vista
+#   POST   posizione {tipo, a, durata, disp}      nuova: tipo «vivo» o «punto», a = persone, durata 900, 3600 o 0
+#   POST   posizione/<id> {id, disp, corpo, sale, chiavi}   la posizione cifrata -> {seq, t, scade, mancano}
+#   DELETE posizione/<id>                         la ferma (solo chi l'ha avviata, da uno qualsiasi dei suoi dispositivi)
+#
+# Le chiavi hanno rotte loro e non quelle della chat (chat/dispositivi e chat/persone, con lo stesso formato): lì un
+# dispositivo nuovo dallo stesso browser prende il posto del vecchio, e due moduli con chiavi diverse si butterebbero
+# fuori a vicenda. Unendo i rami basterà una rubrica sola quando chat e posizione terranno le chiavi nello stesso posto
+# del telefono.
+
+POS_DURATE = (900, 3600, 0)        # 15 minuti, un'ora, «finché non la fermi»
+POS_SENZA_FINE = 12 * 3600         # «finché non la fermi» finisce comunque dopo 12 ore (un telefono dimenticato acceso)
+POS_OGNI = 2.0                     # secondi minimi tra due aggiornamenti (il telefono ne manda al più uno ogni 5 s)
+POS_PERSONE_MAX = 32               # destinatari di una condivisione, come un gruppo della chat
+POS_ATTIVE_MAX = 10                # condivisioni attive per persona (e una sola dal vivo)
+POS_CREATE_ORA = 60                # condivisioni nuove per persona in un'ora: l'avviso non deve diventare un fastidio
+POS_CORPO_MAX = 4096               # una posizione cifrata, in base64url (sono poche centinaia di byte)
+TIPI_POS = ("vivo", "punto")
+CHIAVI_DISP_MAX = 10               # dispositivi con la chiave per persona: oltre, esce quello sentito meno di recente
+CHIAVI_SPENTE = 30 * 86400         # le chiavi spente (telefono cambiato, accesso revocato) escono dal file dopo 30 giorni
+CIFRA_SAMUELE = "Samuele"
+ID_CIFRA = re.compile(r"^[A-Za-z0-9_-]{16,43}$")   # id scelti dai telefoni (dispositivi, aggiornamenti): 16 byte casuali
+ID_POS = re.compile(r"^[0-9a-f]{16}$")
+B64_CIFRA = re.compile(r"^[A-Za-z0-9_-]*$")
+_P256_CIFRA = (2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1,
+               0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b)
+
+
+class ErroreCifra(ErroreExtra):
+    """Errore con campi in più per il telefono («registra»: rimanda la sua chiave pubblica e riprova)."""
+
+    def __init__(self, codice, testo, **extra):
+        super().__init__(codice, testo)
+        self.extra = extra
+
+
+def _cifra_b64(s, massimo):
+    """I byte di una stringa base64url senza «=» lunga al più `massimo`; se no 400."""
+    if not isinstance(s, str) or not B64_CIFRA.match(s) or len(s) % 4 == 1 or len(s) > massimo:
+        raise ErroreExtra(400, "Dati cifrati non validi")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _cifra_punto(raw):
+    """Chiave pubblica P-256 non compressa (0x04 || x || y) che sta davvero sulla curva y² = x³ − 3x + b."""
+    p, b = _P256_CIFRA
+    if len(raw) != 65 or raw[0] != 4:
+        return False
+    x, y = int.from_bytes(raw[1:33], "big"), int.from_bytes(raw[33:], "big")
+    return x < p and y < p and (y * y - (x * x * x - 3 * x + b)) % p == 0
+
+
+def _cifra_io(h):
+    """La persona di chi chiede: "p" per Samuele, l'id per un invitato. Dalla rete di casa senza biscotto no: lì non si
+    sa chi c'è, e un dispositivo registrato da lì riceverebbe le posizioni mandate a Samuele."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"]
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    raise ErroreExtra(403, "La posizione si condivide con Tailscale o con il proprio invito, non dalla rete di casa")
+
+
+def _cifra_vivi():
+    """(persone in Atlante {id: nome}, dispositivo d'accesso -> persona, chiavi «p:…» revocate) con una sola lettura di
+    persone.json: una persona o un dispositivo revocati escono subito dai destinatari."""
+    persone, accessi, revocati = {}, {}, set()
+    if PERS is not None:
+        with PERS.blocco:
+            d = PERS._aggiorna()
+            persone = {pid: x["nome"] for pid, x in d["persone"].items()}
+            accessi = {k: x.get("persona") for k, x in d["dispositivi"].items()}
+            revocati = set(d["revocati"])
+    persone["p"] = CIFRA_SAMUELE
+    return persone, accessi, revocati
+
+
+class Chiavi:
+    """Le chiavi pubbliche dei dispositivi, in <cache>/chiavi.json (0600). Ogni dispositivo è legato al suo accesso (il
+    biscotto con cui ha mandato la chiave): revocato quello, la sua chiave non riceve più niente."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.RLock()
+        self.dati = self._leggi()
+
+    def _leggi(self):
+        d = {}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            # le chiavi vivono nei telefoni: si riparte e ognuno rimanda la sua alla prossima apertura dell'app
+            print("Atlante: %s non si legge (%s): lo metto da parte e riparto" % (self.file, e), flush=True)
+            try:
+                os.replace(self.file, self.file + ".rotto")
+            except OSError:
+                pass
+        if not isinstance(d, dict):
+            d = {}
+        if not isinstance(d.get("dispositivi"), dict):
+            d["dispositivi"] = {}
+        return d
+
+    def _scrivi(self):
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self.dati, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, self.file)
+
+    @staticmethod
+    def _vivo(x, vivi):
+        """Dispositivo che riceve: attivo, di una persona ancora in Atlante, con l'accesso non revocato."""
+        persone, accessi, revocati = vivi
+        if x is None or not x.get("attivo", True) or x.get("persona") not in persone:
+            return False
+        a = x.get("accesso")
+        if x["persona"] == "p":
+            return not a or (a.startswith("p:") and a not in revocati)
+        return bool(a) and accessi.get(a) == x["persona"]
+
+    def attivi(self, persona, vivi):
+        with self.blocco:
+            return sorted(k for k, x in self.dati["dispositivi"].items() if x["persona"] == persona and self._vivo(x, vivi))
+
+    def registra(self, persona, accesso, corpo, tipo):
+        """True se per gli altri è cambiato qualcosa (dispositivo nuovo o rientrato): chi manda rilegge le chiavi."""
+        did, chiave = corpo.get("id"), corpo.get("chiave")
+        if not isinstance(did, str) or not ID_CIFRA.match(did):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        if not _cifra_punto(_cifra_b64(chiave, 100)):
+            raise ErroreExtra(400, "Chiave pubblica non valida: serve una chiave P-256 non compressa")
+        ora = time.time()
+        with self.blocco:
+            vivi = _cifra_vivi()
+            d = self.dati["dispositivi"]
+            x = d.get(did)
+            if x is not None and (x["persona"] != persona or x["chiave"] != chiave):
+                raise ErroreExtra(409, "Questo id è già di un altro dispositivo: il telefono ne crea uno nuovo")
+            prima = self._vivo(x, vivi), (x or {}).get("accesso")
+            if x is None:
+                # un browser ha una sola identità: un dispositivo nuovo con lo stesso accesso (dati del sito cancellati)
+                # prende il posto del vecchio; oltre CHIAVI_DISP_MAX esce quello sentito meno di recente
+                for y in d.values():
+                    if accesso and y.get("accesso") == accesso and y.get("attivo", True):
+                        y.update(attivo=False, spento=ora)
+                suoi = sorted((k for k, y in d.items() if y["persona"] == persona and self._vivo(y, vivi)),
+                              key=lambda k: d[k].get("visto", 0))
+                for k in suoi[:max(0, len(suoi) - CHIAVI_DISP_MAX + 1)]:
+                    d[k].update(attivo=False, spento=ora)
+                x = d[did] = {"persona": persona, "chiave": chiave, "creato": ora}
+            x.update(accesso=accesso or x.get("accesso"), tipo=tipo if tipo in TIPI_DISP else "pc", visto=ora, attivo=True)
+            x.pop("spento", None)
+            for k in [k for k, y in d.items() if not y.get("attivo", True) and ora - y.get("spento", 0) > CHIAVI_SPENTE]:
+                del d[k]
+            self._scrivi()
+            return prima != (True, x.get("accesso"))
+
+    def mio(self, persona, did, accesso, vivi):
+        """Il dispositivo di chi fa la richiesta. Se non è suo, o il telefono deve rimandare la chiave: ErroreCifra con
+        «registra» (a un'altra persona risponde come per un dispositivo che non c'è)."""
+        with self.blocco:
+            x = self.dati["dispositivi"].get(did) if isinstance(did, str) else None
+            if not x or x["persona"] != persona:
+                raise ErroreCifra(404, "Questo dispositivo non ha ancora mandato la sua chiave", registra=True)
+            if accesso and x.get("accesso") != accesso:
+                if x.get("accesso"):
+                    raise ErroreCifra(409, "Questo dispositivo deve rimandare la sua chiave", registra=True)
+                x["accesso"] = accesso   # Samuele entrato prima senza biscotto (dal Mac o da Tailscale)
+                self._scrivi()
+            if not self._vivo(x, vivi):
+                raise ErroreCifra(403, "Questo dispositivo non riceve più le posizioni", registra=True)
+            return x
+
+    def persone(self, persona):
+        """Chi è in Atlante (Samuele per primo) con le chiavi pubbliche dei suoi dispositivi attivi."""
+        with self.blocco:
+            vivi = _cifra_vivi()
+            per = {p: [] for p in vivi[0]}
+            for k, x in self.dati["dispositivi"].items():
+                if x["persona"] in per and self._vivo(x, vivi):
+                    per[x["persona"]].append({"id": k, "chiave": x["chiave"], "attivo": True})
+            return {"io": persona, "persone": [{"id": p, "nome": n, "dispositivi": sorted(per[p], key=lambda y: y["id"])}
+                                               for p, n in sorted(vivi[0].items(), key=lambda kv: (kv[0] != "p", kv[1].lower()))]}
+
+
+class Posizioni:
+    """Le condivisioni della posizione, in memoria: chi, a chi, tipo, scadenza e l'ultima posizione cifrata (con la
+    chiave per ciascun dispositivo dei destinatari). Una versione per persona sveglia le attese lunghe."""
+
+    def __init__(self, chiavi):
+        self.chiavi = chiavi
+        self.cond = threading.Condition()
+        self.c = {}                                   # id -> condivisione
+        self.ver, self.base = {}, int(time.time())    # dopo un riavvio le versioni sono diverse: i telefoni rileggono
+        self.create = {}                              # persona -> istanti delle condivisioni create nell'ultima ora
+
+    def _v(self, persona):
+        return self.base + self.ver.get(persona, 0)
+
+    def _tocca(self, persone):
+        for p in persone:
+            self.ver[p] = self.ver.get(p, 0) + 1
+        self.cond.notify_all()
+
+    def tocca_tutti(self):
+        """Le chiavi di qualcuno sono cambiate: chi condivide rilegge «mancano»."""
+        with self.cond:
+            self.base += 1
+            self.cond.notify_all()
+
+    def _pulisci(self, ora, vivi):
+        for cid, x in list(self.c.items()):
+            if x["scade"] <= ora or x["da"] not in vivi[0]:
+                del self.c[cid]
+                self._tocca([x["da"]] + x["a"])
+
+    def _attesi(self, x, vivi):
+        """I dispositivi che devono poter leggere la posizione: quelli attivi dei destinatari ancora in Atlante."""
+        out = set()
+        for p in x["a"]:
+            if p in vivi[0]:
+                out.update(self.chiavi.attivi(p, vivi))
+        return out
+
+    @staticmethod
+    def _base(x):
+        return {k: x[k] for k in ("id", "tipo", "durata", "inizio", "scade", "seq", "t")}
+
+    def _mia(self, x, vivi):
+        fatte = set((x["pos"] or {}).get("chiavi", {}))
+        return dict(self._base(x), a=[{"id": p, "nome": vivi[0][p]} for p in x["a"] if p in vivi[0]], disp=x["disp"],
+                    mancano=sorted(self._attesi(x, vivi) - fatte))
+
+    def _per_me(self, x, disp, vivi):
+        pos, busta = x["pos"], None
+        if pos and disp and disp in pos["chiavi"]:   # a ognuno solo la chiave cifrata per il suo dispositivo
+            busta = {"id": pos["id"], "disp": pos["disp"], "corpo": pos["corpo"], "sale": pos["sale"],
+                     "chiave": pos["chiavi"][disp]}
+        return dict(self._base(x), da={"id": x["da"], "nome": vivi[0][x["da"]]}, pos=busta)
+
+    def crea(self, persona, accesso, corpo):
+        tipo, durata, a = corpo.get("tipo"), corpo.get("durata"), corpo.get("a")
+        if tipo not in TIPI_POS:
+            raise ErroreExtra(400, "Tipo non valido: «vivo» o «punto»")
+        if isinstance(durata, bool) or durata not in POS_DURATE:
+            raise ErroreExtra(400, "Durata non valida: 900, 3600 o 0 (finché non la fermi)")
+        if not isinstance(a, list) or not 1 <= len(a) <= POS_PERSONE_MAX or not all(isinstance(p, str) for p in a):
+            raise ErroreExtra(400, "Scegli da 1 a %d persone" % POS_PERSONE_MAX)
+        a = list(dict.fromkeys(a))
+        with self.cond:
+            vivi, ora = _cifra_vivi(), time.time()
+            self._pulisci(ora, vivi)
+            self.chiavi.mio(persona, corpo.get("disp"), accesso, vivi)
+            if persona in a:
+                raise ErroreExtra(400, "La posizione si condivide con gli altri, non con sé stessi")
+            if any(p not in vivi[0] for p in a):
+                raise ErroreExtra(404, "Persona sconosciuta: non è più in Atlante?")
+            fatte = [t for t in self.create.get(persona, []) if ora - t < 3600]
+            if len(fatte) >= POS_CREATE_ORA:
+                raise ErroreExtra(429, "Troppe condivisioni nell'ultima ora: riprova più tardi")
+            vecchie = [k for k, x in self.c.items() if x["da"] == persona and x["tipo"] == "vivo"] if tipo == "vivo" else []
+            if sum(1 for x in self.c.values() if x["da"] == persona) - len(vecchie) >= POS_ATTIVE_MAX:
+                raise ErroreExtra(409, "Hai già %d condivisioni attive: fermane qualcuna" % POS_ATTIVE_MAX)
+            for k in vecchie:   # una sola dal vivo alla volta: la nuova prende il posto della vecchia
+                self._tocca([persona] + self.c.pop(k)["a"])
+            cid = secrets.token_hex(8)
+            x = self.c[cid] = {"id": cid, "da": persona, "disp": corpo["disp"], "a": a, "tipo": tipo, "durata": durata,
+                               "inizio": ora, "scade": ora + (durata or POS_SENZA_FINE), "seq": 0, "t": 0, "pos": None,
+                               "ultimo": 0.0}
+            self.create[persona] = fatte + [ora]
+            self._tocca([persona] + a)
+            return {"condivisione": self._mia(x, vivi)}
+
+    def aggiorna(self, persona, accesso, cid, corpo):
+        with self.cond:
+            vivi, ora = _cifra_vivi(), time.time()
+            self._pulisci(ora, vivi)
+            x = self.c.get(cid)
+            if x is None or x["da"] != persona:
+                raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
+            testo, chiavi, mid = corpo.get("corpo"), corpo.get("chiavi"), corpo.get("id")
+            if isinstance(testo, str) and len(testo) > POS_CORPO_MAX:
+                raise ErroreExtra(413, "Posizione cifrata troppo grande")
+            if not isinstance(mid, str) or not ID_CIFRA.match(mid):
+                raise ErroreExtra(400, "Aggiornamento non valido")
+            if len(_cifra_b64(testo, POS_CORPO_MAX)) < 29 or len(_cifra_b64(corpo.get("sale"), 64)) != 16:
+                raise ErroreExtra(400, "Posizione cifrata non valida")
+            if not isinstance(chiavi, dict) or len(chiavi) > POS_PERSONE_MAX * CHIAVI_DISP_MAX:
+                raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+            for k, w in chiavi.items():
+                if not ID_CIFRA.match(k) or len(_cifra_b64(w, 200)) != 60:
+                    raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+            self.chiavi.mio(persona, corpo.get("disp"), accesso, vivi)
+            if ora - x["ultimo"] < POS_OGNI:
+                raise ErroreExtra(429, "Troppo presto: al più un aggiornamento ogni 5 secondi")
+            attesi = self._attesi(x, vivi)
+            # restano solo le chiavi per i dispositivi dei destinatari: le altre non servono a nessuno
+            x["pos"] = {"id": mid, "disp": corpo["disp"], "corpo": testo, "sale": corpo["sale"],
+                        "chiavi": {k: w for k, w in chiavi.items() if k in attesi}}
+            x.update(seq=x["seq"] + 1, t=ora, ultimo=ora, disp=corpo["disp"])
+            self._tocca([persona] + x["a"])
+            return {"seq": x["seq"], "t": ora, "scade": x["scade"], "mancano": sorted(attesi - set(chiavi))}
+
+    def ferma(self, persona, cid):
+        with self.cond:
+            x = self.c.get(cid)
+            if x is None or x["da"] != persona:
+                raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
+            del self.c[cid]
+            self._tocca([persona] + x["a"])
+            return {"ok": True}
+
+    def elenco(self, persona, accesso, disp, v, attesa):
+        """Le mie condivisioni e quelle verso di me; con `attesa`, appena qualcosa cambia rispetto alla versione `v`."""
+        fine = time.time() + max(0.0, min(attesa, ATTESA_MAX))
+        with self.cond:
+            if disp:
+                self.chiavi.mio(persona, disp, accesso, _cifra_vivi())
+            while True:
+                vivi, ora = _cifra_vivi(), time.time()
+                self._pulisci(ora, vivi)
+                if self._v(persona) != v or ora >= fine:
+                    break
+                # sveglia anche alla scadenza di una condivisione che la riguarda
+                prossima = min([x["scade"] for x in self.c.values() if x["da"] == persona or persona in x["a"]] + [fine])
+                self.cond.wait(max(0.01, prossima - ora))
+            tutte = sorted(self.c.values(), key=lambda x: -x["inizio"])
+            return {"v": self._v(persona), "io": {"id": persona, "nome": vivi[0].get(persona, "")},
+                    "mie": [self._mia(x, vivi) for x in tutte if x["da"] == persona],
+                    "per_me": [self._per_me(x, disp, vivi) for x in tutte if persona in x["a"]]}
+
+
+POSIZ = None
+_POSIZ_BLOCCO = threading.Lock()
+
+
+def _posizioni():
+    global POSIZ
+    with _POSIZ_BLOCCO:
+        if POSIZ is None:
+            POSIZ = Posizioni(Chiavi(os.path.join(_cart("cache"), "chiavi.json")))
+        return POSIZ
+
+
+def _posizione(h, metodo, cosa, resto, corpo):
+    """Rotte api/extra/chiavi e api/extra/posizione…: solo per chi è in Atlante; ognuno vede le sue condivisioni e,
+    di quelle verso di lui, solo la chiave cifrata per il suo dispositivo."""
+    persona = _cifra_io(h)
+    accesso = _chi_e(h).get("chiave")
+    pz = _posizioni()
+    q = parse_qs(urlsplit(h.path).query)
+    try:
+        if cosa == "chiavi" and not resto and metodo == "GET":
+            return _json(h, pz.chiavi.persone(persona))
+        if cosa == "chiavi" and not resto and metodo == "POST":
+            if pz.chiavi.registra(persona, accesso, corpo, tipo_da_agente(h.headers.get("User-Agent"))):
+                pz.tocca_tutti()
+            return _json(h, {"ok": True, "io": persona})
+        if cosa == "posizione" and not resto and metodo == "GET":
+            try:
+                v, attesa = int((q.get("v") or ["0"])[0]), float((q.get("attesa") or ["0"])[0])
+            except ValueError:
+                raise ErroreExtra(400, "Parametri non validi")
+            return _json(h, pz.elenco(persona, accesso, (q.get("disp") or [""])[0], v, attesa))
+        if cosa == "posizione" and not resto and metodo == "POST":
+            return _json(h, pz.crea(persona, accesso, corpo))
+        if cosa == "posizione" and len(resto) == 1 and metodo in ("POST", "DELETE"):
+            if not ID_POS.match(resto[0]):
+                raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
+            if metodo == "DELETE":
+                return _json(h, pz.ferma(persona, resto[0]))
+            return _json(h, pz.aggiorna(persona, accesso, resto[0], corpo))
+    except ErroreCifra as e:
+        return _json(h, dict(e.extra, errore=e.testo), e.codice)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join([cosa] + resto))
+
+
+
 # ----- videoclip sincronizzati con i brani -----
 #
 # Nel lettore dell'app, al posto della copertina, il videoclip ufficiale del brano, muto: si sente il file della
@@ -3334,6 +3734,8 @@ def _instrada(h, metodo, parti, corpo):
         solo("POST")
         DISP.comando(resto[0], corpo, _di(h))
         _json(h, {"ok": True})
+    elif cosa in ("chiavi", "posizione"):   # posizione condivisa, cifrata da telefono a telefono: vedi la sua sezione
+        _posizione(h, metodo, cosa, resto, corpo)
     elif cosa == "voci" and not resto:
         solo("GET")
         _json(h, {"voci": voci()})
@@ -4371,6 +4773,16 @@ def _permesso(h):
     if h.command != "HEAD":
         h.wfile.write(corpo)
     return False
+
+
+# ----- posizione condivisa: anche per gli invitati -----
+# le sue rotte (ognuno vede solo le sue condivisioni e quelle verso di lui), la sua pagina, la cifratura e il Navigatore,
+# che si apre a loro per «Raggiungilo»: la pagina del Navigatore non usa il Mac (mappe, percorsi e ricerca vanno dal
+# telefono ai servizi pubblici; lo controlla TestPosizione.test_9_pagine_senza_rotte_vietate). In un blocco a parte,
+# così l'elenco qui sopra resta com'è
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern +
+                               r"|^/x/(?:posizione\.html|posizione\.js|cifra\.js|naviga\.html)$"
+                               r"|^(?:/.*)?/api/extra/(?:chiavi|posizione(?:/[^/]+)?)$")
 
 
 def _imposta_password(file):

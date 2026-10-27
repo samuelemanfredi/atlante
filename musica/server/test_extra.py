@@ -7,6 +7,7 @@ Avvia il server su una porta libera con una cartella di musica vuota, cartelle t
 (yt-dlp, say) in testa al PATH; l'IA è cercata su una porta dove non risponde nessuno (quindi «Ollama assente»
 anche su un Mac dove Ollama c'è). Il proxy verso un sito pubblico si prova solo se la rete c'è.
 """
+import base64
 import http.client
 import http.server
 import importlib.util
@@ -1813,6 +1814,480 @@ class TestPersone(unittest.TestCase):
                          ("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36", "Chrome"),
                          ("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0", "Firefox"), ("curl/8", "Altro")):
             self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
+
+
+
+# ----- posizione condivisa, cifrata da telefono a telefono -----
+#
+# Il Mac mini non decifra niente: qui le posizioni sono byte a caso della grandezza giusta e le chiavi pubbliche punti
+# veri della curva P-256 (calcolati qui sotto). La cifratura vera (x/cifra.js) si prova con Deno in TestPosizioneJS.
+
+_POS_P = 2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1
+_POS_G = (0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
+          0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5)
+_POS_DENO = shutil.which("deno") or next((p for p in ("/opt/homebrew/bin/deno", "/usr/local/bin/deno")
+                                          if os.path.isfile(p)), None)
+
+
+def _pos_b64(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _pos_somma(a, b):
+    """Somma di due punti della curva P-256 (y² = x³ − 3x + b), None è il punto all'infinito."""
+    p = _POS_P
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and (a[1] + b[1]) % p == 0:
+        return None
+    if a == b:
+        k = (3 * a[0] * a[0] - 3) * pow(2 * a[1], p - 2, p) % p
+    else:
+        k = (b[1] - a[1]) * pow(b[0] - a[0], p - 2, p) % p
+    x = (k * k - a[0] - b[0]) % p
+    return x, (k * (a[0] - x) - a[1]) % p
+
+
+def _pos_punto(k):
+    r, q = None, _POS_G
+    while k:
+        if k & 1:
+            r = _pos_somma(r, q)
+        q = _pos_somma(q, q)
+        k >>= 1
+    return r
+
+
+def _pos_chiave(k):
+    """Chiave pubblica P-256 vera (k·G), non compressa, in base64url: come la manda il browser."""
+    x, y = _pos_punto(k)
+    return _pos_b64(b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big"))
+
+
+def _pos_id(n):
+    """Id di un dispositivo come lo crea il browser (16 byte in base64url), qui riconoscibile."""
+    return _pos_b64(("disp-%011d" % n).encode("ascii"))
+
+
+def _pos_busta(dispositivi, n=300):
+    """Aggiornamento «cifrato» per i dispositivi dati: byte a caso, con le grandezze vere."""
+    return {"id": _pos_b64(os.urandom(16)), "corpo": _pos_b64(os.urandom(n)), "sale": _pos_b64(os.urandom(16)),
+            "chiavi": {d: _pos_b64(os.urandom(60)) for d in dispositivi}}
+
+
+def _pos_modulo(nome):
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location(nome, SERVER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class TestPosizione(unittest.TestCase):
+    """«Condividi la posizione»: chiavi dei dispositivi, condivisione dal vivo e di un punto, solo per chi è in Atlante
+    (Samuele e invitati); nessuno legge le posizioni (cifrate) destinate ad altri."""
+
+    ORIGINE = {"Origin": "https://mac.esempio.ts.net:10000"}
+    IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15"
+    S1, A1, M1, A2 = _pos_id(1), _pos_id(2), _pos_id(3), _pos_id(4)
+    KS1, KA1, KM1, KA2 = _pos_chiave(11), _pos_chiave(12), _pos_chiave(13), _pos_chiave(14)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-posizione-")
+        cls.c = prepara_cartelle(cls.base)
+        for f in ("x/naviga.html", "x/posizione.html", "x/posizione.js", "x/cifra.js", "x/benessere.html", "x/kit.js"):
+            with open(os.path.join(cls.c["app"], f), "w", encoding="utf-8") as fh:
+                fh.write("ciao")
+        # con ATLANTE_PROPRIETARI dalla rete Tailscale è Samuele solo quel login: gli altri sono «casa»
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_PROPRIETARI": "samuele@example.com"}):
+            cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        cls.m = _pos_modulo("musica_libreria_posizione")
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cls.anna, cls.marco = cls.entra("Anna", "203.0.113.150"), cls.entra("Marco", "203.0.113.151")
+        cls.anna2 = (cls.anna[0], cls.biscotto_nuovo(cls.anna[0], "203.0.113.152"))   # il secondo telefono di Anna
+        for chi, did, k in ((None, cls.S1, cls.KS1), (cls.anna, cls.A1, cls.KA1), (cls.marco, cls.M1, cls.KM1)):
+            st, j = cls.come(chi, "POST", "chiavi", {"id": did, "chiave": k})
+            assert st == 200, (st, j)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    @classmethod
+    def biscotto_nuovo(cls, pid, ip):
+        codice, _ = cls.pers.invito(pid)
+        h = dict(FUNNEL, **{"X-Forwarded-For": ip, "User-Agent": cls.IPHONE,
+                            "Content-Type": "application/x-www-form-urlencoded"}, **cls.ORIGINE)
+        st, hh, b = richiesta(cls.s.porta, "POST", "/accesso/invito/" + codice, b"", intest=h)
+        assert st == 200, b[:300]
+        v = [x for x in hh.get_all("Set-Cookie") or [] if x.startswith("am_accesso=o.")]
+        return v[0].split(";")[0].split("=", 1)[1]
+
+    @classmethod
+    def entra(cls, nome, ip):
+        pid = cls.pers.crea(nome)["id"]
+        return pid, cls.biscotto_nuovo(pid, ip)
+
+    @classmethod
+    def come(cls, chi, metodo, p, corpo=None):
+        """(codice, risposta) di una richiesta a api/extra/<p>: Samuele dal Mac (chi=None), «casa» (dalla rete Tailscale
+        con un login che non è di Samuele) o un invitato (persona, biscotto) da Internet."""
+        if chi is None:
+            h = {}
+        elif chi == "casa":
+            h = {"X-Forwarded-For": "100.100.1.2"}
+        else:
+            h = dict(FUNNEL, **{"X-Forwarded-For": "203.0.113.150", "Cookie": "am_accesso=" + chi[1],
+                                "User-Agent": cls.IPHONE}, **cls.ORIGINE)
+        st, hh, b = richiesta(cls.s.porta, metodo, "/api/extra/" + p, corpo, intest=h)
+        try:
+            j = json.loads(b.decode("utf-8")) if b else None
+        except ValueError:
+            j = None
+        return st, j
+
+    def condividi(self, chi=None, a=None, tipo="vivo", durata=3600, disp=None):
+        st, j = self.come(chi, "POST", "posizione", {"tipo": tipo, "a": a or [self.anna[0]], "durata": durata,
+                                                    "disp": disp or self.S1})
+        self.assertEqual(st, 200, j)
+        return j["condivisione"]
+
+    def per_me(self, chi, disp, cid):
+        st, j = self.come(chi, "GET", "posizione?disp=" + disp)
+        self.assertEqual(st, 200, j)
+        return next((x for x in j["per_me"] if x["id"] == cid), None)
+
+    def test_1_chiavi_dei_dispositivi(self):
+        anna, marco = self.anna[0], self.marco[0]
+        st, j = self.come(self.anna, "GET", "chiavi")
+        self.assertEqual(st, 200, j)
+        self.assertEqual(j["io"], anna)
+        self.assertEqual(j["persone"][0]["id"], "p")   # Samuele per primo, poi gli invitati
+        per = {p["id"]: p for p in j["persone"]}
+        self.assertEqual(per["p"]["nome"], "Samuele")
+        self.assertEqual(per["p"]["dispositivi"], [{"id": self.S1, "chiave": self.KS1, "attivo": True}])
+        self.assertEqual(per[anna]["dispositivi"], [{"id": self.A1, "chiave": self.KA1, "attivo": True}])
+        self.assertEqual((per[marco]["nome"], per[marco]["dispositivi"][0]["id"]), ("Marco", self.M1))
+        self.assertEqual(self.come(None, "GET", "chiavi")[1]["io"], "p")
+        # lo stesso dispositivo con la stessa chiave: va bene (il telefono la rimanda a ogni apertura)
+        self.assertEqual(self.come(self.anna, "POST", "chiavi", {"id": self.A1, "chiave": self.KA1})[0], 200)
+        # l'id di un altro, o lo stesso id con un'altra chiave: no
+        self.assertEqual(self.come(self.anna, "POST", "chiavi", {"id": self.S1, "chiave": self.KA1})[0], 409)
+        self.assertEqual(self.come(None, "POST", "chiavi", {"id": self.S1, "chiave": self.KA1})[0], 409)
+        x, y = _pos_punto(15)
+        storta = _pos_b64(b"\x04" + x.to_bytes(32, "big") + ((y + 1) % _POS_P).to_bytes(32, "big"))
+        for corpo in ({"id": _pos_id(90), "chiave": storta}, {"id": _pos_id(90), "chiave": self.KA1[:40]},
+                      {"id": "corto", "chiave": _pos_chiave(16)}, {"id": _pos_id(90)}, {"chiave": _pos_chiave(16)}):
+            self.assertEqual(self.come(self.anna, "POST", "chiavi", corpo)[0], 400, corpo)
+        # dalla rete di casa non si sa chi c'è: niente chiavi né posizioni
+        for metodo, p, corpo in (("GET", "chiavi", None), ("POST", "chiavi", {"id": _pos_id(91), "chiave": _pos_chiave(17)}),
+                                 ("GET", "posizione", None), ("POST", "posizione", {"tipo": "punto"})):
+            st, j = self.come("casa", metodo, p, corpo)
+            self.assertEqual(st, 403, (metodo, p))
+            self.assertIn("rete di casa", j["errore"])
+
+    def test_2_dal_vivo(self):
+        anna = self.anna[0]
+        c = self.condividi(a=[anna], durata=3600)
+        self.assertEqual((c["tipo"], c["a"], c["seq"]), ("vivo", [{"id": anna, "nome": "Anna"}], 0))
+        self.assertAlmostEqual(c["scade"], time.time() + 3600, delta=10)
+        self.assertEqual(c["mancano"], [self.A1])   # nessuna posizione ancora: manca il telefono di Anna
+        # Anna la vede subito, senza posizione
+        x = self.per_me(self.anna, self.A1, c["id"])
+        self.assertEqual((x["tipo"], x["da"], x["pos"]), ("vivo", {"id": "p", "nome": "Samuele"}, None))
+        b = _pos_busta([self.A1])
+        st, j = self.come(None, "POST", "posizione/" + c["id"], dict(b, disp=self.S1))
+        self.assertEqual(st, 200, j)
+        self.assertEqual((j["seq"], j["mancano"]), (1, []))
+        x = self.per_me(self.anna, self.A1, c["id"])
+        self.assertEqual(x["seq"], 1)
+        # ad Anna arriva solo la chiave cifrata per il suo telefono, non quelle degli altri dispositivi
+        self.assertEqual(x["pos"], {"id": b["id"], "disp": self.S1, "corpo": b["corpo"], "sale": b["sale"],
+                                    "chiave": b["chiavi"][self.A1]})
+        # senza dire il dispositivo: la condivisione sì, la posizione no
+        st, j = self.come(self.anna, "GET", "posizione")
+        self.assertIsNone(next(y for y in j["per_me"] if y["id"] == c["id"])["pos"])
+        st, j = self.come(None, "GET", "posizione")
+        self.assertEqual([y["id"] for y in j["mie"] if y["id"] == c["id"]], [c["id"]])
+        self.assertEqual(j["io"], {"id": "p", "nome": "Samuele"})
+        self.assertEqual(self.come(None, "DELETE", "posizione/" + c["id"])[0], 200)
+        self.assertIsNone(self.per_me(self.anna, self.A1, c["id"]))
+        self.assertEqual(self.come(None, "DELETE", "posizione/" + c["id"])[0], 404)
+
+    def test_3_nessuno_legge_quelle_degli_altri(self):
+        anna = self.anna[0]
+        c = self.condividi(a=[anna])
+        b = _pos_busta([self.A1, self.M1])   # anche per il telefono di Marco, che non è tra i destinatari
+        self.assertEqual(self.come(None, "POST", "posizione/" + c["id"], dict(b, disp=self.S1))[0], 200)
+        # Marco non la vede, né con il suo telefono né con l'id di quello di Anna
+        self.assertIsNone(self.per_me(self.marco, self.M1, c["id"]))
+        self.assertEqual(self.come(self.marco, "GET", "posizione?disp=" + self.A1)[0], 404)
+        self.assertEqual(self.come(self.anna, "GET", "posizione?disp=" + self.S1)[0], 404)
+        # chi la riceve non la cambia e non la ferma; un altro non la usa per mandare
+        self.assertEqual(self.come(self.anna, "POST", "posizione/" + c["id"], dict(_pos_busta([self.A1]), disp=self.A1))[0], 404)
+        self.assertEqual(self.come(self.marco, "DELETE", "posizione/" + c["id"])[0], 404)
+        self.assertEqual(self.come(self.anna, "DELETE", "posizione/" + c["id"])[0], 404)
+        self.assertEqual(self.come(self.marco, "POST", "posizione", {"tipo": "punto", "a": [anna], "durata": 900,
+                                                                    "disp": self.A1})[0], 404)
+        # e la condivisione c'è ancora, con la posizione solo per Anna
+        x = self.per_me(self.anna, self.A1, c["id"])
+        self.assertEqual(x["pos"]["chiave"], b["chiavi"][self.A1])
+        st, j = self.come(self.marco, "GET", "posizione?disp=" + self.M1)
+        self.assertNotIn(b["chiavi"][self.M1], json.dumps(j))
+        self.assertNotIn(b["corpo"], json.dumps(j))
+        self.come(None, "DELETE", "posizione/" + c["id"])
+
+    def test_4_nuovo_telefono_del_destinatario(self):
+        anna = self.anna[0]
+        self.assertEqual(self.come(self.anna2, "POST", "chiavi", {"id": self.A2, "chiave": self.KA2})[0], 200)
+        try:
+            c = self.condividi(a=[anna])
+            st, j = self.come(None, "POST", "posizione/" + c["id"], dict(_pos_busta([self.A1]), disp=self.S1))
+            self.assertEqual(j["mancano"], [self.A2])   # il telefono che manda rilegge le chiavi e cifra anche per lui
+            st, j = self.come(None, "GET", "posizione")
+            self.assertEqual(next(y for y in j["mie"] if y["id"] == c["id"])["mancano"], [self.A2])
+            self.assertIsNone(self.per_me(self.anna2, self.A2, c["id"])["pos"])
+            time.sleep(self.m.POS_OGNI + 0.1)
+            b = _pos_busta([self.A1, self.A2])
+            st, j = self.come(None, "POST", "posizione/" + c["id"], dict(b, disp=self.S1))
+            self.assertEqual((st, j["mancano"]), (200, []))
+            self.assertEqual(self.per_me(self.anna2, self.A2, c["id"])["pos"]["chiave"], b["chiavi"][self.A2])
+            self.come(None, "DELETE", "posizione/" + c["id"])
+        finally:   # il secondo telefono esce: le altre prove contano solo A1
+            self.pers.revoca_dispositivo(self.anna2[1].split(".")[2])
+
+    def test_5_punto_e_limiti(self):
+        anna, marco = self.anna[0], self.marco[0]
+        p = self.condividi(a=[anna, marco], tipo="punto", durata=0)
+        self.assertAlmostEqual(p["scade"], time.time() + 12 * 3600, delta=10)   # «finché non la fermi»: al più 12 ore
+        self.assertEqual(sorted(x["id"] for x in p["a"]), sorted([anna, marco]))
+        for corpo, codice in (({"tipo": "x", "a": [anna], "durata": 900}, 400), ({"tipo": "vivo", "a": [anna], "durata": 60}, 400),
+                              ({"tipo": "vivo", "a": [anna], "durata": True}, 400), ({"tipo": "vivo", "a": [], "durata": 900}, 400),
+                              ({"tipo": "vivo", "a": ["p"], "durata": 900}, 400), ({"tipo": "vivo", "a": anna, "durata": 900}, 400),
+                              ({"tipo": "vivo", "a": ["ffffffffffffffff"], "durata": 900}, 404),
+                              ({"tipo": "vivo", "a": ["%016x" % i for i in range(33)], "durata": 900}, 400),
+                              ({"tipo": "vivo", "a": [anna], "durata": 900, "disp": self.A1}, 404)):
+            corpo.setdefault("disp", self.S1)
+            self.assertEqual(self.come(None, "POST", "posizione", corpo)[0], codice, corpo)
+        # una sola condivisione dal vivo alla volta: la nuova prende il posto della vecchia
+        v1 = self.condividi(a=[anna])
+        v2 = self.condividi(a=[marco])
+        st, j = self.come(None, "GET", "posizione")
+        mie = [y["id"] for y in j["mie"]]
+        self.assertNotIn(v1["id"], mie)
+        self.assertIn(v2["id"], mie)
+        self.assertIn(p["id"], mie)   # il punto resta
+        # al più un aggiornamento ogni pochi secondi, e di grandezze sensate
+        u = "posizione/" + v2["id"]
+        self.assertEqual(self.come(None, "POST", u, dict(_pos_busta([self.M1]), disp=self.S1))[0], 200)
+        self.assertEqual(self.come(None, "POST", u, dict(_pos_busta([self.M1]), disp=self.S1))[0], 429)
+        grande = dict(_pos_busta([self.M1], n=self.m.POS_CORPO_MAX), disp=self.S1)
+        self.assertEqual(self.come(None, "POST", u, grande)[0], 413)
+        for cambia in ({"sale": _pos_b64(b"x" * 15)}, {"corpo": _pos_b64(b"x" * 20)}, {"id": "corto"},
+                       {"chiavi": {self.M1: _pos_b64(b"x" * 59)}}, {"chiavi": {"!": _pos_b64(b"x" * 60)}}, {"chiavi": []}):
+            self.assertEqual(self.come(None, "POST", u, dict(_pos_busta([self.M1]), disp=self.S1, **cambia))[0], 400, cambia)
+        for x in (v2, p):
+            self.come(None, "DELETE", "posizione/" + x["id"])
+
+    def test_6_attesa_lunga(self):
+        marco = self.marco[0]
+        c = self.condividi(a=[marco])
+        v = self.come(self.marco, "GET", "posizione?disp=" + self.M1)[1]["v"]
+        esito = {}
+
+        def aspetta_marco():
+            t = time.time()
+            esito["r"] = self.come(self.marco, "GET", "posizione?disp=%s&v=%d&attesa=10" % (self.M1, v))
+            esito["t"] = time.time() - t
+        th = threading.Thread(target=aspetta_marco)
+        th.start()
+        time.sleep(0.5)
+        b = _pos_busta([self.M1])
+        self.assertEqual(self.come(None, "POST", "posizione/" + c["id"], dict(b, disp=self.S1))[0], 200)
+        th.join(15)
+        st, j = esito["r"]
+        self.assertLess(esito["t"], 5)   # arriva appena Samuele si sposta, non dopo 10 s
+        self.assertNotEqual(j["v"], v)
+        self.assertEqual(next(x for x in j["per_me"] if x["id"] == c["id"])["pos"]["chiave"], b["chiavi"][self.M1])
+        # niente di nuovo: risponde allo scadere dell'attesa
+        t = time.time()
+        st, j2 = self.come(self.marco, "GET", "posizione?disp=%s&v=%d&attesa=1" % (self.M1, j["v"]))
+        self.assertGreater(time.time() - t, 0.8)
+        self.assertEqual(j2["v"], j["v"])
+        self.come(None, "DELETE", "posizione/" + c["id"])
+
+    def test_7_permessi_invitati(self):
+        for p in ("/x/naviga.html", "/x/posizione.html", "/x/posizione.js", "/x/cifra.js"):
+            st, h, b = richiesta(self.s.porta, "GET", p, intest=dict(FUNNEL, Cookie="am_accesso=" + self.anna[1]))
+            self.assertEqual(st, 200, p)
+        st, h, b = richiesta(self.s.porta, "GET", "/x/benessere.html", intest=dict(FUNNEL, Cookie="am_accesso=" + self.anna[1]))
+        self.assertEqual(st, 403)   # gli altri moduli restano chiusi
+        for metodo, p, atteso in (("GET", "chiavi", 200), ("GET", "posizione", 200), ("POST", "posizione/0123456789abcdef", 404),
+                                  ("DELETE", "posizione/0123456789abcdef", 404), ("GET", "posizione/0123456789abcdef/x", 403),
+                                  ("GET", "stato", 403)):
+            st, j = self.come(self.anna, metodo, p, {} if metodo == "POST" else None)
+            self.assertEqual(st, atteso, (metodo, p, j))
+
+    def test_8_revoca(self):
+        luca, v = self.entra("Luca", "203.0.113.153")
+        dl = _pos_id(5)
+        self.assertEqual(self.come((luca, v), "POST", "chiavi", {"id": dl, "chiave": _pos_chiave(18)})[0], 200)
+        c = self.condividi(a=[luca, self.anna[0]])
+        self.assertEqual(sorted(c["mancano"]), sorted([dl, self.A1]))
+        self.pers.revoca_dispositivo(v.split(".")[2])   # il telefono di Luca non è più in Atlante: esce dai destinatari
+        st, j = self.come(None, "GET", "chiavi")
+        self.assertEqual(next(p for p in j["persone"] if p["id"] == luca)["dispositivi"], [])
+        st, j = self.come(None, "GET", "posizione")
+        self.assertEqual(next(y for y in j["mie"] if y["id"] == c["id"])["mancano"], [self.A1])
+        self.pers.revoca_persona(luca)   # e Luca stesso: sparisce anche dall'elenco della condivisione
+        st, j = self.come(None, "GET", "posizione")
+        self.assertEqual([x["id"] for x in next(y for y in j["mie"] if y["id"] == c["id"])["a"]], [self.anna[0]])
+        self.assertNotIn(luca, [p["id"] for p in self.come(None, "GET", "chiavi")[1]["persone"]])
+        self.come(None, "DELETE", "posizione/" + c["id"])
+
+    def test_9_pagine_senza_rotte_vietate(self):
+        # il Navigatore si apre agli invitati per «Raggiungilo» perché non usa il Mac: mappe, percorsi e ricerca vanno dal
+        # telefono ai servizi pubblici. Lo si controlla leggendo le pagine vere: niente proxy, IA, stato, e solo rotte
+        # permesse agli invitati
+        app = os.path.normpath(os.path.join(QUI, ".."))
+        for f in ("x/naviga.html", "x/posizione.html", "x/posizione.js", "x/cifra.js"):
+            with open(os.path.join(app, f), encoding="utf-8") as fh:
+                t = fh.read()
+            for vietata in ("AX.proxy(", "AX.ia(", "AX.stato(", "proxy?url"):
+                self.assertNotIn(vietata, t, f)
+            rotte = re.findall(r"""\bapi\(\s*['"]([a-z]+)""", t) + re.findall(r"""api/extra/([a-z]+)""", t)
+            if f in ("x/cifra.js", "x/posizione.js"):
+                self.assertTrue(rotte, f)
+            for r in rotte:
+                self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/extra/" + r), (f, r))
+                self.assertIn(r, ("chiavi", "posizione"), (f, r))
+
+
+class TestPosizioniTempi(unittest.TestCase):
+    """Le condivisioni con il tempo spostato in avanti: scadenze, ritmo degli aggiornamenti, limiti."""
+
+    def setUp(self):
+        self.m = _pos_modulo("musica_libreria_posizioni_tempi")
+        self.base = tempfile.mkdtemp(prefix="atlante-posizioni-")
+        self.m.PERS = self.m.Persone(os.path.join(self.base, "persone.json"))
+        self.anna = self.m.PERS.crea("Anna")["id"]
+        did = self.m.PERS.usa_invito(self.m.PERS.invito(self.anna)[0], "iphone")
+        self.ch = self.m.Chiavi(os.path.join(self.base, "chiavi.json"))
+        self.ch.registra("p", None, {"id": _pos_id(1), "chiave": _pos_chiave(21)}, "iphone")
+        self.ch.registra(self.anna, did, {"id": _pos_id(2), "chiave": _pos_chiave(22)}, "iphone")
+        self.pz = self.m.Posizioni(self.ch)
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def piu_tardi(self, secondi):
+        return unittest.mock.patch.object(self.m.time, "time", return_value=time.time() + secondi)
+
+    def crea(self, tipo="vivo", durata=900):
+        return self.pz.crea("p", None, {"tipo": tipo, "a": [self.anna], "durata": durata, "disp": _pos_id(1)})["condivisione"]
+
+    def ids(self, persona="p", chiave="mie"):
+        return [x["id"] for x in self.pz.elenco(persona, None, "", 0, 0)[chiave]]
+
+    def test_scadenze(self):
+        a, b = self.crea("vivo", 900), self.crea("punto", 0)
+        self.assertEqual(sorted(self.ids()), sorted([a["id"], b["id"]]))
+        self.assertEqual(sorted(self.ids(self.anna, "per_me")), sorted([a["id"], b["id"]]))
+        with self.piu_tardi(901):
+            self.assertEqual(self.ids(), [b["id"]])   # 15 minuti passati: la condivisione dal vivo è finita
+        with self.piu_tardi(12 * 3600 + 1):
+            self.assertEqual(self.ids(), [])          # «finché non la fermi»: al più 12 ore
+            self.assertEqual(self.ids(self.anna, "per_me"), [])
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                self.pz.aggiorna("p", None, a["id"], dict(_pos_busta([_pos_id(2)]), disp=_pos_id(1)))
+            self.assertEqual(e.exception.codice, 404)
+
+    def test_ritmo_e_chiavi_dei_soli_destinatari(self):
+        c = self.crea()
+        b = dict(_pos_busta([_pos_id(2), _pos_id(9)]), disp=_pos_id(1))
+        self.pz.aggiorna("p", None, c["id"], b)
+        # la chiave per un dispositivo che non è di un destinatario non resta sul Mac mini
+        self.assertEqual(list(self.pz.c[c["id"]]["pos"]["chiavi"]), [_pos_id(2)])
+        with self.piu_tardi(1):
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                self.pz.aggiorna("p", None, c["id"], b)
+            self.assertEqual(e.exception.codice, 429)
+        with self.piu_tardi(self.m.POS_OGNI + 0.5):
+            self.assertEqual(self.pz.aggiorna("p", None, c["id"], b)["seq"], 2)
+
+    def test_limiti(self):
+        self.m.POS_ATTIVE_MAX, self.m.POS_CREATE_ORA = 2, 4
+        p1 = self.crea("punto")
+        self.crea("punto")
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.crea("punto")   # due attive: la terza no
+        self.assertEqual(e.exception.codice, 409)
+        self.pz.ferma("p", p1["id"])
+        v1 = self.crea("vivo")
+        v2 = self.crea("vivo")   # una sola dal vivo: la nuova prende il posto della vecchia
+        self.assertEqual(len(self.ids()), 2)
+        self.assertIn(v2["id"], self.ids())
+        self.assertNotIn(v1["id"], self.ids())
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.crea("vivo")    # quattro create in un'ora: basta
+        self.assertEqual(e.exception.codice, 429)
+        with self.piu_tardi(3601):
+            self.crea("vivo")    # dopo un'ora si torna a poterne creare
+
+
+@unittest.skipUnless(_POS_DENO, "Deno non c'è: la cifratura del browser si prova solo a mano")
+class TestPosizioneJS(unittest.TestCase):
+    """x/cifra.js e le regole di x/posizione.js con la WebCrypto vera (Deno): due telefoni che si scambiano una posizione,
+    un estraneo che non la legge, un Mac mini che la cambia o la sposta e viene scoperto."""
+
+    def test_deno(self):
+        base = tempfile.mkdtemp(prefix="atlante-posizione-deno-")
+        try:
+            env = dict(os.environ, DENO_DIR=os.path.join(base, "deno"), DENO_NO_UPDATE_CHECK="1", NO_COLOR="1")
+            app = os.path.normpath(os.path.join(QUI, ".."))
+            r = subprocess.run([_POS_DENO, "run", "--no-config", "--no-remote", "--allow-read=" + app,
+                                os.path.join(QUI, "test_posizione.js"), app],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=120)
+            out = r.stdout.decode("utf-8", "replace")
+            self.assertEqual(r.returncode, 0, out)
+            j = json.loads(out.strip().splitlines()[-1])
+            self.assertEqual(j["fallite"], [], out)
+            self.assertGreaterEqual(len(j["riuscite"]), 8, out)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_deno_attraverso_il_server(self):
+        base = tempfile.mkdtemp(prefix="atlante-posizione-deno-server-")
+        c = prepara_cartelle(base)
+        s = Server(base, c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        try:
+            pers = _pos_modulo("musica_libreria_posizione_deno").Persone(os.path.join(c["cache"], "persone.json"))
+            pid = pers.crea("Anna")["id"]
+            codice, _ = pers.invito(pid)
+            h = dict(FUNNEL, **{"X-Forwarded-For": "203.0.113.160", "Content-Type": "application/x-www-form-urlencoded",
+                                "Origin": "https://mac.esempio.ts.net:10000"})
+            st, hh, b = richiesta(s.porta, "POST", "/accesso/invito/" + codice, b"", intest=h)
+            self.assertEqual(st, 200, b[:200])
+            v = [x for x in hh.get_all("Set-Cookie") if x.startswith("am_accesso=o.")][0].split(";")[0].split("=", 1)[1]
+            anna = {"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.160", "X-Forwarded-Proto": "https",
+                    "Cookie": "am_accesso=" + v}
+            env = dict(os.environ, DENO_DIR=os.path.join(base, "deno"), DENO_NO_UPDATE_CHECK="1", NO_COLOR="1")
+            app = os.path.normpath(os.path.join(QUI, ".."))
+            r = subprocess.run([_POS_DENO, "run", "--no-config", "--no-remote", "--allow-read=" + app,
+                                "--allow-net=127.0.0.1:%d" % s.porta, os.path.join(QUI, "test_posizione.js"), app, "server",
+                                "http://127.0.0.1:%d/" % s.porta, json.dumps({"samuele": {}, "anna": anna})],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=120)
+            out = r.stdout.decode("utf-8", "replace")
+            self.assertEqual(r.returncode, 0, out)
+            j = json.loads(out.strip().splitlines()[-1])
+            self.assertEqual((j["fallite"], len(j["riuscite"])), ([], 3), out)
+        finally:
+            s.ferma()
+            shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1475,12 +1475,166 @@ body{position:fixed;inset:0}
     rs();
   }
 
+  /* ---------- destinazione da «Raggiungilo» (#verso=lat,lon o #verso=persona:<id>) ---------- */
+  // Arriva dall'avviso «Nome condivide la sua posizione» dell'app (x/posizione.js), anche per gli invitati. Le coordinate
+  // stanno dopo il # dell'indirizzo, che non va al Mac mini (le posizioni non deve conoscerle); vale anche ?verso=.
+  // Con «persona:» la destinazione è la posizione dal vivo di quella persona: arriva cifrata (attesa lunga su
+  // api/extra/posizione), si apre qui con x/cifra.js, il segnaposto la segue e il percorso si ricalcola quando si sposta
+  // di più di VERSO_METRI, al più ogni VERSO_OGNI (il servizio pubblico dei percorsi va usato con misura).
+  const VERSO_METRI = 50, VERSO_OGNI = 15000;
+  const VS = {modo: '', pid: '', nome: '', tok: 0, v: 0, cid: '', seq: -1, ultima: null, rotta: null, calcolo: 0, calcolando: false,
+    chiuso: false, primo: true, finita: false, testo: ''};
+  $('top').insertAdjacentHTML('beforeend', '<div id="versoNota" class="glass" hidden style="border-radius:14px;padding:10px 12px;font-size:15px;display:flex;align-items:center;gap:8px"></div>');
+  async function api(percorso, o) {   // il Mac: solo api/extra/posizione e chiavi, permesse anche agli invitati
+    o = Object.assign({cache: 'no-store'}, o);
+    if (o.body && typeof o.body !== 'string') { o.body = JSON.stringify(o.body); o.headers = {'Content-Type': 'application/json'}; }
+    const r = await AX.fetchT(AX.API + percorso, o, o.timeout || 30000);
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (!r.ok) { const er = new Error((j && j.errore) || ('il Mac ha risposto ' + r.status)); er.codice = r.status; er.dati = j || {}; throw er; }
+    return j;
+  }
+  function versoNota(html, tasto) {
+    const t = html ? '<div style="flex:1;min-width:0">' + html + '</div>' + (tasto || '') : '';
+    if (t === VS.testo) return;
+    VS.testo = t; $('versoNota').innerHTML = t; $('versoNota').hidden = !t; rs();
+  }
+  function versoTesto() {
+    const nome = '<b>' + esc(VS.nome || 'Posizione condivisa') + '</b>';
+    if (VS.modo === 'punto') versoNota(VS.chiuso ? '' : nome + ' · punto condiviso');
+    else if (VS.modo !== 'persona') versoNota('');
+    else if (VS.chiuso) versoNota('Hai chiuso il percorso verso ' + nome + '.', VS.ultima ? '<button class="btn sm pri" id="versoRiprendi">Riprendi</button>' : '');
+    else if (VS.finita) versoNota(VS.ultima ? nome + ' ha smesso di condividere la posizione: la destinazione resta il suo ultimo punto, delle ' + soloOra(VS.ultima.arrivo) + '.' : nome + ' non sta condividendo la posizione con te.');
+    else if (!VS.ultima) versoNota('In attesa della posizione di ' + nome + '…');
+    else {
+      const s = Math.max(0, (Date.now() - VS.ultima.arrivo) / 1000);
+      versoNota(nome + ' · dal vivo, aggiornata ' + (s < 45 ? 'adesso' : s < 3600 ? Math.round(s / 60) + ' min fa' : 'alle ' + soloOra(VS.ultima.arrivo)) +
+        (VS.ultima.acc ? ' (±' + Math.round(VS.ultima.acc) + ' m)' : ''));
+    }
+  }
+  const versoDest = p => ({name: VS.nome || 'Posizione condivisa', addr: VS.modo === 'persona' ? 'Posizione dal vivo' : p.lat.toFixed(5) + ', ' + p.lon.toFixed(5), lat: p.lat, lon: p.lon, verso: true});
+  $('versoNota').addEventListener('click', e => {
+    if (e.target.id === 'versoRiprendi' && VS.ultima) { VS.chiuso = false; versoImposta(versoDest(VS.ultima)); versoTesto(); }
+  });
+  // come setDest, ma la posizione di un'altra persona non entra nei «Recenti»
+  async function versoImposta(d) {
+    if (S.nav) fermaNav(false);
+    S.dest = d; S.routes = []; S.esitoVign = null; S.tokVign++;
+    disegnaDest(); disegnaRotte(); aggPill(); chiudiFogli();
+    renderPanel('calcolo');
+    const meta = {lat: d.lat, lon: d.lon};
+    VS.calcolando = true; VS.calcolo = Date.now();
+    try {
+      const from = await origine();
+      if (S.dest !== d) return;
+      const {routes, escluse} = await calcolaRotte(from, meta, S.speed > 3 ? S.head : null);
+      if (S.dest !== d) return;
+      S.escluse = escluse; S.routes = routes.map(prepara); S.sel = scegliMigliore(); VS.rotta = meta;
+      disegnaRotte(); renderPanel('anteprima'); vediTutto(); controllaVignette();
+    } catch (e) {
+      if (S.dest === d) renderPanel('errore', e.message);
+    } finally { VS.calcolando = false; }
+  }
+  // la persona si è spostata: percorso nuovo verso dov'è adesso, senza fermare la guida né ripetere gli annunci
+  async function versoRicalcola() {
+    const d = S.dest, meta = {lat: d.lat, lon: d.lon};
+    VS.calcolando = true; VS.calcolo = Date.now();
+    try {
+      const {routes, escluse} = await calcolaRotte(S.pos, meta, S.nav && S.speed > 3 ? S.head : null);
+      if (S.dest !== d) return;
+      S.escluse = escluse; S.routes = routes.map(prepara); S.sel = scegliMigliore(); VS.rotta = meta;
+      if (S.nav) { S.snapIdx = 0; S.annunci.clear(); S.offSince = 0; disegnaRotte(); S.zitto = true; passoNav(); S.zitto = false; }
+      else { disegnaRotte(); renderPanel('anteprima'); }
+    } catch (e) { /* si riprova al prossimo controllo */ }
+    finally { VS.calcolando = false; }
+  }
+  function versoNuova(p, c) {
+    if (!isFinite(p.lat) || !isFinite(p.lon) || Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180) return;
+    VS.ultima = {lat: +p.lat, lon: +p.lon, acc: p.acc, arrivo: c.t * 1000};
+    if (!VS.primo && S.dest && !S.dest.verso) VS.chiuso = true;   // ha scelto un'altra destinazione: resta quella
+    if (VS.chiuso) return;
+    if (VS.primo || !S.dest) { VS.primo = false; versoImposta(versoDest(VS.ultima)); return; }
+    S.dest.lat = VS.ultima.lat; S.dest.lon = VS.ultima.lon; disegnaDest();
+  }
+  async function versoSegui(tok) {
+    try {
+      await caricaScript('cifra.js');
+      if (!Cifra.disponibile()) throw new Error('serve l\'indirizzo https dell\'app');
+      Cifra.usa(api);
+      await Cifra.registra();
+    } catch (e) { if (tok === VS.tok) versoNota('La posizione dal vivo non si apre qui: ' + esc(e.message) + '.'); return; }
+    let pausa = 0;
+    while (tok === VS.tok) {
+      // Navigatore chiuso (il riquadro resta caricato ma nascosto) o app non sullo schermo: niente richieste
+      if (document.visibilityState !== 'visible' || (window.frameElement && !window.frameElement.offsetParent)) { await sleep(1500); continue; }
+      try {
+        const io = await Cifra.mie();
+        const j = await api('posizione?disp=' + encodeURIComponent(io.disp) + '&v=' + VS.v + '&attesa=25', {timeout: 40000});
+        if (tok !== VS.tok) return;
+        VS.v = j.v; pausa = 0;
+        const c = j.per_me.filter(x => x.da.id === VS.pid).sort((a, b) => (b.tipo === 'vivo') - (a.tipo === 'vivo') || b.inizio - a.inizio)[0];
+        VS.finita = !c;
+        if (c) {
+          VS.nome = c.da.nome;
+          if (c.pos && (c.id !== VS.cid || c.seq !== VS.seq)) {
+            const p = await Cifra.apri(c.pos, c.id, c.da.id);
+            if (tok !== VS.tok) return;
+            VS.cid = c.id; VS.seq = c.seq;
+            versoNuova(p, c);
+          }
+        }
+        versoTesto();
+      } catch (e) {
+        if (tok !== VS.tok) return;
+        if (e.dati && e.dati.registra) { await Cifra.registra(true).catch(() => {}); continue; }
+        pausa = Math.min(30000, (pausa || 2000) * 2);
+        if (!VS.ultima) versoNota('Non riesco a leggere la posizione di <b>' + esc(VS.nome) + '</b>: ' + esc(e.message) + '. Riprovo…');
+        await sleep(pausa);
+      }
+    }
+  }
+  function versoDaIndirizzo() {
+    const h = new URLSearchParams(location.hash.slice(1)), q = new URLSearchParams(location.search);
+    const dove = h.get('verso') || q.get('verso') || '', nome = (h.get('nome') || q.get('nome') || '').slice(0, 40);
+    const tok = ++VS.tok;
+    Object.assign(VS, {modo: '', pid: '', nome, v: 0, cid: '', seq: -1, ultima: null, rotta: null, chiuso: false, primo: true, finita: false});
+    if (!dove) { versoNota(''); return; }
+    $('resume').hidden = true;
+    const m = dove.match(/^(-?\d{1,2}(?:\.\d+)?),(-?\d{1,3}(?:\.\d+)?)$/);
+    if (m && Math.abs(+m[1]) <= 90 && Math.abs(+m[2]) <= 180) {
+      VS.modo = 'punto'; VS.ultima = {lat: +m[1], lon: +m[2]};
+      versoImposta(versoDest(VS.ultima)); versoTesto();
+      return;
+    }
+    const p = dove.match(/^persona:(p|[0-9a-f]{16})$/);
+    if (!p) { versoNota('Destinazione condivisa non valida.'); return; }
+    VS.modo = 'persona'; VS.pid = p[1]; VS.nome = nome || 'La persona';
+    versoTesto();
+    versoSegui(tok);
+  }
+  $('panel').addEventListener('click', e => {   // ✕ o «Fine» sul percorso: smetto di seguire (con «Riprendi» per tornarci)
+    const b = e.target.closest('[data-a]');
+    if (b && VS.modo && (b.dataset.a === 'annulla' || b.dataset.a === 'fine')) { VS.chiuso = true; versoTesto(); }
+  });
+  // tornando sullo schermo l'attesa lunga riparte (quella di prima può essere rimasta appesa in sottofondo)
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && VS.modo === 'persona') versoSegui(++VS.tok); });
+  setInterval(() => {
+    if (VS.modo !== 'persona') return;
+    versoTesto();
+    if (!S.dest || !S.dest.verso || !S.pos || VS.chiuso || VS.calcolando || S.ricalcolando) return;
+    const dt = Date.now() - VS.calcolo;
+    // spostata di più di VERSO_METRI dal punto del percorso; oppure il primo calcolo non è riuscito: si riprova ogni minuto
+    const rifai = VS.rotta ? (S.nav || modoPanel === 'anteprima') && dist(VS.rotta, S.dest) > VERSO_METRI && dt > VERSO_OGNI
+      : modoPanel === 'errore' && dt > 60000;
+    if (rifai) versoRicalcola();
+  }, 5000);
+
   /* ---------- avvio ---------- */
   initMap();
   applicaTema(true);
   setInterval(() => applicaTema(), 60000);
   startGeo();
   renderChips(); aggPill(); aggPromemoria(); promemoriaAvvio(); offriRipresa(); syncOpz();
+  versoDaIndirizzo(); addEventListener('hashchange', versoDaIndirizzo);   // «Raggiungilo» dall'avviso di una posizione condivisa
   window.NAVIGA = {istr, targaDa, zoneTarga, stato: S, VIG};  // per le prove automatiche
 })();
 </script>
