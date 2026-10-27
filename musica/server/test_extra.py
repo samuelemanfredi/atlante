@@ -1921,6 +1921,8 @@ class TestInterfaccia(unittest.TestCase):
             {"div[a=x y]": {"nascosto": True}}, {"DIV": {"nascosto": True}}, {"div\n": {"nascosto": True}},
             {"main#view  h2": {"nascosto": True}}, {" div": {"nascosto": True}}, {"div[v=a][a=b]": {"nascosto": True}},
             {"div:has(x)": {"nascosto": True}}, {"div#1x": {"nascosto": True}}, {"": {"nascosto": True}},
+            {"body": {"nascosto": True}}, {"html": {"colore": "rosso"}}, {"div.x body:2": {"nascosto": True}},
+            {"main#view style": {"nascosto": True}}, {"head.x": {"nascosto": True}},
             # proprietà e valori
             {"div.x": {"testo": "x" * 81}}, {"div.x": {"testo": ["x"]}}, {"div.x": {"grandezza": 69}},
             {"div.x": {"grandezza": 201}}, {"div.x": {"grandezza": "120"}}, {"div.x": {"grandezza": True}},
@@ -1947,7 +1949,8 @@ class TestInterfaccia(unittest.TestCase):
         # un testo con HTML resta testo: si salva com'è (l'app lo scrive come testo); spazi e caratteri di controllo no
         buone = {"main#view[v=home] h2.h2[sez=i-piu-ascoltati]": {"testo": "<img src=x onerror=alert(1)>"},
                  "span.l:2": {"testo": " Ciao\n\tmondo\u0000 \u202e! "}, "button#npFav": {"colore": "#FFAA00"},
-                 "div.x": {"sfondo": "accento", "colore": "originale", "testo": ""}}
+                 "div.x": {"sfondo": "accento", "colore": "originale", "testo": ""}, "body main#view[v=home]": {"grandezza": 90},
+                 "nav#tabs div.in button.bodyx": {"nascosto": True}}
         st, h, b = richiesta(self.s.porta, "POST", "/api/extra/interfaccia/personale", {"modifiche": buone})
         self.assertEqual(st, 200, b)
         self.assertIn("application/json", h["Content-Type"])

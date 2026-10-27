@@ -2688,6 +2688,7 @@ const UI_TAV = new Map([['accento', 'var(--accent)'], ['principale', 'var(--fg)'
   ['viola', '#af52de'], ['rosa', '#ff2d55'], ['marrone', '#a2845e'], ['grigio', '#8e8e93'], ['nero', '#000000'], ['bianco', '#ffffff']]);
 const UI_PEZZO = '[a-z][a-z0-9]{0,9}(?:#[A-Za-z][A-Za-z0-9_-]{0,39})?(?:\\.[A-Za-z][A-Za-z0-9_-]{0,29}){0,4}' + ['a', 'tab', 'v', 'k', 'sez'].map(n => '(?:\\[' + n + '=[A-Za-z0-9_-]{1,40}\\])?').join('');
 const UI_IND = new RegExp('^' + UI_PEZZO + '(?: ' + UI_PEZZO + '){0,6}(?::[1-9][0-9]?)?$');
+const UI_NON_ELEMENTI = /(?:^| )(?:html|head|body|script|style|link|meta|title)(?:[#.[:]|$)[^ ]*$/;   // mai l'elemento cambiato
 const UI_HEX = /^#[0-9a-f]{6}$/, UI_VAL = /^[A-Za-z0-9_-]{1,40}$/, UI_CLASSE = /^[A-Za-z][A-Za-z0-9_-]{0,29}$/, UI_ID = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 const UI_CTRL = /[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
 const UI_PROP = ['testo', 'colore', 'sfondo', 'grandezza', 'nascosto', 'ordine'];
@@ -2715,7 +2716,7 @@ function uiPulisci(m) {   // modifiche dal Mac o dalla copia sul telefono: solo 
   if (!m || typeof m !== 'object' || Array.isArray(m)) return out;
   for (const a of Object.keys(m)) {
     const pr = m[a];
-    if (a.length > 400 || !UI_IND.test(a) || !pr || typeof pr !== 'object' || Array.isArray(pr)) continue;
+    if (a.length > 400 || !UI_IND.test(a) || UI_NON_ELEMENTI.test(a) || !pr || typeof pr !== 'object' || Array.isArray(pr)) continue;
     const x = {};
     for (const p of UI_PROP) if (uiHa(pr, p)) { const v = uiValore(p, pr[p]); if (v !== undefined) x[p] = v; }
     const k = Object.keys(x).length; if (!k) continue;
@@ -2767,7 +2768,7 @@ function uiIndirizzo(el) {   // {ind, rip}: rip = si ripete (niente posizione, n
     for (const s of el.parentElement.children) { let ok = false; try { ok = s.matches(sel); } catch (e) {} if (ok) { n++; if (s === el) k = n; } }
     if (n > 1 && k <= 99) ind += ':' + k;
   }
-  return ind.length <= 400 && UI_IND.test(ind) ? {ind, rip} : null;
+  return ind.length <= 400 && UI_IND.test(ind) && !UI_NON_ELEMENTI.test(ind) ? {ind, rip} : null;
 }
 // sezioni della pagina: ogni titolo h2 dà il nome a sé e a quello che lo segue fino al titolo dopo
 const uiSlug = s => fold(s).replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 40).replace(/-+$/, '');
