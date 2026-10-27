@@ -726,9 +726,13 @@ async function loadServer() {
   SRVSCAN = !j.aggiornato;
   clearTimeout(scanTimer); scanTimer = SRVSCAN ? setTimeout(() => reconnect(true), 5000) : 0;
   const now = new Set(), put = [], del = [];
+  // brani sostituiti sul Mac (stesso file, contenuto nuovo: es. la versione explicit al posto di quella censurata):
+  // la data del file cambia e la copia sull'iPhone è quella vecchia
+  const cambiati = [];
   for (const b of j.brani) {
     const id = 'r' + b.id; now.add(id);
     const old = T.get(id) || GONE.get(id); GONE.delete(id);
+    if (old && old.added && b.added && old.added !== b.added && saved.has(id)) cambiati.push(id);
     const m = Object.assign({fav:false, plays:0, last:0}, old || {}, {id, sid:b.id, remote:true, src:'srv|' + b.id,
       title:b.title || '', artist:b.artist || '', album:b.album || '', albumArtist:b.albumArtist || '', track:b.track || 0, disc:b.disc || 0,
       year:b.year || '', genre:b.genre || '', duration:b.duration || (old && old.duration) || 0, added:b.added || (old && old.added) || Date.now(),
@@ -749,6 +753,12 @@ async function loadServer() {
     if (SRVN) { const n = DLQ.length; for (let k = n - 1; k >= 0; k--) if (!T.has(DLQ[k]) && !GONE.has(DLQ[k])) DLQ.splice(k, 1); if (DLQ.length !== n) ls.set('am-dlq', DLQ); }
   }
   dbBatch('meta', put, del).catch(() => {});
+  // la copia vecchia si toglie e il brano si riscarica in silenzio. Troppi insieme = il disco è stato copiato o
+  // ricollegato con date nuove, non brani sostituiti: si lasciano le copie che ci sono (sarebbe un download enorme)
+  if (cambiati.length && cambiati.length <= Math.max(300, saved.size * 0.2)) {
+    for (const id of cambiati) { saved.delete(id); memFiles.delete(id); dbDel('files', id).catch(() => {}); }
+    queueDl(cambiati.filter(id => !TOLTI.has(id)), true);
+  }
   oldIds();
   if (put.length) rematch(put.filter(t => T.has(t.id)));   // brani nuovi o cambiati: forse sono quelli che mancavano alle playlist importate
   nuoviGemelli();
