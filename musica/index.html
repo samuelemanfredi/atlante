@@ -210,11 +210,11 @@ body.xnav #mini{display:none}
 body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .xgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
 .xnote{color:var(--fg2);font-size:15px;margin:4px 4px 18px}
-/* YouTube ha bloccato gli scaricamenti del Mac mini (classifiche e playlist): il riquadro Gestione in rosso */
+/* YouTube blocca le richieste del Mac mini (classifica di YouTube Music, videoclip): il riquadro Gestione in rosso */
 .xtile.xyt{box-shadow:inset 0 0 0 2px #ff3b30}
-.xtile.xyt::after{content:"YouTube ha bloccato gli scaricamenti";color:#ff3b30;font-size:13px;font-weight:600;line-height:1.25}
+.xtile.xyt::after{content:"YouTube blocca le richieste";color:#ff3b30;font-size:13px;font-weight:600;line-height:1.25}
 .xtile.xyt .xn{background:#ff3b30}
-/* classifiche: posizione con ▲▼ e «nuovo», brani in arrivo dal Mac mini */
+/* classifiche: posizione con ▲▼ e «nuovo», brani che la libreria non ha (o in arrivo dalla musica libera) */
 .cllead{display:flex;align-items:center;gap:10px}
 .clpos{width:30px;display:flex;flex-direction:column;align-items:center;font-variant-numeric:tabular-nums;line-height:1.15}
 .clpos b{font-size:16px;font-weight:600}
@@ -1579,9 +1579,10 @@ function searchResults() {
 
 /* ---------- classifiche: ogni classifica letta dal Mac mini è una playlist (posizioni, ▲▼, nuovi, usciti) ---------- */
 // L'elenco arriva dal Mac (api/extra/classifiche, anche per gli invitati) e resta sul telefono: senza rete si vede l'ultima
-// versione ricevuta e suonano i brani salvati sull'iPhone. I brani sono quelli della libreria (si scaricano sull'iPhone come
-// gli altri); quelli che il Mac mini non ha ancora scaricato sono «in arrivo». Chi esce dalla classifica resta nella
-// libreria e, per 4 settimane, in «Usciti di recente».
+// versione ricevuta e suonano i brani salvati sull'iPhone. Suonano i brani della libreria (si scaricano sull'iPhone come
+// gli altri); delle classifiche commerciali gli altri sono «non in libreria» (da lì non si scarica niente), di quelle di
+// musica libera («libera») sono «in arrivo» finché il Mac mini non li ha scaricati. Chi esce dalla classifica resta, per
+// 4 settimane, in «Usciti di recente».
 let CLS = ls.get('am-classifiche', []);
 if (!Array.isArray(CLS)) CLS = [];
 I.classifica = '<path d="M3.5 20.5v-9h4.2v9zm6.4 0v-17h4.2v17zm6.4 0v-12h4.2v12z"/>';
@@ -1616,7 +1617,7 @@ function clRighe(voci, l, pos) {
   const q = new Set(DLQ); let k = 0;
   return '<div class="trks">' + voci.map(b => {
     const t = clTraccia(b), testa = '<span class="cllead"><span class="clpos">' + pos(b) + '</span>' + art(t ? t.cover : null) + '</span>';
-    if (!t) return '<div class="trk clno">' + testa + '<div class="rt"><div class="tx"><span class="t1">' + esc(b.titolo) + '</span><span class="t2">' + esc(b.artista) + ' · ' + (b.stato === 'non disponibile' ? 'non disponibile' : 'in arrivo') + '</span></div></div></div>';
+    if (!t) return '<div class="trk clno">' + testa + '<div class="rt"><div class="tx"><span class="t1">' + esc(b.titolo) + '</span><span class="t2">' + esc(b.artista) + ' · ' + (b.stato === 'in arrivo' || b.stato === 'non disponibile' ? b.stato : 'non in libreria') + '</span></div></div></div>';
     const i = k++;
     return '<div class="trk' + (t.id === curId ? ' cur' : '') + (t.remote && !SRV && !srvWait && !saved.has(t.id) ? ' off' : '') + '" data-id="' + t.id + '"><button class="tap" style="display:contents" data-a="play" data-l="' + l + '" data-i="' + i + '">' + testa +
       '</button><div class="rt"><button class="tx" data-a="play" data-l="' + l + '" data-i="' + i + '" style="text-align:left"><span class="t1">' + t1(t) + '</span><span class="t2">' + esc(t.artist || UNK_ART) + '</span></button>' +
@@ -1625,24 +1626,26 @@ function clRighe(voci, l, pos) {
 }
 pages.classifiche = function () {
   return topBar() + '<h1 class="lt">Classifiche</h1>' + (CLS.length ? '<div>' + CLS.map(c => '<button class="trk" data-a="go" data-v="classifica" data-k="' + esc(c.id) + '">' + mosaic(clTracce(c.brani)) +
-    '<span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">' + c.brani.length + ' brani · aggiornata il ' + clData(c.cambiata || c.letta) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' +
-    '<p class="foot">Si aggiornano da sole: i nuovi ingressi entrano nella libreria, chi esce resta nella libreria.</p>' :
+    '<span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">' + (c.brani.length === 1 ? '1 brano' : c.brani.length + ' brani') + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' +
+    '<p class="foot">Si aggiornano da sole ogni giorno e suonano i brani che hai già. Quelle di musica libera portano anche brani nuovi nella libreria.</p>' :
     '<div class="empty"><div class="big">' + ic('classifica') + '</div><h3>Nessuna classifica, per ora</h3><p>Compaiono quando il Mac mini le ha lette.</p></div>');
 };
 pages.classifica = function (r) {
   const c = CLS.find(x => x.id === r.k);
   if (!c) return topBar() + '<div class="empty"><h3>Classifica non trovata</h3></div>';
   const tr = clTracce(c.brani), l = regList(tr.map(t => t.id), c.nome);
-  const arrivo = c.brani.filter(b => !clTraccia(b) && b.stato !== 'non disponibile').length;
-  let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(c.nome) + '</div><div class="hm">' + c.brani.length + ' brani · aggiornata il ' + clData(c.cambiata || c.letta) + '</div>' +
-    (arrivo ? '<div class="hm" style="text-transform:none;letter-spacing:0;font-weight:400">' + arrivo + (arrivo === 1 ? ' brano in arrivo' : ' brani in arrivo') + ' nella libreria</div>' : '') + '</div></div>';
+  const arrivo = c.brani.filter(b => !clTraccia(b) && b.stato === 'in arrivo').length, hai = c.brani.filter(clTraccia).length;
+  const nota = c.libera ? (arrivo ? arrivo + (arrivo === 1 ? ' brano in arrivo' : ' brani in arrivo') + ' nella libreria' : 'Musica libera, con licenza Creative Commons') :
+    hai + ' di ' + c.brani.length + ' nella libreria';
+  let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(c.nome) + '</div><div class="hm">' + (c.brani.length === 1 ? '1 brano' : c.brani.length + ' brani') + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</div>' +
+    '<div class="hm" style="text-transform:none;letter-spacing:0;font-weight:400">' + nota + '</div></div></div>';
   if (tr.length) h += pbtns(l);
   h += clRighe(c.brani, l, b => '<b>' + b.pos + '</b>' + clSegno(b));
   const us = c.usciti || [];
   if (us.length) {
     const lu = regList(clTracce(us).map(t => t.id), c.nome + ' · Usciti di recente');
     h += '<h2 class="h2">Usciti di recente</h2>' + clRighe(us, lu, b => '<small>era ' + b.pos + '°</small>') +
-      '<p class="foot">Usciti dalla classifica nelle ultime 4 settimane: restano nella libreria e nelle tue playlist.</p>';
+      '<p class="foot">Usciti dalla classifica nelle ultime 4 settimane. Quelli che hai restano nella libreria e nelle tue playlist.</p>';
   }
   return h;
 };

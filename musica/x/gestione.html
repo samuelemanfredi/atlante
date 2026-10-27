@@ -31,7 +31,7 @@
 .idea textarea.in{min-height:44px;font-size:15px;background:var(--bg)}
 </style>
 <style>
-/* Classifiche e playlist */
+/* Classifiche e musica libera */
 .avviso{background:rgba(255,59,48,.14);border-radius:12px;padding:12px 14px;margin:10px 0;color:var(--fg)}
 .avviso b{display:block;color:var(--bad);font-size:17px}
 .avviso span{display:block;font-size:14px;color:var(--fg2);margin-top:2px}
@@ -92,8 +92,8 @@ details.rimp summary{color:var(--link);cursor:pointer}
     <div class="seg" id="ideefiltro"><button class="on" data-f="aperte">Aperte</button><button data-f="tutte">Tutte</button></div>
     <div class="list" id="ideelist"></div>
   </div>
-  <h2 class="h2" id="classifiche">Classifiche e playlist</h2>
-  <p class="small">I brani delle classifiche più note (rilette ogni giorno: i nuovi ingressi passano davanti), poi delle playlist più seguite di Spotify e YouTube Music, sempre nella versione explicit, entrano da soli nella libreria. Ogni classifica è anche una playlist nell'app di tutti.</p>
+  <h2 class="h2" id="classifiche">Classifiche e musica libera</h2>
+  <p class="small">Ogni giorno il Mac mini rilegge le classifiche più note e ne fa playlist per l'app di tutti, con i brani che hai già: dai servizi commerciali non si scarica niente. I brani nuovi arrivano da soli dai siti di musica libera (Jamendo, Internet Archive), con la licenza Creative Commons scritta nei tag, nella cartella «Musica libera».</p>
   <div id="cl"><p class="small">Un momento…</p></div>
   <h2 class="h2">Ascolti in Atlante</h2>
   <p class="small">Le stesse classifiche che vedono tutti: di una persona si vede solo quello che ha scelto di condividere.</p>
@@ -311,7 +311,8 @@ ascolti();
 </script>
 <script>
 'use strict';
-// ----- Classifiche e playlist: brani nuovi da soli; se YouTube blocca, l'avviso rosso in cima e «Riprova adesso» -----
+// ----- Classifiche e musica libera: classifiche come playlist, brani nuovi dai siti di musica libera -----
+// Se YouTube blocca (la sua classifica e i videoclip aspettano), l'avviso rosso in cima e «Riprova adesso».
 (function () {
   const {$, esc, toast, api} = AX;
   const hm = t => new Date(t * 1000).toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
@@ -323,12 +324,17 @@ ascolti();
   const pill = f => f.esito === 'ok' ? '<span class="pill ok">letta</span>' : f.esito === 'errore' ? '<span class="pill bad">non letta</span>' : '<span class="pill">da leggere</span>';
   function riga(f) {
     const sotto = f.esito === 'errore' ? esc(f.errore) + ' · ' + quando(f.letta) + ': riprovo domani' :
-      f.esito === 'ok' ? f.brani + ' brani · ' + quando(f.letta) : 'non ancora letta';
+      f.esito === 'ok' ? (f.brani === 1 ? '1 brano' : f.brani + ' brani') + ' · ' + quando(f.letta) : 'non ancora letta';
     return '<div class="row"><span class="tx"><b>' + esc(f.nome) + '</b><span>' + sotto + '</span></span>' + pill(f) + '</div>';
+  }
+  // licenza e pagina d'origine di un brano aggiunto: solo indirizzi https
+  function licenza(u) {
+    const nome = esc(u.licenza || 'Licenza libera');
+    return /^https:\/\//.test(u.pagina || '') ? '<a href="' + esc(u.pagina) + '" target="_blank" rel="noopener">' + nome + '</a>' : nome;
   }
   async function riprova(b) {
     b.disabled = true;
-    try { await api('gestione/classifiche/riprova', {method:'POST'}); toast('Riprovo adesso: una ricerca sola'); } catch (e) { toast(e.message); }
+    try { await api('gestione/classifiche/riprova', {method:'POST'}); toast('Riprovo adesso'); } catch (e) { toast(e.message); }
     setTimeout(disegna, 2500);
   }
   async function disegna() {
@@ -338,9 +344,9 @@ ascolti();
     const b = j.blocco;
     $('clavviso').hidden = !b;
     if (b) {
-      $('clavviso').innerHTML = '<b>YouTube ha bloccato gli scaricamenti ' + alle(b.quando) + '</b><span>' +
+      $('clavviso').innerHTML = '<b>YouTube blocca le richieste dal ' + alle(b.quando) + '</b><span>' +
         (b.tipo === 'robot' ? 'Chiede di confermare che non sei un robot: riprovo una volta al giorno, ' : 'Ha chiesto di rallentare: riprovo ') +
-        alle(b.prossima) + ', con una ricerca sola. Niente proxy né cambi di indirizzo.</span>' +
+        alle(b.prossima) + '. Aspettano la classifica di YouTube Music e i videoclip; il resto va avanti. Niente proxy né cambi di indirizzo.</span>' +
         '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button><a class="btn sm" href="#classifiche">Dettagli</a></div>';
     }
     if (!j.attivo) {
@@ -348,19 +354,20 @@ ascolti();
     } else {
       const p = j.pausa, f = j.fonte;
       let h = '<div class="card"><div class="numeri"><div><b>' + j.oggi + '</b><span>aggiunti oggi</span></div><div><b>' + j.totale + '</b><span>in tutto</span></div></div>';
-      if (b) h += '<p class="small" style="color:var(--bad)">Fermo: YouTube ha bloccato gli scaricamenti. Prossima prova ' + alle(b.prossima) + '.</p>';
-      else if (p) h += '<p class="small">In pausa: ' + esc(p.motivo) + ' Riprendo ' + alle(p.fino) + '.</p>';
+      if (p) h += '<p class="small">In pausa: ' + esc(p.motivo) + ' Riprendo ' + alle(p.fino) + '.</p>';
       else if (j.ora) h += '<p class="small">Adesso: ' + esc(j.ora) + '</p>';
-      if (f && f.in_coda) h += '<p class="small">Fonte in corso: <b>' + esc(f.nome) + '</b> · ' + f.in_coda + (f.in_coda === 1 ? ' brano' : ' brani') + ' da guardare</p>';
-      h += '<p class="small">' + j.cercati + ' brani già cercati su YouTube Music · ' + j.playlist_lette + ' playlist lette' +
-        (j.spazio_libero_gb != null ? ' · ' + Math.round(j.spazio_libero_gb) + ' GB liberi (mi fermo sotto i 200)' : '') + '</p>';
+      if (b) h += '<p class="small" style="color:var(--bad)">La classifica di YouTube Music aspetta: prossima prova ' + alle(b.prossima) + '.</p>';
+      if (f && f.in_coda) h += '<p class="small">Fonte in corso: <b>' + esc(f.nome) + '</b> · ' + f.in_coda + (f.in_coda === 1 ? ' brano' : ' brani') + ' da scaricare</p>';
+      h += '<p class="small">' + j.provati + (j.provati === 1 ? ' brano provato' : ' brani provati') +
+        (j.spazio_libero_gb != null ? ' · ' + Math.round(j.spazio_libero_gb) + ' GB liberi' + (j.spazio_min_gb ? ' (mi fermo sotto i ' + j.spazio_min_gb + ')' : '') : '') + '</p>';
+      if (!j.jamendo) h += '<p class="small">Jamendo è spento: serve il suo client_id gratuito (devportal.jamendo.com) in <b>ATLANTE_JAMENDO_CLIENT_ID</b> nel servizio del server.</p>';
       if (b || p) h += '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button></div>';
       h += '</div>';
       h += '<h2 class="h2" style="font-size:17px">Ultimi aggiunti</h2>' + (j.ultimi.length ? '<div class="list">' + j.ultimi.map(u =>
-        '<div class="row"><span class="tx"><b>' + esc(u.titolo) + (u.explicit ? ' <em class="esp" title="Explicit">E</em>' : '') + '</b><span>' + esc(u.artista) + ' · ' + esc(u.fonte) + ' · ' + quando(u.quando) + '</span></span></div>').join('') + '</div>' :
+        '<div class="row"><span class="tx"><b>' + esc(u.titolo) + '</b><span>' + esc(u.artista) + ' · ' + licenza(u) + ' · ' + esc(u.fonte) + ' · ' + quando(u.quando) + '</span></span></div>').join('') + '</div>' :
         '<p class="small">Ancora nessuno.</p>');
-      h += '<h2 class="h2" style="font-size:17px">Classifiche (ogni giorno)</h2><div class="list">' + j.classifiche.map(riga).join('') + '</div>';
-      if (j.playlist.length) h += '<h2 class="h2" style="font-size:17px">Playlist lette di recente</h2><div class="list">' + j.playlist.map(riga).join('') + '</div>';
+      h += '<h2 class="h2" style="font-size:17px">Musica libera (ogni giorno)</h2><div class="list">' + j.libere.map(riga).join('') + '</div>';
+      h += '<h2 class="h2" style="font-size:17px">Classifiche (ogni giorno, solo come playlist)</h2><div class="list">' + j.classifiche.map(riga).join('') + '</div>';
       $('cl').innerHTML = h;
     }
     document.querySelectorAll('[data-riprova]').forEach(x => x.onclick = () => riprova(x));

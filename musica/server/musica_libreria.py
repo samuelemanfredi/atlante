@@ -78,7 +78,7 @@ import urllib.error
 import urllib.request
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 
 ESTENSIONI = {".mp3", ".m4a", ".m4b", ".aac", ".flac", ".wav", ".aif", ".aiff", ".ogg", ".oga", ".opus", ".alac", ".mp4"}
 TIPI = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".m4b": "audio/mp4", ".mp4": "audio/mp4", ".alac": "audio/mp4",
@@ -1840,10 +1840,10 @@ def _cartella_musica():
     return p
 
 
-def _scarica_immagine(url, dest):
+def _scarica_immagine(url, dest, siti=HOST_COPERTINE):
     s = urlsplit(url)
     host = (s.hostname or "").lower()
-    if s.scheme != "https" or not any(host == d or host.endswith("." + d) for d in HOST_COPERTINE):
+    if s.scheme != "https" or not any(host == d or host.endswith("." + d) for d in siti):
         return False   # solo dai siti delle copertine: un indirizzo qualsiasi farebbe del Mac un proxy
     try:
         r = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": BROWSER}), timeout=10)
@@ -1899,7 +1899,7 @@ def _in_libreria(percorso):
     return ""
 
 
-def _mp3(ff, sorgente, copertina, tag, uscita):
+def _mp3(ff, sorgente, copertina, tag, uscita, copia=False):
     args = [ff, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", sorgente]
     if copertina:
         args += ["-i", copertina, "-map", "0:a:0", "-map", "1:v:0", "-c:v", "mjpeg",
@@ -1908,7 +1908,8 @@ def _mp3(ff, sorgente, copertina, tag, uscita):
                  "-metadata:s:v", "comment=Cover (front)"]
     else:
         args += ["-map", "0:a:0"]
-    args += ["-c:a", "libmp3lame", "-q:a", "0", "-map_metadata", "-1", "-id3v2_version", "3"]
+    # copia: l'audio di un MP3 com'è (la musica libera), senza perdere qualità in una seconda codifica
+    args += (["-c:a", "copy"] if copia else ["-c:a", "libmp3lame", "-q:a", "0"]) + ["-map_metadata", "-1", "-id3v2_version", "3"]
     for k, v in tag.items():
         if v:
             args += ["-metadata", "%s=%s" % (k, v)]
@@ -3178,24 +3179,12 @@ class Videoclip:
             m = os.path.getmtime(self.file_piano)
         except OSError:
             return self.piano
-        # con gli altri elenchi (i videoclip dei brani aggiunti dalle classifiche): quello principale vince
-        m = (m,) + tuple(os.path.getmtime(p) if os.path.isfile(p) else 0 for p in PIANI_AGGIUNTI)
         if m != self.piano_m:
             try:
                 with open(self.file_piano, encoding="utf-8") as f:
                     d = json.load(f)
-                piano = {n: v["id"] for n, v in d.items()
-                         if isinstance(v, dict) and isinstance(v.get("id"), str) and ID_YT.match(v["id"])}
-                for p, mp in zip(PIANI_AGGIUNTI, m[1:]):
-                    if mp:
-                        try:
-                            with open(p, encoding="utf-8") as f:
-                                for n, v in json.load(f).items():
-                                    if isinstance(v, dict) and isinstance(v.get("id"), str) and ID_YT.match(v["id"]):
-                                        piano.setdefault(n, v["id"])
-                        except (OSError, ValueError, AttributeError):
-                            pass
-                self.piano = piano
+                self.piano = {n: v["id"] for n, v in d.items()
+                              if isinstance(v, dict) and isinstance(v.get("id"), str) and ID_YT.match(v["id"])}
                 self.piano_m = m
             except (OSError, ValueError, AttributeError):
                 pass
@@ -3439,39 +3428,42 @@ def _clip_file(h, nome):
     _invia_file(h, p, "video/mp4", {"X-Content-Type-Options": "nosniff"})
 
 
-# ----- classifiche e playlist: brani nuovi nella libreria, da soli -----
+# ----- classifiche e musica libera -----
 #
-# Con --classifiche (ATLANTE_CLASSIFICHE=1) il Mac mini aggiunge alla musica scaricata i brani delle classifiche più note
-# (rilette ogni giorno: Spotify tramite kworb.net, FIMI, Billboard, UK, YouTube Music con la sua API web, Apple Music),
-# poi quelli delle playlist più seguite di Spotify e di YouTube Music, genere per genere, dalla più seguita in giù, senza
-# fine. I nuovi ingressi di una classifica passano davanti ai brani delle playlist. Ogni classifica è anche una playlist
-# per l'app di tutti (api/extra/classifiche): posizioni, ▲▼ e «nuovo», e in fondo gli usciti delle ultime 4 settimane,
-# che restano nella libreria (niente si cancella).
-# Ogni brano si cerca su YouTube Music con le regole di «Cerca e scarica»: versione explicit (mai la censurata), artista
-# principale tra gli esecutori, niente tributi, cover, karaoke né altre versioni (remix, live…) se la classifica non le
-# chiede. I brani che la libreria ha già (anche scritti in un altro modo) e quelli già cercati si saltano senza chiedere
-# niente a YouTube. Un brano dopo l'altro, pochi secondi tra uno e l'altro, nessun tetto al giorno.
-# Se YouTube blocca (429, «conferma di non essere un robot») ci si ferma: avviso in Gestione e sul riquadro di «Altro»,
-# poi una prova sola ogni tanto (al più una al giorno dopo le prime ore) e «Riprova adesso». Niente proxy né cambi di
-# indirizzo: si va alla velocità che YouTube permette. Si ferma anche sotto i 200 GB liberi sul disco della musica.
-# Una fonte che non si legge (sito cambiato o irraggiungibile) si salta e lo si dice in Gestione.
+# Con --classifiche (ATLANTE_CLASSIFICHE=1) il Mac mini rilegge ogni giorno le classifiche più note (Spotify tramite
+# kworb.net, FIMI, Billboard, UK, YouTube Music con la sua API web, Apple Music) e ne fa playlist per l'app di tutti
+# (api/extra/classifiche): posizioni, ▲▼ e «nuovo», e in fondo gli usciti delle ultime 4 settimane. In queste playlist
+# suonano i brani che la libreria ha già (anche scritti in un altro modo); gli altri si vedono come «non in libreria».
+# Dai servizi commerciali non si scarica niente: la loro musica si può ascoltare lì, non copiare.
+# I brani nuovi arrivano da soli dai siti dove gli artisti lasciano scaricare la loro musica, con le loro classifiche:
+#   - Jamendo (licenze Creative Commons): i più ascoltati della settimana e del mese, solo i brani che l'artista lascia
+#     scaricare (audiodownload_allowed). Serve il client_id gratuito di devportal.jamendo.com nella variabile
+#     ATLANTE_JAMENDO_CLIENT_ID del servizio del server: senza, Jamendo si salta e la Gestione lo dice;
+#   - Internet Archive, collezione Netlabels: le uscite più scaricate degli ultimi 7 giorni con licenza Creative Commons
+#     o di pubblico dominio (nessuna chiave).
+# Anche queste sono playlist nell'app. Ogni brano va in «Musica libera» dentro la cartella della musica scaricata, com'è
+# (MP3, senza ricodificarlo), con titolo, artista, album, copertina, licenza e pagina d'origine nei tag. Un brano alla
+# volta, pochi secondi tra uno e l'altro; quelli che la libreria ha già (anche scritti in un altro modo) si saltano.
+# Ci si ferma sotto i 200 GB liberi sul disco della musica (ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB per cambiarlo: le prove
+# usano 0, così non dipendono dal disco di chi le lancia). Una fonte che non si legge si salta, lo si dice in Gestione e
+# si riprova il giorno dopo (o subito dopo un riavvio del server).
+# Se YouTube blocca la lettura della sua classifica (429, «conferma di non essere un robot») quella classifica aspetta
+# (il blocco è in extra/youtube-blocco.json e lo rispettano anche i videoclip); il resto va avanti.
 # Stato nella cache (extra/classifiche/): stato.json (coda, fonti lette, ultimi aggiunti), elenchi.json (le classifiche
-# per l'app), cercati.jsonl (ogni brano già cercato, una riga) e videoclip.json (videoclip dei brani aggiunti, letto da
-# Videoclip insieme al suo elenco);
-# il blocco di YouTube in extra/youtube-blocco.json (lo rispettano anche i videoclip). Dopo un riavvio si riprende da lì.
+# per l'app) e cercati.jsonl (ogni brano già provato, una riga). Dopo un riavvio si riprende da lì.
 
-CL_PAUSA = 5                     # secondi tra un brano e l'altro (quando si è chiesto qualcosa a YouTube)
-CL_SPAZIO_MIN = 200 * 1024 ** 3  # sotto i 200 GB liberi sul disco della musica ci si ferma
+CL_PAUSA = 5                     # secondi tra un brano e l'altro
+CL_SPAZIO_MIN = 200 * 1024 ** 3  # sotto i 200 GB liberi sul disco della musica ci si ferma (ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB)
 CL_CLASSIFICHE_OGNI = 86400      # le classifiche si rileggono ogni giorno: i nuovi ingressi entrano subito
 CL_USCITI = 28 * 86400           # i brani usciti da una classifica restano in fondo («Usciti di recente») per 4 settimane
-CL_PLAYLIST_OGNI = 30 * 86400    # una playlist si rilegge dopo un mese (per i brani nuovi)
 CL_RIPROVA_FONTE = 86400         # una fonte che non si è letta si riprova il giorno dopo
-CL_RIPROVA_BRANO = 90 * 86400    # un brano non trovato (o solo censurato) si cerca di nuovo dopo tre mesi
-CL_RETE = 600                    # Internet o YouTube che non rispondono: si riprova fra 10 minuti
-CL_TEMPO_BRANO = 900             # secondi massimi per scaricare e convertire un brano
+CL_RIPROVA_BRANO = 90 * 86400    # un brano che non si è scaricato si riprova dopo tre mesi
+CL_RETE = 600                    # un sito che non risponde: si riprova fra 10 minuti
 CL_ULTIMI = 30                   # brani aggiunti che la Gestione mostra
 CL_PAGINE_PLAYLIST = 10          # pagine (di circa 100 brani) lette al più di una playlist di YouTube Music
 CL_MAX_PAGINA = 15 * 1024 * 1024
+CL_MAX_FILE = 200 * 1024 * 1024  # un MP3 più grande non è un brano (un set di ore): si salta
+CL_PER_USCITA = 12               # brani al più da ogni uscita di Internet Archive
 # dopo un 429 («troppe richieste») la pausa cresce: mezz'ora, 2 ore, 8 ore, poi una prova al giorno;
 # «conferma di non essere un robot» vuol dire subito una prova al giorno
 YT_PAUSE = (1800, 7200, 28800, 86400)
@@ -3479,9 +3471,6 @@ YT_ROBOT = re.compile(r"not a (?:ro)?bot|non (?:sei|essere) un robot|unusual tra
                       r"google\.com/sorry", re.I)
 YT_BLOCCO = re.compile(r"\b429\b|too many requests|rate.?limit|isn.t available,? try again later|not a (?:ro)?bot|"
                        r"non (?:sei|essere) un robot|unusual traffic|traffico insolito|captcha|google\.com/sorry", re.I)
-YT_RETE = re.compile(r"urlopen error|timed? ?out|temporary failure|name or service not known|nodename nor servname|"
-                     r"network is unreachable|no route to host|connection (?:reset|refused|aborted)|remote end closed|"
-                     r"HTTP Error 5\d\d|getaddrinfo|\bssl\b", re.I)
 # le classifiche, nell'ordine in cui si leggono ogni giorno
 CL_FONTI = (
     {"id": "spotify-it", "nome": "Spotify Top 50 Italia", "tipo": "kworb", "quanti": 50,
@@ -3500,38 +3489,22 @@ CL_FONTI = (
      "dove": "https://rss.applemarketingtools.com/api/v2/it/music/most-played/100/songs.json"},
     {"id": "apple-mondo", "nome": "Apple Music Top 100 Globale", "tipo": "apple", "quanti": 100,
      "dove": "https://music.apple.com/it/playlist/top-100-global/pl.d25f5d1181894928af76c85c967f8f31"})
-# playlist di Spotify (le più seguite, all'incirca dalla più seguita): nome, genere, id. Si cambiano senza toccare il
-# programma con extra/classifiche/fonti.json: {"spotify": [[nome, genere, id], …], "generi": [[genere, ricerca], …]}
-CL_SPOTIFY = (
-    ("Today's Top Hits", "pop", "37i9dQZF1DXcBWIGoYBM5M"), ("RapCaviar", "rap e hip hop", "37i9dQZF1DX0XUsuxWHRQd"),
-    ("Viva Latino", "latina", "37i9dQZF1DX10zKzsJ2jva"), ("Baila Reggaeton", "latina", "37i9dQZF1DWY7IeIP1cdjF"),
-    ("Rock Classics", "rock", "37i9dQZF1DWXRqgorJj26U"), ("mint", "dance ed elettronica", "37i9dQZF1DX4dyzvuaRJ0n"),
-    ("Are & Be", "R&B", "37i9dQZF1DX4SBhb3fqCJd"), ("All Out 2010s", "pop", "37i9dQZF1DX5Ejj0EkURtP"),
-    ("All Out 2000s", "pop", "37i9dQZF1DX4o1oenSJRJd"), ("All Out 80s", "pop", "37i9dQZF1DX4UtSsGT1Sbe"),
-    ("All Out 90s", "pop", "37i9dQZF1DXbTxeAdrVG2l"), ("Rock This", "rock", "37i9dQZF1DXcF6B6QPhFDv"),
-    ("Hot Country", "country", "37i9dQZF1DX1lVhptIYRda"), ("Lorem", "indie", "37i9dQZF1DXdwmD5Q7Gxah"),
-    ("Pop Rising", "pop", "37i9dQZF1DWUa8ZRTfalHk"), ("Songs to Sing in the Car", "pop", "37i9dQZF1DWWMOmoXKqHTD"),
-    ("Beast Mode", "allenamento", "37i9dQZF1DX76Wlfdnj7AP"), ("Top 50 Italia", "italiana", "37i9dQZEVXbIQnj7RRhdSX"),
-    ("Top 50 Global", "pop", "37i9dQZEVXbMDoHDwVN2tF"), ("Viral 50 Global", "pop", "37i9dQZEVXbLiRSasKsNU9"))
-# generi per le playlist di YouTube Music: nome e ricerca
-CL_GENERI = (
-    ("pop", "pop hits"), ("rap e hip hop", "hip hop rap hits"), ("italiana", "hit italiane"), ("rock", "rock classics"),
-    ("dance ed elettronica", "dance elettronica"), ("R&B", "r&b hits"), ("latina", "reggaeton latino"),
-    ("rap italiano", "rap italiano"), ("indie", "indie"), ("pop italiano", "pop italiano"), ("trap", "trap"),
-    ("indie italiano", "indie italiano"), ("house", "house music"), ("techno", "techno"), ("anni 2000", "hit anni 2000"),
-    ("anni 90", "hit anni 90"), ("anni 80", "hit anni 80"), ("cantautori italiani", "cantautori italiani"),
-    ("K-pop", "k-pop"), ("afrobeats", "afrobeats"), ("soul e funk", "soul funk"), ("metal", "metal"),
-    ("reggae", "reggae"), ("country", "country"), ("allenamento", "workout"))
-# filtri della ricerca di YouTube Music: playlist in evidenza (di YouTube Music), della community, nessun filtro
-CL_FILTRI_PLAYLIST = ("EgeKAQQoADgBagwQDhAKEAMQBBAJEAU%3D", "EgeKAQQoAEABagwQDhAKEAMQBBAJEAU%3D", None)
-# parole di altre versioni del brano: un risultato che ne ha una che la classifica non ha non è il brano giusto
-CL_ALTRE = re.compile(r"\b(?:remix|rmx|live|dal vivo|acoustic|acustic[ao]|unplugged|sped up|speed up|slowed|reverb|"
-                      r"nightcore|8d|instrumental|strumentale|karaoke|cover|covers|tribute|tributo|lullaby|ninna nanna|"
-                      r"demo|mashup|bootleg|rework|a cappella|acapella|orchestral|piano version|versione piano|"
-                      r"in the style of|originally performed|made famous|reso famoso|performed by|as made famous)\b")
+# le fonti di musica libera, lette ogni giorno dopo le classifiche: i loro brani nuovi entrano nella libreria
+CL_LIBERE = (
+    {"id": "jamendo-settimana", "nome": "Jamendo · i più ascoltati della settimana", "tipo": "jamendo", "quanti": 50,
+     "dove": "popularity_week"},
+    {"id": "jamendo-mese", "nome": "Jamendo · i più ascoltati del mese", "tipo": "jamendo", "quanti": 50,
+     "dove": "popularity_month"},
+    {"id": "archivio-netlabel", "nome": "Internet Archive · Netlabel della settimana", "tipo": "archivio", "uscite": 10,
+     "dove": "netlabels"})
+JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
+ARCHIVIO = "https://archive.org"
+CL_HOST_LIBERI = ("jamendo.com", "archive.org")   # i soli siti da cui si scaricano brani e copertine
+# formati MP3 di Internet Archive, dal migliore: di ogni brano si prende una versione sola
+CL_IA_FORMATI = ("VBR MP3", "320Kbps MP3", "256Kbps MP3", "224Kbps MP3", "192Kbps MP3", "160Kbps MP3", "128Kbps MP3",
+                 "112Kbps MP3", "96Kbps MP3", "64Kbps MP3", "MP3")
 CL_SEPARATORI = re.compile(r"\s*(?:,|;|&|\+|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b|\bwith\b|\bw/|\bx\b|\be\b|\band\b|"
                            r"\bvs\b\.?)\s*", re.I)
-PIANI_AGGIUNTI = []   # altri elenchi di videoclip (quello delle classifiche), letti da Videoclip con il suo
 BLOCCO = None         # BloccoYouTube, preparato da avvia_classifiche
 CL = None             # Classifiche, se attive
 
@@ -3541,17 +3514,7 @@ class Bloccato(Exception):
 
 
 class Rete(Exception):
-    """Internet o YouTube non rispondono per un po': si riprova più tardi, il brano resta in coda."""
-
-
-def _cl_errore(testo):
-    """L'errore giusto per un messaggio di yt-dlp o di YouTube: blocco, rete o un brano che non va (che si salta)."""
-    testo = str(testo or "scaricamento non riuscito")
-    if YT_BLOCCO.search(testo):
-        return Bloccato(testo)
-    if YT_RETE.search(testo):
-        return Rete(testo)
-    return RuntimeError(testo)
+    """Un sito che non risponde per un po': si riprova più tardi (un brano resta in coda)."""
 
 
 def _cl_errore_http(e, ricerca):
@@ -3643,8 +3606,8 @@ class BloccoYouTube:
 
 
 def _videoclip_fermo():
-    """I videoclip aspettano mentre YouTube blocca: la prova la fanno le classifiche (una sola), se ci sono; se no la fa
-    il videoclip, quando è l'ora."""
+    """I videoclip aspettano mentre YouTube blocca: la prova la fanno le classifiche (una sola: la lettura della classifica
+    di YouTube Music), se ci sono; se no la fa il videoclip, quando è l'ora."""
     return BLOCCO is not None and BLOCCO.attivo() and (CL is not None or not BLOCCO.e_ora())
 
 
@@ -3692,54 +3655,6 @@ def _cl_dentro(poche, tante):
     """Le parole `poche` di seguito dentro `tante`."""
     n = len(poche)
     return n > 0 and any(tante[i:i + n] == poche for i in range(len(tante) - n + 1))
-
-
-def _cl_stesso_titolo(a, b):
-    import difflib
-    x, y = _cl_titolo(a), _cl_titolo(b)
-    if not x or not y:
-        return False
-    if x == y:
-        return True
-    corto, lungo = sorted((x, y), key=len)
-    if len(corto) >= 4 and corto in lungo and len(corto) / len(lungo) >= 0.6:
-        return True
-    return difflib.SequenceMatcher(None, x, y).ratio() >= 0.85
-
-
-def _cl_esecutore(artista, altro):
-    """L'artista principale di uno è tra gli esecutori dell'altro."""
-    p, q = _cl_principale(artista).split(), _cl_principale(altro).split()
-    return _cl_dentro(p, _cl_parole(altro)) or _cl_dentro(q, _cl_parole(artista))
-
-
-def _cl_altra_versione(titolo, r):
-    """Tributo, cover, karaoke, remix, live…: parole nel risultato che il titolo della classifica non ha."""
-    chi = _cl_semplice(titolo)
-    for m in CL_ALTRE.finditer(_cl_semplice(" ".join((r.get("titolo") or "", r.get("artista") or "", r.get("album") or "")))):
-        if not re.search(r"\b%s\b" % re.escape(m.group(0)), chi):
-            return True
-    return False
-
-
-def _cl_scegli(artista, titolo, risultati):
-    """Il risultato di YouTube Music da scaricare per un brano di una classifica (risultati già passati da _ordina):
-    (risultato, "") oppure (None, "non trovato" | "censurata"). Sempre la versione explicit quando c'è, mai una censurata."""
-    validi = [r for r in risultati
-              if _cl_stesso_titolo(titolo, r.get("titolo")) and _cl_esecutore(artista, r.get("artista"))
-              and not _cl_altra_versione(titolo, r) and (not r.get("durata") or 30 <= r["durata"] <= 1200)]
-    if not validi:
-        return None, "non trovato"
-    buoni = [r for r in validi if not r.get("censurata")]
-    if not buoni:
-        return None, "censurata"
-    return next((r for r in buoni if r.get("explicit")), buoni[0]), ""
-
-
-def _cl_domanda(artista, titolo):
-    """La ricerca per YouTube Music: l'artista principale e il titolo senza parentesi («Travis Scott FE!N»)."""
-    t = " ".join(re.sub(r"\s*[(\[][^()\[\]]*[)\]]", " ", str(titolo or "")).split()) or str(titolo or "")
-    return ("%s %s" % (_cl_principale_testo(artista), t)).strip()
 
 
 def _cl_unici(brani):
@@ -3986,23 +3901,6 @@ def _cl_apple(testo):
     return _cl_unici(fuori)
 
 
-def _cl_spotify(testo):
-    """La pagina «embed» di una playlist di Spotify: nei dati della pagina «trackList» con titolo e artisti (subtitle)."""
-    fuori = []
-    for d in _cl_json_pagina(testo):
-        for tl in _trova(d, "trackList"):
-            for x in tl if isinstance(tl, list) else ():
-                if isinstance(x, dict) and isinstance(x.get("title"), str) and isinstance(x.get("subtitle"), str):
-                    fuori.append((x["subtitle"], x["title"]))
-        if not fuori:   # altra forma: brani con «name» e «artists»: [{name}]
-            for x in _trova(d, "track"):
-                if isinstance(x, dict) and isinstance(x.get("name"), str) and isinstance(x.get("artists"), list):
-                    nomi = [a.get("name") for a in x["artists"] if isinstance(a, dict) and a.get("name")]
-                    if nomi:
-                        fuori.append((", ".join(nomi), x["name"]))
-    return _cl_unici(fuori)
-
-
 def _cl_ytm(percorso, corpo, extra=""):
     """Una richiesta all'API web di YouTube Music (browse, search) come la pagina music.youtube.com. Blocco → Bloccato;
     YouTube o Internet che non rispondono → Rete; una pagina che non c'è (browse) → RuntimeError."""
@@ -4072,98 +3970,224 @@ def _cl_ytm_classifica(paese):
     return brani
 
 
-def _cl_viste(s):
-    """Le visualizzazioni scritte da YouTube Music: «1,2 Mln visualizzazioni», «350.000 visualizzazioni», «12K views»."""
-    m = re.search(r"(\d[\d.,   ]*)\s*(mld|mln|mila|k|m|b)?\.?\s*(?:di\s+)?(?:visualizzazioni|views|viste)",
-                  s or "", re.I)
-    if not m:
-        return 0
-    num, per = re.sub(r"[\s  ]", "", m.group(1)), (m.group(2) or "").lower()
-    try:
-        if per:
-            return int(round(float(num.replace(",", ".")) * {"k": 1e3, "mila": 1e3, "m": 1e6, "mln": 1e6,
-                                                               "b": 1e9, "mld": 1e9}[per]))
-        return int(re.sub(r"[.,]", "", num))
-    except ValueError:
-        return 0
-
-
-def _cl_scopri(q, filtro, seguito=""):
-    """Playlist di YouTube Music per una ricerca, dalla più vista: ([{id, nome, viste}], segno della pagina dopo)."""
-    if seguito:
-        d = _cl_ytm("search", {"continuation": seguito},
-                    "&ctoken=%s&continuation=%s&type=next" % (quote(seguito), quote(seguito)))
-    else:
-        d = _cl_ytm("search", dict({"query": q}, **({"params": filtro} if filtro else {})))
-    fuori, visti = [], set()
-    for it in list(_trova(d, "musicResponsiveListItemRenderer")) + list(_trova(d, "musicTwoRowItemRenderer")):
-        if not isinstance(it, dict):
-            continue
-        bid = next((x for x in _trova(it.get("navigationEndpoint"), "browseId") if isinstance(x, str)), "")
-        if not bid.startswith("VL") or bid in visti:
-            continue
-        cols = [((c.get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text") or {}).get("runs")
-                for c in it.get("flexColumns") or [] if isinstance(c, dict)]
-        nome = _corse(cols[0]) if cols else _corse((it.get("title") or {}).get("runs"))
-        sotto = _corse(cols[1]) if len(cols) > 1 else _corse((it.get("subtitle") or {}).get("runs"))
-        visti.add(bid)
-        fuori.append({"id": bid, "nome": nome.strip() or bid, "viste": _cl_viste(sotto)})
-    fuori.sort(key=lambda p: -p["viste"])   # le playlist senza numero (quelle di YouTube Music) restano nel loro ordine
-    return fuori, _cl_seguito(d)
-
-
 def _cl_leggi(f):
-    """I brani di una fonte (classifica o playlist): [(artista, titolo)]."""
+    """I brani di una classifica: [(artista, titolo)]."""
     tipo = f["tipo"]
     if tipo == "ytm":
         return _cl_ytm_classifica(f["dove"])
-    if tipo == "ytm-playlist":
-        return _cl_ytm_playlist(f["dove"])
-    if tipo == "spotify":
-        return _cl_spotify(_cl_pagina("https://open.spotify.com/embed/playlist/" + f["dove"]))
     lettore = {"kworb": _cl_kworb, "billboard": _cl_billboard, "uk": _cl_uk, "fimi": _cl_fimi, "apple": _cl_apple}[tipo]
     return lettore(_cl_pagina(f["dove"]))
 
 
-def _cl_cerca(q):
-    """Risultati di YouTube Music per un brano, come cerca_musica (stessa richiesta, explicit, censurate in fondo), ma un
-    blocco di YouTube si fa sentire (Bloccato) invece di passare a yt-dlp, che chiederebbe ancora a YouTube."""
-    try:
-        d = _youtubei("ytm", q)
-    except urllib.error.HTTPError as e:
-        raise _cl_errore_http(e, True)
-    except (OSError, ValueError) as e:
-        raise Rete(str(e) or e.__class__.__name__)
-    risultati, visti = [], set()
-    for x in _trova(d, "musicResponsiveListItemRenderer"):
-        b = _brano_ytm(x) if isinstance(x, dict) else None
-        if b and b["id"] not in visti:
-            visti.add(b["id"])
-            risultati.append(b)
-    return _ordina(risultati[:30])
+# ----- musica libera: Jamendo e Internet Archive -----
+
+def _uno(v):
+    """Il primo testo di un campo che può essere un testo o un elenco (i metadati di Internet Archive), su una riga."""
+    if isinstance(v, list):
+        v = next((x for x in v if isinstance(x, (str, int)) and str(x).strip()), "")
+    return " ".join(str(v).split()) if isinstance(v, (str, int)) and not isinstance(v, bool) else ""
 
 
-def _cl_videoclip(artista, titolo):
-    """L'ID del videoclip ufficiale del brano su YouTube ('' se non è sicuro: meglio niente che un video sbagliato)."""
+def _jamendo_id():
+    """Il client_id di Jamendo (gratuito, da devportal.jamendo.com) dal servizio del server, o ''. Non si mostra mai."""
+    v = os.environ.get("ATLANTE_JAMENDO_CLIENT_ID", "").strip()
+    return v if re.fullmatch(r"[A-Za-z0-9_-]{4,64}", v) else ""
+
+
+def _cl_api(url):
+    """L'oggetto JSON di un'API pubblica (con le pagine finte delle prove, come _cl_pagina)."""
     try:
-        d = _youtubei("yt", "%s %s official video" % (_cl_principale_testo(artista), titolo))
+        d = json.loads(_cl_pagina(url))
+    except ValueError:
+        raise RuntimeError("risposta non leggibile")
+    if not isinstance(d, dict):
+        raise RuntimeError("risposta non leggibile")
+    return d
+
+
+def _cl_licenza_libera(url):
+    """Una licenza che lascia copiare e condividere: Creative Commons o pubblico dominio."""
+    u = str(url or "").lower()
+    return "creativecommons.org/licenses/" in u or "creativecommons.org/publicdomain/" in u
+
+
+def _cl_nome_licenza(url):
+    """«CC BY-NC-SA 3.0» da http://creativecommons.org/licenses/by-nc-sa/3.0/; «CC0»; «Pubblico dominio»."""
+    u = str(url or "").lower()
+    m = re.search(r"creativecommons\.org/licenses/([a-z-]+)/(\d+(?:\.\d+)?)", u)
+    if m:
+        return "CC %s %s" % (m.group(1).upper(), m.group(2))
+    if "publicdomain/zero" in u:
+        return "CC0"
+    if "publicdomain" in u:
+        return "Pubblico dominio"
+    return "Licenza libera" if u else ""
+
+
+def _cl_host_libero(url):
+    """Un indirizzo https di un sito di musica libera (CL_HOST_LIBERI): solo da lì si scarica."""
+    s = urlsplit(str(url or ""))
+    host = (s.hostname or "").lower()
+    return s.scheme == "https" and any(host == d or host.endswith("." + d) for d in CL_HOST_LIBERI)
+
+
+def _cl_jamendo(ordine, quanti):
+    """I brani di Jamendo più ascoltati (ordine: popularity_week, popularity_month…), solo quelli che l'artista lascia
+    scaricare: [{a, t, al, u, lic, pag, img, s}]."""
+    cid = _jamendo_id()
+    if not cid:
+        raise RuntimeError("manca il client_id gratuito di Jamendo: crealo su devportal.jamendo.com e mettilo in "
+                           "ATLANTE_JAMENDO_CLIENT_ID nel servizio del server")
+    quanti = max(1, int(quanti))
+    q = urlencode({"client_id": cid, "format": "json", "limit": min(200, quanti * 2), "order": ordine,
+                   "include": "licenses", "audiodlformat": "mp32", "imagesize": 600})
+    d = _cl_api(JAMENDO_API + "?" + q)
+    h = d.get("headers") if isinstance(d.get("headers"), dict) else {}
+    if h.get("status") not in (None, "success"):
+        motivo = _uno(h.get("error_message")) or _uno(h.get("status"))
+        raise RuntimeError("Jamendo: %s" % motivo.replace(cid, "…"))   # il client_id non esce mai, nemmeno negli errori
+    fuori = []
+    for x in d.get("results") or []:
+        if not isinstance(x, dict) or x.get("audiodownload_allowed") is not True or not _uno(x.get("id")):
+            continue   # l'artista non lascia scaricare il brano
+        u = x.get("audiodownload") if isinstance(x.get("audiodownload"), str) else ""
+        if not _cl_host_libero(u):
+            continue
+        fuori.append({"a": _uno(x.get("artist_name")), "t": _uno(x.get("name")), "al": _uno(x.get("album_name")), "u": u,
+                      "lic": _uno(x.get("license_ccurl")), "pag": _uno(x.get("shareurl")),
+                      "img": _uno(x.get("album_image")) or _uno(x.get("image")), "s": "jamendo:" + _uno(x.get("id"))})
+        if len(fuori) >= quanti:
+            break
+    return fuori
+
+
+def _cl_ia_numero(x):
+    m = re.match(r"\s*(\d+)", _uno(x.get("track")))
+    return int(m.group(1)) if m else 10 ** 6
+
+
+def _cl_archivio(collezione, uscite):
+    """Le uscite di una collezione di Internet Archive più scaricate negli ultimi 7 giorni, solo con licenza Creative
+    Commons o di pubblico dominio: i loro brani MP3 (una versione per brano, al più CL_PER_USCITA per uscita)."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(collezione or "")):
+        raise RuntimeError("collezione non valida")
+    uscite = max(1, int(uscite))
+    q = urlencode([("q", "collection:(%s) AND mediatype:(audio)" % collezione), ("fl[]", "identifier"),
+                   ("fl[]", "title"), ("fl[]", "creator"), ("fl[]", "licenseurl"), ("sort[]", "week desc"),
+                   ("rows", str(uscite * 3)), ("page", "1"), ("output", "json")])
+    d = _cl_api(ARCHIVIO + "/advancedsearch.php?" + q)
+    docs = d.get("response", {}).get("docs") if isinstance(d.get("response"), dict) else None
+    if not isinstance(docs, list):
+        raise RuntimeError("risposta di Internet Archive non leggibile")
+    fuori, lette = [], 0
+    for doc in docs:
+        if lette >= uscite:
+            break
+        ident = _uno(doc.get("identifier")) if isinstance(doc, dict) else ""
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", ident) or not _cl_licenza_libera(_uno(doc.get("licenseurl"))):
+            continue
+        try:
+            m = _cl_api(ARCHIVIO + "/metadata/" + ident)
+        except RuntimeError:
+            continue   # un'uscita che non si legge si salta
+        meta = m.get("metadata") if isinstance(m.get("metadata"), dict) else {}
+        lic = _uno(meta.get("licenseurl")) or _uno(doc.get("licenseurl"))
+        if not _cl_licenza_libera(lic):
+            continue
+        lette += 1
+        artista = _uno(meta.get("creator")) or _uno(doc.get("creator"))
+        album = _uno(meta.get("title")) or _uno(doc.get("title"))
+        scelti = {}   # brano (il file da cui viene la versione) -> (posto del formato, file)
+        for x in m.get("files") or []:
+            nome = x.get("name") if isinstance(x, dict) and isinstance(x.get("name"), str) else ""
+            formato = _uno(x.get("format")) if nome else ""
+            if not nome.lower().endswith(".mp3") or formato not in CL_IA_FORMATI:
+                continue
+            try:
+                if int(x.get("size") or 0) > CL_MAX_FILE:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            chiave = x["original"] if x.get("source") == "derivative" and isinstance(x.get("original"), str) else nome
+            posto = CL_IA_FORMATI.index(formato)
+            if chiave not in scelti or posto < scelti[chiave][0]:
+                scelti[chiave] = (posto, x)
+        brani = sorted((x for _, x in scelti.values()), key=lambda x: (_cl_ia_numero(x), x["name"].lower()))
+        for x in brani[:CL_PER_USCITA]:
+            nome = x["name"]
+            fuori.append({"a": _uno(x.get("creator")) or _uno(x.get("artist")) or artista,
+                          "t": _uno(x.get("title")) or os.path.splitext(os.path.basename(nome))[0], "al": album,
+                          "u": "%s/download/%s/%s" % (ARCHIVIO, ident, quote(nome)), "lic": lic,
+                          "pag": "%s/details/%s" % (ARCHIVIO, ident), "img": "%s/services/img/%s" % (ARCHIVIO, ident),
+                          "s": "archivio:%s/%s" % (ident, nome)})
+    return fuori
+
+
+def _cl_leggi_libera(f):
+    """I brani di una fonte di musica libera: [{a, t, al, u, lic, pag, img, s}]."""
+    if f["tipo"] == "jamendo":
+        return _cl_jamendo(f["dove"], f.get("quanti") or 50)
+    if f["tipo"] == "archivio":
+        return _cl_archivio(f["dove"], f.get("uscite") or 10)
+    raise RuntimeError("fonte sconosciuta: %s" % f["tipo"])
+
+
+def _cl_libere_uniche(voci):
+    """I brani di una fonte libera puliti (artista, titolo, un file da scaricare) e senza doppioni, nell'ordine."""
+    fuori, visti = [], set()
+    for v in voci or ():
+        if not isinstance(v, dict):
+            continue
+        a = " ".join(html.unescape(str(v.get("a") or "")).split())[:300]
+        t = " ".join(html.unescape(str(v.get("t") or "")).split())[:300]
+        k = _cl_chiave(a, t)
+        if a and t and v.get("u") and v.get("s") and k not in visti:
+            visti.add(k)
+            fuori.append(dict(v, a=a, t=t))
+    return fuori
+
+
+class _SoloSitiLiberi(urllib.request.HTTPRedirectHandler):
+    """I reindirizzamenti (Internet Archive manda ai suoi server) restano sui siti di musica libera."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _cl_host_libero(newurl) and not os.environ.get("ATLANTE_CLASSIFICHE_FINTE"):
+            raise urllib.error.HTTPError(newurl, code, "reindirizzato fuori dai siti di musica libera", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _cl_scarica_file(url, dest):
+    """Il file MP3 di un brano da un sito di musica libera, al più CL_MAX_FILE byte. Un sito che non risponde → Rete (il
+    brano resta in coda); un file che non c'è o non è un MP3 → RuntimeError (il brano si salta)."""
+    if not _cl_host_libero(url):
+        raise RuntimeError("indirizzo fuori dai siti di musica libera")
+    finte = os.environ.get("ATLANTE_CLASSIFICHE_FINTE")
+    if finte:   # le prove: lo stesso sito finto delle pagine
+        u = urlsplit(url)
+        url = finte.rstrip("/") + "/" + u.netloc + u.path + ("?" + u.query if u.query else "")
+    r = urllib.request.Request(url, headers={"User-Agent": "AtlanteMusica/1.0"})
+    try:
+        with urllib.request.build_opener(_SoloSitiLiberi).open(r, timeout=60) as f, open(dest, "wb") as fuori:
+            n = 0
+            while True:
+                b = f.read(1 << 20)
+                if not b:
+                    break
+                n += len(b)
+                if n > CL_MAX_FILE:
+                    raise RuntimeError("file troppo grande")
+                fuori.write(b)
     except urllib.error.HTTPError as e:
-        raise _cl_errore_http(e, True)
-    except (OSError, ValueError) as e:
-        raise Rete(str(e) or e.__class__.__name__)
-    for v in _trova(d, "videoRenderer"):
-        if not isinstance(v, dict) or not ID_YT.match(str(v.get("videoId") or "")) or not v.get("lengthText"):
-            continue
-        nome = _corse((v.get("title") or {}).get("runs"))
-        canale = _corse((v.get("ownerText") or {}).get("runs"))
-        if not re.search(r"official (?:music )?video|video ufficiale|videoclip ufficiale|\(official\)|music video", nome, re.I):
-            continue
-        if re.search(r"\b(?:lyrics?|testo|audio|visuali[sz]er|karaoke|cover|reaction|live|teaser|trailer)\b", nome, re.I):
-            continue
-        a, t = _da_titolo_video(nome, canale)
-        if _cl_stesso_titolo(titolo, t) and _cl_esecutore(artista, a + ", " + canale):
-            return v["videoId"]
-    return ""
+        e.close()
+        if e.code == 429 or e.code >= 500:
+            raise Rete("il sito ha risposto %d" % e.code)
+        raise RuntimeError("il sito ha risposto %d" % e.code)
+    except (OSError, ValueError) as e:   # nome che non si risolve, tempo scaduto, connessione chiusa
+        raise Rete(str(getattr(e, "reason", None) or e) or e.__class__.__name__)
+    with open(dest, "rb") as f:
+        testa = f.read(3)
+    if not (testa.startswith(b"ID3") or (len(testa) >= 2 and testa[0] == 0xFF and testa[1] & 0xE0 == 0xE0)):
+        raise RuntimeError("il file scaricato non è un MP3")
 
 
 def _cl_catalogo():
@@ -4184,38 +4208,42 @@ def _cl_libero():
 
 
 class Classifiche:
-    """Il lavoro in sottofondo: un brano dopo l'altro dalle classifiche, poi dalle playlist, senza fine."""
+    """Il lavoro in sottofondo: ogni giorno le classifiche (playlist per l'app con i brani che la libreria ha già) e le
+    fonti di musica libera, i cui brani nuovi entrano nella libreria uno alla volta."""
 
     def __init__(self, cartella, blocco):
         self.dir = cartella
         os.makedirs(cartella, exist_ok=True)
         self.file = os.path.join(cartella, "stato.json")
         self.file_cercati = os.path.join(cartella, "cercati.jsonl")
-        self.file_fonti = os.path.join(cartella, "fonti.json")
-        self.piano_clip = os.path.join(cartella, "videoclip.json")
         self.file_elenchi = os.path.join(cartella, "elenchi.json")   # le classifiche come playlist per l'app
         self.blocco_yt = blocco
         self.lock = threading.RLock()
         self.sveglia = threading.Event()
         self.adesso = time.time
-        self.fonti, self.spotify, self.generi = list(CL_FONTI), list(CL_SPOTIFY), list(CL_GENERI)
+        self.fonti, self.libere = list(CL_FONTI), list(CL_LIBERE)
         # quello che va fuori dal Mac mini (le prove lo sostituiscono)
-        self.leggi, self.cerca, self.scopri, self.videoclip = _cl_leggi, _cl_cerca, _cl_scopri, _cl_videoclip
+        self.leggi, self.leggi_libera = _cl_leggi, _cl_leggi_libera
         self.scarica, self.libero, self.catalogo = self._scarica, _cl_libero, _cl_catalogo
-        self.lavori = None        # coda degli scaricamenti (la stessa funzione di «Cerca e scarica»), alla prima volta
         self.ora_fa = ""
         self.avviato = False
         self._indice, self._firma, self._aggiunti = {}, object(), []
-        self._fonti_file = (None, None)
-        self._prova = None        # (ricerca, risultati) della prova dopo un blocco: il brano dopo non la rifà
         self.s = self._carica()
+        # dopo un riavvio le fonti che non si erano lette si riprovano subito: un riavvio di solito ripara qualcosa
+        # (il client_id di Jamendo aggiunto al servizio, la rete tornata)
+        for x in self.s["fonti"].values():
+            if isinstance(x, dict) and x.get("esito") == "errore":
+                x["letta"] = 0
+        # una coda di una versione di prima (brani da cercare su YouTube): restano solo i brani con un file libero
+        self.s["coda"] = [v for v in self.s["coda"] if isinstance(v, dict) and v.get("u") and v.get("s")
+                          and v.get("a") and v.get("t")]
         try:
             with open(self.file_elenchi, encoding="utf-8") as f:
                 d = json.load(f)
             self.elenchi = d if isinstance(d, dict) else {}
         except (OSError, ValueError):
             self.elenchi = {}
-        self.cercati, self.yt_fatti = {}, set()
+        self.cercati, self.fatti = {}, set()
         try:
             with open(self.file_cercati, encoding="utf-8") as f:
                 for riga in f:
@@ -4225,16 +4253,15 @@ class Classifiche:
                         continue
                     if isinstance(x, dict) and x.get("k"):
                         self.cercati[x["k"]] = x
-                        if x.get("yt") and x.get("e") in ("aggiunto", "doppione"):
-                            self.yt_fatti.add(x["yt"])
+                        if x.get("s") and x.get("e") == "aggiunto":
+                            self.fatti.add(x["s"])
         except OSError:
             pass
 
     # ----- stato su disco -----
 
     def _carica(self):
-        s = {"totale": 0, "giorno": "", "oggi": 0, "coda": [], "fonte": None, "fonti": {}, "ultimi": [], "pausa": None,
-             "playlist": {"turno": "", "ytm": {}}}
+        s = {"totale": 0, "giorno": "", "oggi": 0, "coda": [], "fonte": None, "fonti": {}, "ultimi": [], "pausa": None}
         try:
             with open(self.file, encoding="utf-8") as f:
                 d = json.load(f)
@@ -4262,25 +4289,23 @@ class Classifiche:
     def _giorno(self):
         return time.strftime("%Y-%m-%d", time.localtime(self.adesso()))
 
-    def _cercato(self, k, esito, v, yt="", errore="", brano=""):
-        """Un brano cercato su YouTube: si ricorda (cercati.jsonl, con l'id del catalogo se è nella libreria) ed esce
-        dalla coda."""
-        x = {"k": k, "e": esito, "t": int(self.adesso()), "a": v["a"][:200], "ti": v["t"][:200]}
+    def _cercato(self, k, esito, v, errore="", brano=""):
+        """Un brano provato: si ricorda (cercati.jsonl, con l'id del catalogo se è entrato nella libreria) ed esce dalla
+        coda."""
+        x = {"k": k, "e": esito, "t": int(self.adesso()), "a": v["a"][:200], "ti": v["t"][:200], "s": str(v.get("s") or "")[:500]}
         if brano:
             x["b"] = brano
-        if yt:
-            x["yt"] = yt
         if errore:
             x["errore"] = errore[:200]
         with self.lock:
             self.cercati[k] = x
-            if yt and esito in ("aggiunto", "doppione"):
-                self.yt_fatti.add(yt)
+            if esito == "aggiunto" and x["s"]:
+                self.fatti.add(x["s"])
             try:
                 with open(self.file_cercati, "a", encoding="utf-8") as f:
                     f.write(json.dumps(x, ensure_ascii=False) + "\n")
             except OSError as e:
-                print("Classifiche: elenco dei cercati non salvato: %s" % e, flush=True)
+                print("Classifiche: elenco dei provati non salvato: %s" % e, flush=True)
             self._togli()
 
     def _togli(self):
@@ -4333,20 +4358,6 @@ class Classifiche:
     def _in_libreria(self, artista, titolo):
         return self._trova_in_libreria(artista, titolo) is not None
 
-    def _brano_di(self, vid):
-        """L'id del catalogo di un video già scaricato dalle classifiche ('' se non si sa)."""
-        return next((x.get("b") for x in self.cercati.values() if x.get("yt") == vid and x.get("b")), "")
-
-    def _gia_scaricato(self, vid):
-        for coda in (self.lavori, _CODE.get("musica")):
-            if coda is None:
-                continue
-            with coda.blocco:
-                for l in coda.lavori.values():
-                    if l.get("yt") == vid and l.get("stato") == "fatto" and os.path.isfile(l.get("_percorso") or ""):
-                        return True
-        return False
-
     # ----- il lavoro -----
 
     def avvia(self):
@@ -4368,97 +4379,63 @@ class Classifiche:
                 self.sveglia.clear()
 
     def riprova_adesso(self):
-        """«Riprova adesso» in Gestione: una prova subito (blocco di YouTube o pausa)."""
+        """«Riprova adesso» in Gestione: la pausa finisce, la classifica di YouTube Music si riprova subito (se YouTube
+        bloccava) e le fonti che non si sono lette si rileggono."""
         self.blocco_yt.riprova_adesso()
         with self.lock:
             self.s["pausa"] = None
+            for x in self.s["fonti"].values():
+                if isinstance(x, dict) and x.get("esito") == "errore":
+                    x["letta"] = 0
             self._salva()
         self.sveglia.set()
 
-    def _attesa_blocco(self):
-        self.ora_fa = ""
-        return max(1.0, min(600.0, self.blocco_yt.attesa()))
-
-    def _domanda_prova(self):
-        if self.s["coda"]:
-            return _cl_domanda(self.s["coda"][0]["a"], self.s["coda"][0]["t"])
-        if self.s["ultimi"]:
-            return _cl_domanda(self.s["ultimi"][0]["artista"], self.s["ultimi"][0]["titolo"])
-        return "Eminem Without Me"
+    def _libera(self, f):
+        return any(f["id"] == x["id"] for x in self.libere)
 
     def passo(self):
-        """Un passo del lavoro (un brano, o la lettura di una fonte): restituisce i secondi da aspettare prima del prossimo."""
+        """Un passo del lavoro (la lettura di una fonte o un brano): restituisce i secondi da aspettare prima del prossimo."""
         ora = self.adesso()
-        b = self.blocco_yt
-        if b.attivo():
-            if not b.e_ora():
-                return self._attesa_blocco()
-            self.ora_fa = "Provo se YouTube ha tolto il blocco"
-            try:   # la prova: una ricerca sola (i suoi risultati servono al brano in coda)
-                q = self._domanda_prova()
-                self._prova = (q, self.cerca(q))
-            except Bloccato as e:
-                b.segnala(str(e))
-                return self._attesa_blocco()
-            except Rete as e:
-                return self._pausa("Internet o YouTube non rispondono (%s): riprovo fra poco" % e, CL_RETE)
-            b.riuscito()
         with self.lock:
             p = self.s.get("pausa")
             if p and ora < p.get("fino", 0):
                 return max(1.0, min(600.0, p["fino"] - ora))
             self.s["pausa"] = None
+        f = self._da_leggere_adesso(ora)   # le fonti appena è ora: i nuovi ingressi arrivano subito
+        if f is not None:
+            self._leggi_fonte(f, ora)
+            return 0
+        if self.s["coda"]:
+            return self._brano(ora)
+        self.ora_fa = "Tutto fatto: aspetto le classifiche nuove"
+        if self.blocco_yt.attivo():   # la classifica di YouTube Music si riprova quando è l'ora
+            return max(1.0, min(3600.0, self.blocco_yt.attesa()))
+        return 3600
+
+    def _brano(self, ora):
+        v = self.s["coda"][0]
+        k = _cl_chiave(v["a"], v["t"])
+        if v["s"] in self.fatti or self._gia_cercato(k, ora) or self._in_libreria(v["a"], v["t"]):
+            self._togli()
+            return 0
         libero = self.libero()
         if libero is None:
             return self._pausa("La cartella della musica non è raggiungibile (il Cloud è collegato?): riprovo fra "
                                "mezz'ora", 1800)
         if libero < CL_SPAZIO_MIN:
-            return self._pausa("Meno di 200 GB liberi sul disco della musica (%d GB): fermo, riprovo fra mezz'ora"
-                               % (libero // 1024 ** 3), 1800)
+            return self._pausa("Meno di %d GB liberi sul disco della musica (%d GB): fermo, riprovo fra mezz'ora"
+                               % (CL_SPAZIO_MIN // 1024 ** 3, libero // 1024 ** 3), 1800)
+        self.ora_fa = "Scarico «%s» di %s" % (v["t"], v["a"])
         try:
-            f = self._classifica_da_leggere(ora)   # le classifiche appena è ora: i nuovi ingressi passano davanti
-            if f is None and self.s["coda"]:
-                return self._brano(ora)
-            if f is None:
-                f = self._prossima_playlist(ora)
-            if f is None:
-                self.ora_fa = "Tutto fatto: aspetto le classifiche nuove"
-                return 3600
-            self._leggi_fonte(f, ora)
-            return 0
-        except Bloccato as e:
-            b.segnala(str(e))
-            return self._attesa_blocco()
-        except Rete as e:
-            return self._pausa("Internet o YouTube non rispondono (%s): riprovo fra poco" % e, CL_RETE)
-
-    def _brano(self, ora):
-        v = self.s["coda"][0]
-        k = _cl_chiave(v["a"], v["t"])
-        if self._gia_cercato(k, ora) or self._in_libreria(v["a"], v["t"]):
-            self._togli()
-            return 0
-        self.ora_fa = "Cerco «%s» di %s" % (v["t"], v["a"])
-        q, prova, self._prova = _cl_domanda(v["a"], v["t"]), self._prova, None
-        risultati = prova[1] if prova and prova[0] == q else self.cerca(q)   # Bloccato, Rete: il brano resta in coda
-        r, motivo = _cl_scegli(v["a"], v["t"], risultati)
-        if r is None:
-            self._cercato(k, motivo, v)
-            return CL_PAUSA
-        gia = self._trova_in_libreria(r["artista"], r["titolo"])
-        if r["id"] in self.yt_fatti or self._gia_scaricato(r["id"]) or gia is not None:
-            self._cercato(k, "doppione", v, r["id"], brano=gia or self._brano_di(r["id"]))
-            return CL_PAUSA
-        self.ora_fa = "Scarico «%s» di %s" % (r["titolo"], r["artista"])
-        try:
-            x = self.scarica(r)
-        except (Bloccato, Rete):
-            raise
+            x = self.scarica(v)
         except ErroreExtra as e:   # la cartella della musica non c'è più (disco scollegato)
             return self._pausa(e.testo, 1800)
-        except Exception as e:   # noqa: BLE001  un brano che non si scarica (video tolto…) si salta
-            self._cercato(k, "errore", v, r["id"], str(e))
-            print("Classifiche: «%s» di %s non scaricato: %s" % (r["titolo"], r["artista"], e), flush=True)
+        except Rete as e:   # il sito non risponde: il brano resta in coda
+            sito = (urlsplit(v["u"]).hostname or "").lower()
+            return self._pausa("Il sito %s non risponde (%s): riprovo fra poco" % (sito, e), CL_RETE)
+        except Exception as e:   # noqa: BLE001  un brano che non si scarica (tolto dal sito…) si salta
+            self._cercato(k, "errore", v, str(e))
+            print("Classifiche: «%s» di %s non scaricato: %s" % (v["t"], v["a"], e), flush=True)
             return CL_PAUSA
         with self.lock:
             g = self._giorno()
@@ -4466,70 +4443,54 @@ class Classifiche:
                 self.s["giorno"], self.s["oggi"] = g, 0
             self.s["oggi"] += 1
             self.s["totale"] += 1
-            self.s["ultimi"] = ([{"titolo": r["titolo"], "artista": r["artista"], "album": r.get("album") or "",
-                                  "explicit": bool(r.get("explicit")), "fonte": v.get("f") or "", "quando": int(ora),
-                                  "brano": x.get("brano") or "", "yt": r["id"]}] + self.s["ultimi"])[:CL_ULTIMI]
-            self._aggiunti.append((r["artista"], r["titolo"], x.get("brano") or ""))
-            self._indice.setdefault(_cl_titolo(r["titolo"]), []).append((_cl_parole(r["artista"]),
-                                                                       _cl_principale(r["artista"]).split(),
-                                                                       x.get("brano") or ""))
-        self._cercato(k, "aggiunto", v, r["id"], brano=x.get("brano") or "")
-        print("Classifiche: aggiunto «%s» di %s (%s)" % (r["titolo"], r["artista"], v.get("f") or ""), flush=True)
-        self._videoclip(r, x)
+            self.s["ultimi"] = ([{"titolo": v["t"], "artista": v["a"], "album": v.get("al") or "", "fonte": v.get("f") or "",
+                                  "quando": int(ora), "brano": x.get("brano") or "", "licenza": _cl_nome_licenza(v.get("lic")),
+                                  "licenza_url": v.get("lic") or "", "pagina": v.get("pag") or ""}]
+                                + self.s["ultimi"])[:CL_ULTIMI]
+            self._aggiunti.append((v["a"], v["t"], x.get("brano") or ""))
+            self._indice.setdefault(_cl_titolo(v["t"]), []).append((_cl_parole(v["a"]), _cl_principale(v["a"]).split(),
+                                                                   x.get("brano") or ""))
+        self._cercato(k, "aggiunto", v, brano=x.get("brano") or "")
+        print("Classifiche: aggiunto «%s» di %s (%s, %s)" % (v["t"], v["a"], v.get("f") or "",
+                                                            _cl_nome_licenza(v.get("lic")) or "licenza libera"), flush=True)
         return CL_PAUSA
 
-    def _scarica(self, r):
-        """Scarica il brano con lo stesso lavoro di «Cerca e scarica» (MP3, tag, copertina, explicit), uno alla volta, e ne
-        aspetta la fine: {nome, brano, percorso}."""
-        _cartella_musica()   # disco scollegato: ErroreExtra (pausa), prima di cominciare
-        with self.lock:
-            if self.lavori is None:
-                self.lavori = Coda(os.path.join(self.dir, "lavori.json"), 1, _scarica_musica)
-        id_ = self.lavori.aggiungi({"yt": r["id"], "url": "https://music.youtube.com/watch?v=" + r["id"],
-                                    "titolo": r["titolo"][:300], "artista": r["artista"][:300],
-                                    "album": (r.get("album") or "")[:300], "copertina": (r.get("copertina") or "")[:1000],
-                                    "explicit": bool(r.get("explicit")), "nome": "", "dimensione": 0, "brano": "",
-                                    "fonte": "classifiche"})
-        fine = time.time() + CL_TEMPO_BRANO
-        while True:
-            l = dict(self.lavori.lavori.get(id_) or {})
-            if l.get("stato") in ("fatto", "errore"):
-                break
-            if time.time() > fine:
-                self.lavori.annulla(id_)
-                raise RuntimeError("scaricamento troppo lungo")
-            time.sleep(0.3)
-        if l["stato"] == "fatto":
-            return {"nome": l.get("nome") or "", "brano": l.get("brano") or "", "percorso": l.get("_percorso") or ""}
-        raise _cl_errore(l.get("errore"))
-
-    def _videoclip(self, r, x):
-        """Il videoclip del brano nuovo nell'elenco dei videoclip (li prepara Videoclip, come per gli altri)."""
-        if CLIP is None or not x.get("nome"):
-            return
+    def _scarica(self, v):
+        """Il brano dal sito di musica libera in «Musica libera» dentro la cartella della musica scaricata: il file com'è
+        (MP3, senza ricodificarlo) con titolo, artista, album, copertina, licenza e pagina d'origine nei tag.
+        -> {nome, brano, percorso}"""
+        dest = os.path.join(_cartella_musica(), "Musica libera")   # disco scollegato: ErroreExtra (pausa), prima
+        os.makedirs(dest, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="libera-", dir=_cartella_tmp())
+        parziale = os.path.join(dest, ".libera-%s.tmp" % secrets.token_hex(6))   # col punto davanti la libreria non lo legge
         try:
-            vid = self.videoclip(r["artista"], r["titolo"])
-        except Bloccato as e:
-            self.blocco_yt.segnala(str(e))
-            return
-        except Exception:   # noqa: BLE001  senza videoclip il brano c'è comunque
-            return
-        if not vid:
-            return
-        try:
-            with open(self.piano_clip, encoding="utf-8") as f:
-                piano = json.load(f)
-            if not isinstance(piano, dict):
-                piano = {}
-        except (OSError, ValueError):
-            piano = {}
-        piano[x["nome"]] = {"id": vid}
-        try:
-            with open(self.piano_clip + ".tmp", "w", encoding="utf-8") as f:
-                json.dump(piano, f, ensure_ascii=False)
-            os.replace(self.piano_clip + ".tmp", self.piano_clip)
-        except OSError as e:
-            print("Classifiche: elenco dei videoclip non salvato: %s" % e, flush=True)
+            sorgente = os.path.join(tmp, "brano.mp3")
+            _cl_scarica_file(v["u"], sorgente)
+            nome = _nome_file("%s - %s" % (v["a"], v["t"]), 180) or "brano"
+            ff = _programma("ffmpeg")
+            if ff:
+                lic = v.get("lic") or ""
+                nota = "%s · %s · %s" % (v.get("f") or "Musica libera", _cl_nome_licenza(lic) or "licenza libera",
+                                         v.get("pag") or lic)
+                tag = {"title": v["t"], "artist": v["a"], "album": v.get("al") or "", "copyright": lic, "comment": nota,
+                       "purl": v.get("pag") or ""}
+                copertina = os.path.join(tmp, "copertina.img")
+                if not (v.get("img") and _scarica_immagine(v["img"], copertina, CL_HOST_LIBERI)):
+                    copertina = ""
+                try:
+                    _mp3(ff, sorgente, copertina, tag, parziale, copia=True)
+                except RuntimeError:
+                    if not copertina:
+                        raise
+                    _mp3(ff, sorgente, "", tag, parziale, copia=True)   # immagine che ffmpeg non legge: senza copertina
+            else:   # senza ffmpeg il file com'è, con i tag che ha già
+                shutil.copyfile(sorgente, parziale)
+            finale = _libero(os.path.join(dest, nome + ".mp3"))
+            os.replace(parziale, finale)
+            return {"nome": os.path.basename(finale), "brano": _in_libreria(finale), "percorso": finale}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            _cancella(parziale)   # non riuscito a metà
 
     # ----- le fonti -----
 
@@ -4539,122 +4500,58 @@ class Classifiche:
             return True
         return ora - x.get("letta", 0) >= (ogni if x.get("esito") == "ok" else CL_RIPROVA_FONTE)
 
-    def _dal_file(self):
-        """fonti.json nella cartella delle classifiche, se c'è: {"spotify": [[nome, genere, id]], "generi": [[g, ricerca]]}."""
-        try:
-            m = os.path.getmtime(self.file_fonti)
-        except OSError:
-            return {}
-        if self._fonti_file[0] != m:
-            try:
-                with open(self.file_fonti, encoding="utf-8") as f:
-                    d = json.load(f)
-                self._fonti_file = (m, d if isinstance(d, dict) else {})
-            except (OSError, ValueError):
-                self._fonti_file = (m, {})
-        return self._fonti_file[1]
-
-    def _lista_spotify(self):
-        voci = self._dal_file().get("spotify") or self.spotify
-        return [{"id": "sp:" + str(x[2]), "nome": "%s (Spotify, %s)" % (x[0], x[1]), "tipo": "spotify", "dove": str(x[2])}
-                for x in voci if isinstance(x, (list, tuple)) and len(x) >= 3 and re.match(r"^[A-Za-z0-9]{10,40}$", str(x[2]))]
-
-    def _lista_generi(self):
-        voci = self._dal_file().get("generi") or self.generi
-        return [(str(x[0]), str(x[1])) for x in voci if isinstance(x, (list, tuple)) and len(x) >= 2 and x[1]]
-
-    def _classifica_da_leggere(self, ora):
-        return next((f for f in self.fonti if self._da_leggere(f["id"], CL_CLASSIFICHE_OGNI, ora)), None)
-
-    def _prossima_playlist(self, ora):
-        pl = self.s["playlist"]
-        sp = next((f for f in self._lista_spotify() if self._da_leggere(f["id"], CL_PLAYLIST_OGNI, ora)), None)
-        if sp and pl.get("turno") != "ytm":   # poi le playlist, a turno: una di Spotify e una di YouTube Music
-            pl["turno"] = "ytm"
-            return sp
-        y = self._prossima_ytm(ora)
-        if y:
-            pl["turno"] = "spotify"
-            return y
-        return sp
-
-    def _prossima_ytm(self, ora):
-        """La prossima playlist di YouTube Music: la più vista di ogni genere, poi la seconda di ogni genere… Le pagine dei
-        risultati si leggono quando servono, una dopo l'altra, senza un numero massimo."""
-        st = self.s["playlist"].setdefault("ytm", {})
-        generi = self._lista_generi()
-        for g, q in generi:
-            x = st.get(g)
-            if not isinstance(x, dict) or x.get("q") != q or ora - x.get("cercata", 0) >= CL_PLAYLIST_OGNI:
-                st[g] = {"q": q, "trovate": [], "seguiti": [[f, ""] for f in CL_FILTRI_PLAYLIST], "cercata": ora}
-        r = 0
-        while True:
-            altre = False
-            for g, q in generi:
-                x = st[g]
-                while r >= len(x["trovate"]) and x["seguiti"]:
-                    filtro, seguito = x["seguiti"].pop(0)
-                    self.ora_fa = "Cerco playlist di %s su YouTube Music" % g
-                    try:
-                        trovate, dopo = self.scopri(q, filtro, seguito)
-                    except BaseException:
-                        x["seguiti"].insert(0, [filtro, seguito])
-                        raise
-                    visti = {p["id"] for p in x["trovate"]}
-                    nuove = [p for p in trovate if p.get("id") and p["id"] not in visti]
-                    x["trovate"] += [{"id": p["id"], "nome": p.get("nome") or p["id"], "viste": p.get("viste") or 0}
-                                     for p in nuove]
-                    if dopo and nuove:
-                        x["seguiti"].append([filtro, dopo])
-                    self._salva()
-                if r < len(x["trovate"]):
-                    altre = True
-                    p = x["trovate"][r]
-                    fid = "yt:" + p["id"]
-                    if self._da_leggere(fid, CL_PLAYLIST_OGNI, ora):
-                        return {"id": fid, "nome": "%s (YouTube Music, %s)" % (p["nome"], g), "tipo": "ytm-playlist",
-                                "dove": p["id"]}
-            if not altre:
-                return None
-            r += 1
+    def _da_leggere_adesso(self, ora):
+        """La prossima fonte da leggere: prima le classifiche, poi la musica libera. Mentre YouTube blocca, la classifica
+        di YouTube Music aspetta l'ora della prova; le altre vanno avanti."""
+        b = self.blocco_yt
+        for f in list(self.fonti) + list(self.libere):
+            if f["tipo"] == "ytm" and b.attivo():
+                if b.e_ora():
+                    return f   # la prova: la lettura stessa della classifica
+                continue
+            if self._da_leggere(f["id"], CL_CLASSIFICHE_OGNI, ora):
+                return f
+        return None
 
     def _leggi_fonte(self, f, ora):
+        libera = self._libera(f)
         with self.lock:
             self.s["fonte"] = {"id": f["id"], "nome": f["nome"]}
         self.ora_fa = "Leggo %s" % f["nome"]
-        errore = ""
+        errore = motivo = ""
         try:
-            brani = self.leggi(f)
-        except Bloccato:
-            raise
-        except Rete:
-            if f["tipo"] in ("ytm", "ytm-playlist"):
-                raise   # YouTube che non risponde: si riprova la stessa fonte fra poco
-            brani, errore = [], "sito non raggiungibile"
+            voci = self.leggi_libera(f) if libera else self.leggi(f)
+            if f["tipo"] == "ytm":
+                self.blocco_yt.riuscito()   # YouTube ha risposto: se c'era un blocco, è finito
+        except Bloccato as e:   # la classifica di YouTube Music aspetta la fine del blocco; il resto va avanti
+            self.blocco_yt.segnala(str(e))
+            return
+        except Rete as e:
+            voci, errore, motivo = [], "sito non raggiungibile", str(e) or "sito non raggiungibile"
         except Exception as e:   # noqa: BLE001  una fonte che non si legge si salta (e si dice in Gestione)
-            brani, errore = [], str(e) or e.__class__.__name__
-        brani = _cl_unici(brani)
+            voci, errore = [], str(e) or e.__class__.__name__
+            motivo = errore
+        if f["tipo"] == "ytm" and errore and self.blocco_yt.attivo():
+            # la prova durante un blocco non è riuscita in un altro modo (YouTube o la rete rispondono male): si riprova
+            # più tardi, con la pausa che cresce. Senza questo la prova si ripeterebbe subito, senza fine.
+            self.blocco_yt.segnala("prova non riuscita: %s" % motivo)
+            return
+        voci = _cl_libere_uniche(voci) if libera else [{"a": a, "t": t} for a, t in _cl_unici(voci)]
         if f.get("quanti"):
-            brani = brani[:f["quanti"]]
-        classifica = any(f["id"] == c["id"] for c in self.fonti)
+            voci = voci[:f["quanti"]]
         with self.lock:
-            if brani:
+            if voci:
                 self.s["fonti"][f["id"]] = {"nome": f["nome"], "letta": int(ora), "esito": "ok", "errore": "",
-                                            "brani": len(brani)}
-                nuovi = [{"a": a, "t": t, "f": f["nome"]} for a, t in brani
-                         if not self._gia_cercato(_cl_chiave(a, t), ora) and not self._in_libreria(a, t)]
-                if classifica:
-                    # i nuovi ingressi passano davanti ai brani delle playlist (dopo quelli delle classifiche già in coda,
-                    # nel loro ordine); un brano che era già in coda non si ripete
-                    coda = self.s["coda"]
-                    i = next((j for j, v in enumerate(coda) if not v.get("c")), len(coda))
-                    davanti = {_cl_chiave(v["a"], v["t"]) for v in coda[:i]}
-                    nuovi = [dict(v, c=1) for v in nuovi if _cl_chiave(v["a"], v["t"]) not in davanti]
-                    chiavi = {_cl_chiave(v["a"], v["t"]) for v in nuovi}
-                    self.s["coda"] = coda[:i] + nuovi + [v for v in coda[i:] if _cl_chiave(v["a"], v["t"]) not in chiavi]
-                    self._aggiorna_elenco(f, brani, ora)
-                else:
-                    self.s["coda"] += nuovi
+                                            "brani": len(voci)}
+                if libera:   # i brani nuovi in coda, uno solo per file (le classifiche della settimana e del mese si somigliano)
+                    in_coda = {v.get("s") for v in self.s["coda"]}
+                    for v in voci:
+                        if (v["s"] not in in_coda and v["s"] not in self.fatti
+                                and not self._gia_cercato(_cl_chiave(v["a"], v["t"]), ora) and not self._in_libreria(v["a"], v["t"])):
+                            self.s["coda"].append(dict({k: v[k] for k in ("a", "t", "al", "u", "lic", "pag", "img", "s")
+                                                        if v.get(k)}, f=f["nome"]))
+                            in_coda.add(v["s"])
+                self._aggiorna_elenco(f, [(v["a"], v["t"]) for v in voci], ora)
             else:
                 errore = errore or "pagina letta ma senza brani: forse il sito ha cambiato forma"
                 self.s["fonti"][f["id"]] = {"nome": f["nome"], "letta": int(ora), "esito": "errore",
@@ -4686,15 +4583,18 @@ class Classifiche:
         except OSError as err:
             print("Classifiche: classifiche per l'app non salvate: %s" % err, flush=True)
 
-    def _voce_app(self, v, ora):
-        """Un brano di una classifica per l'app: il suo id nel catalogo («libreria»), «in arrivo» (ancora da cercare o da
-        scaricare) o «non disponibile» (cercato su YouTube Music: non c'è, o c'è solo la versione censurata)."""
+    def _voce_app(self, v, ora, libera):
+        """Un brano di una classifica per l'app: il suo id nel catalogo («libreria»); se no, per le classifiche
+        commerciali «non in libreria»; per la musica libera «in arrivo» (ancora da scaricare) o «non disponibile» (non si
+        è scaricato: si riprova dopo tre mesi)."""
         i = self._trova_in_libreria(v["a"], v["t"])
         c = self.cercati.get(v.get("k")) or {}
         if i is None and c.get("e") in ("aggiunto", "doppione"):
-            i = c.get("b") or ""   # scaricato dalle classifiche con un titolo scritto in un altro modo
+            i = c.get("b") or ""   # scaricato con un titolo scritto in un altro modo
         if i is not None:
             stato = "libreria"
+        elif not libera:
+            stato = "non in libreria"
         elif c and self._gia_cercato(v["k"], ora):
             stato = "non disponibile"
         else:
@@ -4703,27 +4603,29 @@ class Classifiche:
 
     def classifiche_app(self):
         """Le classifiche lette, come playlist per l'app di tutti: posizioni, ▲▼ e «nuovo» rispetto alla classifica di
-        prima, ogni brano nella libreria o «in arrivo», e gli usciti delle ultime 4 settimane (restano nella libreria)."""
+        prima, ogni brano nella libreria o no, e gli usciti delle ultime 4 settimane. Prima le classifiche, poi quelle di
+        musica libera («libera»)."""
         ora = self.adesso()
         fuori = []
         with self.lock:
-            for f in self.fonti:
+            for f in list(self.fonti) + list(self.libere):
                 e = self.elenchi.get(f["id"])
                 if not e or not e.get("brani"):
                     continue
+                libera = self._libera(f)
                 prima = e.get("prima")
                 brani = []
                 for n, v in enumerate(e["brani"], 1):
-                    b = dict(self._voce_app(v, ora), pos=n, segno="", di=0)
+                    b = dict(self._voce_app(v, ora, libera), pos=n, segno="", di=0)
                     if prima is not None:
                         p = prima.get(v["k"])
                         b["segno"], b["di"] = ("nuovo", 0) if p is None else (
                             "su" if p > n else "giu" if p < n else "uguale", abs(p - n))
                     brani.append(b)
-                usciti = [dict(self._voce_app(u, ora), pos=u.get("pos", 0), uscito=u.get("quando", 0))
+                usciti = [dict(self._voce_app(u, ora, libera), pos=u.get("pos", 0), uscito=u.get("quando", 0))
                           for u in e.get("usciti") or [] if ora - u.get("quando", 0) < CL_USCITI]
-                fuori.append({"id": f["id"], "nome": f["nome"], "letta": e.get("letta", 0), "cambiata": e.get("cambiata", 0),
-                              "brani": brani, "usciti": usciti})
+                fuori.append({"id": f["id"], "nome": f["nome"], "libera": libera, "letta": e.get("letta", 0),
+                              "cambiata": e.get("cambiata", 0), "brani": brani, "usciti": usciti})
         return {"classifiche": fuori}
 
     # ----- per la Gestione -----
@@ -4733,25 +4635,22 @@ class Classifiche:
         with self.lock:
             s = self.s
             pausa = dict(s["pausa"]) if s.get("pausa") and s["pausa"].get("fino", 0) > ora else None
-            classifiche = []
-            for f in self.fonti:
+
+            def riga(f):
                 x = s["fonti"].get(f["id"]) or {}
-                classifiche.append({"id": f["id"], "nome": f["nome"], "letta": x.get("letta", 0), "esito": x.get("esito", ""),
-                                    "errore": x.get("errore", ""), "brani": x.get("brani", 0)})
-            ids = {f["id"] for f in self.fonti}
-            playlist = sorted(({"id": k, "nome": x.get("nome", k), "letta": x.get("letta", 0), "esito": x.get("esito", ""),
-                                "errore": x.get("errore", ""), "brani": x.get("brani", 0)}
-                               for k, x in s["fonti"].items() if k not in ids), key=lambda y: -y["letta"])
+                return {"id": f["id"], "nome": f["nome"], "letta": x.get("letta", 0), "esito": x.get("esito", ""),
+                        "errore": x.get("errore", ""), "brani": x.get("brani", 0)}
             fonte = dict(s["fonte"], in_coda=len(s["coda"])) if s.get("fonte") else None
-            if s["coda"]:   # la fonte del brano che si fa adesso (una classifica può essere passata davanti a una playlist)
+            if s["coda"]:   # la fonte del brano che si fa adesso
                 fonte = {"nome": s["coda"][0].get("f") or "", "in_coda": len(s["coda"])}
             r = {"attivo": True, "oggi": s["oggi"] if s["giorno"] == self._giorno() else 0, "totale": s["totale"],
                  "ora": self.ora_fa, "fonte": fonte, "pausa": pausa, "ultimi": [dict(u) for u in s["ultimi"]],
-                 "classifiche": classifiche, "playlist": playlist[:12], "playlist_lette": len(playlist),
-                 "cercati": len(self.cercati)}
+                 "classifiche": [riga(f) for f in self.fonti], "libere": [riga(f) for f in self.libere],
+                 "provati": len(self.cercati), "jamendo": bool(_jamendo_id())}
         r["blocco"] = self.blocco_yt.stato()
         libero = _con_limite(self.libero, 3)
         r["spazio_libero_gb"] = round(libero / 1024 ** 3, 1) if libero is not None else None
+        r["spazio_min_gb"] = round(CL_SPAZIO_MIN / 1024 ** 3)
         return r
 
 
@@ -4762,7 +4661,6 @@ def avvia_classifiche(cache, attive):
     BLOCCO = BloccoYouTube(os.path.join(base, "youtube-blocco.json"))
     if attive:
         CL = Classifiche(os.path.join(base, "classifiche"), BLOCCO)
-        PIANI_AGGIUNTI.append(CL.piano_clip)
         CL.avvia()
         print("Classifiche: attive (stato in %s)" % CL.dir, flush=True)
 
@@ -11999,7 +11897,7 @@ def _imposta_password(file):
 
 def main():
     global ACC, CLIP, PERS, PROPRIETARI, PUBBLICO
-    global IDEE
+    global IDEE, CL_SPAZIO_MIN
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -12026,7 +11924,8 @@ def main():
                     help="cartella (playlist) i cui brani si preparano per primi (anche ATLANTE_CLIP_PRIMA)")
     # classifiche e playlist: anche da variabile d'ambiente (nel LaunchAgent una versione vecchia del server la ignora)
     ap.add_argument("--classifiche", action="store_true", default=os.environ.get("ATLANTE_CLASSIFICHE") == "1",
-                    help="aggiunge da solo i brani delle classifiche e delle playlist più seguite (anche ATLANTE_CLASSIFICHE=1)")
+                    help="classifiche come playlist con i brani che hai, e brani nuovi dai siti di musica libera "
+                         "(Jamendo con ATLANTE_JAMENDO_CLIENT_ID, Internet Archive) (anche ATLANTE_CLASSIFICHE=1)")
     ap.add_argument("--tematiche", action="store_true", default=os.environ.get("ATLANTE_TEMATICHE") == "1",
                     help="prepara in sottofondo, un brano alla volta, i dati delle playlist di Atlante (generi da "
                     "MusicBrainz, BPM ed energia dall'audio); anche ATLANTE_TEMATICHE=1")
@@ -12073,6 +11972,7 @@ def main():
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
     PUBBLICO = a.pubblico.strip()
+    CL_SPAZIO_MIN = int(max(0.0, _numero_ambiente("ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB", 200)) * 1024 ** 3)
     _prepara_chiamate(a.stun)
     if PUBBLICO and not PUBBLICO.endswith("/"):
         PUBBLICO += "/"

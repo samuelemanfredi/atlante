@@ -25,7 +25,7 @@ import threading
 import time
 import unittest
 import unittest.mock
-from urllib.parse import quote as _quote, urlsplit
+from urllib.parse import parse_qs, quote as _quote, urlsplit
 
 QUI =os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(QUI, "musica_libreria.py")
@@ -353,6 +353,9 @@ class Server:
         env = dict(os.environ)
         env["PATH"] = self.c["bin"] + os.pathsep + env.get("PATH", "")
         env["FINTO_DIR"] = self.c["finto"]
+        # la musica libera si ferma sotto i 200 GB liberi: qui non deve contare il disco di chi lancia le prove
+        # (l'aggiornamento automatico le lancia sul Mac mini, dove il disco interno può averne meno)
+        env.setdefault("ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB", "0")
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         self.log = open(os.path.join(self.base, "server-%d.log" % self.porta), "wb")
@@ -2242,10 +2245,6 @@ PAGINA_APPLE = """<html><head><script type="application/ld+json">{"@type":"Music
 {"title":"Die With A Smile","artistName":"Lady Gaga & Bruno Mars","contentDescriptor":{"kind":"song"}},
 {"title":"APT.","artistName":"ROSÉ & Bruno Mars"}]}]}}]</script></body></html>"""
 
-PAGINA_SPOTIFY = """<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":
-{"entity":{"name":"RapCaviar","subtitle":"Spotify","trackList":[{"uri":"spotify:track:1","title":"Not Like Us","subtitle":"Kendrick Lamar",
-"isExplicit":true},{"uri":"spotify:track:2","title":"Timeless (with Playboi Carti)","subtitle":"The Weeknd, Playboi Carti"}]}}}}}}</script></body></html>"""
-
 PAGINA_CAMBIATA = "<html><body><h1>Manutenzione</h1><p>Torniamo presto.</p></body></html>"
 
 
@@ -2258,22 +2257,13 @@ def modulo_server(nome):
     return m
 
 
-def risultato(vid, titolo, artista, album="", explicit=False, durata=200):
-    """Un risultato della ricerca di YouTube Music com'è dopo _brano_ytm (prima di _ordina)."""
-    return {"id": vid, "titolo": titolo, "artista": artista, "album": album, "durata": durata, "copertina": "",
-            "explicit": explicit}
+def libera(n, artista, titolo, lic="http://creativecommons.org/licenses/by-sa/4.0/"):
+    """Un brano di una fonte di musica libera com'è dopo _cl_leggi_libera."""
+    return {"a": artista, "t": titolo, "al": "Album", "u": "https://archive.org/download/u/%d.mp3" % n, "lic": lic,
+            "pag": "https://archive.org/details/u", "img": "", "s": "archivio:u/%d.mp3" % n}
 
 
-def ricerca_playlist(voci):
-    """Risposta finta di youtubei/v1/search con playlist: (id, nome, sotto)."""
-    return {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {
-        "contents": [{"musicShelfRenderer": {"contents": [{"musicResponsiveListItemRenderer": {
-            "navigationEndpoint": {"browseEndpoint": {"browseId": vid}},
-            "flexColumns": [
-                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": nome}]}}},
-                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": sotto}]}}}]}}
-            for vid, nome, sotto in voci],
-            "continuations": [{"nextContinuationData": {"continuation": "PAGINA2"}}]}}]}}}}]}}}
+MP3_FINTO = b"ID3\x03\x00\x00\x00\x00\x00\x00" + (b"\xff\xfb\x90\x00" + bytes(413)) * 10
 
 
 class Orologio:
@@ -2317,13 +2307,9 @@ class TestClassificheLettori(unittest.TestCase):
         self.assertEqual(self.m._cl_apple(PAGINA_APPLE), [("Lady Gaga & Bruno Mars", "Die With A Smile"),
                                                           ("ROSÉ & Bruno Mars", "APT.")])
 
-    def test_spotify(self):
-        self.assertEqual(self.m._cl_spotify(PAGINA_SPOTIFY), [("Kendrick Lamar", "Not Like Us"),
-                                                              ("The Weeknd, Playboi Carti", "Timeless (with Playboi Carti)")])
-
     def test_pagina_cambiata(self):
         m = self.m
-        for lettore in (m._cl_kworb, m._cl_billboard, m._cl_uk, m._cl_fimi, m._cl_apple, m._cl_spotify):
+        for lettore in (m._cl_kworb, m._cl_billboard, m._cl_uk, m._cl_fimi, m._cl_apple):
             self.assertEqual(lettore(PAGINA_CAMBIATA), [], lettore.__name__)
             self.assertEqual(lettore(""), [], lettore.__name__)
         self.assertEqual(m._cl_apple("{non json"), [])
@@ -2376,90 +2362,6 @@ class TestClassificheLettori(unittest.TestCase):
         self.assertEqual(chieste[:3], ["FEmusic_charts", "VLPLbraniIT", "SEGUE"])
         self.assertNotIn("VLPLaltro", chieste)
 
-    def test_scopri_playlist(self):
-        m = self.m
-        risposta = ricerca_playlist([("VLRDCLAK5uy_a", "Pop italiano: le hit", "Playlist • YouTube Music • 250.000 visualizzazioni"),
-                                     ("UCartista", "Un artista", "Artista"),
-                                     ("VLPLcommunity", "Hit pop 2026", "Playlist • Mario • 1,2 Mln visualizzazioni"),
-                                     ("VLPLpiccola", "Pop nuovo", "Playlist • Anna • 12K views")])
-        corpi = []
-
-        def ytm(percorso, corpo, extra=""):
-            corpi.append((percorso, corpo, extra))
-            return risposta
-        with unittest.mock.patch.object(m, "_cl_ytm", ytm):
-            trovate, seguito = m._cl_scopri("pop italiano", m.CL_FILTRI_PLAYLIST[0], "")
-            m._cl_scopri("pop italiano", None, "PAGINA2")
-        self.assertEqual([p["id"] for p in trovate], ["VLPLcommunity", "VLRDCLAK5uy_a", "VLPLpiccola"])   # dalla più vista
-        self.assertEqual([p["viste"] for p in trovate], [1200000, 250000, 12000])
-        self.assertEqual(seguito, "PAGINA2")
-        self.assertEqual((corpi[0][0], corpi[0][1]["query"], corpi[0][1]["params"]), ("search", "pop italiano", m.CL_FILTRI_PLAYLIST[0]))
-        self.assertEqual(corpi[1][1], {"continuation": "PAGINA2"})
-        self.assertIn("ctoken=PAGINA2", corpi[1][2])
-
-    def test_viste(self):
-        for testo, n in (("1,2 Mln visualizzazioni", 1200000), ("350.000 visualizzazioni", 350000), ("1.5M views", 1500000),
-                         ("12K views", 12000), ("2 Mld di visualizzazioni", 2000000000), ("Playlist • YouTube Music", 0)):
-            self.assertEqual(self.m._cl_viste(testo), n, testo)
-
-
-class TestClassificheScelta(unittest.TestCase):
-    """Quale risultato di YouTube Music si scarica per un brano di una classifica, e quando un brano c'è già."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.m = modulo_server("musica_libreria_cl_scelta")
-
-    def scegli(self, artista, titolo, risultati):
-        return self.m._cl_scegli(artista, titolo, self.m._ordina([dict(r) for r in risultati]))
-
-    def test_sempre_la_versione_explicit(self):
-        r, motivo = self.scegli("Eminem", "Without Me", [risultato("NoExplicit1", "Without Me", "Eminem"),
-                                                         risultato("Explicit001", "Without Me", "Eminem", explicit=True)])
-        self.assertEqual((r["id"], motivo), ("Explicit001", ""))
-        # c'è solo la versione censurata (clean, edited, radio edit): niente, mai la censurata
-        for t in ("Without Me (Clean)", "Without Me (Radio Edit)", "Without Me - Edited", "Without Me [Censored]"):
-            r, motivo = self.scegli("Eminem", "Without Me", [risultato("Pulita00001", t, "Eminem")])
-            self.assertEqual((r, motivo), (None, "censurata"), t)
-        # un brano senza versione explicit (nessuna parolaccia): va bene quella che c'è
-        r, motivo = self.scegli("Olly", "Balorda nostalgia", [risultato("Olly0000001", "Balorda nostalgia", "Olly")])
-        self.assertEqual(r["id"], "Olly0000001")
-        # «Clean» di Taylor Swift è il titolo, non una versione censurata
-        self.assertEqual(self.scegli("Taylor Swift", "Clean", [risultato("TaylorClean", "Clean", "Taylor Swift")])[0]["id"],
-                         "TaylorClean")
-
-    def test_niente_tributi_cover_karaoke(self):
-        falsi = [risultato("Tributo0001", "Lose Yourself", "Eminem Tribute Band"),
-                 risultato("Karaoke0001", "Lose Yourself (Karaoke Version)", "Karaoke Hits"),
-                 risultato("Cover000001", "Lose Yourself", "Piano Covers", album="Rap Hits on Piano"),
-                 risultato("Stile000001", "Lose Yourself (In the Style of Eminem)", "Eminem"),
-                 risultato("Altro000001", "Lose Yourself", "Altro Cantante")]
-        self.assertEqual(self.scegli("Eminem", "Lose Yourself", falsi), (None, "non trovato"))
-        r, _ = self.scegli("Eminem", "Lose Yourself", falsi + [risultato("Vero0000001", "Lose Yourself", "Eminem", explicit=True)])
-        self.assertEqual(r["id"], "Vero0000001")
-
-    def test_altre_versioni(self):
-        versioni = [risultato("Remix000001", "Houdini (Remix)", "Dua Lipa"), risultato("Live0000001", "Houdini (Live)", "Dua Lipa"),
-                    risultato("Veloce00001", "Houdini (Sped Up)", "Dua Lipa"), risultato("Acustica001", "Houdini - Acoustic", "Dua Lipa"),
-                    risultato("Strument001", "Houdini (Instrumental)", "Dua Lipa")]
-        self.assertEqual(self.scegli("Dua Lipa", "Houdini", versioni)[1], "non trovato")
-        self.assertEqual(self.scegli("Dua Lipa", "Houdini", versioni + [risultato("Houdini0001", "Houdini", "Dua Lipa")])[0]["id"],
-                         "Houdini0001")
-        # se è la classifica a volere il remix, il remix va bene
-        self.assertEqual(self.scegli("Dua Lipa", "Houdini (Remix)", versioni)[0]["id"], "Remix000001")
-
-    def test_artista_principale_tra_gli_esecutori(self):
-        self.assertEqual(self.scegli("Shiva", "Mamma mia", [risultato("Mamma000001", "Mamma mia", "Sfera Ebbasta e Shiva")])[0]["id"],
-                         "Mamma000001")
-        self.assertEqual(self.scegli("Travis Scott, Playboi Carti", "FE!N",
-                                     [risultato("Fein0000001", "FE!N (feat. Playboi Carti)", "Travis Scott", explicit=True)])[0]["id"],
-                         "Fein0000001")
-        self.assertEqual(self.scegli("ROSÉ & Bruno Mars", "APT.", [risultato("Apt00000001", "APT.", "ROSÉ & Bruno Mars")])[0]["id"],
-                         "Apt00000001")
-        self.assertEqual(self.scegli("Adele", "Hello", [risultato("Hello000001", "Hello", "Lionel Richie")]), (None, "non trovato"))
-        # durate assurde (un'ora di «mix», tre secondi)
-        self.assertEqual(self.scegli("Adele", "Hello", [risultato("Hello000002", "Hello", "Adele", durata=3600)])[0], None)
-
     def test_stesso_brano_scritto_in_altro_modo(self):
         m = self.m
         for a, b in (("FE!N", "FE!N (feat. Playboi Carti)"), ("APT.", "Apt"), ("Perché", "perche"), ("N.Y. State", "NY State"),
@@ -2470,8 +2372,195 @@ class TestClassificheScelta(unittest.TestCase):
         self.assertTrue(m._cl_titolo("사랑"))
 
 
+class TestMusicaLiberaLettori(unittest.TestCase):
+    """Jamendo e Internet Archive con risposte finte: solo i brani che gli artisti lasciano scaricare, con licenza e
+    pagina d'origine; il file si prende solo dai siti di musica libera ed è un MP3."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_cl_libera")
+
+    def api(self, tabella):
+        chieste = []
+
+        def api(url):
+            chieste.append(url)
+            for prefisso, d in tabella:
+                if url.startswith(prefisso):
+                    if isinstance(d, Exception):
+                        raise d
+                    return d
+            raise RuntimeError("il sito ha risposto 404")
+        return api, chieste
+
+    JAMENDO = {"headers": {"status": "success", "code": 0, "results_count": 4}, "results": [
+        {"id": "101", "name": "Luce", "artist_name": "Anna", "album_name": "Primo album", "audiodownload_allowed": True,
+         "audiodownload": "https://prod-1.storage.jamendo.com/download/track/101/mp32/",
+         "license_ccurl": "http://creativecommons.org/licenses/by-sa/3.0/", "shareurl": "https://www.jamendo.com/track/101",
+         "image": "https://usercontent.jamendo.com?type=album&id=1&width=600", "album_image": ""},
+        {"id": "102", "name": "Chiuso", "artist_name": "Bea", "audiodownload_allowed": False, "audiodownload": ""},
+        {"id": "103", "name": "Altrove", "artist_name": "Cora", "audiodownload_allowed": True,
+         "audiodownload": "https://altro.example/103.mp3"},
+        {"id": "104", "name": "Seconda", "artist_name": "Duo", "audiodownload_allowed": True,
+         "audiodownload": "https://prod-1.storage.jamendo.com/download/track/104/mp32/",
+         "license_ccurl": "http://creativecommons.org/licenses/by-nc/4.0/"}]}
+
+    def test_jamendo(self):
+        m = self.m
+        api, chieste = self.api([(m.JAMENDO_API, self.JAMENDO)])
+        with unittest.mock.patch.object(m, "_cl_api", api), \
+                unittest.mock.patch.dict(os.environ, {"ATLANTE_JAMENDO_CLIENT_ID": "abc12345"}):
+            r = m._cl_jamendo("popularity_week", 50)
+            uno = m._cl_jamendo("popularity_month", 1)
+        # chi non lascia scaricare e chi manda altrove: fuori
+        self.assertEqual([(x["a"], x["t"], x["s"]) for x in r], [("Anna", "Luce", "jamendo:101"), ("Duo", "Seconda", "jamendo:104")])
+        self.assertEqual(r[0], {"a": "Anna", "t": "Luce", "al": "Primo album",
+                                "u": "https://prod-1.storage.jamendo.com/download/track/101/mp32/",
+                                "lic": "http://creativecommons.org/licenses/by-sa/3.0/", "pag": "https://www.jamendo.com/track/101",
+                                "img": "https://usercontent.jamendo.com?type=album&id=1&width=600", "s": "jamendo:101"})
+        self.assertEqual([x["t"] for x in uno], ["Luce"])
+        q = parse_qs(urlsplit(chieste[0]).query)
+        self.assertEqual((q["client_id"], q["order"], q["audiodlformat"], q["include"], q["limit"]),
+                         (["abc12345"], ["popularity_week"], ["mp32"], ["licenses"], ["100"]))
+        self.assertEqual(parse_qs(urlsplit(chieste[1]).query)["order"], ["popularity_month"])
+
+    def test_jamendo_senza_client_id_o_rifiutato(self):
+        m = self.m
+        api, chieste = self.api([(m.JAMENDO_API, {"headers": {"status": "failed", "code": 5,
+                                                              "error_message": "Your credential is not authorized."},
+                                                  "results": []})])
+        with unittest.mock.patch.object(m, "_cl_api", api):
+            for valore in ("", "con spazi e ;", "x" * 80):
+                with unittest.mock.patch.dict(os.environ, {"ATLANTE_JAMENDO_CLIENT_ID": valore}):
+                    with self.assertRaises(RuntimeError) as e:
+                        m._cl_jamendo("popularity_week", 50)
+                    self.assertIn("devportal.jamendo.com", str(e.exception))
+            self.assertEqual(chieste, [])   # senza un client_id valido nessuna richiesta
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_JAMENDO_CLIENT_ID": "segreto99"}):
+                with self.assertRaises(RuntimeError) as e:
+                    m._cl_jamendo("popularity_week", 50)
+        self.assertIn("not authorized", str(e.exception))
+        self.assertNotIn("segreto99", str(e.exception))   # il client_id non si mostra mai
+        # nemmeno se è Jamendo a ripeterlo nel suo messaggio d'errore
+        api, _ = self.api([(m.JAMENDO_API, {"headers": {"status": "failed", "code": 5,
+                                                        "error_message": "client_id segreto99 is not valid"}, "results": []})])
+        with unittest.mock.patch.object(m, "_cl_api", api), \
+                unittest.mock.patch.dict(os.environ, {"ATLANTE_JAMENDO_CLIENT_ID": "segreto99"}):
+            with self.assertRaises(RuntimeError) as e:
+                m._cl_jamendo("popularity_week", 50)
+        self.assertIn("is not valid", str(e.exception))
+        self.assertNotIn("segreto99", str(e.exception))
+
+    def test_archivio(self):
+        m = self.m
+        cc = "http://creativecommons.org/licenses/by-nc-sa/3.0/"
+        ricerca = {"response": {"numFound": 4, "docs": [
+            {"identifier": "netlabel-uno", "title": "Uscita uno", "creator": "Gruppo", "licenseurl": cc},
+            {"identifier": "senza-licenza", "title": "Chiusa", "creator": "Xeno"},
+            {"identifier": "../storto", "licenseurl": cc},
+            {"identifier": "netlabel-due", "title": ["Uscita due"], "creator": ["Duo", "Altro"],
+             "licenseurl": "https://creativecommons.org/publicdomain/zero/1.0/"}]}}
+        uno = {"metadata": {"title": "Uscita uno", "creator": "Gruppo", "licenseurl": cc}, "files": [
+            {"name": "02 Secondo.flac", "format": "Flac", "source": "original", "track": "2", "title": "Secondo"},
+            {"name": "02 Secondo_64kb.mp3", "format": "64Kbps MP3", "source": "derivative", "original": "02 Secondo.flac",
+             "track": "2", "title": "Secondo"},
+            {"name": "02 Secondo.mp3", "format": "VBR MP3", "source": "derivative", "original": "02 Secondo.flac", "track": "2",
+             "title": "Secondo"},
+            {"name": "01 Primo.mp3", "format": "128Kbps MP3", "source": "original", "track": "1/3", "title": "Primo",
+             "creator": "Gruppo feat. Ospite"},
+            {"name": "03 Set di tre ore.mp3", "format": "VBR MP3", "source": "original", "track": "3",
+             "size": str(300 * 1024 * 1024)},
+            {"name": "copertina.jpg", "format": "JPEG", "source": "original"}]}
+        due = {"metadata": {"title": "Uscita due", "creator": "Duo",
+                            "licenseurl": "https://creativecommons.org/publicdomain/zero/1.0/"},
+               "files": [{"name": "dischi/brano con spazi.mp3", "format": "VBR MP3", "source": "original"}]}
+        api, chieste = self.api([(m.ARCHIVIO + "/advancedsearch.php", ricerca), (m.ARCHIVIO + "/metadata/netlabel-uno", uno),
+                                 (m.ARCHIVIO + "/metadata/netlabel-due", due)])
+        with unittest.mock.patch.object(m, "_cl_api", api):
+            r = m._cl_archivio("netlabels", 10)
+            solo_uno = m._cl_archivio("netlabels", 1)
+        # una versione per brano (la migliore), nell'ordine dei brani; il set enorme e l'immagine no
+        self.assertEqual([(x["a"], x["t"]) for x in r], [("Gruppo feat. Ospite", "Primo"), ("Gruppo", "Secondo"),
+                                                         ("Duo", "brano con spazi")])
+        self.assertEqual([x["u"] for x in r], ["https://archive.org/download/netlabel-uno/01%20Primo.mp3",
+                                                "https://archive.org/download/netlabel-uno/02%20Secondo.mp3",
+                                                "https://archive.org/download/netlabel-due/dischi/brano%20con%20spazi.mp3"])
+        self.assertEqual((r[0]["lic"], r[0]["pag"], r[0]["img"], r[0]["al"], r[0]["s"]),
+                         (cc, "https://archive.org/details/netlabel-uno", "https://archive.org/services/img/netlabel-uno",
+                          "Uscita uno", "archivio:netlabel-uno/01 Primo.mp3"))
+        self.assertEqual(r[2]["lic"], "https://creativecommons.org/publicdomain/zero/1.0/")
+        self.assertEqual([x["t"] for x in solo_uno], ["Primo", "Secondo"])
+        q = parse_qs(urlsplit(chieste[0]).query)
+        self.assertEqual((q["q"], q["sort[]"], q["output"]), (["collection:(netlabels) AND mediatype:(audio)"], ["week desc"], ["json"]))
+        self.assertIn("licenseurl", q["fl[]"])
+        # senza licenza libera (o con un nome strano) l'uscita non si apre nemmeno
+        self.assertFalse([u for u in chieste if "senza-licenza" in u or "storto" in u])
+        with unittest.mock.patch.object(m, "_cl_api", lambda url: {"altro": 1}):
+            with self.assertRaises(RuntimeError):
+                m._cl_archivio("netlabels", 10)
+        with self.assertRaises(RuntimeError):
+            m._cl_archivio("netlabels) OR (tutto", 10)
+
+    def test_licenze_e_siti(self):
+        m = self.m
+        self.assertEqual(m._cl_nome_licenza("http://creativecommons.org/licenses/by-nc-sa/3.0/"), "CC BY-NC-SA 3.0")
+        self.assertEqual(m._cl_nome_licenza("https://creativecommons.org/licenses/by/4.0/deed.it"), "CC BY 4.0")
+        self.assertEqual(m._cl_nome_licenza("https://creativecommons.org/publicdomain/zero/1.0/"), "CC0")
+        self.assertEqual(m._cl_nome_licenza("https://creativecommons.org/publicdomain/mark/1.0/"), "Pubblico dominio")
+        self.assertEqual(m._cl_nome_licenza(""), "")
+        self.assertTrue(m._cl_licenza_libera("http://creativecommons.org/licenses/by/4.0/"))
+        self.assertFalse(m._cl_licenza_libera("https://example.com/tutti-i-diritti-riservati"))
+        self.assertFalse(m._cl_licenza_libera(""))
+        for u in ("https://archive.org/download/x/y.mp3", "https://ia800.us.archive.org/1/items/x/y.mp3",
+                  "https://prod-1.storage.jamendo.com/download/track/1/mp32/"):
+            self.assertTrue(m._cl_host_libero(u), u)
+        for u in ("http://archive.org/download/x/y.mp3", "https://archive.org.altro.example/x.mp3", "https://nonarchive.org/x",
+                  "https://music.youtube.com/watch?v=x", "javascript:alert(1)", ""):
+            self.assertFalse(m._cl_host_libero(u), u)
+
+    def test_libere_uniche(self):
+        voci = [{"a": "Anna &amp; Co", "t": " Luce ", "u": "https://archive.org/download/a/1.mp3", "s": "archivio:a/1.mp3"},
+                {"a": "anna & co", "t": "Luce (feat. Bruno)", "u": "https://archive.org/download/a/2.mp3", "s": "archivio:a/2.mp3"},
+                {"a": "", "t": "Senza artista", "u": "https://archive.org/download/a/3.mp3", "s": "archivio:a/3.mp3"},
+                {"a": "Bea", "t": "Senza file", "u": "", "s": "archivio:a/4.mp3"}, "non un dizionario"]
+        self.assertEqual([(v["a"], v["t"], v["s"]) for v in self.m._cl_libere_uniche(voci)],
+                         [("Anna & Co", "Luce", "archivio:a/1.mp3")])
+
+    def test_scarica_file(self):
+        m = self.m
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoWeb)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        tmp = tempfile.mkdtemp(prefix="atlante-libera-file-")
+        dest = os.path.join(tmp, "brano.mp3")
+        try:
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_CLASSIFICHE_FINTE": "http://127.0.0.1:%d" % srv.server_address[1]}):
+                m._cl_scarica_file("https://archive.org/download/netlabel-uno/01%20Primo.mp3", dest)
+                with open(dest, "rb") as f:
+                    self.assertEqual(f.read(), MP3_FINTO)
+                with self.assertRaises(RuntimeError) as e:   # una pagina HTML al posto del brano
+                    m._cl_scarica_file("https://archive.org/download/netlabel-uno/pagina.mp3", dest)
+                self.assertIn("non è un MP3", str(e.exception))
+                with self.assertRaises(RuntimeError) as e:
+                    m._cl_scarica_file("https://archive.org/download/netlabel-uno/manca.mp3", dest)
+                self.assertNotIsInstance(e.exception, m.Rete)   # non c'è: si salta
+                with self.assertRaises(m.Rete):                  # il sito non risponde bene: si riprova
+                    m._cl_scarica_file("https://archive.org/download/netlabel-uno/503.mp3", dest)
+                with self.assertRaises(RuntimeError) as e:       # solo dai siti di musica libera
+                    m._cl_scarica_file("https://altro.example/brano.mp3", dest)
+                self.assertIn("fuori dai siti", str(e.exception))
+                with unittest.mock.patch.object(m, "CL_MAX_FILE", 1000):
+                    with self.assertRaises(RuntimeError) as e:
+                        m._cl_scarica_file("https://archive.org/download/netlabel-uno/01%20Primo.mp3", dest)
+                    self.assertIn("troppo grande", str(e.exception))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestClassificheLavoro(unittest.TestCase):
-    """Il lavoro in sottofondo, passo per passo, con fonti, ricerca e scaricamento finti e il tempo spostato a mano."""
+    """Il lavoro in sottofondo, passo per passo, con fonti e scaricamento finti e il tempo spostato a mano: le classifiche
+    diventano playlist (niente si scarica da lì), i brani della musica libera entrano nella libreria."""
 
     @classmethod
     def setUpClass(cls):
@@ -2482,57 +2571,40 @@ class TestClassificheLavoro(unittest.TestCase):
         self.base = tempfile.mkdtemp(prefix="atlante-classifiche-")
         self.ora = Orologio()
         self.pagine = {}          # id della fonte -> brani (o un'eccezione da sollevare)
-        self.predefinito = []     # brani delle fonti che non sono in self.pagine
-        self.risposte = {}        # ricerca -> risultati (o un'eccezione)
-        self.ricerche, self.scaricati, self.letture = [], [], []
+        self.errori = {}          # id del file -> eccezione dello scaricamento
+        self.scaricati, self.letture = [], []
         self.libreria = []
         self.libero = 7 * 1024 ** 4
-        self.playlist = {}        # (ricerca, filtro, seguito) -> ([playlist], seguito)
-        self.scoperte = []
 
     def tearDown(self):
         shutil.rmtree(self.base, ignore_errors=True)
 
     def leggi(self, f):
         self.letture.append(f["id"])
-        x = self.pagine.get(f["id"], self.predefinito)
+        x = self.pagine.get(f["id"], [])
         if isinstance(x, Exception):
             raise x
         return list(x)
 
-    def cerca(self, q):
-        self.ricerche.append(q)
-        x = self.risposte.get(q, [])
+    def scarica(self, v):
+        self.scaricati.append(v["s"])
+        x = self.errori.get(v["s"])
         if isinstance(x, Exception):
             raise x
-        return self.m._ordina([dict(r) for r in x])
+        return {"nome": "%s - %s.mp3" % (v["a"], v["t"]), "brano": "b%d" % len(self.scaricati), "percorso": ""}
 
-    def scarica(self, r):
-        self.scaricati.append(r["id"])
-        x = self.risposte.get("scarica " + r["id"])
-        if isinstance(x, Exception):
-            raise x
-        return {"nome": "%s - %s.mp3" % (r["artista"], r["titolo"]), "brano": "b%d" % len(self.scaricati), "percorso": ""}
-
-    def scopri(self, q, filtro, seguito):
-        self.scoperte.append((q, filtro, seguito))
-        x = self.playlist.get((q, filtro, seguito), ([], ""))
-        if isinstance(x, Exception):
-            raise x
-        return x
-
-    def nuovo(self, fonti=None, spotify=(), generi=()):
+    def nuovo(self, fonti=None, libere=None):
         m = self.m
         b = m.BloccoYouTube(os.path.join(self.base, "youtube-blocco.json"))
         b.adesso = self.ora
         c = m.Classifiche(os.path.join(self.base, "classifiche"), b)
         c.adesso = self.ora
         c.fonti = fonti if fonti is not None else [{"id": "prova", "nome": "Classifica di prova", "tipo": "finta", "quanti": 100}]
-        c.spotify, c.generi = list(spotify), list(generi)
-        c.leggi, c.cerca, c.scarica, c.scopri = self.leggi, self.cerca, self.scarica, self.scopri
+        c.libere = libere if libere is not None else [{"id": "libera", "nome": "Musica libera di prova", "tipo": "finta",
+                                                       "quanti": 50}]
+        c.leggi, c.leggi_libera, c.scarica = self.leggi, self.leggi, self.scarica
         c.libero = lambda: self.libero
         c.catalogo = lambda: (len(self.libreria), list(self.libreria))
-        c.videoclip = lambda artista, titolo: ""
         return c
 
     def gira(self, c, massimo=200):
@@ -2543,231 +2615,232 @@ class TestClassificheLavoro(unittest.TestCase):
                 return attesa
         self.fail("il lavoro non si ferma mai")
 
-    def test_una_classifica(self):
+    def brani(self, c, fid="prova"):
+        el = {x["id"]: x for x in c.classifiche_app()["classifiche"]}[fid]
+        return [(b["pos"], b["titolo"], b["segno"], b["di"], b["stato"], b["brano"]) for b in el["brani"]], el
+
+    def test_classifiche_solo_playlist(self):
         self.pagine["prova"] = [("Eminem", "Without Me"), ("Travis Scott, Playboi Carti", "FE!N"), ("Eminem", "Without Me"),
-                                ("Eminem", "Lose Yourself"), ("Artista", "Solo Pulita"), ("Olly", "Balorda nostalgia")]
-        self.risposte = {"Eminem Without Me": [risultato("NoExplicit1", "Without Me", "Eminem"),
-                                               risultato("Explicit001", "Without Me", "Eminem", "The Eminem Show", True)],
-                         "Eminem Lose Yourself": [risultato("Tributo0001", "Lose Yourself", "Eminem Tribute Band")],
-                         "Artista Solo Pulita": [risultato("Pulita00001", "Solo Pulita (Clean)", "Artista")],
-                         "Olly Balorda nostalgia": [risultato("Explicit001", "Without Me", "Eminem", explicit=True),
-                                                    risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
-        self.libreria = [("Travis Scott", "FE!N (feat. Playboi Carti)")]   # c'è già, scritto in un altro modo
-        c = self.nuovo()
+                                ("Olly", "Balorda nostalgia")]
+        self.libreria = [("Travis Scott", "FE!N (feat. Playboi Carti)", "lib-fein")]   # c'è già, scritto in un altro modo
+        c = self.nuovo(libere=[])
         self.assertEqual(self.gira(c), 3600)   # tutto fatto: aspetta
-        self.assertEqual(self.letture, ["prova"])
-        # il brano che la libreria ha già e il doppione della classifica: nessuna ricerca
-        self.assertEqual(self.ricerche, ["Eminem Without Me", "Eminem Lose Yourself", "Artista Solo Pulita", "Olly Balorda nostalgia"])
-        self.assertEqual(self.scaricati, ["Explicit001", "Olly0000001"])
+        self.assertEqual((self.letture, self.scaricati, c.s["coda"]), (["prova"], [], []))   # da lì non si scarica niente
         r = c.riassunto()
-        self.assertEqual((r["attivo"], r["oggi"], r["totale"], r["blocco"], r["pausa"]), (True, 2, 2, None, None))
-        self.assertEqual([(u["titolo"], u["artista"], u["fonte"]) for u in r["ultimi"]],
-                         [("Balorda nostalgia", "Olly", "Classifica di prova"), ("Without Me", "Eminem", "Classifica di prova")])
-        self.assertEqual(r["classifiche"][0]["esito"], "ok")
-        self.assertEqual(r["classifiche"][0]["brani"], 5)   # senza il doppione
-        # la classifica si rilegge ogni giorno (i nuovi ingressi arrivano subito), ma i brani già cercati non si cercano più
+        self.assertEqual((r["attivo"], r["oggi"], r["totale"], r["ultimi"], r["blocco"], r["pausa"]), (True, 0, 0, [], None, None))
+        self.assertEqual((r["classifiche"][0]["esito"], r["classifiche"][0]["brani"]), ("ok", 3))   # senza il doppione
+        brani, el = self.brani(c)
+        self.assertEqual(brani, [(1, "Without Me", "", 0, "non in libreria", ""), (2, "FE!N", "", 0, "libreria", "lib-fein"),
+                                 (3, "Balorda nostalgia", "", 0, "non in libreria", "")])
+        self.assertFalse(el["libera"])
+        # un brano entrato nella libreria in un altro modo: la playlist lo suona subito
+        self.libreria.append(("Eminem", "Without Me", "lib-wm"))
+        self.assertEqual(self.brani(c)[0][0][4:], ("libreria", "lib-wm"))
+        # la classifica si rilegge ogni giorno, non prima
         self.ora.t += 3600
-        self.assertEqual(self.gira(c), 3600)
+        self.gira(c)
         self.assertEqual(self.letture, ["prova"])
         self.ora.t += 86400
-        self.assertEqual(self.gira(c), 3600)
+        self.gira(c)
         self.assertEqual(self.letture, ["prova", "prova"])
-        self.assertEqual(len(self.ricerche), 4)
+
+    def test_musica_libera_nella_libreria(self):
+        self.pagine["libera"] = [libera(1, "Anna", "Luce"), libera(2, "Duo", "Notte"), libera(1, "Anna", "Luce"),
+                                 libera(3, "Già", "Presente"), libera(4, "Rotto", "Brano")]
+        self.libreria = [("Già", "Presente", "lib-gia")]
+        self.errori["archivio:u/4.mp3"] = RuntimeError("il sito ha risposto 404")
+        c = self.nuovo(fonti=[])
+        self.assertEqual(self.gira(c), 3600)
+        # «Presente» c'è già, il doppione non si ripete; il brano rotto si prova e si salta
+        self.assertEqual(self.scaricati, ["archivio:u/1.mp3", "archivio:u/2.mp3", "archivio:u/4.mp3"])
+        r = c.riassunto()
+        self.assertEqual((r["oggi"], r["totale"], r["provati"], r["libere"][0]["esito"], r["libere"][0]["brani"]),
+                         (2, 2, 3, "ok", 4))
+        u = r["ultimi"][0]
+        self.assertEqual((u["titolo"], u["artista"], u["album"], u["fonte"], u["licenza"], u["licenza_url"], u["pagina"], u["brano"]),
+                         ("Notte", "Duo", "Album", "Musica libera di prova", "CC BY-SA 4.0",
+                          "http://creativecommons.org/licenses/by-sa/4.0/", "https://archive.org/details/u", "b2"))
+        brani, el = self.brani(c, "libera")
+        self.assertTrue(el["libera"])
+        self.assertEqual([(b[1], b[4], b[5]) for b in brani], [("Luce", "libreria", "b1"), ("Notte", "libreria", "b2"),
+                                                               ("Presente", "libreria", "lib-gia"), ("Brano", "non disponibile", "")])
+        # il giorno dopo la stessa classifica: niente si riscarica
+        self.ora.t += 86400
+        self.assertEqual(self.gira(c), 3600)
+        self.assertEqual((self.letture, len(self.scaricati)), (["libera", "libera"], 3))
         self.assertEqual(c.riassunto()["oggi"], 0)   # è un altro giorno
-        self.assertEqual(c.riassunto()["totale"], 2)
-        # dopo tre mesi un brano non trovato si cerca di nuovo (forse ora c'è)
+        # dopo tre mesi il brano non scaricato si riprova (forse ora c'è)
+        del self.errori["archivio:u/4.mp3"]
         self.ora.t += 90 * 86400
         self.gira(c)
-        self.assertEqual(self.ricerche[4:], ["Eminem Lose Yourself", "Artista Solo Pulita"])
+        self.assertEqual(self.scaricati[-1], "archivio:u/4.mp3")
+        self.assertEqual(c.riassunto()["totale"], 3)
+        self.assertEqual(self.brani(c, "libera")[0][3][4:], ("libreria", "b4"))
+
+    def test_brani_in_arrivo_e_doppioni_tra_fonti(self):
+        settimana = {"id": "settimana", "nome": "Della settimana", "tipo": "finta", "quanti": 50}
+        mese = {"id": "mese", "nome": "Del mese", "tipo": "finta", "quanti": 50}
+        self.pagine = {"settimana": [libera(1, "Anna", "Luce"), libera(2, "Duo", "Notte")],
+                       "mese": [libera(2, "Duo", "Notte"), libera(3, "Tre", "Alba")]}
+        c = self.nuovo(fonti=[], libere=[settimana, mese])
+        c.passo()
+        c.passo()   # due fonti lette, niente ancora scaricato
+        self.assertEqual([v["s"] for v in c.s["coda"]], ["archivio:u/1.mp3", "archivio:u/2.mp3", "archivio:u/3.mp3"])
+        self.assertEqual([b[4] for b in self.brani(c, "mese")[0]], ["in arrivo", "in arrivo"])
+        self.gira(c)
+        self.assertEqual(self.scaricati, ["archivio:u/1.mp3", "archivio:u/2.mp3", "archivio:u/3.mp3"])
+        self.assertEqual([b[4:] for b in self.brani(c, "mese")[0]], [("libreria", "b2"), ("libreria", "b3")])
 
     def test_ripresa_dopo_il_riavvio(self):
-        self.pagine["prova"] = [("A%d" % i, "Brano %d" % i) for i in range(4)]
-        self.risposte = {"A%d Brano %d" % (i, i): [risultato("Brano%06d" % i, "Brano %d" % i, "A%d" % i)] for i in range(4)}
-        c = self.nuovo()
-        c.passo()   # la classifica
+        self.pagine["libera"] = [libera(i, "A%d" % i, "Brano %d" % i) for i in range(4)]
+        c = self.nuovo(fonti=[])
+        c.passo()   # la fonte
         c.passo()   # il primo brano
-        self.assertEqual(self.scaricati, ["Brano000000"])
-        c = self.nuovo()   # il Mac mini si è riavviato
+        self.assertEqual(self.scaricati, ["archivio:u/0.mp3"])
+        c = self.nuovo(fonti=[])   # il Mac mini si è riavviato
         self.assertEqual(c.riassunto()["totale"], 1)
         self.assertEqual(c.riassunto()["fonte"]["in_coda"], 3)
         self.gira(c)
-        self.assertEqual(self.letture, ["prova"])
-        self.assertEqual(self.scaricati, ["Brano%06d" % i for i in range(4)])
-        self.assertEqual(self.ricerche.count("A0 Brano 0"), 1)
+        self.assertEqual(self.letture, ["libera"])
+        self.assertEqual(self.scaricati, ["archivio:u/%d.mp3" % i for i in range(4)])
 
-    def test_blocco_429_con_la_pausa_che_cresce(self):
+    def test_coda_di_una_versione_di_prima(self):
+        os.makedirs(os.path.join(self.base, "classifiche"))
+        with open(os.path.join(self.base, "classifiche", "stato.json"), "w", encoding="utf-8") as f:
+            json.dump({"totale": 7, "coda": [{"a": "Eminem", "t": "Without Me", "f": "Spotify Top 50 Italia", "c": 1},
+                                             libera(1, "Anna", "Luce")],
+                       "playlist": {"turno": "ytm"}, "ultimi": [{"titolo": "Vecchio", "artista": "X", "yt": "abcdefghijk"}]}, f)
+        c = self.nuovo(fonti=[], libere=[])
+        # i brani da cercare su YouTube della versione di prima spariscono; restano quelli con un file libero
+        self.assertEqual([v["t"] for v in c.s["coda"]], ["Luce"])
+        self.assertNotIn("playlist", c.s)
+        self.assertEqual(c.riassunto()["totale"], 7)
+        self.gira(c)
+        self.assertEqual(self.scaricati, ["archivio:u/1.mp3"])
+
+    def test_youtube_blocca_solo_la_sua_classifica(self):
         m = self.m
-        self.pagine["prova"] = [("Eminem", "Without Me"), ("Olly", "Balorda nostalgia")]
-        self.risposte = {"Eminem Without Me": m.Bloccato("YouTube ha risposto 429 Too Many Requests"),
-                         "Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
-        c = self.nuovo()
+        fonti = [{"id": "ytm", "nome": "YouTube Music Top 100 Italia", "tipo": "ytm"},
+                 {"id": "prova", "nome": "Classifica di prova", "tipo": "finta"}]
+        self.pagine = {"ytm": m.Bloccato("YouTube ha risposto 429 Too Many Requests"), "prova": [("Olly", "Balorda nostalgia")],
+                       "libera": [libera(1, "Anna", "Luce")]}
+        c = self.nuovo(fonti)
         inizio = self.ora.t
-        self.assertEqual(self.gira(c), 600)
+        self.assertEqual(self.gira(c), 1800)   # tutto il resto fatto: si aspetta l'ora della prova di YouTube
         b = c.riassunto()["blocco"]
         self.assertEqual((b["tipo"], b["quando"], b["prossima"]), ("rallenta", inizio, inizio + 1800))
-        self.assertIn("429", b["motivo"])
-        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 2)   # il brano resta in coda
-        self.assertEqual(self.ricerche, ["Eminem Without Me"])
-        self.assertEqual(c.passo(), 600)   # fermo: nessuna richiesta a YouTube
-        self.assertEqual(self.ricerche, ["Eminem Without Me"])
-        attese = []
-        for pausa in (1800, 7200, 28800, 86400, 86400):   # ogni prova fallita allunga la pausa, poi una al giorno
-            self.ora.t = c.riassunto()["blocco"]["prossima"]
-            self.gira(c)
-            attese.append(c.riassunto()["blocco"]["prossima"] - self.ora.t)
-        self.assertEqual(attese, [7200, 28800, 86400, 86400, 86400])
-        self.assertEqual(len(self.ricerche), 6)   # una ricerca sola per ogni prova
-        self.assertEqual(c.riassunto()["blocco"]["quando"], inizio)   # l'ora del blocco resta quella della prima volta
-        # riavvio durante il blocco: resta fermo
-        c = self.nuovo()
-        self.assertIsNotNone(c.riassunto()["blocco"])
-        self.assertGreater(c.passo(), 0)
-        self.assertEqual(len(self.ricerche), 6)
-        # il blocco finisce: alla prova seguente si riparte e il brano rimasto in coda si fa
-        self.risposte["Eminem Without Me"] = [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]
-        self.ora.t = c.riassunto()["blocco"]["prossima"]
-        self.assertEqual(self.gira(c), 3600)
-        self.assertIsNone(c.riassunto()["blocco"])
-        self.assertEqual(self.scaricati, ["Explicit001", "Olly0000001"])
-
-    def test_robot_e_riprova_adesso(self):
-        m = self.m
-        self.pagine["prova"] = [("Eminem", "Without Me")]
-        self.risposte = {"Eminem Without Me": m.Bloccato("Sign in to confirm you’re not a bot")}
-        c = self.nuovo()
+        self.assertEqual(self.letture, ["ytm", "prova", "libera"])   # le altre fonti vanno avanti
+        self.assertEqual(self.scaricati, ["archivio:u/1.mp3"])       # e anche la musica libera
+        self.assertEqual({f["id"]: f["esito"] for f in c.riassunto()["classifiche"]}, {"ytm": "", "prova": "ok"})
+        self.ora.t += 600
         self.gira(c)
-        b = c.riassunto()["blocco"]
-        self.assertEqual((b["tipo"], b["prossima"] - b["quando"]), ("robot", 86400))   # una prova al giorno, da subito
-        self.ora.t += 3600
-        self.assertGreater(c.passo(), 0)
-        self.assertEqual(len(self.ricerche), 1)
-        # «Riprova adesso» in Gestione: una prova sola, subito
-        self.risposte["Eminem Without Me"] = [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]
+        self.assertEqual(self.letture.count("ytm"), 1)   # prima dell'ora della prova: niente
+        self.ora.t = b["prossima"]
+        self.gira(c)
+        self.assertEqual(self.letture.count("ytm"), 2)   # la prova è la lettura stessa
+        self.assertEqual(c.riassunto()["blocco"]["prossima"] - self.ora.t, 7200)   # ancora bloccato: la pausa cresce
+        # «Riprova adesso» in Gestione: subito; YouTube risponde e il blocco finisce
+        self.pagine["ytm"] = [("ANNA", "30°C")]
         c.riprova_adesso()
         self.assertEqual(self.gira(c), 3600)
         self.assertIsNone(c.riassunto()["blocco"])
-        self.assertEqual(self.scaricati, ["Explicit001"])
-        self.assertEqual(len(self.ricerche), 2)   # la prova serve anche al brano: nessuna ricerca in più
-
-    def test_blocco_durante_lo_scaricamento(self):
-        m = self.m
-        self.pagine["prova"] = [("Eminem", "Without Me"), ("Olly", "Balorda nostalgia")]
-        self.risposte = {"Eminem Without Me": [risultato("Explicit001", "Without Me", "Eminem", explicit=True)],
-                         "Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")],
-                         "scarica Explicit001": m._cl_errore("ERROR: [youtube] Explicit001: Sign in to confirm you're not a bot. "
-                                                             "Use --cookies-from-browser")}
-        c = self.nuovo()
-        self.gira(c)
-        self.assertEqual(c.riassunto()["blocco"]["tipo"], "robot")
-        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 2)
-        self.assertEqual(c.riassunto()["totale"], 0)
-        # gli errori: blocco, rete o brano che non va (questo si salta)
-        self.assertIsInstance(m._cl_errore("ERROR: unable to download video data: HTTP Error 429: Too Many Requests"), m.Bloccato)
-        self.assertIsInstance(m._cl_errore("ERROR: [youtube] x: The current session has been rate-limited by YouTube"), m.Bloccato)
-        self.assertIsInstance(m._cl_errore("ERROR: Unable to download webpage: <urlopen error [Errno 8] nodename nor servname "
-                                           "provided, or not known>"), m.Rete)
-        self.assertIsInstance(m._cl_errore("ERROR: [youtube] x: Video unavailable"), RuntimeError)
-        self.assertNotIsInstance(m._cl_errore("ERROR: [youtube] x: Video unavailable"), (m.Bloccato, m.Rete))
-        # un brano che non si scarica (video tolto) si salta, il lavoro continua
-        self.risposte["scarica Explicit001"] = m._cl_errore("ERROR: [youtube] Explicit001: Video unavailable")
-        c.riprova_adesso()
-        self.assertEqual(self.gira(c), 3600)
-        self.assertEqual(c.riassunto()["totale"], 1)
-        self.assertEqual(self.scaricati[-1], "Olly0000001")
+        self.assertEqual(self.letture.count("ytm"), 3)
+        self.assertEqual(self.brani(c, "ytm")[0][0][1:5:3], ("30°C", "non in libreria"))
 
     def test_spazio_e_rete(self):
         m = self.m
-        self.pagine["prova"] = [("Eminem", "Without Me")]
-        self.risposte = {"Eminem Without Me": [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]}
-        self.libero = 150 * 1024 ** 3   # sotto i 200 GB: fermo
-        c = self.nuovo()
+        self.pagine["libera"] = [libera(1, "Anna", "Luce")]
+        self.libero = 150 * 1024 ** 3   # sotto i 200 GB: le fonti si leggono, lo scaricamento aspetta
+        c = self.nuovo(fonti=[])
         self.assertEqual(self.gira(c), 1800)
-        self.assertIn("200 GB", c.riassunto()["pausa"]["motivo"])
-        self.assertEqual((self.letture, self.ricerche), ([], []))
+        self.assertIn("Meno di 200 GB liberi", c.riassunto()["pausa"]["motivo"])
+        self.assertEqual((self.letture, self.scaricati), (["libera"], []))
         self.libero = None   # disco scollegato
         self.ora.t += 1801
         self.assertEqual(self.gira(c), 1800)
         self.assertIn("raggiungibile", c.riassunto()["pausa"]["motivo"])
         self.libero = 7 * 1024 ** 4
         self.ora.t += 1801
-        self.risposte["Eminem Without Me"] = m.Rete("timed out")
-        self.assertEqual(self.gira(c), 600)   # Internet o YouTube che non rispondono: il brano resta, si riprova
-        self.assertIn("non rispondono", c.riassunto()["pausa"]["motivo"])
-        self.assertIsNone(c.riassunto()["blocco"])
-        self.risposte["Eminem Without Me"] = [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]
+        self.errori["archivio:u/1.mp3"] = m.Rete("timed out")
+        self.assertEqual(self.gira(c), 600)   # il sito non risponde: il brano resta in coda, si riprova fra poco
+        self.assertIn("archive.org non risponde", c.riassunto()["pausa"]["motivo"])
+        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 1)
+        self.errori["archivio:u/1.mp3"] = m.ErroreExtra(503, "Cartella della musica scaricata non raggiungibile")
         self.ora.t += 601
+        self.assertEqual(self.gira(c), 1800)   # disco sparito proprio adesso: pausa, il brano resta
+        self.assertEqual(c.riassunto()["fonte"]["in_coda"], 1)
+        del self.errori["archivio:u/1.mp3"]
+        self.ora.t += 1801
         self.assertEqual(self.gira(c), 3600)
-        self.assertEqual(self.scaricati, ["Explicit001"])
+        self.assertEqual(self.scaricati, ["archivio:u/1.mp3"] * 3)
+        self.assertEqual(c.riassunto()["totale"], 1)
+        # la soglia viene dal servizio (le prove la mettono a 0)
+        with unittest.mock.patch.object(m, "CL_SPAZIO_MIN", 100 * 1024 ** 3):
+            self.libero = 150 * 1024 ** 3
+            self.pagine["libera"] = [libera(2, "Duo", "Notte")]
+            self.ora.t += 86400
+            self.assertEqual(self.gira(c), 3600)
+            self.assertEqual(self.scaricati[-1], "archivio:u/2.mp3")
 
     def test_fonte_che_non_si_legge(self):
         fonti = [{"id": "uno", "nome": "Prima", "tipo": "finta"}, {"id": "due", "nome": "Seconda", "tipo": "finta"},
                  {"id": "tre", "nome": "Terza", "tipo": "finta", "quanti": 1}]
         self.pagine = {"uno": RuntimeError("il sito ha risposto 503"), "due": [],
-                       "tre": [("Olly", "Balorda nostalgia"), ("Eminem", "Without Me")]}
-        self.risposte = {"Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
+                       "tre": [("Olly", "Balorda nostalgia"), ("Eminem", "Without Me")],
+                       "libera": RuntimeError("manca il client_id gratuito di Jamendo")}
         c = self.nuovo(fonti)
         self.assertEqual(self.gira(c), 3600)
-        self.assertEqual(self.ricerche, ["Olly Balorda nostalgia"])   # «quanti»: solo il primo della terza
-        esiti = {f["id"]: f for f in c.riassunto()["classifiche"]}
-        self.assertEqual((esiti["uno"]["esito"], esiti["due"]["esito"], esiti["tre"]["esito"]), ("errore", "errore", "ok"))
+        r = c.riassunto()
+        esiti = {f["id"]: f for f in r["classifiche"] + r["libere"]}
+        self.assertEqual({k: v["esito"] for k, v in esiti.items()}, {"uno": "errore", "due": "errore", "tre": "ok", "libera": "errore"})
         self.assertIn("503", esiti["uno"]["errore"])
         self.assertIn("cambiato", esiti["due"]["errore"])
-        # una fonte che non si è letta si riprova il giorno dopo (come le altre classifiche)
+        self.assertIn("client_id", esiti["libera"]["errore"])
+        self.assertEqual([b[1] for b in self.brani(c, "tre")[0]], ["Balorda nostalgia"])   # «quanti»: solo il primo
+        # una fonte che non si è letta si riprova il giorno dopo (come le altre)
         self.pagine["uno"] = [("Olly", "Balorda nostalgia")]
         self.ora.t += 3600
         self.gira(c)
-        self.assertEqual(self.letture, ["uno", "due", "tre"])
+        self.assertEqual(self.letture, ["uno", "due", "tre", "libera"])
         self.ora.t += 86401
         self.gira(c)
-        self.assertEqual(self.letture, ["uno", "due", "tre", "uno", "due", "tre"])
-
-    def test_playlist_senza_fine(self):
-        m = self.m
-        f0, f1, f2 = m.CL_FILTRI_PLAYLIST
-        spotify = [("RapCaviar", "rap e hip hop", "37i9dQZF1DX0XUsuxWHRQd"), ("Today's Top Hits", "pop", "37i9dQZF1DXcBWIGoYBM5M")]
-        generi = [("pop", "pop hits"), ("rap italiano", "rap italiano")]
-        self.playlist = {("pop hits", f0, ""): ([{"id": "VLpop1", "nome": "Pop 1", "viste": 0}], "SEGUITO"),
-                         ("pop hits", f1, ""): ([{"id": "VLpop2", "nome": "Pop 2", "viste": 900}], ""),
-                         ("rap italiano", f0, ""): ([{"id": "VLrap1", "nome": "Rap 1", "viste": 0}], ""),
-                         ("pop hits", f0, "SEGUITO"): ([{"id": "VLpop3", "nome": "Pop 3", "viste": 0}], "")}
-        self.predefinito = [("Olly", "Balorda nostalgia")]
-        self.risposte = {"Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")]}
-        c = self.nuovo(fonti=[], spotify=spotify, generi=generi)
-        self.assertEqual(self.gira(c), 3600)
-        # una di Spotify e una di YouTube Music a turno; su YouTube Music la prima di ogni genere, poi la seconda…
-        self.assertEqual(self.letture, ["sp:37i9dQZF1DX0XUsuxWHRQd", "yt:VLpop1", "sp:37i9dQZF1DXcBWIGoYBM5M", "yt:VLrap1",
-                                        "yt:VLpop2", "yt:VLpop3"])
-        self.assertIn(("pop hits", f0, "SEGUITO"), self.scoperte)   # le pagine dopo la prima: senza un numero massimo
-        self.assertIn(("rap italiano", f2, ""), self.scoperte)      # e anche la ricerca senza filtro
-        # le playlist fatte si rileggono dopo un mese (per i brani nuovi), non prima
-        self.ora.t += 10 * 86400
+        self.assertEqual(self.letture, ["uno", "due", "tre", "libera"] * 2)
+        # o subito dopo un riavvio (il client_id aggiunto al servizio): solo quelle che non si erano lette
+        self.pagine["libera"] = [libera(1, "Anna", "Luce")]
+        c = self.nuovo(fonti)
         self.gira(c)
-        self.assertEqual(len(self.letture), 6)
-        self.ora.t += 25 * 86400
+        self.assertEqual(self.letture[8:], ["due", "libera"])
+        self.assertEqual(self.scaricati, ["archivio:u/1.mp3"])
+        # e con «Riprova adesso» in Gestione
+        c.riprova_adesso()
         self.gira(c)
-        self.assertEqual(len(self.letture), 12)
+        self.assertEqual(self.letture[10:], ["due"])
 
-    def test_videoclip_nel_piano(self):
+    def test_prova_fallita_durante_il_blocco(self):
+        """La prova di YouTube durante un blocco che fallisce in un altro modo (503, rete): una sola lettura, poi si
+        aspetta di più. Prima la prova si ripeteva subito, senza fine."""
         m = self.m
-        self.pagine["prova"] = [("Eminem", "Without Me")]
-        self.risposte = {"Eminem Without Me": [risultato("Explicit001", "Without Me", "Eminem", explicit=True)]}
-        c = self.nuovo()
-        c.videoclip = lambda artista, titolo: "YVkUvmDQ3HY" if (artista, titolo) == ("Eminem", "Without Me") else ""
-        with unittest.mock.patch.object(m, "CLIP", object()):
-            self.gira(c)
-        with open(c.piano_clip, encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {"Eminem - Without Me.mp3": {"id": "YVkUvmDQ3HY"}})
-        # il piano dei videoclip lo legge insieme a quello principale (che vince se un nome c'è in tutti e due)
-        principale = os.path.join(self.base, "piano.json")
-        with open(principale, "w", encoding="utf-8") as f:
-            json.dump({"Altro - Brano.mp3": {"id": "abcdefghijk"}}, f)
-        v = m.Videoclip(principale, os.path.join(self.base, "clip"))
-        with unittest.mock.patch.object(m, "PIANI_AGGIUNTI", [c.piano_clip]):
-            self.assertEqual(v.leggi_piano(), {"Altro - Brano.mp3": "abcdefghijk", "Eminem - Without Me.mp3": "YVkUvmDQ3HY"})
-            with open(principale, "w", encoding="utf-8") as f:
-                json.dump({"Eminem - Without Me.mp3": {"id": "Principale1"}}, f)
-            os.utime(principale, (time.time() + 5, time.time() + 5))
-            self.assertEqual(v.leggi_piano(), {"Eminem - Without Me.mp3": "Principale1"})
+        fonti = [{"id": "ytm", "nome": "YouTube Music Top 100 Italia", "tipo": "ytm"}]
+        self.pagine = {"ytm": m.Bloccato("YouTube ha risposto 429 Too Many Requests"), "libera": []}
+        c = self.nuovo(fonti)
+        self.gira(c)
+        self.ora.t = c.riassunto()["blocco"]["prossima"]
+        pause = []
+        for errore in (m.Rete("YouTube ha risposto 503 Service Unavailable"), RuntimeError("il sito ha risposto 404")):
+            self.pagine["ytm"] = errore
+            n = self.letture.count("ytm")
+            self.assertGreater(self.gira(c), 0)                 # il lavoro si ferma: niente letture a raffica
+            self.assertEqual(self.letture.count("ytm"), n + 1)  # una prova sola
+            b = c.riassunto()["blocco"]
+            self.assertIn("prova non riuscita", b["motivo"])
+            pause.append(b["prossima"] - self.ora.t)
+            self.ora.t = b["prossima"]
+        self.assertEqual(pause, [7200, 28800])   # dopo la mezz'ora del 429: 2 ore, poi 8 ore
+        # YouTube torna a rispondere: il blocco finisce e la classifica si legge
+        self.pagine["ytm"] = [("ANNA", "30°C")]
+        self.gira(c)
+        self.assertIsNone(c.riassunto()["blocco"])
+        self.assertEqual([b[1] for b in self.brani(c, "ytm")[0]], ["30°C"])
 
     def test_videoclip_fermi_durante_il_blocco(self):
         m = self.m
@@ -2780,7 +2853,7 @@ class TestClassificheLavoro(unittest.TestCase):
             self.ora.t += 1800
             self.assertFalse(m._videoclip_fermo())   # senza classifiche, la prova la fa il videoclip
             with unittest.mock.patch.object(m, "CL", object()):
-                self.assertTrue(m._videoclip_fermo())   # con le classifiche la fa la ricerca
+                self.assertTrue(m._videoclip_fermo())   # con le classifiche la fa la lettura della classifica di YouTube
             b.riuscito()
             self.assertFalse(m._videoclip_fermo())
 
@@ -2799,53 +2872,33 @@ class TestClassificheLavoro(unittest.TestCase):
         self.assertTrue(m.PERMESSE_INVITATI.match("/api/extra/classifiche"))   # le classifiche come playlist sì
         self.assertIsNone(m.PERMESSE_INVITATI.match("/api/extra/classifiche/x"))
 
-    def brani(self, c, fid="prova"):
-        el = {x["id"]: x for x in c.classifiche_app()["classifiche"]}[fid]
-        return [(b["pos"], b["titolo"], b["segno"], b["di"], b["stato"], b["brano"]) for b in el["brani"]], el
-
     def test_classifiche_come_playlist(self):
         self.pagine["prova"] = [("Olly", "Balorda nostalgia"), ("Coma_Cose", "Cuoricini"), ("Geolier", "Nun te scetà")]
-        self.risposte = {"Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")],
-                         "Geolier Nun te scetà": [risultato("Altro000001", "Altra canzone", "Geolier")]}
-        self.libreria = [("Coma_Cose", "Cuoricini", "lib-cuoricini")]   # c'è già nella libreria
-        c = self.nuovo()
+        self.libreria = [("Coma_Cose", "Cuoricini", "lib-cuoricini"), ("Olly", "Balorda nostalgia", "lib-olly")]
+        c = self.nuovo(libere=[])
         self.assertEqual(c.classifiche_app(), {"classifiche": []})   # prima della prima lettura: niente
         self.gira(c)
         brani, el = self.brani(c)
-        # la prima volta: le posizioni, senza segni (non c'è una lettura prima); il brano scaricato ha il suo id del catalogo
-        self.assertEqual(brani, [(1, "Balorda nostalgia", "", 0, "libreria", "b1"), (2, "Cuoricini", "", 0, "libreria", "lib-cuoricini"),
-                                 (3, "Nun te scetà", "", 0, "non disponibile", "")])
-        self.assertEqual((el["nome"], el["usciti"]), ("Classifica di prova", []))
-        # intanto una playlist lunga riempie la coda…
-        c.s["coda"] = [{"a": "Artista %d" % i, "t": "Brano %d" % i, "f": "Una playlist"} for i in range(50)]
-        # …la classifica nuova (il giorno dopo) passa davanti: i nuovi ingressi si scaricano subito
+        # la prima volta: le posizioni, senza segni (non c'è una lettura prima)
+        self.assertEqual(brani, [(1, "Balorda nostalgia", "", 0, "libreria", "lib-olly"),
+                                 (2, "Cuoricini", "", 0, "libreria", "lib-cuoricini"),
+                                 (3, "Nun te scetà", "", 0, "non in libreria", "")])
+        self.assertEqual((el["nome"], el["usciti"], el["libera"]), ("Classifica di prova", [], False))
+        # la classifica nuova (il giorno dopo): ▲▼ e «nuovo»
         self.pagine["prova"] = [("ANNA", "30°C"), ("Geolier", "Nun te scetà"), ("Olly", "Balorda nostalgia"), ("Coma_Cose", "Cuoricini")]
-        self.risposte["ANNA 30°C"] = [risultato("Anna0000001", "30°C", "ANNA", explicit=True)]
         self.ora.t += 86400
         self.assertEqual(c.passo(), 0)
         self.assertEqual(self.letture[-1], "prova")
-        self.assertEqual(c.s["coda"][0]["t"], "30°C")
-        self.assertEqual(len(c.s["coda"]), 51)
-        # un'altra classifica letta subito dopo va dietro a questa, ma sempre davanti alla playlist
-        altra = {"id": "altra", "nome": "Altra classifica", "tipo": "finta"}
-        c.fonti.append(altra)
-        self.pagine["altra"] = [("Artista 7", "Brano 7"), ("ANNA", "30°C"), ("Sfera Ebbasta", "Nuova")]
-        c.passo()
-        self.assertEqual([v["t"] for v in c.s["coda"][:4]], ["30°C", "Brano 7", "Nuova", "Brano 0"])
-        self.assertEqual(len(c.s["coda"]), 52)   # «Brano 7» spostato davanti, non ripetuto
-        c.fonti.remove(altra)
-        brani, el = self.brani(c)
-        self.assertEqual(brani, [(1, "30°C", "nuovo", 0, "in arrivo", ""), (2, "Nun te scetà", "su", 1, "non disponibile", ""),
-                                 (3, "Balorda nostalgia", "giu", 2, "libreria", "b1"), (4, "Cuoricini", "giu", 2, "libreria", "lib-cuoricini")])
-        c.passo()
-        self.assertEqual(self.scaricati[-1], "Anna0000001")
-        self.assertEqual(self.brani(c)[0][0][4:], ("libreria", "b2"))
+        self.assertEqual(self.brani(c)[0], [(1, "30°C", "nuovo", 0, "non in libreria", ""), (2, "Nun te scetà", "su", 1, "non in libreria", ""),
+                                            (3, "Balorda nostalgia", "giu", 2, "libreria", "lib-olly"),
+                                            (4, "Cuoricini", "giu", 2, "libreria", "lib-cuoricini")])
+        self.assertEqual(c.s["coda"], [])   # dalle classifiche non si scarica niente
         # riletta uguale il giorno dopo: i segni restano quelli della classifica nuova
         self.ora.t += 86400
         c.passo()
         self.assertEqual(self.letture.count("prova"), 3)
         self.assertEqual([b[2] for b in self.brani(c)[0]], ["nuovo", "su", "giu", "giu"])
-        # un brano esce: sparisce dalla classifica ma resta nella libreria, in fondo tra gli «Usciti di recente»
+        # un brano esce: sparisce dalla classifica, in fondo tra gli «Usciti di recente»
         self.pagine["prova"] = [("ANNA", "30°C"), ("Olly", "Balorda nostalgia"), ("Geolier", "Nun te scetà")]
         self.ora.t += 86400
         c.passo()
@@ -2863,73 +2916,91 @@ class TestClassificheLavoro(unittest.TestCase):
         self.assertEqual([b[1:3] for b in brani], [("Cuoricini", "nuovo"), ("30°C", "giu")])
         self.assertEqual([u["titolo"] for u in el["usciti"]], ["Balorda nostalgia", "Nun te scetà"])
         # dopo un riavvio le classifiche restano
-        self.assertEqual(self.brani(self.nuovo())[0], brani)
+        self.assertEqual(self.brani(self.nuovo(libere=[]))[0], brani)
 
 
 class FintoWeb(http.server.BaseHTTPRequestHandler):
-    """Le pagine delle classifiche (indirizzo del sito + percorso) e YouTube Music, finti."""
-    blocca = False
+    """Le pagine delle classifiche, le API di Jamendo e Internet Archive e i loro file (indirizzo del sito + percorso),
+    finti; YouTube Music risponde 404 a tutto (e ricorda se qualcuno ha cercato qualcosa)."""
+    chieste = []
     ricerche = []
+    CC = "http://creativecommons.org/licenses/by-sa/3.0/"
     PAGINE = {"/kworb.net/spotify/country/it_weekly.html":
               '<table><tr><td class="text mp"><div><a href="../artist/1.html">Eminem</a> - '
               '<a href="../track/1.html">Without Me</a></div></td></tr></table>',
               "/kworb.net/spotify/country/global_weekly.html":
               '<table><tr><td class="text mp"><div><a href="../artist/2.html">Dua Lipa</a> - '
               '<a href="../track/2.html">Houdini</a></div></td></tr></table>'}
+    JAMENDO = {"popularity_week": [("101", "Luce", "Anna")], "popularity_month": [("101", "Luce", "Anna"), ("105", "Terza", "Duo")]}
+
+    def manda(self, stato, dati, tipo):
+        self.send_response(stato)
+        self.send_header("Content-Type", tipo)
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
 
     def do_GET(self):
-        dati = self.PAGINE.get(self.path, "").encode("utf-8")
-        self.send_response(200 if dati else 404)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(dati)))
-        self.end_headers()
-        self.wfile.write(dati)
+        FintoWeb.chieste.append(self.path)
+        percorso, _, q = self.path.partition("?")
+        if percorso in self.PAGINE:
+            return self.manda(200, self.PAGINE[percorso].encode("utf-8"), "text/html; charset=utf-8")
+        if percorso == "/api.jamendo.com/v3.0/tracks/":
+            p = parse_qs(q)
+            brani = self.JAMENDO.get(p.get("order", [""])[0], []) if p.get("client_id") == ["prova1234"] else []
+            d = {"headers": {"status": "success", "code": 0, "results_count": len(brani)}, "results": [
+                {"id": i, "name": t, "artist_name": a, "album_name": "Album di " + a, "audiodownload_allowed": True,
+                 "audiodownload": "https://prod-1.storage.jamendo.com/download/track/%s/mp32/" % i,
+                 "license_ccurl": self.CC, "shareurl": "https://www.jamendo.com/track/" + i,
+                 "image": "https://usercontent.jamendo.com?type=album&id=" + i} for i, t, a in brani]}
+            return self.manda(200, json.dumps(d).encode("utf-8"), "application/json")
+        if percorso == "/archive.org/advancedsearch.php":
+            d = {"response": {"docs": [{"identifier": "netlabel-uno", "title": "Uscita uno", "creator": "Gruppo",
+                                        "licenseurl": "http://creativecommons.org/licenses/by-nc/4.0/"}]}}
+            return self.manda(200, json.dumps(d).encode("utf-8"), "application/json")
+        if percorso == "/archive.org/metadata/netlabel-uno":
+            d = {"metadata": {"title": "Uscita uno", "creator": "Gruppo",
+                              "licenseurl": "http://creativecommons.org/licenses/by-nc/4.0/"},
+                 "files": [{"name": "01 Primo.mp3", "format": "VBR MP3", "source": "original", "track": "1", "title": "Primo"}]}
+            return self.manda(200, json.dumps(d).encode("utf-8"), "application/json")
+        if percorso in ("/archive.org/download/netlabel-uno/01%20Primo.mp3", "/prod-1.storage.jamendo.com/download/track/101/mp32/",
+                        "/prod-1.storage.jamendo.com/download/track/105/mp32/"):
+            return self.manda(200, MP3_FINTO, "audio/mpeg")
+        if percorso == "/archive.org/download/netlabel-uno/pagina.mp3":
+            return self.manda(200, b"<!doctype html><p>Non trovato</p>", "text/html")
+        if percorso.endswith("/503.mp3"):
+            return self.manda(503, b"", "text/plain")
+        return self.manda(404, b"", "text/html; charset=utf-8")
 
     def do_POST(self):
-        corpo = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
-        q = str(corpo.get("query") or "").lower()
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
         if "/search" in self.path:
-            FintoWeb.ricerche.append(q)
-        if "/search" in self.path and FintoWeb.blocca:
-            stato, d = 429, {"error": {"code": 429, "message": "Too Many Requests"}}
-        elif "/search" in self.path and q == "eminem without me":
-            stato, d = 200, RISPOSTA_YTM
-        elif "/search" in self.path and q == "dua lipa houdini":
-            stato, d = 200, {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
-                "sectionListRenderer": {"contents": [{"musicShelfRenderer": {"contents": [
-                    _brano_ytm("HoudiniRmx1", "Houdini (Remix)", ["Dua Lipa"], "Houdini", "3:10", True),
-                    _brano_ytm("HoudiniExp1", "Houdini", ["Dua Lipa"], "Radical Optimism", "3:05", True)]}}]}}}}]}}}
-        elif "/search" in self.path:
-            stato, d = 200, {"contents": {}}
-        else:
-            stato, d = 404, {"error": {"code": 404}}
-        dati = json.dumps(d).encode("utf-8")
-        self.send_response(stato)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(dati)))
-        self.end_headers()
-        self.wfile.write(dati)
+            FintoWeb.ricerche.append(self.path)
+        self.manda(404, json.dumps({"error": {"code": 404}}).encode("utf-8"), "application/json")
 
     def log_message(self, *x):
         pass
 
 
 class TestClassificheServer(unittest.TestCase):
-    """Il server vero con ATLANTE_CLASSIFICHE=1, pagine e YouTube finti, yt-dlp e ffmpeg finti: un brano entra nella
-    libreria, YouTube blocca, Samuele lo vede in Gestione e sul riquadro (io), «Riprova adesso» e si riparte."""
+    """Il server vero con ATLANTE_CLASSIFICHE=1, pagine, API e file finti, ffmpeg finto: le classifiche diventano playlist
+    con i brani che la libreria ha già (a YouTube non si cerca niente), i brani di Jamendo e di Internet Archive entrano
+    nella libreria in «Musica libera» com'erano, con licenza e pagina nei tag; il client_id di Jamendo non esce mai."""
 
     @classmethod
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="atlante-classifiche-srv-")
         cls.c = prepara_cartelle(cls.base)
+        scrivi_mp3(os.path.join(cls.c["musica"], "Eminem - Without Me.mp3"), "Without Me", "Eminem")   # c'è già
         cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoWeb)
         threading.Thread(target=cls.web.serve_forever, daemon=True).start()
         finto = "http://127.0.0.1:%d" % cls.web.server_address[1]
         cls.c["youtubei"] = finto
-        FintoWeb.blocca, FintoWeb.ricerche = False, []
+        FintoWeb.chieste, FintoWeb.ricerche = [], []
         # copertine e tutto il resto che andrebbe su Internet: verso un indirizzo dove non risponde nessuno
         morto = "http://127.0.0.1:%d" % porta_libera()
         with unittest.mock.patch.dict(os.environ, {"ATLANTE_CLASSIFICHE": "1", "ATLANTE_CLASSIFICHE_FINTE": finto,
+                                                   "ATLANTE_JAMENDO_CLIENT_ID": "prova1234",
                                                    "http_proxy": morto, "https_proxy": morto, "no_proxy": "127.0.0.1,localhost"}):
             cls.s = Server(cls.base, cls.c).avvia()
 
@@ -2943,52 +3014,53 @@ class TestClassificheServer(unittest.TestCase):
     def stato(self):
         return self.s.json("GET", "/api/extra/gestione/classifiche")
 
-    def test_dalla_classifica_alla_libreria(self):
-        r = aspetta(lambda: (lambda x: x if x["totale"] >= 1 else None)(self.stato()), 40, 0.1)
+    def test_classifiche_e_musica_libera(self):
+        r = aspetta(lambda: (lambda x: x if x["totale"] >= 3 else None)(self.stato()), 60, 0.2)
         self.assertIsNotNone(r, "%r\n%s" % (self.stato(), self.s.leggi_log()))
-        FintoWeb.blocca = True   # dal prossimo brano YouTube risponde 429
-        self.assertEqual((r["ultimi"][0]["titolo"], r["ultimi"][0]["artista"]), ("Without Me", "Eminem"))
-        self.assertEqual(r["ultimi"][0]["fonte"], "Spotify Top 50 Italia")
-        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Eminem - Without Me.mp3")))
+        libera = os.path.join(self.c["scaricati"], "Musica libera")
+        self.assertEqual(sorted(os.listdir(libera)), ["Anna - Luce.mp3", "Duo - Terza.mp3", "Gruppo - Primo.mp3"])
+        # com'erano (niente ricodifica), con licenza e pagina d'origine nei tag
         with open(os.path.join(self.c["finto"], "ffmpeg.log"), encoding="utf-8") as f:
-            tag = json.loads(f.read().strip().splitlines()[-1])["tag"]
-        self.assertEqual((tag["ITUNESADVISORY"], tag["purl"]), ("1", "https://music.youtube.com/watch?v=tqxRidAWER8"))
-        cat = self.s.json("GET", "/api/musica/catalogo")["brani"]
-        self.assertIn(("Without Me", "Eminem"), [(x["title"], x["artist"]) for x in cat])
-        # YouTube blocca: fermo, avviso in Gestione e nel riquadro di «Altro»
-        r = aspetta(lambda: (lambda x: x if x["blocco"] else None)(self.stato()), 40, 0.1)
-        self.assertIsNotNone(r, self.s.leggi_log())
-        self.assertEqual(r["blocco"]["tipo"], "rallenta")
-        self.assertEqual(self.s.json("GET", "/api/extra/io")["nuove"]["youtube_bloccato"], 1)
-        n = len(FintoWeb.ricerche)
-        time.sleep(1)
-        self.assertEqual(len(FintoWeb.ricerche), n)   # fermo davvero: nessuna richiesta
-        # «Riprova adesso»: una prova sola; il blocco è finito, si riparte col brano rimasto in coda (la versione giusta)
-        FintoWeb.blocca = False
-        self.assertEqual(self.s.json("POST", "/api/extra/gestione/classifiche/riprova", {}), {"ok": True})
-        r = aspetta(lambda: (lambda x: x if x["totale"] >= 2 else None)(self.stato()), 40, 0.1)
-        self.assertIsNotNone(r, "%r\n%s" % (self.stato(), self.s.leggi_log()))
-        self.assertIsNone(r["blocco"])
-        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Dua Lipa - Houdini.mp3")))
-        self.assertNotIn("youtube_bloccato", self.s.json("GET", "/api/extra/io").get("nuove", {}))
-        # ogni classifica letta è una playlist per l'app: posizioni e il brano della libreria (id del catalogo)
+            righe = [json.loads(x) for x in f.read().strip().splitlines()]
+        luce = next(x for x in righe if x["tag"].get("title") == "Luce")
+        self.assertEqual(luce["args"][luce["args"].index("-c:a") + 1], "copy")
+        self.assertNotIn("libmp3lame", luce["args"])
+        self.assertEqual((luce["tag"]["artist"], luce["tag"]["album"], luce["tag"]["copyright"], luce["tag"]["purl"]),
+                         ("Anna", "Album di Anna", FintoWeb.CC, "https://www.jamendo.com/track/101"))
+        self.assertIn("CC BY-SA 3.0", luce["tag"]["comment"])
+        primo = next(x for x in righe if x["tag"].get("title") == "Primo")
+        self.assertEqual((primo["tag"]["artist"], primo["tag"]["album"]), ("Gruppo", "Uscita uno"))
+        self.assertIn("CC BY-NC 4.0", primo["tag"]["comment"])
+        cat = {(x["title"], x["artist"]): x["id"] for x in self.s.json("GET", "/api/musica/catalogo")["brani"]}
+        for t in (("Luce", "Anna"), ("Terza", "Duo"), ("Primo", "Gruppo"), ("Without Me", "Eminem")):
+            self.assertIn(t, cat)
+        # le classifiche come playlist: suonano i brani che ci sono, gli altri «non in libreria»; poi la musica libera
         cl = {x["id"]: x for x in self.s.json("GET", "/api/extra/classifiche")["classifiche"]}
-        self.assertEqual(cl["spotify-it"]["nome"], "Spotify Top 50 Italia")
-        b = cl["spotify-it"]["brani"][0]
-        self.assertEqual((b["pos"], b["titolo"], b["artista"], b["stato"]), (1, "Without Me", "Eminem", "libreria"))
-        cat = {x["id"]: x for x in self.s.json("GET", "/api/musica/catalogo")["brani"]}
-        self.assertEqual(cat[b["brano"]]["title"], "Without Me")
-        self.assertEqual(cl["spotify-mondo"]["brani"][0]["titolo"], "Houdini")
+        self.assertEqual([(b["titolo"], b["stato"], b["brano"]) for b in cl["spotify-it"]["brani"]],
+                         [("Without Me", "libreria", cat[("Without Me", "Eminem")])])
+        self.assertEqual([(b["titolo"], b["stato"]) for b in cl["spotify-mondo"]["brani"]], [("Houdini", "non in libreria")])
+        self.assertFalse(cl["spotify-it"]["libera"])
+        self.assertEqual([(b["titolo"], b["stato"], b["brano"]) for b in cl["jamendo-mese"]["brani"]],
+                         [("Luce", "libreria", cat[("Luce", "Anna")]), ("Terza", "libreria", cat[("Terza", "Duo")])])
+        self.assertTrue(cl["jamendo-mese"]["libera"])
         self.assertNotIn("billboard", cl)   # non letta: nessuna playlist
-        self.s.json("POST", "/api/extra/classifiche", {}, codice=405)
-        # le fonti che non esistono qui (404) si saltano e lo si dice
-        esiti = {f["id"]: f["esito"] for f in self.stato()["classifiche"]}
-        self.assertEqual((esiti["spotify-it"], esiti["spotify-mondo"]), ("ok", "ok"))
-        aspetta(lambda: self.stato()["classifiche"][-1]["esito"], 20, 0.2)
-        self.assertEqual({f["id"]: f["esito"] for f in self.stato()["classifiche"]}["billboard"], "errore")
-        # le scritture della Gestione: solo dalla stessa origine
+        self.assertEqual(list(cl)[:2], ["spotify-it", "spotify-mondo"])   # prima le classifiche, poi la musica libera
+        # a YouTube non si è cercato niente
+        self.assertEqual(FintoWeb.ricerche, [])
+        st = self.stato()
+        self.assertEqual({f["id"]: f["esito"] for f in st["libere"]},
+                         {"jamendo-settimana": "ok", "jamendo-mese": "ok", "archivio-netlabel": "ok"})
+        self.assertEqual(({f["id"]: f["esito"] for f in st["classifiche"]}["billboard"], st["jamendo"]), ("errore", True))
+        self.assertEqual(st["ultimi"][0]["licenza"], "CC BY-NC 4.0")
+        # il client_id di Jamendo va solo a Jamendo: non nella Gestione, non nelle playlist, non nel registro
+        self.assertTrue([p for p in FintoWeb.chieste if "client_id=prova1234" in p])
+        for testo in (json.dumps(st), json.dumps(cl), self.s.leggi_log()):
+            self.assertNotIn("prova1234", testo)
+        # la Gestione: «Riprova adesso» solo dalla stessa origine; il resto non esiste
+        self.assertEqual(self.s.json("POST", "/api/extra/gestione/classifiche/riprova", {}), {"ok": True})
         self.s.json("POST", "/api/extra/gestione/classifiche/riprova", {}, codice=403, intest={"Origin": "https://altro.example"})
         self.s.json("GET", "/api/extra/gestione/classifiche/nessuna", codice=404)
+        self.s.json("POST", "/api/extra/classifiche", {}, codice=405)
 
 
 # ----- brani ascoltati: classifiche e consigli tra le persone -----
