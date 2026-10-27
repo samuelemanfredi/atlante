@@ -156,3 +156,24 @@ invitati; la rete di casa senza nessuno dietro no. Le persone sono `"p"` (Samuel
 cornice sopra tutto (true se è partita); oppure `x/chiamate.html?chiama=<persona>&video=1`. Notifiche ad app chiusa:
 `avviso_chiamata(persona, evento, chiamata)` in `musica_libreria.py` (eventi `arriva`, `persa`, `chiusa`); il blocco
 di una persona: `chiamata_bloccata(da, a)`.
+## Posizione condivisa (cifrata da telefono a telefono)
+`posizione.html` (riquadro «Condividi la posizione» in «Altro», anche per gli invitati): la propria posizione **dal vivo**
+per 15 minuti, un'ora o finché la si ferma (al più 12 ore), oppure **un punto solo**, a una o più persone di Atlante. Il
+motore gira nell'app (`x/posizione.js`, `window.POS` per la pagina): la barra in alto «Stai condividendo la posizione con
+…» con «Ferma», e a chi riceve «*Nome* condivide la sua posizione» con **Raggiungilo**, che apre `naviga.html` (anche agli
+invitati, solo da lì: la pagina non usa il Mac) con `#verso=persona:<id>` (dal vivo: percorso ricalcolato quando la
+persona si sposta di più di 50 m) o `#verso=<lat>,<lon>` (un punto); dopo il `#`, così le coordinate non vanno al Mac.
+Cifratura: `x/cifra.js` (`window.Cifra`), lo schema e i formati della chat (ECDH P-256, HKDF-SHA256, AES-GCM con una
+chiave nuova per aggiornamento cifrata per ciascun dispositivo; etichetta `atlante-posizione/1`); chiavi del dispositivo
+in IndexedDB `ax-cifra`. Il Mac mini tiene in memoria solo l'ultimo aggiornamento cifrato.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `chiavi` | `{io, persone:[{id, nome, dispositivi:[{id, chiave, attivo}]}]}` — chi è in Atlante (Samuele `"p"` per primo) e le chiavi pubbliche dei dispositivi attivi |
+| POST | `chiavi` `{id, chiave}` | `{ok, io}` — la chiave pubblica di questo dispositivo (P-256 non compressa, base64url; id di 16 byte casuali) |
+| GET | `posizione?disp=&v=&attesa=25` | `{v, io:{id,nome}, mie:[{id,tipo,durata,inizio,scade,seq,t,a:[{id,nome}],disp,mancano}], per_me:[{…, da:{id,nome}, pos:{id,disp,corpo,sale,chiave}\|null}]}` — attesa lunga finché cambia la versione `v`; in `pos` solo la chiave cifrata per `disp` |
+| POST | `posizione` `{tipo:'vivo'\|'punto', a:[persone], durata:900\|3600\|0, disp}` | `{condivisione}` — una sola dal vivo per persona (la nuova prende il posto della vecchia), al più 10 attive |
+| POST | `posizione/<id>` `{id, disp, corpo, sale, chiavi:{disp: chiave cifrata}}` | `{seq, t, scade, mancano}` — al più uno ogni 2 s sul Mac (il telefono: ogni 5 s e 20 m); `mancano` = dispositivi nuovi dei destinatari |
+| DELETE | `posizione/<id>` | `{ok:true}` — solo chi l'ha avviata |
+
+Tutte rispondono 403 dalla rete di casa senza biscotto (lì non si sa chi c'è) e sono permesse agli invitati.
