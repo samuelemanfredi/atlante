@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<title>Cerca e scarica</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+/* Cerca e scarica: brani da YouTube Music e YouTube (o da un link) nella libreria del Mac */
+svg.i{width:20px;height:20px;display:block;flex:none}
+.search{display:flex;align-items:center;gap:10px;margin:0 0 4px}
+.search .box{flex:1;position:relative}
+.search .box svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:var(--fg2);pointer-events:none}
+.search input{width:100%;min-height:42px;padding:8px 12px 8px 36px;border:0;border-radius:12px;background:var(--fill);outline:none;-webkit-appearance:none;appearance:none}
+.search input::-webkit-search-cancel-button{-webkit-appearance:none}
+.search .btn{min-height:42px}
+.row img,.row .ph{width:52px;height:52px;border-radius:6px}
+.row.cens{opacity:.72}
+.row .tx span.err{color:var(--bad);white-space:normal}
+.row .tx span.e{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:3px;background:var(--fg2);color:var(--bg);font-size:10px;font-weight:700;vertical-align:1px;margin-right:5px}
+.acts{display:flex;align-items:center;gap:6px;flex:none}
+.round{width:36px;height:36px;border-radius:50%;background:var(--fill);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;flex:none}
+.round.on{background:var(--accent);color:var(--onaccent)}
+.pct{min-width:44px;text-align:center;font-size:14px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums}
+.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.lav .bar{margin-top:6px}
+.siti .row{color:inherit}
+.siti .row .chev{color:var(--fg3);font-size:22px;flex:none}
+.siti .ic{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:19px;flex:none;background:var(--fill)}
+.row .tx span.pill{display:inline-block;vertical-align:2px;margin-left:4px}
+.vuoto{text-align:center;color:var(--fg2);padding:22px 16px;background:var(--bg2);border-radius:12px;margin:10px 0}
+@media (max-width:380px){.acts .btn.sm{padding:0 9px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <form id="f" class="search" role="search">
+    <div class="box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>
+      <input id="q" type="search" enterkeyhint="search" maxlength="300" placeholder="Titolo, artista o link" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Cerca musica">
+    </div>
+    <button class="btn pri" type="submit">Cerca</button>
+  </form>
+  <div class="seg" id="fonti"><button type="button" data-a="fonte" data-f="ytm">YouTube Music</button><button type="button" data-a="fonte" data-f="yt">YouTube</button></div>
+  <div id="nomac" class="note" hidden>Il Mac non risponde: ricerca, ascolto e download funzionano solo con il Mac acceso. I siti qui sotto si aprono lo stesso.</div>
+
+  <div id="link" class="card" hidden>
+    <b>Scarica dal link</b>
+    <div class="small" id="linkTesto"></div>
+    <div class="small">Funziona con YouTube, SoundCloud, Bandcamp e molti altri siti.</div>
+    <div class="btns"><button class="btn pri" data-a="link">Scarica nella libreria</button></div>
+  </div>
+
+  <div id="stato" class="small"></div>
+  <div id="ris" class="list" hidden></div>
+  <h2 class="h2" id="hCens" hidden>Versioni censurate</h2>
+  <div id="cens" class="list" hidden></div>
+
+  <h2 class="h2" id="hLav" hidden>Scaricati</h2>
+  <div id="lav" class="list lav" hidden></div>
+
+  <h2 class="h2">Cerca anche su</h2>
+  <div id="siti" class="list siti"></div>
+  <p class="small">I brani scaricati vanno nella libreria del Mac e compaiono su tutti i tuoi dispositivi, nel formato e alla qualità di quelli del Cloud. Si scarica la versione explicit: le censurate sono in fondo. Solo per ascolto personale: i brani restano dei loro autori. Dai servizi protetti (Spotify, Apple Music, Amazon Music) non si scarica.</p>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api, store, player, host} = AX;
+AX.header('Cerca e scarica');
+
+const ICON = {
+  play:'<svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
+  pause:'<svg class="i" viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="5" width="4" height="14" rx="1"/><rect x="13.5" y="5" width="4" height="14" rx="1"/></svg>',
+  down:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>',
+  ok:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  wait:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg>',
+  dopo:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h11M4 11h11M4 16h7M17 14v6M14 17h6"/></svg>',
+  x:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>'
+};
+// siti dove cercare a mano: si aprono in un'altra scheda con la stessa ricerca
+const SITI = [
+  {n:'YouTube Music', d:'brani ufficiali', i:'🎵', u:'https://music.youtube.com/search?q='},
+  {n:'YouTube', d:'video, live, remix', i:'▶️', u:'https://www.youtube.com/results?search_query='},
+  {n:'SoundCloud', d:'remix, DJ set, artisti emergenti', i:'☁️', u:'https://soundcloud.com/search?q='},
+  {n:'Bandcamp', d:'artisti indipendenti, anche gratis', i:'💿', u:'https://bandcamp.com/search?q='},
+  {n:'Jamendo', d:'musica libera', i:'🆓', u:'https://www.jamendo.com/search?q='},
+  {n:'Internet Archive', d:'musica libera e d\'archivio', i:'🏛️', u:'https://archive.org/search?query=', s:'&and%5B%5D=mediatype%3A%22audio%22'},
+  // richiesto da Samuele sapendo il rischio: segnato, la ricerca va negli appunti (non si sa come accetta le ricerche)
+  {n:'mp3juice.sc', d:'pubblicità ingannevoli: non installare niente', i:'⚠️', u:'https://mp3juice.sc/', rischio:true}
+];
+
+let fonte = store.get('cerca-fonte', 'ytm') === 'yt' ? 'yt' : 'ytm';
+let query = '', risultati = [], lavori = [], nCerca = 0, giro = 0, primoGiro = true, segno = '';
+const noti = new Set();   // scaricamenti finiti già passati all'app (la libreria si rilegge una volta per ognuno)
+const eLink = s => /^https?:\/\/\S+$/i.test((s || '').trim());
+const durata = s => { s = Math.round(s || 0); if (!s) return ''; const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = String(s % 60).padStart(2, '0'); return h ? h + ':' + String(m).padStart(2, '0') + ':' + x : m + ':' + x; };
+const lavoroDi = id => lavori.find(l => l.yt === id);   // il più recente (l'elenco arriva dal più nuovo)
+const attivo = l => l && (l.stato === 'in coda' || l.stato === 'in corso');
+
+function segnaFonte() { document.querySelectorAll('#fonti button').forEach(b => b.classList.toggle('on', b.dataset.f === fonte)); }
+
+async function cerca(q) {
+  query = (q || '').trim(); siti();
+  $('link').hidden = !eLink(query); $('linkTesto').textContent = eLink(query) ? query : '';
+  history.replaceState(null, '', query ? '?q=' + encodeURIComponent(query) : location.pathname);
+  if (!query || eLink(query)) { risultati = []; $('stato').textContent = ''; mostra(); return; }
+  const n = ++nCerca;
+  $('stato').textContent = 'Cerco su ' + (fonte === 'ytm' ? 'YouTube Music' : 'YouTube') + '…';
+  try {
+    const j = await api('musica/cerca?fonte=' + fonte + '&q=' + encodeURIComponent(query), {timeout:90000});
+    if (n !== nCerca) return;
+    risultati = j.risultati || [];
+    $('stato').textContent = risultati.length ? '' : 'Nessun brano trovato: prova con altre parole' + (fonte === 'ytm' ? ' o su YouTube.' : ' o su YouTube Music.');
+  } catch (e) {
+    if (n !== nCerca) return;
+    risultati = []; $('stato').textContent = e.name === 'AbortError' ? 'Il Mac non risponde: riprova tra poco.' : e.message;
+  }
+  mostra();
+}
+
+function riga(b) {
+  const l = lavoroDi(b.id), ora = player.now(), qui = ora && ora.id === 'yt:' + b.id;
+  const fatto = l && l.stato === 'fatto', lib = fatto && l.brano && host && host.suona;
+  const meta = (fatto ? '✓ In libreria · ' : '') + [b.artista, b.album, durata(b.durata)].filter(Boolean).join(' · ');
+  let az, play = '<button class="round' + (qui ? ' on' : '') + '" data-a="ascolta" data-id="' + esc(b.id) + '" aria-label="' + (qui && ora.playing ? 'Pausa' : 'Ascolta prima di scaricare') + '">' + (qui && ora.playing ? ICON.pause : ICON.play) + '</button>';
+  if (lib) {   // già scaricato: si suona dalla libreria (con il mix e la copia sull'iPhone), non più l'anteprima
+    play = '<button class="round" data-a="suona" data-b="' + esc(l.brano) + '" aria-label="Riproduci «' + esc(b.titolo) + '»">' + ICON.play + '</button>';
+    az = '<button class="round" data-a="dopo" data-b="' + esc(l.brano) + '" aria-label="Riproduci dopo">' + ICON.dopo + '</button>';
+  } else if (fatto) az = '<span class="round on" aria-label="In libreria">' + ICON.ok + '</span>';
+  else if (attivo(l)) az = '<span class="pct">' + (l.progresso > 0 ? Math.round(l.progresso) + '%' : '…') + '</span>';
+  else az = '<button class="round" data-a="scarica" data-id="' + esc(b.id) + '" aria-label="Scarica «' + esc(b.titolo) + '»">' + ICON.down + '</button>';
+  return '<div class="row' + (b.censurata ? ' cens' : '') + '">' + (b.copertina ? '<img src="' + esc(b.copertina) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '<div class="ph"></div>') +
+    '<div class="tx"><b>' + esc(b.titolo) + '</b><span>' + (b.explicit ? '<span class="e" title="Explicit">E</span>' : '') + esc(meta) + '</span>' +
+    (l && l.stato === 'errore' && l.errore !== 'Annullato' ? '<span class="err">Non scaricato: ' + esc(l.errore) + '</span>' : '') + '</div>' +
+    '<div class="acts">' + play + az + '</div></div>';
+}
+
+function mostra() {
+  const buoni = risultati.filter(b => !b.censurata), cens = risultati.filter(b => b.censurata);
+  $('ris').innerHTML = buoni.map(riga).join(''); $('ris').hidden = !buoni.length;
+  $('cens').innerHTML = cens.map(riga).join(''); $('cens').hidden = $('hCens').hidden = !cens.length;
+  const L = lavori.slice(0, 20);
+  $('lav').innerHTML = L.map(l => {
+    const fatto = l.stato === 'fatto', err = l.stato === 'errore';
+    const sotto = fatto ? (l.artista ? esc(l.artista) + ' · ' : '') + 'nella libreria' : err ? '<span class="err">' + esc(l.errore || 'Non riuscito') + '</span>' : l.stato === 'in coda' ? 'in attesa…' : 'scarico sul Mac… ' + Math.round(l.progresso || 0) + '%';
+    const az = fatto && l.brano && host && host.suona ? '<button class="round" data-a="suona" data-b="' + esc(l.brano) + '" aria-label="Riproduci">' + ICON.play + '</button><button class="round" data-a="dopo" data-b="' + esc(l.brano) + '" aria-label="Riproduci dopo">' + ICON.dopo + '</button>'
+      : attivo(l) ? '<button class="round" data-a="annulla" data-l="' + esc(l.id) + '" aria-label="Annulla">' + ICON.x + '</button>'
+      : '<button class="round" data-a="togli" data-l="' + esc(l.id) + '" aria-label="Togli dall\'elenco">' + ICON.x + '</button>';
+    return '<div class="row"><div class="round' + (fatto ? ' on' : attivo(l) ? ' spin' : '') + '" aria-hidden="true">' + (fatto ? ICON.ok : attivo(l) ? ICON.wait : ICON.x) + '</div><div class="tx"><b>' + esc(l.titolo || l.url) + '</b><span>' + sotto + '</span>' +
+      (attivo(l) ? '<div class="bar"><i style="width:' + Math.max(3, l.progresso || 0) + '%"></i></div>' : '') + '</div><div class="acts">' + az + '</div></div>';
+  }).join('');
+  $('lav').hidden = $('hLav').hidden = !L.length;
+}
+
+function siti() {
+  const q = eLink(query) ? '' : query;
+  $('siti').innerHTML = SITI.map((s, k) => '<a class="row" href="' + esc(s.rischio || !q ? (s.rischio ? s.u : new URL(s.u).origin + '/') : s.u + encodeURIComponent(q) + (s.s || '')) + '" target="_blank" rel="noopener noreferrer" data-sito="' + k + '">' +
+    '<span class="ic">' + s.i + '</span><div class="tx"><b>' + esc(s.n) + (s.rischio ? ' <span class="pill bad">sito a rischio</span>' : '') + '</b><span>' + esc(s.d) + '</span></div><span class="chev">›</span></a>').join('');
+}
+
+async function aggiornaLavori() {
+  clearTimeout(giro);
+  try { lavori = (await api('musica', {timeout:10000})).lavori || []; } catch (e) { giro = setTimeout(aggiornaLavori, 10000); return; }
+  let nuovi = false;
+  for (const l of lavori) if (l.stato === 'fatto' && l.brano && !noti.has(l.id)) { noti.add(l.id); if (!primoGiro) nuovi = true; }
+  primoGiro = false;
+  if (nuovi && host && host.libreria) { try { await host.libreria(); } catch (e) {} toast('Scaricato: è nella libreria'); }
+  mostra();
+  if (lavori.some(attivo)) giro = setTimeout(aggiornaLavori, 1500);
+}
+
+function ascolta(id) {
+  const ora = player.now();
+  if (ora && ora.id === 'yt:' + id) { player.toggle(); return; }
+  const b = risultati.find(x => x.id === id) || {};
+  player.play([{id:'yt:' + id, title:b.titolo || 'Anteprima', artist:b.artista || '', album:b.album || '', url:AX.API + 'musica/ascolta/' + encodeURIComponent(id), cover:b.copertina || ''}], 0, 'Anteprima da internet');
+  if (host) toast('Preparo l\'ascolto: la prima volta ci vogliono circa 15 secondi');
+  mostra();
+}
+
+async function scarica(corpo, nome) {
+  try {
+    await api('musica', {method:'POST', body:corpo, timeout:20000});
+    toast('Scarico «' + nome + '» sul Mac');
+  } catch (e) { toast(e.message); }
+  aggiornaLavori();
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-a],[data-sito]'); if (!b) return;
+  if (b.dataset.sito != null) {   // il collegamento si apre da solo; per mp3juice la ricerca va negli appunti
+    const s = SITI[+b.dataset.sito];
+    if (s.rischio && query && !eLink(query) && navigator.clipboard) navigator.clipboard.writeText(query).then(() => toast('Ricerca copiata: incollala nel sito. Chiudi le finestre che si aprono da sole.'), () => toast('Scrivi «' + query + '» nella ricerca del sito'));
+    return;
+  }
+  const a = b.dataset.a, d = b.dataset;
+  if (a === 'fonte') { if (fonte !== d.f) { fonte = d.f; store.set('cerca-fonte', fonte); segnaFonte(); cerca(query); } }
+  else if (a === 'ascolta') ascolta(d.id);
+  else if (a === 'scarica') { const r = risultati.find(x => x.id === d.id); if (r) scarica({id:r.id, titolo:r.titolo, artista:r.artista, album:r.album, copertina:r.copertina, explicit:r.explicit}, r.titolo); }
+  else if (a === 'link') scarica({url:query}, query);
+  else if (a === 'suona') { if (!host.suona([d.b], 0, 'Scaricati da internet')) host.libreria().then(() => host.suona([d.b], 0, 'Scaricati da internet') || toast('Il brano non è ancora nella libreria: riprova tra poco')); }
+  else if (a === 'dopo') { if (host.dopo(d.b)) return; host.libreria().then(() => { if (!host.dopo(d.b)) toast('Il brano non è ancora nella libreria: riprova tra poco'); }); }
+  else if (a === 'annulla') api('musica/' + encodeURIComponent(d.l) + '/annulla', {method:'POST'}).then(aggiornaLavori, err => toast(err.message));
+  else if (a === 'togli') api('musica/' + encodeURIComponent(d.l) + '/annulla', {method:'POST'}).then(aggiornaLavori, err => toast(err.message));
+});
+$('f').addEventListener('submit', e => { e.preventDefault(); $('q').blur(); cerca($('q').value); });
+// icona ▶︎/⏸ del brano in ascolto: si ridisegna solo quando cambia brano o stato
+player.onChange(n => { const s = n ? n.id + (n.playing ? '1' : '0') : ''; if (s !== segno) { segno = s; if (risultati.length) mostra(); } });
+
+segnaFonte(); siti();
+const q0 = new URLSearchParams(location.search).get('q') || '';
+$('q').value = q0;
+AX.stato().then(s => { $('nomac').hidden = s.ok; });
+aggiornaLavori();
+if (q0) cerca(q0); else setTimeout(() => $('q').focus(), 300);
+</script>
+</body>
+</html>

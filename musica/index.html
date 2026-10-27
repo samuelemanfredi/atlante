@@ -272,6 +272,10 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .sform .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .sform .row2 button{height:46px;border-radius:10px;background:var(--fill);font-weight:600}
 .sform .row2 button.pri{background:var(--accent);color:var(--onaccent)}
+.sform .rowq{display:flex;gap:10px}
+.sform .rowq input{flex:1;min-width:0;-webkit-appearance:none;appearance:none}
+.sform .rowq button{height:44px;padding:0 16px;border-radius:10px;background:var(--accent);color:var(--onaccent);font-weight:600}
+.sform .nota{font-size:13px;color:var(--fg2);margin-top:-4px}
 .steps{padding:16px;display:flex;flex-direction:column;gap:12px;font-size:16px;line-height:1.35}
 .steps div{display:flex;gap:12px;align-items:flex-start}
 .steps i{font-style:normal;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:14px;font-weight:700;flex:none}
@@ -2013,7 +2017,11 @@ function trackMenu(id, pl) {
     (t.remote ? '' : '<button class="red" data-a="m-del" data-id="' + id + '"><span class="l">Elimina dalla libreria</span>' + ic('trash') + '</button>') + '</div>' : '') + cancel);
 }
 function addSheet() {
-  openSheet('<div class="grp"><div class="smsg"><b>Aggiungi musica</b>I file vengono copiati in questa app e restano su questo dispositivo.</div>' +
+  // in cima la ricerca su internet: apre il modulo «Cerca e scarica» (x/cerca.html) con la ricerca già fatta
+  openSheet('<div class="grp"><form class="sform" data-f="cercaweb"><label for="cw">Cerca musica su internet</label>' +
+    '<div class="rowq"><input id="cw" type="search" enterkeyhint="search" maxlength="300" placeholder="Titolo, artista o link" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="submit">Cerca</button></div>' +
+    '<div class="nota">YouTube Music, YouTube e link da altri siti: i brani scaricati entrano nella libreria del Mac.</div></form></div>' +
+    '<div class="grp"><div class="smsg"><b>Aggiungi musica</b>I file vengono copiati in questa app e restano su questo dispositivo.</div>' +
     '<button class="acc" data-a="pickfiles"><span class="l">Scegli file audio</span>' + ic('file') + '</button>' +
     '<button class="acc" data-a="impl"><span class="l">Importa playlist di Apple Music</span>' + ic('plist') + '</button>' + (isIOS ? '' : '<button class="acc" data-a="pickdir"><span class="l">Scegli una cartella</span>' + ic('folder') + '</button>') + '</div>' + cancel);
 }
@@ -2149,6 +2157,7 @@ document.addEventListener('click', e => {
 document.addEventListener('submit', async e => {
   const f = e.target.closest('form[data-f]'); if (!f) return; e.preventDefault();
   const kind = f.dataset.f, k = f.dataset.k;
+  if (kind === 'cercaweb') { const v = ($('cw').value || '').trim(); closeSheet(); openX('cerca', v ? '?q=' + encodeURIComponent(v) : ''); return; }
   if (kind === 'edit') {
     const t = T.get(k); if (!t) return closeSheet();
     const val = n => (f.querySelector('[name=' + n + ']').value || '').trim();
@@ -2183,6 +2192,7 @@ let toastT = 0;
 // ogni modulo è una pagina in x/, aperta in un riquadro: la musica continua e i suoi comandi restano qui sotto
 const XMODS = [
   {g:'Ascolta', m:[
+    {k:'cerca', t:'Cerca e scarica musica', d:'YouTube Music, YouTube, link da altri siti', i:'🔎', c:'#fa2d48'},
     {k:'podcast', t:'Podcast', d:'Cerca, iscriviti, ascolta e scarica', i:'🎙️', c:'#8e44ec'},
     {k:'libri', t:'Libri e audiolibri', d:'Leggi, fatti leggere, crea audiolibri', i:'📚', c:'#ff9500'},
     {k:'video', t:'Video e streaming', d:'Servizi di streaming e download', i:'🎬', c:'#ff3b30'},
@@ -2217,7 +2227,11 @@ window.AM = {
   seek(t) { try { au.currentTime = t; } catch (e) {} },
   now() { const t = curId && TT(curId); return t ? {id:t.ext ? t.id.slice(2) : t.id, title:t.title, artist:t.artist || '', album:t.album || '', cover:coverUrl(t.cover) ? new URL(coverUrl(t.cover), location.href).href : '', playing:!au.paused, ext:!!t.ext, t:au.currentTime || 0, d:isFinite(au.duration) ? au.duration : 0} : null; },
   onChange(cb) { xSubs.add(cb); return () => xSubs.delete(cb); },
-  toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }, accesso() { chiediAccesso(); }
+  toast(m) { toast(m); }, close() { closeX(); }, server() { return !!SRV; }, accesso() { chiediAccesso(); },
+  // brani della libreria del Mac (id del catalogo, es. quelli appena scaricati da «Cerca e scarica»)
+  libreria() { return reconnect(true); },   // rilegge il catalogo: i brani nuovi compaiono e si salvano sull'iPhone
+  suona(ids, start, from) { const L = (ids || []).map(x => 'r' + x).filter(x => T.has(x)); if (L.length) playList(L, start || 0, false, from || ''); return L.length; },
+  dopo(id) { const x = 'r' + id; if (!T.has(x)) return false; playNext(x); return true; }
 };
 ['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => auOn(n, xNotify));
 setInterval(() => { if (xSubs.size && !au.paused) xNotify(); }, 1000);
