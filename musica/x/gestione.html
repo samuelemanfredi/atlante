@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Gestione</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.btn.danger{background:var(--bad);color:#fff}
+.btn.full{width:100%}
+.av{width:40px;height:40px;border-radius:20px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;background:#8e8e93;font-size:17px;text-transform:uppercase}
+.det{padding:4px 14px 14px;border-bottom:.5px solid var(--sep)}
+.det:last-child{border-bottom:0}
+.dev{display:flex;align-items:center;gap:10px;min-height:44px}
+.dev .tx{flex:1;min-width:0}
+.dev .tx b,.dev .tx span{display:block}
+.link{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;background:var(--fill);border-radius:8px;padding:8px 10px;margin:8px 0}
+.qr{display:block;margin:10px auto;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:8px}
+.chev{color:var(--fg3);font-size:20px}
+/* Idee */
+.idea{padding:12px 14px;border-bottom:.5px solid var(--sep)}
+.idea:last-child{border-bottom:0}
+.idea.nuova{box-shadow:inset 3px 0 0 var(--accent)}
+.idea .itop{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.idea .itop .tx{flex:1;min-width:0}
+.idea .itop .tx b,.idea .itop .tx span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.idea .itop .tx span{font-size:13px;color:var(--fg2)}
+.idea select.in{width:auto;min-height:34px;padding:4px 10px;flex:none;font-size:15px}
+.idea .testo{white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0 10px}
+.idea textarea.in{min-height:44px;font-size:15px;background:var(--bg)}
+</style>
+<style>
+/* Classifiche e musica libera */
+.avviso{background:rgba(255,59,48,.14);border-radius:12px;padding:12px 14px;margin:10px 0;color:var(--fg)}
+.avviso b{display:block;color:var(--bad);font-size:17px}
+.avviso span{display:block;font-size:14px;color:var(--fg2);margin-top:2px}
+.numeri{display:flex;gap:10px}
+.numeri div{flex:1;background:var(--bg);border-radius:10px;padding:10px 12px}
+.numeri b{display:block;font-size:28px;line-height:1.1}
+.numeri span{font-size:13px;color:var(--fg2)}
+.esp{font-style:normal;display:inline-block;font-size:11px;font-weight:700;line-height:16px;padding:0 4px;border-radius:3px;background:var(--fill);color:var(--fg2);vertical-align:2px}
+</style>
+<style id="stile-rete">
+/* Gestione → Rete: interruttori come in Impostazioni */
+.sw{appearance:none;-webkit-appearance:none;width:51px;height:31px;border-radius:16px;background:var(--fill);position:relative;flex:none;cursor:pointer;transition:background .2s;margin:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.25);transition:transform .2s}
+.sw:checked{background:var(--ok)}
+.sw:checked::after{transform:translateX(20px)}
+.sw:disabled{opacity:.45}
+.orow{display:flex;align-items:center;gap:12px}
+.orow .tx{flex:1;min-width:0}
+.orow .tx b{display:block;font-weight:600}
+.orow .tx span{display:block;font-size:13px;color:var(--fg2);margin-top:2px}
+.rnota{font-size:14px;margin:10px 0 0}
+.rnota a{word-break:break-all}
+.rerr{background:rgba(255,59,48,.1);border-radius:10px;padding:10px 12px;margin:10px 0 0;font-size:14px}
+.rerr pre{white-space:pre-wrap;word-break:break-all;font-size:12px;margin:8px 0 0;color:var(--fg2)}
+.rconf{background:var(--fill);border-radius:10px;padding:10px 12px;margin:10px 0 0}
+details.rimp{margin:10px 0 0;font-size:14px}
+details.rimp summary{color:var(--link);cursor:pointer}
+/* sezioni della Gestione in altre pagine (parte 2): Da controllare, Contenuti */
+.sezioni .tile{position:relative;color:inherit}
+.sezioni .tile .n{position:absolute;top:10px;right:10px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--accent);color:#fff;font-size:13px;font-weight:700;line-height:22px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="avviso" id="clavviso" hidden></div>
+  <div class="grid sezioni" id="sezioni">
+    <a class="tile" href="controllo.html"><span class="ic">📥</span><b>Da controllare</b><span>Brani e film da approvare</span><span class="n" id="nControllo" hidden></span></a>
+    <a class="tile" href="contenuti.html"><span class="ic">🎼</span><b>Contenuti</b><span>Correggi, togli, rimetti</span></a>
+  </div>
+  <div id="richieste" hidden>
+    <h2 class="h2">Richieste</h2>
+    <div class="list" id="rlist"></div>
+  </div>
+  <h2 class="h2">Persone</h2>
+  <div class="card">
+    <div class="field"><label for="nome">Invita una persona</label><input class="in" id="nome" maxlength="40" placeholder="Nome" autocomplete="off"></div>
+    <button class="btn pri full" id="invita">Crea il link d'invito</button>
+    <div id="nuovo" hidden></div>
+  </div>
+  <div class="list" id="plist"></div>
+  <p class="small" id="pvuote" hidden>Nessuna persona invitata, per ora.</p>
+  <h2 class="h2">I tuoi dispositivi</h2>
+  <p class="small">Quelli entrati come Samuele (con Tailscale o con la password). Se ne vedi uno che non è tuo, revocalo.</p>
+  <div class="list" id="tlist"></div>
+  <div id="idee">
+    <h2 class="h2">Idee <span class="pill" id="ideenuove" hidden></span></h2>
+    <p class="small">Le manda chi usa l'app dal riquadro «Idee». Claude legge le nuove dal Mac mini e te le sottopone; qui ne cambi lo stato e scrivi una nota, che vedete solo tu e Claude.</p>
+    <div class="seg" id="ideefiltro"><button class="on" data-f="aperte">Aperte</button><button data-f="tutte">Tutte</button></div>
+    <div class="list" id="ideelist"></div>
+  </div>
+  <h2 class="h2" id="classifiche">Classifiche e musica libera</h2>
+  <p class="small">Ogni giorno il Mac mini rilegge le classifiche più note e ne fa playlist per l'app di tutti, con i brani che hai già: dai servizi commerciali non si scarica niente. I brani nuovi arrivano da soli dai siti di musica libera (Jamendo, Internet Archive), con la licenza Creative Commons scritta nei tag, nella cartella «Musica libera».</p>
+  <div id="cl"><p class="small">Un momento…</p></div>
+  <h2 class="h2">Ascolti in Atlante</h2>
+  <p class="small">Le stesse classifiche che vedono tutti: di una persona si vede solo quello che ha scelto di condividere.</p>
+  <div class="list" id="alist"></div>
+  <div id="rete">
+    <h2 class="h2">Rete</h2>
+    <p class="small">Tailscale sul Mac mini. Il VPN del telefono non si accende da qui (iPhone e Android non lo permettono alle app web): si accende dall'app Tailscale, con la <a href="rete.html">guida per il telefono</a>.</p>
+    <div class="list" id="rmac"><div class="row"><span class="tx"><span>Leggo Tailscale sul Mac mini…</span></span></div></div>
+    <div class="card" id="rfunnel" hidden></div>
+    <div class="card" id="ruscita" hidden></div>
+    <div id="rdispbox" hidden>
+      <p class="small" style="margin:16px 4px 0">Dispositivi nella rete Tailscale</p>
+      <div class="list" id="rdisp"></div>
+    </div>
+  <div id="uiSezione">
+    <h2 class="h2">Interfaccia</h2>
+    <div class="card">
+      <p class="sub" id="uiStato">Leggo la base…</p>
+      <div class="btns"><button class="btn pri" id="uiModifica">Modifica la base</button><button class="btn" id="uiPubblica" hidden>Pubblica</button><button class="btn" id="uiButta" hidden>Butta la bozza</button></div>
+      <p class="small">La base è come appare Atlante Musica a tutti; poi ognuno la cambia per sé con «Modifica interfaccia» in Altro (anche tu). La bozza la vedi solo tu finché non tocchi «Pubblica». Per tornare all'app originale: «Modifica la base», tocca il numero delle modifiche per toglierle tutte, «Fatto» e «Pubblica».</p>
+    </div>
+    <div class="list" id="uiVersioni" hidden></div>
+  </div>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api} = AX;
+AX.header('Gestione');
+const TIPI = {iphone:'iPhone', ipad:'iPad', android:'Telefono Android', mac:'Mac', pc:'Computer'};
+let aperta = '';   // persona con i dettagli aperti
+let QRLIB = null;
+// come riconoscere un dispositivo: «iPhone · Safari · da Tailscale · dal 27/10/2026», e quello che si sta usando
+function descrivi(d) {
+  return (TIPI[d.tipo] || 'Dispositivo') + (d.browser && d.browser !== 'Altro' ? ' · ' + d.browser : '');
+}
+function dettagli(d) {
+  return (d.via === 'tailscale' ? 'da Tailscale' : d.via === 'internet' ? 'da Internet' : '') +
+    (d.creato ? (d.via ? ' · ' : '') + 'dal ' + new Date(d.creato * 1000).toLocaleDateString('it-IT') : '') +
+    ' · ultimo accesso ' + quando(d.visto);
+}
+
+function quando(t) {
+  if (!t) return 'mai';
+  const d = new Date(t * 1000), ora = new Date(), hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const giorni = Math.floor((new Date(ora.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (giorni <= 0) return 'oggi alle ' + hm;
+  if (giorni === 1) return 'ieri alle ' + hm;
+  return giorni < 30 ? giorni + ' giorni fa' : d.toLocaleDateString('it-IT');
+}
+// testo da mandare con il link (Condividi): per ora Atlante fa ascoltare e salvare i brani; si allunga con le parti nuove
+function messaggio(nome, link) {
+  return 'Ciao ' + nome + '! Ti ho invitato su Atlante Musica, la mia libreria musicale. Apri questo link sul telefono e sei dentro: ' +
+    'puoi ascoltare tutto e salvare i brani sul telefono. Se ti viene un\'idea per migliorarla, mandamela dalla sezione «Idee»: le leggo tutte.\n' + link;
+}
+// qrcode-generator 1.4.4 (MIT) tenuta in x/qrcode.js: nella Gestione niente codice da altri siti
+async function caricaQR() {
+  if (QRLIB) return QRLIB;
+  await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = 'qrcode.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); });
+  return (QRLIB = window.qrcode);
+}
+function cartaLink(nome, link, scade) {
+  return '<p class="small" style="margin-top:12px">Link per <b>' + esc(nome) + '</b> · vale fino al ' + new Date(scade * 1000).toLocaleDateString('it-IT') + ', una volta sola</p>' +
+    '<div class="link">' + esc(link) + '</div>' +
+    '<div class="btns"><button class="btn sm pri" data-a="condividi">Condividi</button><button class="btn sm" data-a="copia">Copia</button><button class="btn sm" data-a="qr">Codice QR</button></div>' +
+    '<div data-q></div>';
+}
+function attivaLink(box, nome, link) {
+  box.querySelector('[data-a=condividi]').onclick = async () => {
+    const text = messaggio(nome, link);
+    if (navigator.share) { try { await navigator.share({text}); } catch (e) {} return; }
+    copia(text);
+  };
+  box.querySelector('[data-a=copia]').onclick = () => copia(link);
+  box.querySelector('[data-a=qr]').onclick = async () => {
+    try {
+      const q = (await caricaQR())(0, 'M'); q.addData(link); q.make();
+      box.querySelector('[data-q]').innerHTML = '<img class="qr" alt="Codice QR del link" src="' + q.createDataURL(6, 2) + '"><p class="small" style="text-align:center">Fallo inquadrare con la fotocamera del telefono di ' + esc(nome) + '.</p>';
+    } catch (e) { toast('Il codice QR non si è caricato: usa Condividi o Copia'); }
+  };
+}
+async function copia(t) {
+  try { await navigator.clipboard.writeText(t); toast('Copiato'); }
+  catch (e) { toast('Non riesco a copiare: tieni premuto sul link e scegli Copia'); }
+}
+
+async function disegna() {
+  let el, rq;
+  try { [el, rq] = await Promise.all([api('gestione/persone'), api('gestione/richieste')]); }
+  catch (e) { $('plist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le persone</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+  const attesa = rq.richieste.filter(r => r.stato === 'attesa');
+  $('richieste').hidden = !attesa.length;
+  $('rlist').innerHTML = attesa.map(r => '<div class="row"><span class="tx"><b>' + esc(r.nome) + '</b><span>Lo chiede ' + esc(r.da_nome || 'una persona revocata') + ' · ' + quando(r.creato) + '</span></span>' +
+    '<button class="btn sm pri" data-ok="' + r.id + '">Consenti</button><button class="btn sm" data-no="' + r.id + '">Rifiuta</button></div>').join('');
+  $('rlist').querySelectorAll('[data-ok]').forEach(b => b.onclick = async () => {
+    try { const r = await api('gestione/richieste/' + b.dataset.ok + '/consenti', {method:'POST'}); toast('Fatto: il link per ' + r.persona.nome + ' è arrivato a chi l\'ha chiesto'); }
+    catch (e) { toast(e.message); }
+    disegna();
+  });
+  $('rlist').querySelectorAll('[data-no]').forEach(b => b.onclick = async () => {
+    try { await api('gestione/richieste/' + b.dataset.no + '/rifiuta', {method:'POST'}); } catch (e) { toast(e.message); }
+    disegna();
+  });
+  $('pvuote').hidden = el.persone.length > 0;
+  $('plist').hidden = !el.persone.length;
+  $('plist').innerHTML = el.persone.map(p => {
+    const ult = Math.max(0, ...p.dispositivi.map(d => d.visto));
+    const det = p.id !== aperta ? '' : '<div class="det">' +
+      (p.dispositivi.length ? p.dispositivi.map(d => '<div class="dev"><span class="tx"><b>' + esc(descrivi(d)) + '</b><span class="small">' + esc(dettagli(d)) + '</span></span><button class="btn sm" data-rd="' + d.id + '">Revoca</button></div>').join('') :
+        '<p class="small">Nessun dispositivo collegato, per ora.</p>') +
+      '<div class="btns"><button class="btn sm" data-nl="' + p.id + '">Nuovo link</button><button class="btn sm danger" data-rp="' + p.id + '">Revoca ' + esc(p.nome) + '</button></div><div data-box></div></div>';
+    return '<button class="row" data-p="' + p.id + '"><span class="av">' + esc(p.nome.slice(0, 1)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b><span>' +
+      p.dispositivi.length + (p.dispositivi.length === 1 ? ' dispositivo' : ' dispositivi') + ' · ultimo accesso ' + quando(ult) +
+      (p.da_nome ? ' · invito di ' + esc(p.da_nome) : '') + '</span></span><span class="chev">' + (p.id === aperta ? '⌄' : '›') + '</span></button>' + det;
+  }).join('');
+  $('plist').querySelectorAll('[data-p]').forEach(b => b.onclick = () => { aperta = aperta === b.dataset.p ? '' : b.dataset.p; disegna(); });
+  $('plist').querySelectorAll('[data-rd]').forEach(b => b.onclick = () => revocaDisp(b.dataset.rd));
+  $('plist').querySelectorAll('[data-nl]').forEach(b => b.onclick = async () => {
+    const p = el.persone.find(x => x.id === b.dataset.nl), box = b.closest('.det').querySelector('[data-box]');
+    try { const r = await api('gestione/persone/' + p.id + '/invito', {method:'POST'}); box.innerHTML = cartaLink(p.nome, r.invito.link, r.invito.scade); attivaLink(box, p.nome, r.invito.link); }
+    catch (e) { toast(e.message); }
+  });
+  $('plist').querySelectorAll('[data-rp]').forEach(b => b.onclick = async () => {
+    const p = el.persone.find(x => x.id === b.dataset.rp);
+    if (!confirm(p.nome + ' non potrà più aprire Atlante Musica. I brani già salvati sul suo telefono restano lì.')) return;
+    try { await api('gestione/persone/' + p.id, {method:'DELETE'}); toast('Accesso di ' + p.nome + ' revocato'); aperta = ''; } catch (e) { toast(e.message); }
+    disegna();
+  });
+  $('tlist').innerHTML = el.tuoi.length ? el.tuoi.map(d => '<div class="row"><span class="tx"><b>' + esc(descrivi(d)) + (d.attuale ? ' <span class="pill ok">questo</span>' : '') + '</b><span>' + esc(dettagli(d)) + '</span></span>' +
+    (d.attuale ? '' : '<button class="btn sm" data-rd="' + esc(d.id) + '">Revoca</button>') + '</div>').join('') :
+    '<div class="row"><span class="tx"><span>Nessuno, per ora: compaiono appena si collegano.</span></span></div>';
+  $('tlist').querySelectorAll('[data-rd]').forEach(b => b.onclick = () => revocaDisp(b.dataset.rd));
+}
+async function revocaDisp(id) {
+  if (!confirm('Questo dispositivo non potrà più aprire Atlante Musica finché non rientra con un invito o con la password.')) return;
+  try { await api('gestione/dispositivi/' + encodeURIComponent(id), {method:'DELETE'}); toast('Dispositivo revocato'); } catch (e) { toast(e.message); }
+  disegna();
+}
+$('invita').onclick = async () => {
+  const nome = $('nome').value.trim();
+  if (!nome) { $('nome').focus(); return; }
+  $('invita').disabled = true;
+  try {
+    const r = await api('gestione/persone', {method:'POST', body:{nome}});
+    const box = $('nuovo'); box.hidden = false; box.innerHTML = cartaLink(r.persona.nome, r.invito.link, r.invito.scade);
+    attivaLink(box, r.persona.nome, r.invito.link);
+    $('nome').value = '';
+    disegna();
+  } catch (e) { toast(e.message); }
+  $('invita').disabled = false;
+};
+$('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('invita').click(); });
+disegna();
+
+// ascolti: le classifiche di tutti e chi condivide i suoi; gli ascolti di chi non li condivide non arrivano qui
+async function ascolti() {
+  let j;
+  try { j = await api('ascoltati'); }
+  catch (e) { $('alist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le classifiche</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+  const riga = (x, i) => '<div class="row"><span class="av" style="background:var(--fill);color:var(--fg2)">' + (i + 1) + '</span><span class="tx"><b>' + esc(x.titolo || 'Brano') + '</b><span>' +
+    esc(x.artista || '') + (x.ascolti ? ' · ' + x.ascolti + (x.ascolti === 1 ? ' ascolto' : ' ascolti') : '') + '</span></span></div>';
+  const titolo = (t, sotto) => '<div class="row"><span class="tx"><b>' + t + '</b>' + (sotto ? '<span>' + sotto + '</span>' : '') + '</span></div>';
+  const vuota = 'Nessun brano ascoltato da almeno ' + j.soglia + ' persone, per ora';
+  $('alist').innerHTML = titolo('Questa settimana', j.settimana.length ? '' : vuota) + j.settimana.slice(0, 10).map(riga).join('') +
+    titolo('Questo mese', j.mese.length ? '' : vuota) + j.mese.slice(0, 10).map(riga).join('') +
+    titolo('Chi condivide i suoi ascolti', (j.condivisi.length ? j.condivisi.map(c => esc(c.nome)).join(', ') : 'Nessuno, per ora') + (j.io.condivido ? ' · anche tu' : '')) +
+    j.condivisi.map(c => titolo('Cosa ascolta ' + esc(c.nome)) + c.brani.slice(0, 5).map(riga).join('')).join('');
+}
+ascolti();
+</script>
+<script>
+'use strict';
+// ----- Gestione → Idee: le idee mandate dal riquadro «Idee», con stato e nota di Samuele -----
+(function () {
+  const {$, esc, toast, api} = AX;
+  const STATI = [['nuova', 'Nuova'], ['proposta', 'Proposta'], ['accettata', 'Accettata'], ['scartata', 'Scartata'], ['fatta', 'Fatta']];
+  const APERTE = ['nuova', 'proposta', 'accettata'];
+  const nomeStato = k => (STATI.find(x => x[0] === k) || [k, k])[1];
+  let filtro = 'aperte', L = [];
+  async function disegnaIdee() {
+    try { L = (await api('gestione/idee')).idee; }
+    catch (e) { $('ideelist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le idee</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+    const nuove = L.filter(x => x.stato === 'nuova').length;
+    $('ideenuove').hidden = !nuove;
+    $('ideenuove').textContent = nuove + (nuove === 1 ? ' nuova' : ' nuove');
+    const V = filtro === 'tutte' ? L : L.filter(x => APERTE.includes(x.stato));
+    $('ideelist').innerHTML = V.length ? V.map(x => '<div class="idea' + (x.stato === 'nuova' ? ' nuova' : '') + '" data-i="' + esc(x.id) + '">' +
+      '<div class="itop"><span class="tx"><b>' + esc(x.nome || 'Persona') + '</b><span>' + esc(quando(x.creato)) + '</span></span>' +
+      '<select class="in" aria-label="Stato dell\'idea">' + STATI.map(([k, t]) => '<option value="' + k + '"' + (k === x.stato ? ' selected' : '') + '>' + t + '</option>').join('') + '</select></div>' +
+      '<div class="testo">' + esc(x.testo) + '</div>' +
+      '<textarea class="in" maxlength="2000" rows="2" aria-label="Nota" placeholder="Nota per te e per Claude (es. «sì, fallo così…»)">' + esc(x.nota || '') + '</textarea>' +
+      '<div class="btns" hidden><button class="btn sm pri" data-salva>Salva la nota</button></div></div>').join('') :
+      '<div class="row"><span class="tx"><span>' + (L.length ? 'Nessuna idea aperta: le altre sono in «Tutte».' : 'Nessuna idea, per ora.') + '</span></span></div>';
+    $('ideelist').querySelectorAll('.idea').forEach(box => {
+      const id = box.dataset.i, sel = box.querySelector('select'), nota = box.querySelector('textarea'), salva = box.querySelector('.btns');
+      sel.onchange = async () => {
+        try { await api('gestione/idee/' + id, {method:'POST', body:{stato:sel.value}}); toast('Stato: ' + nomeStato(sel.value)); }
+        catch (e) { toast(e.message); }
+        disegnaIdee();
+      };
+      nota.oninput = () => { salva.hidden = false; };
+      salva.querySelector('button').onclick = async () => {
+        try { await api('gestione/idee/' + id, {method:'POST', body:{nota:nota.value}}); salva.hidden = true; toast('Nota salvata'); }
+        catch (e) { toast(e.message); }
+      };
+    });
+  }
+  $('ideefiltro').querySelectorAll('button').forEach(b => b.onclick = () => {
+    filtro = b.dataset.f;
+    $('ideefiltro').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    disegnaIdee();
+  });
+  disegnaIdee();
+})();
+</script>
+<script>
+'use strict';
+// ----- Classifiche e musica libera: classifiche come playlist, brani nuovi dai siti di musica libera -----
+// Se YouTube blocca (la sua classifica e i videoclip aspettano), l'avviso rosso in cima e «Riprova adesso».
+(function () {
+  const {$, esc, toast, api} = AX;
+  const hm = t => new Date(t * 1000).toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  // «alle 18:40», «ieri alle 18:40», «domani alle 9:10», «il 25/10 alle 18:40»
+  function alle(t) {
+    const d = new Date(t * 1000), g = Math.round((new Date(d.toDateString()) - new Date(new Date().toDateString())) / 86400000);
+    return (g === 0 ? '' : g === -1 ? 'ieri ' : g === 1 ? 'domani ' : 'il ' + d.toLocaleDateString('it-IT', {day:'2-digit', month:'2-digit'}) + ' ') + 'alle ' + hm(t);
+  }
+  const pill = f => f.esito === 'ok' ? '<span class="pill ok">letta</span>' : f.esito === 'errore' ? '<span class="pill bad">non letta</span>' : '<span class="pill">da leggere</span>';
+  function riga(f) {
+    const sotto = f.esito === 'errore' ? esc(f.errore) + ' · ' + quando(f.letta) + ': riprovo domani' :
+      f.esito === 'ok' ? (f.brani === 1 ? '1 brano' : f.brani + ' brani') + ' · ' + quando(f.letta) : 'non ancora letta';
+    return '<div class="row"><span class="tx"><b>' + esc(f.nome) + '</b><span>' + sotto + '</span></span>' + pill(f) + '</div>';
+  }
+  // licenza e pagina d'origine di un brano aggiunto: solo indirizzi https
+  function licenza(u) {
+    const nome = esc(u.licenza || 'Licenza libera');
+    return /^https:\/\//.test(u.pagina || '') ? '<a href="' + esc(u.pagina) + '" target="_blank" rel="noopener">' + nome + '</a>' : nome;
+  }
+  async function riprova(b) {
+    b.disabled = true;
+    try { await api('gestione/classifiche/riprova', {method:'POST'}); toast('Riprovo adesso'); } catch (e) { toast(e.message); }
+    setTimeout(disegna, 2500);
+  }
+  async function disegna() {
+    let j;
+    try { j = await api('gestione/classifiche'); }
+    catch (e) { $('cl').innerHTML = '<p class="small">Non riesco a leggere lo stato: ' + esc(e.message) + '</p>'; return; }
+    const b = j.blocco;
+    $('clavviso').hidden = !b;
+    if (b) {
+      $('clavviso').innerHTML = '<b>YouTube blocca le richieste dal ' + alle(b.quando) + '</b><span>' +
+        (b.tipo === 'robot' ? 'Chiede di confermare che non sei un robot: riprovo una volta al giorno, ' : 'Ha chiesto di rallentare: riprovo ') +
+        alle(b.prossima) + '. Aspettano la classifica di YouTube Music e i videoclip; il resto va avanti. Niente proxy né cambi di indirizzo.</span>' +
+        '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button><a class="btn sm" href="#classifiche">Dettagli</a></div>';
+    }
+    if (!j.attivo) {
+      $('cl').innerHTML = '<div class="card"><p class="small">Spento su questo Mac. Si accende sul Mac mini con <b>ATLANTE_CLASSIFICHE=1</b> nel servizio del server.</p></div>';
+    } else {
+      const p = j.pausa, f = j.fonte;
+      let h = '<div class="card"><div class="numeri"><div><b>' + j.oggi + '</b><span>aggiunti oggi</span></div><div><b>' + j.totale + '</b><span>in tutto</span></div></div>';
+      if (p) h += '<p class="small">In pausa: ' + esc(p.motivo) + ' Riprendo ' + alle(p.fino) + '.</p>';
+      else if (j.ora) h += '<p class="small">Adesso: ' + esc(j.ora) + '</p>';
+      if (b) h += '<p class="small" style="color:var(--bad)">La classifica di YouTube Music aspetta: prossima prova ' + alle(b.prossima) + '.</p>';
+      if (f && f.in_coda) h += '<p class="small">Fonte in corso: <b>' + esc(f.nome) + '</b> · ' + f.in_coda + (f.in_coda === 1 ? ' brano' : ' brani') + ' da scaricare</p>';
+      h += '<p class="small">' + j.provati + (j.provati === 1 ? ' brano provato' : ' brani provati') +
+        (j.spazio_libero_gb != null ? ' · ' + Math.round(j.spazio_libero_gb) + ' GB liberi' + (j.spazio_min_gb ? ' (mi fermo sotto i ' + j.spazio_min_gb + ')' : '') : '') + '</p>';
+      if (!j.jamendo) h += '<p class="small">Jamendo è spento: serve il suo client_id gratuito (devportal.jamendo.com) in <b>ATLANTE_JAMENDO_CLIENT_ID</b> nel servizio del server.</p>';
+      if (b || p) h += '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button></div>';
+      h += '</div>';
+      h += '<h2 class="h2" style="font-size:17px">Ultimi aggiunti</h2>' + (j.ultimi.length ? '<div class="list">' + j.ultimi.map(u =>
+        '<div class="row"><span class="tx"><b>' + esc(u.titolo) + '</b><span>' + esc(u.artista) + ' · ' + licenza(u) + ' · ' + esc(u.fonte) + ' · ' + quando(u.quando) + '</span></span></div>').join('') + '</div>' :
+        '<p class="small">Ancora nessuno.</p>');
+      h += '<h2 class="h2" style="font-size:17px">Musica libera (ogni giorno)</h2><div class="list">' + j.libere.map(riga).join('') + '</div>';
+      h += '<h2 class="h2" style="font-size:17px">Classifiche (ogni giorno, solo come playlist)</h2><div class="list">' + j.classifiche.map(riga).join('') + '</div>';
+      $('cl').innerHTML = h;
+    }
+    document.querySelectorAll('[data-riprova]').forEach(x => x.onclick = () => riprova(x));
+  }
+  disegna();
+  setInterval(() => { if (document.visibilityState === 'visible') disegna(); }, 15000);
+})();
+</script>
+<script>
+// ----- Gestione → Rete: Tailscale sul Mac mini (api/extra/gestione/rete) -----
+// Funnel (Atlante da Internet, con password e inviti) e uscita da casa (exit node) si accendono sul Mac mini; il VPN
+// del telefono invece si accende dall'app Tailscale (guida in rete.html).
+(() => {
+  'use strict';
+  const $ = AX.$, esc = AX.esc;
+  const VIA = {tailscale:'arriva con Tailscale', casa:'arriva dalla rete di casa', internet:'arriva da Internet: Tailscale è spento qui'};
+  const MACCHINE = 'https://login.tailscale.com/admin/machines';
+  let R = null;          // ultimo stato letto dal Mac
+  let conferma = false;  // «Vuoi accenderlo?» in vista
+  let occupato = '';     // 'funnel' o 'uscita' mentre il Mac chiede a Tailscale
+  let scelta = null;     // porta e indirizzo di Funnel scelti qui (prima di accendere)
+  const errori = {};     // ultimo rifiuto di Tailscale, per funnel e uscita
+  function quando(t) {
+    const d = new Date(t * 1000), oggi = new Date();
+    const hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+    const giorni = Math.floor((new Date(oggi.toDateString()) - new Date(d.toDateString())) / 86400000);
+    return giorni <= 0 ? 'oggi alle ' + hm : giorni === 1 ? 'ieri alle ' + hm : d.toLocaleDateString('it-IT');
+  }
+  function stessoHost(a, b) { try { return new URL(a).host === new URL(b).host; } catch (e) { return a === b; } }
+  async function leggi() {
+    try { R = await AX.api('gestione/rete', {timeout:45000}); }
+    catch (e) { $('rmac').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere Tailscale sul Mac mini</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+    disegna();
+  }
+  async function cambia(cosa, corpo) {
+    occupato = cosa; delete errori[cosa]; disegna();
+    try {
+      const r = await AX.fetchT(AX.API + 'gestione/rete/' + cosa, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(corpo)}, 90000);
+      let j = null; try { j = await r.json(); } catch (e) {}
+      if (r.ok && j) { R = j; if (cosa === 'funnel') scelta = null; AX.toast(cosa === 'funnel' ? (corpo.acceso ? 'Accesso da Internet acceso' : 'Accesso da Internet spento') : (corpo.acceso ? 'Uscita da casa accesa' : 'Uscita da casa spenta')); }
+      else { errori[cosa] = j && j.errore ? j : {errore:'Il Mac ha risposto ' + r.status}; if (j && j.rete) R = j.rete; }
+    } catch (e) { errori[cosa] = {errore:'Il Mac non ha risposto: ' + e.message}; }
+    occupato = ''; disegna();
+  }
+  function erroreHtml(e, cosa) {
+    const link = /^https:\/\/login\.tailscale\.com\//.test(e.link || '') ? e.link : (R && R.pannello) || 'https://login.tailscale.com/admin';
+    let h = '<div class="rerr"><b>' + esc(e.errore) + '</b>';
+    if (e.pannello) h += '<p style="margin:6px 0 0">' + (cosa === 'funnel' ?
+      'Funnel non è ancora permesso nella tua rete Tailscale. Va abilitato una volta sola dal pannello di Tailscale, con il tuo account: apri il pannello, consenti Funnel al Mac mini e poi torna qui e riprova.' :
+      'Va consentita una volta sola nel pannello di Tailscale, con il tuo account; poi torna qui e riprova.') + '</p>' +
+      '<div class="btns" style="margin:8px 0 0"><a class="btn sm pri" target="_blank" rel="noopener" href="' + esc(link) + '">Apri il pannello di Tailscale</a></div>';
+    if (e.dettaglio) h += '<p class="small" style="margin:8px 0 0">Tailscale ha scritto:</p><pre>' + esc(e.dettaglio) + '</pre>';
+    return h + '</div>';
+  }
+  function disegna() {
+    if (!R) return;
+    const usabile = R.installato && R.collegato && !occupato;
+    let h = '<div class="row"><span class="tx"><b>' + esc(R.nome || 'Mac mini') + '</b><span>' +
+      esc([R.dns, R.indirizzo, R.versione ? 'Tailscale ' + R.versione : ''].filter(Boolean).join(' · ') || 'Tailscale sul Mac mini') + '</span></span>' +
+      (R.collegato ? '<span class="pill ok">collegato</span>' : '<span class="pill bad">' + (R.installato ? 'non collegato' : 'non installato') + '</span>') + '</div>';
+    if (R.errore) h += '<div class="row"><span class="tx"><span style="white-space:normal">' + esc(R.errore) +
+      (R.installato ? '' : ': si scarica da tailscale.com/download, poi si entra con il tuo account.') + '</span></span></div>';
+    if (R.questo) h += '<div class="row"><span class="tx"><b>Questo dispositivo</b><span>' + esc(VIA[R.questo] || R.questo) + '</span></span><a class="btn sm" href="rete.html">Guida</a></div>';
+    $('rmac').innerHTML = h;
+    $('rfunnel').hidden = $('ruscita').hidden = !R.installato;
+    if (!R.installato) { $('rdispbox').hidden = true; return; }
+
+    // accesso da Internet (Funnel)
+    const f = R.funnel, tailnet = R.serve.filter(v => !v.funnel), usate = new Set(tailnet.map(v => v.porta));
+    if (!scelta) {
+      const p = usate.has(f.predefiniti.porta) ? (f.porte.find(x => !usate.has(x)) || f.predefiniti.porta) : f.predefiniti.porta;
+      scelta = {porta:p, destino:f.predefiniti.destino};
+    }
+    let x = '<div class="orow"><div class="tx"><b>Accesso da Internet (Funnel)</b><span>Atlante si apre anche senza Tailscale, con la password e con i link d\'invito.</span></div>' +
+      '<input type="checkbox" class="sw" id="swFunnel" aria-label="Accesso da Internet"' + (f.acceso ? ' checked' : '') + (usabile ? '' : ' disabled') + '></div>';
+    if (occupato === 'funnel') x += '<p class="rnota">Un momento: il Mac mini lo chiede a Tailscale…</p>';
+    else if (f.acceso) {
+      x += '<p class="rnota"><span class="pill ok">acceso</span> Da Internet: <a href="' + esc(f.indirizzo) + '" target="_blank" rel="noopener">' + esc(f.indirizzo) + '</a></p>';
+      if (f.pubblico && !stessoHost(f.pubblico, f.indirizzo)) x += '<p class="rnota small">I link d\'invito usano ' + esc(f.pubblico) + ': con questo indirizzo non si aprono. Spegni e riaccendi con la porta giusta, oppure cambia ATLANTE_PUBBLICO sul Mac mini.</p>';
+      if (!f.pubblico) x += '<p class="rnota small">Per i link d\'invito, sul Mac mini va impostato ATLANTE_PUBBLICO=' + esc(f.indirizzo) + '</p>';
+    } else x += '<p class="rnota"><span class="pill">spento</span> Da Internet Atlante non si apre (e i link d\'invito non funzionano). Con Tailscale acceso sul telefono non serve.</p>';
+    if (conferma && !f.acceso && !occupato) x += '<div class="rconf"><p style="margin:0 0 8px">Da Internet Atlante si aprirà con la password e con gli inviti. Vuoi accenderlo?</p>' +
+      '<div class="btns" style="margin:0"><button class="btn sm pri" id="fSi">Accendi</button><button class="btn sm" id="fNo">Annulla</button></div></div>';
+    if (!f.acceso && occupato !== 'funnel') x += '<details class="rimp" id="fImp"><summary>Porta e indirizzo</summary>' +
+      '<div class="field"><label for="fPorta">Porta su Internet</label><select class="in" id="fPorta">' + f.porte.map(p => '<option value="' + p + '"' +
+        (p === scelta.porta ? ' selected' : '') + (usate.has(p) ? ' disabled' : '') + '>' + p + (usate.has(p) ? ' (già usata nella rete Tailscale)' : '') + '</option>').join('') + '</select></div>' +
+      '<div class="field"><label for="fDest">Atlante sul Mac mini</label><input class="in" id="fDest" value="' + esc(scelta.destino) + '" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url"></div>' +
+      '<p class="small">Tailscale apre a Internet solo le porte 443, 8443 e 10000. L\'indirizzo è quello del server di Atlante sul Mac (di solito http://127.0.0.1:8790).</p></details>';
+    tailnet.forEach(v => { x += '<p class="rnota small">Nella rete Tailscale: ' + esc(v.indirizzo) + ' → ' + esc(v.destino) + '</p>'; });
+    R.serve.filter(v => v.funnel && v.indirizzo !== f.indirizzo).forEach(v => { x += '<p class="rnota small">Aperto a Internet anche: ' + esc(v.indirizzo) + ' → ' + esc(v.destino) + '</p>'; });
+    if (errori.funnel) x += erroreHtml(errori.funnel, 'funnel');
+    const aperto = $('fImp') && $('fImp').open;
+    $('rfunnel').innerHTML = x;
+    if (aperto && $('fImp')) $('fImp').open = true;
+
+    // uscita da casa (exit node)
+    const u = R.uscita, nome = esc(R.nome || 'Mac mini');
+    let y = '<div class="orow"><div class="tx"><b>Uscita da casa (exit node)</b><span>Fuori casa il telefono va su Internet passando dal Mac mini, come se fosse a casa (utile sui Wi-Fi pubblici).</span></div>' +
+      '<input type="checkbox" class="sw" id="swUscita" aria-label="Uscita da casa"' + (u.annunciata || u.approvata ? ' checked' : '') + (usabile ? '' : ' disabled') + '></div>';
+    if (occupato === 'uscita') y += '<p class="rnota">Un momento: il Mac mini lo chiede a Tailscale…</p>';
+    else if (u.approvata) y += '<p class="rnota"><span class="pill ok">accesa</span> Sul telefono si sceglie una volta: app Tailscale → Exit Node → ' + nome + '. Per tornare come prima: Exit Node → None.</p>';
+    else if (u.annunciata) y += '<p class="rnota"><span class="pill warn">da approvare</span> Il Mac mini la offre, ma la prima volta va approvata nel pannello di Tailscale: Machines → ' + nome +
+      ' → ⋯ → Edit route settings → «Use as exit node». Poi sul telefono: app Tailscale → Exit Node → ' + nome + '.</p><div class="btns"><a class="btn sm" target="_blank" rel="noopener" href="' + MACCHINE + '">Apri il pannello di Tailscale</a></div>';
+    else if (u.annunciata === null) y += '<p class="rnota"><span class="pill">non so</span> Tailscale non dice se il Mac mini la offre.</p>';
+    else y += '<p class="rnota"><span class="pill">spenta</span> Il telefono va su Internet dalla rete dove si trova, come sempre.</p>';
+    if (errori.uscita) y += erroreHtml(errori.uscita, 'uscita');
+    $('ruscita').innerHTML = y;
+
+    // dispositivi della rete Tailscale
+    $('rdispbox').hidden = !R.dispositivi.length;
+    $('rdisp').innerHTML = R.dispositivi.map(d => '<div class="row"><span class="tx"><b>' + esc(d.nome || 'Dispositivo') + '</b><span>' +
+      esc([d.sistema, d.indirizzo, d.online ? 'collegato adesso' : d.visto ? 'ultimo contatto ' + quando(d.visto) : 'non collegato'].filter(Boolean).join(' · ')) + '</span></span>' +
+      (d.online ? '<span class="pill ok">online</span>' : '<span class="pill">offline</span>') + '</div>').join('');
+
+    const sw = $('swFunnel');
+    sw.onchange = () => {
+      if (sw.checked) { sw.checked = false; conferma = true; disegna(); return; }   // prima di aprire a Internet si chiede
+      conferma = false; cambia('funnel', {acceso:false});
+    };
+    if ($('fSi')) $('fSi').onclick = () => { conferma = false; cambia('funnel', {acceso:true, porta:scelta.porta, destino:scelta.destino}); };
+    if ($('fNo')) $('fNo').onclick = () => { conferma = false; disegna(); };
+    if ($('fPorta')) $('fPorta').onchange = e => { scelta.porta = +e.target.value; };
+    if ($('fDest')) $('fDest').oninput = e => { scelta.destino = e.target.value.trim(); };
+    $('swUscita').onchange = e => cambia('uscita', {acceso:e.target.checked});
+  }
+  leggi();
+  if (location.hash === '#rete') setTimeout(() => $('rete').scrollIntoView({block:'start'}), 60);
+})();
+// quante cose aspettano in «Da controllare» (brani e richieste di film)
+api('io').then(io => { const n = ((io.nuove || {}).da_controllare || 0) + ((io.nuove || {}).film || 0); $('nControllo').hidden = !n; $('nControllo').textContent = n; }, () => {});
+</script>
+<script>
+'use strict';
+// ----- Interfaccia: la base per tutti (bozza, Pubblica, ultime 10 versioni). L'editor è nell'app: «Modifica la base» -----
+(function () {
+  const {$, esc, toast, api} = AX;
+  let attesa = '', attesaT = 0;
+  const conta = m => Object.values(m || {}).reduce((k, x) => k + Object.keys(x).length, 0);
+  const modifiche = k => k === 1 ? '1 modifica' : k + ' modifiche';
+  const data = t => t ? new Date(t * 1000).toLocaleString('it-IT', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+  // doppio tocco per Pubblica, Butta e Ripristina: niente finestre di conferma
+  function chiedi(cosa, b, testo) {
+    if (attesa === cosa) { attesa = ''; clearTimeout(attesaT); return true; }
+    attesa = cosa; b.textContent = testo; clearTimeout(attesaT); attesaT = setTimeout(() => { attesa = ''; disegna(); }, 4000);
+    return false;
+  }
+  function avvisaApp() { try { if (AX.host && AX.host.interfacciaRicarica) AX.host.interfacciaRicarica(); } catch (e) {} }
+  async function disegna() {
+    let j, v;
+    try { [j, v] = await Promise.all([api('interfaccia'), api('interfaccia/versioni')]); }
+    catch (e) { $('uiStato').textContent = 'Non riesco a leggere l\'interfaccia: ' + e.message; return; }
+    const b = j.base, z = j.bozza;
+    $('uiStato').textContent = (b.versione ? 'Base pubblicata: versione ' + b.versione + ' del ' + data(b.pubblicato) + ', ' + modifiche(conta(b.modifiche)) + '.' :
+      'Base: l\'app originale, senza modifiche.') + (z ? ' Bozza non pubblicata: ' + modifiche(conta(z.modifiche)) + ' (la vedi solo tu).' : '');
+    $('uiModifica').textContent = z ? 'Continua la bozza' : 'Modifica la base';
+    $('uiPubblica').hidden = $('uiButta').hidden = !z;
+    $('uiPubblica').textContent = 'Pubblica'; $('uiButta').textContent = 'Butta la bozza';
+    $('uiVersioni').hidden = !v.versioni.length;
+    $('uiVersioni').innerHTML = v.versioni.map(x => '<div class="row"><span class="tx"><b>Versione ' + x.versione + '</b><span>' + esc(data(x.pubblicato)) + ' · ' + modifiche(x.n) + '</span></span>' +
+      (x.versione === v.attuale ? '<span class="pill ok">pubblicata</span>' : '<button class="btn sm" data-v="' + x.versione + '">Ripristina</button>') + '</div>').join('');
+    $('uiVersioni').querySelectorAll('[data-v]').forEach(bt => bt.onclick = async () => {
+      if (!chiedi('r' + bt.dataset.v, bt, 'Tocca ancora')) return;
+      try { const r = await api('interfaccia/versioni/' + bt.dataset.v + '/ripristina', {method:'POST'}); toast('Ora tutti vedono la versione ' + bt.dataset.v + ' (ripubblicata come ' + r.base.versione + ')'); avvisaApp(); }
+      catch (e) { toast(e.message); }
+      disegna();
+    });
+  }
+  $('uiModifica').onclick = () => { if (AX.host && AX.host.interfaccia) AX.host.interfaccia('base'); else toast('Apri la Gestione dall\'app Atlante Musica'); };
+  $('uiPubblica').onclick = async () => {
+    if (!chiedi('pubblica', $('uiPubblica'), 'Tocca ancora: la vedranno tutti')) return;
+    try { const r = await api('interfaccia/pubblica', {method:'POST'}); toast('Pubblicata: tutti vedono la versione ' + r.base.versione); avvisaApp(); } catch (e) { toast(e.message); }
+    disegna();
+  };
+  $('uiButta').onclick = async () => {
+    if (!chiedi('butta', $('uiButta'), 'Tocca ancora per buttarla')) return;
+    try { await api('interfaccia/bozza', {method:'DELETE'}); toast('Bozza buttata'); avvisaApp(); } catch (e) { toast(e.message); }
+    disegna();
+  };
+  window.uiAggiorna = disegna;   // l'app la chiama quando, finita la base, torna qui
+  disegna();
+})();
+</script>
+</body>
+</html>

@@ -34,18 +34,30 @@ Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale fun
 
     python3 musica_libreria.py --imposta-password          # una volta: da Internet l'app chiede questa password
                                                             # (o dalla pagina <app>/accesso aperta con Tailscale)
-    tailscale funnel --bg --https=10000 8790
+    tailscale funnel --bg --https=10000 8790             # oppure dall'app: Gestione → Rete
 
 Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
+
+Playlist di Atlante (playlist tematiche per tutti) e «Crea con l'IA»: con --tematiche (o ATLANTE_TEMATICHE=1) il Mac
+prepara in sottofondo, un brano alla volta, generi (MusicBrainz), BPM ed energia (dall'audio) di ogni brano. Le regole
+delle playlist sono in playlist-atlante.json; le proprie modifiche in <cache>/tematiche/regole.json.
 """
 import argparse
+import array
+import cmath
+import base64
+import collections
 import getpass
+import gzip
 import hashlib
 import hmac
+import html
 import http.client
 import ipaddress
 import json
+import math
 import mimetypes
+import operator
 import os
 import platform
 import queue
@@ -61,11 +73,12 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 
 ESTENSIONI = {".mp3", ".m4a", ".m4b", ".aac", ".flac", ".wav", ".aif", ".aiff", ".ogg", ".oga", ".opus", ".alac", ".mp4"}
 TIPI = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".m4b": "audio/mp4", ".mp4": "audio/mp4", ".alac": "audio/mp4",
@@ -581,7 +594,8 @@ class Libreria:
                 continue
             qui = []
             for cart, sotto, files in os.walk(radice):
-                sotto[:] = [s for s in sotto if not s.startswith(".")]
+                # niente cartelle nascoste, né quelle dei caricamenti (Da controllare, Film, Tolti) se stanno qui dentro
+                sotto[:] = [s for s in sotto if not s.startswith(".") and os.path.join(cart, s) not in ESCLUSE]
                 for nome in files:
                     if nome.startswith(".") or os.path.splitext(nome)[1].lower() not in ESTENSIONI:
                         continue
@@ -608,9 +622,11 @@ class Libreria:
         usati = {v["id"] for v in tenute} | {self.vecchie[p]["id"] for p in letti if p in self.vecchie}
         nuovi, percorsi = {}, {}
         a_pezzi, t_pezzo = not self.brani and not self.ultima, time.time()   # prima lettura: catalogo man mano
+        riletti = getattr(self, "_sporco", False)   # brani aggiunti da _aggiungi_brano dopo l'ultimo indice salvato
         for p, st, firma in trovati:
             v = self.vecchie.get(p)
             if not v or v.get("_f") != firma or v.get("_v") != VERSIONE:
+                riletti = True
                 nuova = self._voce(p, st, firma)
                 nuova["id"] = v["id"] if v else self._id_nuovo(p, nuova, sparite.get(firma), usati)
                 v = nuova
@@ -622,11 +638,18 @@ class Libreria:
                     self.brani, self.percorsi = dict(nuovi), dict(percorsi)
         comp = self._compilation(nuovi.values())
         indice = list(nuovi.values()) + tenute
+        # niente riletto e gli stessi file di prima: l'indice sul disco è già questo (con 50 000 brani sono 26 MB da
+        # riscrivere ogni 10 minuti per niente)
+        uguale = (not riletti and len(indice) == len(self.vecchie) and all(v["_p"] in self.vecchie for v in indice)
+                  and os.path.isfile(self.file_indice))
         self._mancanti = set(self.cartelle) - set(radici_ok)
         with self.blocco:
             self.brani, self.percorsi, self.compilation = nuovi, percorsi, comp
             self.vecchie = {v["_p"]: v for v in indice}
             self.ultima = time.time()
+        if uguale:
+            return len(nuovi)
+        self._sporco = True   # finché l'indice non è salvato davvero (disco pieno?): la prossima lettura ci riprova
         fd, tmp = tempfile.mkstemp(dir=self.cache, prefix="indice.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -638,6 +661,7 @@ class Libreria:
             except OSError:
                 pass
             raise
+        self._sporco = False
         return len(nuovi)
 
     @staticmethod
@@ -723,14 +747,24 @@ class Libreria:
     def catalogo(self):
         if any(os.path.isdir(r) for r in self._mancanti):   # disco ricollegato: si rilegge subito (con l'indice è veloce)
             self.rileggi_presto(subito=True, attendi=5)
+        pronti = CLIP.pronti() if CLIP else {}
+        corr, via = (CORR.tutte() if CORR else {}), (TOLTI.ids() if TOLTI else set())   # Gestione → Contenuti
         with self.blocco:
             pubblici = []
             for b in self.brani.values():
+                if b["id"] in via:
+                    continue   # tolto da Samuele: fuori dall'app di tutti finché non lo rimette
                 x = {k: v for k, v in b.items() if not k.startswith("_")}
+                if b["id"] in corr:
+                    x.update(corr[b["id"]])   # titolo, artista, album, copertina corretti: il file non cambia
                 if b["id"] in self.compilation:
                     x["compilation"] = True   # solo quando è vero: il catalogo di 10 000 brani resta leggero
+                if pronti and pronti.get(os.path.basename(b["_p"])) == b.get("_f"):
+                    x["clip"] = True          # videoclip scaricato e allineato con questo file
                 pubblici.append(x)
         o = {"brani": pubblici, "aggiornato": int(self.ultima * 1000)}
+        if via:
+            o["tolti"] = sorted(via)   # l'app li toglie anche dai telefoni che li avevano salvati
         if INDIRIZZO:
             o["indirizzo"] = INDIRIZZO
         return o
@@ -828,7 +862,7 @@ def gestisci(h):
     h._musica_risposto = False
     try:
         if cosa == "catalogo":
-            _json(h, LIB.catalogo())
+            _manda_catalogo(h)   # pronto, compresso e con ETag (vedi «grande libreria»)
         elif cosa == "aggiorna":
             _json(h, {"brani": LIB.scansiona()})
         elif cosa == "file":
@@ -902,6 +936,120 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
     return LIB
 
 
+# ----- grande libreria: 50 000 brani e più -----
+# Con 50 000 brani il catalogo è un JSON di 12 MB: si prepara una volta sola quando cambia (non a ogni richiesta), va
+# compresso (gzip, 1,8 MB) a chi lo accetta e con un ETag, così l'app che ha già quello uguale riceve un 304 vuoto
+# invece di riscaricarlo. L'ETag non dipende dal valore di «aggiornato» (cambia a ogni lettura del disco, ogni 10 minuti)
+# ma solo dal fatto che sia 0 (il Mac sta ancora leggendo il disco): è un ETag «debole», W/"…".
+
+_BLOCCO_CATALOGO = threading.Lock()
+
+
+def _risposta_catalogo(lib):
+    """(corpo JSON, lo stesso compresso, ETag), rifatti solo quando cambiano brani, compilation, lettura, videoclip o
+    i contenuti decisi in Gestione (correzioni e brani tolti)."""
+    clip = frozenset()
+    if CLIP:
+        pronti = CLIP.pronti()
+        with CLIP.blocco:
+            clip = frozenset(pronti.items())
+    with _BLOCCO_CATALOGO:   # più telefoni insieme: lo si prepara una volta sola
+        c = getattr(lib, "_risposta", None)
+        with lib.blocco:
+            brani, comp, ultima = lib.brani, lib.compilation, lib.ultima
+        contenuti = (json.dumps(CORR.tutte(), sort_keys=True) if CORR else "", frozenset(TOLTI.ids()) if TOLTI else frozenset())
+        # (con una cartella mancante tornata, catalogo() rilegge prima il disco)
+        if (c and c[0] is brani and c[1] is comp and c[2] == ultima and c[3] == clip and c[4] == INDIRIZZO
+                and c[6] == contenuti and not any(os.path.isdir(r) for r in lib._mancanti)):
+            return c[5]
+        o = lib.catalogo()
+        compatto = lambda x: json.dumps(x, ensure_ascii=False, separators=(",", ":")).encode("utf-8")   # noqa: E731
+        senza = {k: v for k, v in o.items() if k != "aggiornato"}
+        etag = 'W/"%s"' % hashlib.sha1(compatto(senza) + (b"1" if o.get("aggiornato") else b"0")).hexdigest()[:20]
+        corpo = compatto(o)
+        r = (corpo, gzip.compress(corpo, 6), etag)
+        lib._risposta = (brani, comp, ultima, clip, INDIRIZZO, r, contenuti)
+        return r
+
+
+def _stesso_etag(intestazione, etag):
+    """If-None-Match: uno degli ETag dell'elenco è questo (confronto debole, come vuole HTTP per If-None-Match), o «*»."""
+    nudo = lambda e: e.strip()[2:] if e.strip().startswith("W/") else e.strip()   # noqa: E731
+    voci = [x for x in (intestazione or "").split(",") if x.strip()]
+    return any(x.strip() == "*" or nudo(x) == nudo(etag) for x in voci)
+
+
+def _accetta_gzip(intestazione):
+    for parte in (intestazione or "").split(","):
+        nome, _, parametri = parte.partition(";")
+        if nome.strip().lower() in ("gzip", "x-gzip"):
+            m = re.search(r"q\s*=\s*([0-9.]+)", parametri)
+            try:
+                return not m or float(m.group(1)) > 0
+            except ValueError:
+                return False
+    return False
+
+
+def _manda_catalogo(h):
+    corpo, compresso, etag = _risposta_catalogo(LIB)
+    h._musica_risposto = True
+    # in HTTP/1.1: a una risposta HTTP/1.0 Chrome non chiede mai «è cambiato?» con l'ETag (che è di HTTP/1.1). Conta dal
+    # Mac stesso e dalla rete di casa; dietro tailscale serve il browser vede comunque HTTP/1.1 o 2. Poi si chiude.
+    h.protocol_version, h.close_connection = "HTTP/1.1", True
+    dati = b""
+    if _stesso_etag(h.headers.get("If-None-Match"), etag):
+        h.send_response(304)   # l'app ha già questo catalogo: niente da scaricare
+    else:
+        gz = _accetta_gzip(h.headers.get("Accept-Encoding"))
+        dati = compresso if gz else corpo
+        h.send_response(200)
+        h.send_header("Content-Type", "application/json; charset=utf-8")
+        if gz:
+            h.send_header("Content-Encoding", "gzip")
+        h.send_header("Content-Length", str(len(dati)))
+    h.send_header("ETag", etag)
+    h.send_header("Cache-Control", "private, no-cache")   # il browser può tenerlo, ma chiede sempre al Mac se è cambiato
+    h.send_header("Vary", "Accept-Encoding")
+    h.send_header("Connection", "close")
+    h.end_headers()
+    if h.command != "HEAD" and dati:
+        h.wfile.write(dati)
+
+
+def _aggiungi_brano(lib, percorso):
+    """Un file appena scaricato entra nel catalogo da solo, senza rileggere tutto il disco: con 50 000 brani una lettura
+    intera costa secondi (di più dal disco USB) e riscriveva un indice di 26 MB a ogni brano scaricato. L'indice si
+    salva alla prossima lettura (ogni 10 minuti); se il Mac si spegne prima, il file si rilegge e ha lo stesso id.
+    Restituisce l'id, o "" se il file non è uno che la lettura del disco prenderebbe (allora si rilegge come prima)."""
+    p = os.path.abspath(percorso)
+    nome = os.path.basename(p)
+    if nome.startswith(".") or os.path.splitext(nome)[1].lower() not in ESTENSIONI:
+        return ""
+    radice = next((r for r in lib.cartelle if _dentro(p, r) and os.path.isdir(r)), None)
+    if not radice or any(x.startswith(".") for x in os.path.relpath(os.path.dirname(p), radice).split(os.sep) if x != "."):
+        return ""   # fuori dalla libreria, o in una cartella nascosta che la lettura salta
+    with lib.blocco_lettura:   # nessuna lettura del disco a metà: indice e catalogo non cambiano sotto le mani
+        try:
+            st = os.stat(p)
+        except OSError:
+            return ""
+        firma = "%d:%d" % (st.st_size, int(st.st_mtime))
+        v = lib.vecchie.get(p)
+        if v and v.get("_f") == firma and v.get("_v") == VERSIONE and lib.percorsi.get(v["id"]) == p:
+            return v["id"]   # già nel catalogo (una lettura appena finita l'ha visto)
+        voce = lib._voce(p, st, firma)
+        voce["id"] = v["id"] if v else lib._id_nuovo(p, voce, None, {x["id"] for x in lib.vecchie.values()})
+        brani, percorsi = dict(lib.brani), dict(lib.percorsi)
+        brani[voce["id"]], percorsi[voce["id"]] = voce, p
+        comp = lib._compilation(brani.values())   # un album con un artista in più può diventare una raccolta
+        with lib.blocco:
+            lib.brani, lib.percorsi, lib.compilation = brani, percorsi, comp
+        lib.vecchie[p] = voce
+        lib._sporco = True   # la prossima lettura salva l'indice anche se per lei non è cambiato niente
+        return voce["id"]
+
+
 # ---------- moduli extra (pagine in x/): API sotto api/extra/ ----------
 #
 #   GET    stato                       programmi presenti sul Mac (yt-dlp, ffmpeg, say, Ollama) e cartelle
@@ -915,6 +1063,9 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 #   POST   musica {id,...} o {url}     scarica il brano nella cartella della musica scaricata (MP3, tag) -> {id}
 #   GET    musica                      elenco degli scaricamenti (`brano` = id nel catalogo quando è in libreria)
 #   POST   musica/<id>/annulla         ferma lo scaricamento; uno finito esce dall'elenco (il brano resta)
+#   GET    clip/<id brano>             videoclip del brano: {stato, url, mappa, durata} (se va preparato entra in coda)
+#   GET    clip/file/<ID YouTube>.mp4  il videoclip (con Range)
+#   GET    clip                        avanzamento della preparazione dei videoclip
 #   GET    dispositivi                 dispositivi con l'app aperta (sentiti negli ultimi 60 s) e cosa suonano
 #   POST   dispositivi/<id>/stato      {nome,tipo,stato} ogni pochi secondi -> {comandi:[...]} in attesa
 #   GET    dispositivi/<id>/comandi?attesa=25  attesa lunga: i comandi appena arrivano
@@ -926,6 +1077,7 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 #   DELETE audiolibro/<id>             toglie l'audiolibro dall'elenco e cancella i suoi file
 #   GET    ia / POST ia                IA locale (Ollama)
 #   GET    dispositivo                 nome, sistema, memoria, dischi, cartelle che si possono svuotare (solo lettura)
+#   GET    tematiche[/<id>] …          playlist di Atlante e playlist con l'IA (vedi la loro sezione)
 #
 # Errori: {errore: "testo"} con codice >= 400.
 
@@ -1688,10 +1840,10 @@ def _cartella_musica():
     return p
 
 
-def _scarica_immagine(url, dest):
+def _scarica_immagine(url, dest, siti=HOST_COPERTINE):
     s = urlsplit(url)
     host = (s.hostname or "").lower()
-    if s.scheme != "https" or not any(host == d or host.endswith("." + d) for d in HOST_COPERTINE):
+    if s.scheme != "https" or not any(host == d or host.endswith("." + d) for d in siti):
         return False   # solo dai siti delle copertine: un indirizzo qualsiasi farebbe del Mac un proxy
     try:
         r = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": BROWSER}), timeout=10)
@@ -1735,6 +1887,9 @@ def _in_libreria(percorso):
     prima che il file ci fosse: allora se ne fa un'altra)."""
     if LIB is None:
         return ""
+    i = _aggiungi_brano(LIB, percorso)   # di solito basta questo, senza rileggere tutto il disco (grande libreria)
+    if i:
+        return i
     for _ in range(2):
         LIB.scansiona()
         with LIB.blocco:
@@ -1744,7 +1899,7 @@ def _in_libreria(percorso):
     return ""
 
 
-def _mp3(ff, sorgente, copertina, tag, uscita):
+def _mp3(ff, sorgente, copertina, tag, uscita, copia=False):
     args = [ff, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", sorgente]
     if copertina:
         args += ["-i", copertina, "-map", "0:a:0", "-map", "1:v:0", "-c:v", "mjpeg",
@@ -1753,7 +1908,8 @@ def _mp3(ff, sorgente, copertina, tag, uscita):
                  "-metadata:s:v", "comment=Cover (front)"]
     else:
         args += ["-map", "0:a:0"]
-    args += ["-c:a", "libmp3lame", "-q:a", "0", "-map_metadata", "-1", "-id3v2_version", "3"]
+    # copia: l'audio di un MP3 com'è (la musica libera), senza perdere qualità in una seconda codifica
+    args += (["-c:a", "copy"] if copia else ["-c:a", "libmp3lame", "-q:a", "0"]) + ["-map_metadata", "-1", "-id3v2_version", "3"]
     for k, v in tag.items():
         if v:
             args += ["-metadata", "%s=%s" % (k, v)]
@@ -1765,7 +1921,7 @@ def _mp3(ff, sorgente, copertina, tag, uscita):
 
 
 def _scarica_musica(coda, l, _dati):
-    dest_dir = _cartella_musica()
+    dest_dir = _cartella_carica("controllo_dir") if l.get("controllo") else _cartella_musica()
     ff = _programma("ffmpeg")
     tmp = tempfile.mkdtemp(prefix="musica-", dir=_cartella_tmp())
     avanza = lambda pct: coda.aggiorna(l["id"], progresso=round(min(pct, 100) * 0.8, 1))   # noqa: E731
@@ -1810,13 +1966,17 @@ def _scarica_musica(coda, l, _dati):
         os.replace(parziale, finale)
         coda.aggiorna(l["id"], progresso=95, nome=os.path.basename(finale), dimensione=os.path.getsize(finale),
                       _percorso=finale)
-        coda.aggiorna(l["id"], brano=_in_libreria(finale))
+        if l.get("controllo"):   # di un invitato: in «Da controllare», e una copia per il suo telefono
+            _da_controllare_scaricato(coda, l, finale)
+        else:
+            coda.aggiorna(l["id"], brano=_in_libreria(finale))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         _cancella(os.path.join(dest_dir, "." + l["id"] + ".tmp"))   # annullato o non riuscito a metà
 
 
-def _nuova_musica(corpo):
+def _nuova_musica(corpo, di=None, chi_nome=""):
+    """Un brano da scaricare. Con `di` (un invitato) il brano va in «Da controllare» e conta nel suo limite di oggi."""
     vid = str(corpo.get("id") or "").strip()
     url = str(corpo.get("url") or "").strip()
     if not vid and url:
@@ -1827,25 +1987,31 @@ def _nuova_musica(corpo):
         raise ErroreExtra(400, "Serve un brano della ricerca o il link (http o https) della sua pagina")
     if not _programma("yt-dlp"):
         raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
-    _cartella_musica()
+    if di and QUOTE:
+        QUOTE.controlla(di, STIMA_BRANO)
+    _cartella_carica("controllo_dir") if di else _cartella_musica()
     coda = _coda("musica")
     if vid:   # lo stesso brano chiesto di nuovo (due tocchi, due dispositivi): lo stesso lavoro, nessun doppione
         with coda.blocco:
             for l in reversed(list(coda.lavori.values())):
-                if l.get("yt") == vid and (l.get("stato") in ("in coda", "in corso") or
+                if l.get("yt") == vid and l.get("di") == di and (l.get("stato") in ("in coda", "in corso") or
                                            (l.get("stato") == "fatto" and os.path.isfile(l.get("_percorso") or ""))):
                     return l["id"]
+            if di and any(l.get("yt") == vid and not l.get("di") and l.get("stato") == "fatto" and
+                          os.path.isfile(l.get("_percorso") or "") for l in coda.lavori.values()):
+                raise ErroreExtra(409, "Questo brano è già nella libreria di Atlante: lo trovi tra i brani")
     testo = lambda k, n: str(corpo.get(k) or "").strip()[:n]   # noqa: E731
     return coda.aggiungi({"yt": vid, "url": "https://music.youtube.com/watch?v=" + vid if vid else url,
                           "titolo": testo("titolo", 300) or ("" if vid else url), "artista": testo("artista", 300),
                           "album": testo("album", 300), "copertina": testo("copertina", 1000),
-                          "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": ""})
+                          "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": "",
+                          **({"di": di, "chi_nome": chi_nome, "controllo": True, "caricamento": ""} if di else {})})
 
 
-def _annulla_musica(id_):
+def _annulla_musica(id_, di=None):
     coda = _coda("musica")
     l = coda.lavori.get(id_)
-    if not l:
+    if not l or l.get("di") != di:   # ognuno ferma solo i suoi
         raise ErroreExtra(404, "Scaricamento non trovato")
     if l.get("stato") in ("in coda", "in corso"):
         coda.annulla(id_)
@@ -1860,7 +2026,8 @@ def _annulla_musica(id_):
 # musica (azione «suona» con la coda). Tutto in memoria: chi non si fa sentire da DISP_VIVO secondi sparisce.
 
 DISP_VIVO = 60           # secondi: oltre, il dispositivo non compare più nell'elenco
-DISP_MAX = 30            # dispositivi ricordati (i più vecchi escono)
+DISP_MAX = 30            # dispositivi ricordati per persona (i più vecchi escono)
+DISP_MAX_TUTTI = 300     # e in tutto
 DISP_CORPO = 32 * 1024   # stato o comando, in JSON
 COMANDI_MAX = 50         # comandi in attesa per dispositivo
 COMANDO_SCADE = 30       # secondi: un comando non consegnato in tempo si scarta («riproduci» dieci minuti dopo no)
@@ -1870,10 +2037,17 @@ TIPI_DISP = ("iphone", "ipad", "android", "mac", "pc")
 ID_DISP = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
+NON_RAGGIUNGIBILE = "Dispositivo non raggiungibile: l'app su quel dispositivo è chiusa?"
+
+
 class Dispositivi:
+    """Telecomando tra i dispositivi. Ognuno è di una persona (`di`: "p" per Samuele, l'id per un invitato): l'elenco,
+    i comandi e lo stato restano tra i dispositivi della stessa persona. Un id di un'altra persona risponde come un
+    dispositivo che non c'è."""
+
     def __init__(self):
         self.cond = threading.Condition()
-        self.d = {}   # id -> {nome, tipo, stato, visto, comandi:[(creato, comando)]}
+        self.d = {}   # id -> {di, nome, tipo, stato, visto, comandi:[(creato, comando)]}
 
     @staticmethod
     def _misura(o, cosa):
@@ -1891,7 +2065,10 @@ class Dispositivi:
         x["comandi"] = []
         return c
 
-    def stato(self, id_, corpo):
+    def _suo(self, x, di):
+        return x is not None and x.get("di", "p") == di
+
+    def stato(self, id_, corpo, di="p"):
         if not ID_DISP.match(id_ or ""):
             raise ErroreExtra(400, "Dispositivo non valido")
         stato = corpo.get("stato") or {}
@@ -1901,34 +2078,41 @@ class Dispositivi:
         ora = time.time()
         with self.cond:
             x = self.d.get(id_)
+            if x is not None and not self._suo(x, di):
+                raise ErroreExtra(404, NON_RAGGIUNGIBILE)
             if x is None:
-                x = self.d[id_] = {"comandi": []}
+                x = self.d[id_] = {"comandi": [], "di": di}
             x.update(nome=nome, tipo=tipo, stato=stato, visto=ora)
-            if len(self.d) > DISP_MAX:   # escono quelli sentiti meno di recente (mai quello appena arrivato)
-                for v in sorted(self.d, key=lambda k: self.d[k].get("visto", 0))[:len(self.d) - DISP_MAX]:
+            # escono quelli sentiti meno di recente (mai quello appena arrivato): prima tra i dispositivi della stessa
+            # persona, così uno che ne inventa tanti non fa uscire quelli degli altri
+            suoi = [k for k, v in self.d.items() if v.get("di", "p") == di]
+            for v in sorted(suoi, key=lambda k: self.d[k].get("visto", 0))[:max(0, len(suoi) - DISP_MAX)]:
+                del self.d[v]
+            if len(self.d) > DISP_MAX_TUTTI:
+                for v in sorted(self.d, key=lambda k: self.d[k].get("visto", 0))[:len(self.d) - DISP_MAX_TUTTI]:
                     del self.d[v]
             return self._prendi(x, ora)
 
-    def elenco(self):
+    def elenco(self, di="p"):
         ora = time.time()
         with self.cond:
             return [{"id": i, "nome": x["nome"], "tipo": x["tipo"], "fa": round(ora - x["visto"], 1), "stato": x["stato"]}
                     for i, x in sorted(self.d.items(), key=lambda kv: -kv[1]["visto"])
-                    if "nome" in x and self._vivo(x, ora)]
+                    if "nome" in x and self._vivo(x, ora) and self._suo(x, di)]
 
-    def comando(self, id_, corpo):
+    def comando(self, id_, corpo, di="p"):
         self._misura(corpo, "Comando")
         if corpo.get("azione") not in AZIONI:
             raise ErroreExtra(400, "Azione non valida: %s" % ", ".join(AZIONI))
         ora = time.time()
         with self.cond:
             x = self.d.get(id_)
-            if x is None or "nome" not in x or not self._vivo(x, ora):
-                raise ErroreExtra(404, "Dispositivo non raggiungibile: l'app su quel dispositivo è chiusa?")
+            if x is None or "nome" not in x or not self._vivo(x, ora) or not self._suo(x, di):
+                raise ErroreExtra(404, NON_RAGGIUNGIBILE)
             x["comandi"] = (x["comandi"] + [(ora, dict(corpo))])[-COMANDI_MAX:]
             self.cond.notify_all()
 
-    def attendi(self, id_, secondi):
+    def attendi(self, id_, secondi, di="p"):
         """Comandi per il dispositivo appena ce n'è uno (al più `secondi`); intanto il dispositivo risulta vivo."""
         if not ID_DISP.match(id_ or ""):
             raise ErroreExtra(400, "Dispositivo non valido")
@@ -1937,6 +2121,8 @@ class Dispositivi:
             while True:
                 ora = time.time()
                 x = self.d.get(id_)
+                if x is not None and not self._suo(x, di):
+                    raise ErroreExtra(404, NON_RAGGIUNGIBILE)
                 if x is not None:
                     x["visto"] = ora
                     c = self._prendi(x, ora)
@@ -1950,11 +2136,4735 @@ class Dispositivi:
 DISP = Dispositivi()
 
 
+def _link_invito(codice):
+    if not PUBBLICO:
+        raise ErroreExtra(409, "Manca l'indirizzo pubblico dell'app (ATLANTE_PUBBLICO): senza, il link non si apre da fuori")
+    return PUBBLICO + "accesso/invito/" + codice
+
+
+def _con_link(r):
+    """Una richiesta d'invito per l'app: il link al posto del codice, e il nome di chi l'ha chiesta."""
+    x = {k: v for k, v in r.items() if k != "codice"}
+    if r.get("codice"):
+        x["link"] = _link_invito(r["codice"])
+    x["da_nome"] = PERS.nome(r["da"])
+    return x
+
+
+def _chi_e(h):
+    return getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None, "chiave": None}
+
+
+def _gestione(h, metodo, resto, corpo):
+    """Gestione → Persone: inviti, nuovi link, richieste degli invitati, revoche. Solo Samuele."""
+    if _chi_e(h)["ruolo"] != "proprietario":
+        raise ErroreExtra(403, "Solo Samuele può usare la Gestione")
+    if resto and resto[0] in GESTIONE_CARICA:   # Da controllare, richieste di film, Contenuti (parte 2)
+        return _gestione_carica(h, metodo, resto, corpo)
+    if metodo not in ("GET", "POST", "DELETE"):
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    if resto[:1] == ["idee"]:   # Gestione → Idee
+        return _gestione_idee(h, metodo, resto[1:], corpo)
+    if resto[:1] == ["rete"]:   # Gestione → Rete: Tailscale sul Mac mini
+        return _rete(h, metodo, resto[1:], corpo)
+    if resto == ["persone"] and metodo == "GET":
+        el, mio = PERS.elenco(), _chi_e(h)["chiave"]
+        for x in el["persone"]:
+            if x.get("da"):
+                x["da_nome"] = PERS.nome(x["da"])
+        for x in el["tuoi"]:
+            if x["id"] == mio:
+                x["attuale"] = True   # questo non si revoca da qui (409): la Gestione lo segna
+        return _json(h, el)
+    if resto == ["persone"] and metodo == "POST":
+        persona = PERS.crea(corpo.get("nome"))
+        codice, scade = PERS.invito(persona["id"])
+        return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
+    if len(resto) == 3 and resto[0] == "persone" and resto[2] == "invito" and metodo == "POST":
+        codice, scade = PERS.invito(resto[1])
+        return _json(h, {"invito": {"link": _link_invito(codice), "scade": scade}})
+    if len(resto) == 2 and resto[0] == "persone" and metodo == "DELETE":
+        if not PERS.revoca_persona(resto[1]):
+            raise ErroreExtra(404, "Persona sconosciuta")
+        return _json(h, {"ok": True})
+    if len(resto) == 2 and resto[0] == "dispositivi" and metodo == "DELETE":
+        if resto[1] == _chi_e(h)["chiave"]:
+            raise ErroreExtra(409, "Questo è il dispositivo che stai usando")
+        if not PERS.revoca_dispositivo(resto[1]):
+            raise ErroreExtra(404, "Dispositivo sconosciuto")
+        return _json(h, {"ok": True})
+    if resto == ["richieste"] and metodo == "GET":
+        return _json(h, {"richieste": [_con_link(r) for r in PERS.richieste()]})
+    if len(resto) == 3 and resto[0] == "richieste" and metodo == "POST" and resto[2] in ("consenti", "rifiuta"):
+        if resto[2] == "rifiuta":
+            if not PERS.rifiuta(resto[1]):
+                raise ErroreExtra(404, "Richiesta sconosciuta o già decisa")
+            return _json(h, {"ok": True})
+        persona, codice, scade = PERS.consenti(resto[1])
+        return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
+    if resto and resto[0] == "classifiche":
+        return _gestione_classifiche(h, metodo, resto[1:], corpo)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/%s" % "/".join(resto))
+
+
+def _inviti(h, metodo, corpo):
+    """«Invita un amico»: un invitato chiede, Samuele decide in Gestione; Samuele invita subito."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        if metodo == "GET":
+            return _json(h, {"inviti": [_con_link(r) for r in PERS.richieste_di(chi["persona"])]})
+        return _json(h, {"richiesta": _con_link(PERS.richiedi(chi["persona"], corpo.get("nome")))})
+    if chi["ruolo"] != "proprietario":
+        raise ErroreExtra(403, "Gli inviti li chiedono Samuele e i suoi invitati")
+    if metodo == "GET":
+        return _json(h, {"inviti": []})
+    persona = PERS.crea(corpo.get("nome"))
+    codice, scade = PERS.invito(persona["id"])
+    return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
+
+
+def _di(h):
+    """Di chi sono i dispositivi di questa richiesta: "p" (Samuele, anche dalla rete di casa) o l'id dell'invitato."""
+    chi = getattr(h, "_chi", None)
+    return chi["persona"] if chi and chi["ruolo"] == "invitato" else "p"
+
+
 def _attesa(h):
     try:
         return float((parse_qs(urlsplit(h.path).query).get("attesa") or ["0"])[0])
     except ValueError:
         raise ErroreExtra(400, "Attesa non valida")
+
+
+# ----- posizione condivisa, cifrata da telefono a telefono -----
+#
+# «Condividi la posizione» (richiesta di Samuele): chi è in Atlante (Samuele e invitati) manda la sua posizione a una o
+# più persone di Atlante, dal vivo per un tempo scelto (15 minuti, un'ora, finché non la ferma) oppure un punto solo; chi
+# la riceve vede «Nome condivide la sua posizione» e con «Raggiungilo» il Navigatore lo porta lì (x/posizione.js,
+# x/naviga.html). Il Mac mini fa solo da postino e le posizioni non le conosce: ogni telefono ha le sue chiavi (ECDH
+# P-256 nel browser; la privata non esce dal telefono, qui arriva solo la pubblica, in <cache>/chiavi.json) e cifra ogni
+# aggiornamento con una chiave nuova, cifrata a sua volta per ciascun dispositivo dei destinatari (x/cifra.js: lo stesso
+# schema e gli stessi formati della chat, x/chat-cifra.js). Il Mac mini sa chi condivide con chi, da quando e fino a
+# quando (in <cache>/posizioni.json, così un riavvio non ferma una condivisione a metà uscita); della posizione tiene
+# solo l'ultimo aggiornamento cifrato, in memoria e mai su disco, e lo dimentica alla scadenza o quando la si ferma.
+#
+#   GET    chiavi                                 chi è in Atlante e le chiavi pubbliche dei suoi dispositivi
+#   POST   chiavi {id, chiave}                    questo dispositivo e la sua chiave pubblica (P-256 non compressa)
+#   GET    posizione?disp=&v=&attesa=25           le mie condivisioni e quelle verso di me (con `disp`, l'ultima
+#                                                 posizione cifrata per quel dispositivo); attesa lunga finché cambia
+#                                                 qualcosa rispetto alla versione `v` già vista
+#   POST   posizione {tipo, a, durata, disp}      nuova: tipo «vivo» o «punto», a = persone, durata 900, 3600 o 0
+#   POST   posizione/<id> {id, disp, corpo, sale, chiavi}   la posizione cifrata -> {seq, t, scade, mancano}
+#   DELETE posizione/<id>                         la ferma (solo chi l'ha avviata, da uno qualsiasi dei suoi dispositivi)
+#
+# Le chiavi hanno rotte loro e non quelle della chat (chat/dispositivi e chat/persone, con lo stesso formato): lì un
+# dispositivo nuovo dallo stesso browser prende il posto del vecchio, e due moduli con chiavi diverse si butterebbero
+# fuori a vicenda. Unendo i rami basterà una rubrica sola quando chat e posizione terranno le chiavi nello stesso posto
+# del telefono.
+
+POS_DURATE = (900, 3600, 0)        # 15 minuti, un'ora, «finché non la fermi»
+POS_SENZA_FINE = 12 * 3600         # «finché non la fermi» finisce comunque dopo 12 ore (un telefono dimenticato acceso)
+POS_OGNI = 2.0                     # secondi minimi tra due aggiornamenti (il telefono ne manda al più uno ogni 5 s)
+POS_PERSONE_MAX = 32               # destinatari di una condivisione, come un gruppo della chat
+POS_ATTIVE_MAX = 10                # condivisioni attive per persona (e una sola dal vivo)
+POS_CREATE_ORA = 60                # condivisioni nuove per persona in un'ora: l'avviso non deve diventare un fastidio
+POS_CORPO_MAX = 4096               # una posizione cifrata, in base64url (sono poche centinaia di byte)
+TIPI_POS = ("vivo", "punto")
+CHIAVI_DISP_MAX = 10               # dispositivi con la chiave per persona: oltre, esce quello sentito meno di recente
+CHIAVI_SPENTE = 30 * 86400         # le chiavi spente (telefono cambiato, accesso revocato) escono dal file dopo 30 giorni
+CIFRA_SAMUELE = "Samuele"
+ID_CIFRA = re.compile(r"^[A-Za-z0-9_-]{16,43}$")   # id scelti dai telefoni (dispositivi, aggiornamenti): 16 byte casuali
+ID_POS = re.compile(r"^[0-9a-f]{16}$")
+B64_CIFRA = re.compile(r"^[A-Za-z0-9_-]*$")
+_P256_CIFRA = (2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1,
+               0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b)
+
+
+class ErroreCifra(ErroreExtra):
+    """Errore con campi in più per il telefono («registra»: rimanda la sua chiave pubblica e riprova)."""
+
+    def __init__(self, codice, testo, **extra):
+        super().__init__(codice, testo)
+        self.extra = extra
+
+
+def _cifra_b64(s, massimo):
+    """I byte di una stringa base64url senza «=» lunga al più `massimo`; se no 400."""
+    if not isinstance(s, str) or not B64_CIFRA.match(s) or len(s) % 4 == 1 or len(s) > massimo:
+        raise ErroreExtra(400, "Dati cifrati non validi")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _cifra_punto(raw):
+    """Chiave pubblica P-256 non compressa (0x04 || x || y) che sta davvero sulla curva y² = x³ − 3x + b."""
+    p, b = _P256_CIFRA
+    if len(raw) != 65 or raw[0] != 4:
+        return False
+    x, y = int.from_bytes(raw[1:33], "big"), int.from_bytes(raw[33:], "big")
+    return x < p and y < p and (y * y - (x * x * x - 3 * x + b)) % p == 0
+
+
+def _cifra_io(h):
+    """La persona di chi chiede: "p" per Samuele, l'id per un invitato. Dalla rete di casa senza biscotto no: lì non si
+    sa chi c'è, e un dispositivo registrato da lì riceverebbe le posizioni mandate a Samuele."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"]
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    raise ErroreExtra(403, "La posizione si condivide con Tailscale o con il proprio invito, non dalla rete di casa")
+
+
+def _cifra_vivi():
+    """(persone in Atlante {id: nome}, dispositivo d'accesso -> persona, chiavi «p:…» revocate) con una sola lettura di
+    persone.json: una persona o un dispositivo revocati escono subito dai destinatari."""
+    persone, accessi, revocati = {}, {}, set()
+    if PERS is not None:
+        with PERS.blocco:
+            d = PERS._aggiorna()
+            persone = {pid: x["nome"] for pid, x in d["persone"].items()}
+            accessi = {k: x.get("persona") for k, x in d["dispositivi"].items()}
+            revocati = set(d["revocati"])
+    persone["p"] = CIFRA_SAMUELE
+    return persone, accessi, revocati
+
+
+class Chiavi:
+    """Le chiavi pubbliche dei dispositivi, in <cache>/chiavi.json (0600). Ogni dispositivo è legato al suo accesso (il
+    biscotto con cui ha mandato la chiave): revocato quello, la sua chiave non riceve più niente."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.RLock()
+        self.dati = self._leggi()
+
+    def _leggi(self):
+        d = {}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            # le chiavi vivono nei telefoni: si riparte e ognuno rimanda la sua alla prossima apertura dell'app
+            print("Atlante: %s non si legge (%s): lo metto da parte e riparto" % (self.file, e), flush=True)
+            try:
+                os.replace(self.file, self.file + ".rotto")
+            except OSError:
+                pass
+        if not isinstance(d, dict):
+            d = {}
+        if not isinstance(d.get("dispositivi"), dict):
+            d["dispositivi"] = {}
+        return d
+
+    def _scrivi(self):
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self.dati, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, self.file)
+
+    @staticmethod
+    def _vivo(x, vivi):
+        """Dispositivo che riceve: attivo, di una persona ancora in Atlante, con l'accesso non revocato."""
+        persone, accessi, revocati = vivi
+        if x is None or not x.get("attivo", True) or x.get("persona") not in persone:
+            return False
+        a = x.get("accesso")
+        if x["persona"] == "p":
+            return not a or (a.startswith("p:") and a not in revocati)
+        return bool(a) and accessi.get(a) == x["persona"]
+
+    def attivi(self, persona, vivi):
+        with self.blocco:
+            return sorted(k for k, x in self.dati["dispositivi"].items() if x["persona"] == persona and self._vivo(x, vivi))
+
+    def registra(self, persona, accesso, corpo, tipo):
+        """True se per gli altri è cambiato qualcosa (dispositivo nuovo o rientrato): chi manda rilegge le chiavi."""
+        did, chiave = corpo.get("id"), corpo.get("chiave")
+        if not isinstance(did, str) or not ID_CIFRA.match(did):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        if not _cifra_punto(_cifra_b64(chiave, 100)):
+            raise ErroreExtra(400, "Chiave pubblica non valida: serve una chiave P-256 non compressa")
+        ora = time.time()
+        with self.blocco:
+            vivi = _cifra_vivi()
+            d = self.dati["dispositivi"]
+            x = d.get(did)
+            if x is not None and (x["persona"] != persona or x["chiave"] != chiave):
+                raise ErroreExtra(409, "Questo id è già di un altro dispositivo: il telefono ne crea uno nuovo")
+            prima = self._vivo(x, vivi), (x or {}).get("accesso")
+            if x is None:
+                # un browser ha una sola identità: un dispositivo nuovo con lo stesso accesso (dati del sito cancellati)
+                # prende il posto del vecchio; oltre CHIAVI_DISP_MAX esce quello sentito meno di recente
+                for y in d.values():
+                    if accesso and y.get("accesso") == accesso and y.get("attivo", True):
+                        y.update(attivo=False, spento=ora)
+                suoi = sorted((k for k, y in d.items() if y["persona"] == persona and self._vivo(y, vivi)),
+                              key=lambda k: d[k].get("visto", 0))
+                for k in suoi[:max(0, len(suoi) - CHIAVI_DISP_MAX + 1)]:
+                    d[k].update(attivo=False, spento=ora)
+                x = d[did] = {"persona": persona, "chiave": chiave, "creato": ora}
+            x.update(accesso=accesso or x.get("accesso"), tipo=tipo if tipo in TIPI_DISP else "pc", visto=ora, attivo=True)
+            x.pop("spento", None)
+            for k in [k for k, y in d.items() if not y.get("attivo", True) and ora - y.get("spento", 0) > CHIAVI_SPENTE]:
+                del d[k]
+            self._scrivi()
+            return prima != (True, x.get("accesso"))
+
+    def mio(self, persona, did, accesso, vivi):
+        """Il dispositivo di chi fa la richiesta. Se non è suo, o il telefono deve rimandare la chiave: ErroreCifra con
+        «registra» (a un'altra persona risponde come per un dispositivo che non c'è)."""
+        with self.blocco:
+            x = self.dati["dispositivi"].get(did) if isinstance(did, str) else None
+            if not x or x["persona"] != persona:
+                raise ErroreCifra(404, "Questo dispositivo non ha ancora mandato la sua chiave", registra=True)
+            if accesso and x.get("accesso") != accesso:
+                if x.get("accesso"):
+                    raise ErroreCifra(409, "Questo dispositivo deve rimandare la sua chiave", registra=True)
+                x["accesso"] = accesso   # Samuele entrato prima senza biscotto (dal Mac o da Tailscale)
+                self._scrivi()
+            if not self._vivo(x, vivi):
+                raise ErroreCifra(403, "Questo dispositivo non riceve più le posizioni", registra=True)
+            return x
+
+    def persone(self, persona):
+        """Chi è in Atlante (Samuele per primo) con le chiavi pubbliche dei suoi dispositivi attivi."""
+        with self.blocco:
+            vivi = _cifra_vivi()
+            per = {p: [] for p in vivi[0]}
+            for k, x in self.dati["dispositivi"].items():
+                if x["persona"] in per and self._vivo(x, vivi):
+                    per[x["persona"]].append({"id": k, "chiave": x["chiave"], "attivo": True})
+            return {"io": persona, "persone": [{"id": p, "nome": n, "dispositivi": sorted(per[p], key=lambda y: y["id"])}
+                                               for p, n in sorted(vivi[0].items(), key=lambda kv: (kv[0] != "p", kv[1].lower()))]}
+
+
+class Posizioni:
+    """Le condivisioni della posizione: chi, a chi, tipo, scadenza (anche in `file`, per i riavvii) e, solo in memoria,
+    l'ultima posizione cifrata con la chiave per ciascun dispositivo dei destinatari. Una versione per persona sveglia
+    le attese lunghe."""
+
+    CAMPI = ("id", "da", "disp", "a", "tipo", "durata", "inizio", "scade", "seq", "t")   # quelli che vanno su disco
+
+    def __init__(self, chiavi, file=None):
+        self.chiavi, self.file = chiavi, file
+        self.cond = threading.Condition()
+        self.c = self._leggi()                        # id -> condivisione
+        self.ver, self.base = {}, int(time.time())    # dopo un riavvio le versioni sono diverse: i telefoni rileggono
+        self.create = {}                              # persona -> istanti delle condivisioni create nell'ultima ora
+
+    def _leggi(self):
+        """Le condivisioni ancora in corso salvate prima di un riavvio, senza posizione: la rimanda il telefono che
+        condivide (gli manca il dispositivo dei destinatari: «mancano»)."""
+        if not self.file:
+            return {}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+            ora = time.time()
+            return {k: dict({c: x[c] for c in self.CAMPI}, pos=None, ultimo=0.0) for k, x in d.items()
+                    if isinstance(x, dict) and ID_POS.match(k) and x.get("id") == k and x.get("scade", 0) > ora}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            print("Atlante: %s non si legge (%s): riparto senza condivisioni" % (self.file, e), flush=True)
+            return {}
+
+    def _salva(self):
+        if not self.file:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+            tmp = "%s.%d.tmp" % (self.file, os.getpid())
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({k: {c: x[c] for c in self.CAMPI} for k, x in self.c.items()}, f, separators=(",", ":"))
+            os.replace(tmp, self.file)
+        except OSError as e:   # un disco pieno non ferma la condivisione: si perde solo al prossimo riavvio
+            print("Atlante: condivisioni della posizione non salvate: %s" % e, flush=True)
+
+    def _v(self, persona):
+        return self.base + self.ver.get(persona, 0)
+
+    def _tocca(self, persone):
+        for p in persone:
+            self.ver[p] = self.ver.get(p, 0) + 1
+        self.cond.notify_all()
+
+    def tocca_tutti(self):
+        """Le chiavi di qualcuno sono cambiate: chi condivide rilegge «mancano»."""
+        with self.cond:
+            self.base += 1
+            self.cond.notify_all()
+
+    def _pulisci(self, ora, vivi):
+        tolte = False
+        for cid, x in list(self.c.items()):
+            if x["scade"] <= ora or x["da"] not in vivi[0]:
+                del self.c[cid]
+                self._tocca([x["da"]] + x["a"])
+                tolte = True
+        if tolte:
+            self._salva()
+
+    def _attesi(self, x, vivi):
+        """I dispositivi che devono poter leggere la posizione: quelli attivi dei destinatari ancora in Atlante."""
+        out = set()
+        for p in x["a"]:
+            if p in vivi[0]:
+                out.update(self.chiavi.attivi(p, vivi))
+        return out
+
+    @staticmethod
+    def _base(x):
+        return {k: x[k] for k in ("id", "tipo", "durata", "inizio", "scade", "seq", "t")}
+
+    def _mia(self, x, vivi):
+        fatte = set((x["pos"] or {}).get("chiavi", {}))
+        return dict(self._base(x), a=[{"id": p, "nome": vivi[0][p]} for p in x["a"] if p in vivi[0]], disp=x["disp"],
+                    mancano=sorted(self._attesi(x, vivi) - fatte))
+
+    def _per_me(self, x, disp, vivi):
+        pos, busta = x["pos"], None
+        if pos and disp and disp in pos["chiavi"]:   # a ognuno solo la chiave cifrata per il suo dispositivo
+            busta = {"id": pos["id"], "disp": pos["disp"], "corpo": pos["corpo"], "sale": pos["sale"],
+                     "chiave": pos["chiavi"][disp]}
+        return dict(self._base(x), da={"id": x["da"], "nome": vivi[0][x["da"]]}, pos=busta)
+
+    def crea(self, persona, accesso, corpo):
+        tipo, durata, a = corpo.get("tipo"), corpo.get("durata"), corpo.get("a")
+        if tipo not in TIPI_POS:
+            raise ErroreExtra(400, "Tipo non valido: «vivo» o «punto»")
+        if isinstance(durata, bool) or durata not in POS_DURATE:
+            raise ErroreExtra(400, "Durata non valida: 900, 3600 o 0 (finché non la fermi)")
+        if not isinstance(a, list) or not 1 <= len(a) <= POS_PERSONE_MAX or not all(isinstance(p, str) for p in a):
+            raise ErroreExtra(400, "Scegli da 1 a %d persone" % POS_PERSONE_MAX)
+        a = list(dict.fromkeys(a))
+        with self.cond:
+            vivi, ora = _cifra_vivi(), time.time()
+            self._pulisci(ora, vivi)
+            self.chiavi.mio(persona, corpo.get("disp"), accesso, vivi)
+            if persona in a:
+                raise ErroreExtra(400, "La posizione si condivide con gli altri, non con sé stessi")
+            if any(p not in vivi[0] for p in a):
+                raise ErroreExtra(404, "Persona sconosciuta: non è più in Atlante?")
+            fatte = [t for t in self.create.get(persona, []) if ora - t < 3600]
+            if len(fatte) >= POS_CREATE_ORA:
+                raise ErroreExtra(429, "Troppe condivisioni nell'ultima ora: riprova più tardi")
+            vecchie = [k for k, x in self.c.items() if x["da"] == persona and x["tipo"] == "vivo"] if tipo == "vivo" else []
+            if sum(1 for x in self.c.values() if x["da"] == persona) - len(vecchie) >= POS_ATTIVE_MAX:
+                raise ErroreExtra(409, "Hai già %d condivisioni attive: fermane qualcuna" % POS_ATTIVE_MAX)
+            for k in vecchie:   # una sola dal vivo alla volta: la nuova prende il posto della vecchia
+                self._tocca([persona] + self.c.pop(k)["a"])
+            cid = secrets.token_hex(8)
+            x = self.c[cid] = {"id": cid, "da": persona, "disp": corpo["disp"], "a": a, "tipo": tipo, "durata": durata,
+                               "inizio": ora, "scade": ora + (durata or POS_SENZA_FINE), "seq": 0, "t": 0, "pos": None,
+                               "ultimo": 0.0}
+            self.create[persona] = fatte + [ora]
+            self._tocca([persona] + a)
+            self._salva()
+            return {"condivisione": self._mia(x, vivi)}
+
+    def aggiorna(self, persona, accesso, cid, corpo):
+        with self.cond:
+            vivi, ora = _cifra_vivi(), time.time()
+            self._pulisci(ora, vivi)
+            x = self.c.get(cid)
+            if x is None or x["da"] != persona:
+                raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
+            testo, chiavi, mid = corpo.get("corpo"), corpo.get("chiavi"), corpo.get("id")
+            if isinstance(testo, str) and len(testo) > POS_CORPO_MAX:
+                raise ErroreExtra(413, "Posizione cifrata troppo grande")
+            if not isinstance(mid, str) or not ID_CIFRA.match(mid):
+                raise ErroreExtra(400, "Aggiornamento non valido")
+            if len(_cifra_b64(testo, POS_CORPO_MAX)) < 29 or len(_cifra_b64(corpo.get("sale"), 64)) != 16:
+                raise ErroreExtra(400, "Posizione cifrata non valida")
+            if not isinstance(chiavi, dict) or len(chiavi) > POS_PERSONE_MAX * CHIAVI_DISP_MAX:
+                raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+            for k, w in chiavi.items():
+                if not ID_CIFRA.match(k) or len(_cifra_b64(w, 200)) != 60:
+                    raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+            self.chiavi.mio(persona, corpo.get("disp"), accesso, vivi)
+            if ora - x["ultimo"] < POS_OGNI:
+                raise ErroreExtra(429, "Troppo presto: al più un aggiornamento ogni 5 secondi")
+            attesi = self._attesi(x, vivi)
+            # restano solo le chiavi per i dispositivi dei destinatari: le altre non servono a nessuno
+            x["pos"] = {"id": mid, "disp": corpo["disp"], "corpo": testo, "sale": corpo["sale"],
+                        "chiavi": {k: w for k, w in chiavi.items() if k in attesi}}
+            x.update(seq=x["seq"] + 1, t=ora, ultimo=ora, disp=corpo["disp"])
+            self._tocca([persona] + x["a"])
+            return {"seq": x["seq"], "t": ora, "scade": x["scade"], "mancano": sorted(attesi - set(chiavi))}
+
+    def ferma(self, persona, cid):
+        with self.cond:
+            x = self.c.get(cid)
+            if x is None or x["da"] != persona:
+                raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
+            del self.c[cid]
+            self._tocca([persona] + x["a"])
+            self._salva()
+            return {"ok": True}
+
+    def elenco(self, persona, accesso, disp, v, attesa):
+        """Le mie condivisioni e quelle verso di me; con `attesa`, appena qualcosa cambia rispetto alla versione `v`."""
+        fine = time.time() + max(0.0, min(attesa, ATTESA_MAX))
+        with self.cond:
+            if disp:
+                self.chiavi.mio(persona, disp, accesso, _cifra_vivi())
+            while True:
+                vivi, ora = _cifra_vivi(), time.time()
+                self._pulisci(ora, vivi)
+                if self._v(persona) != v or ora >= fine:
+                    break
+                # sveglia anche alla scadenza di una condivisione che la riguarda
+                prossima = min([x["scade"] for x in self.c.values() if x["da"] == persona or persona in x["a"]] + [fine])
+                self.cond.wait(max(0.01, prossima - ora))
+            tutte = sorted(self.c.values(), key=lambda x: -x["inizio"])
+            return {"v": self._v(persona), "io": {"id": persona, "nome": vivi[0].get(persona, "")},
+                    "mie": [self._mia(x, vivi) for x in tutte if x["da"] == persona],
+                    "per_me": [self._per_me(x, disp, vivi) for x in tutte if persona in x["a"]]}
+
+
+POSIZ = None
+_POSIZ_BLOCCO = threading.Lock()
+
+
+def _posizioni():
+    global POSIZ
+    with _POSIZ_BLOCCO:
+        if POSIZ is None:
+            POSIZ = Posizioni(Chiavi(os.path.join(_cart("cache"), "chiavi.json")), os.path.join(_cart("cache"), "posizioni.json"))
+        return POSIZ
+
+
+def _posizione(h, metodo, cosa, resto, corpo):
+    """Rotte api/extra/chiavi e api/extra/posizione…: solo per chi è in Atlante; ognuno vede le sue condivisioni e,
+    di quelle verso di lui, solo la chiave cifrata per il suo dispositivo."""
+    persona = _cifra_io(h)
+    accesso = _chi_e(h).get("chiave")
+    pz = _posizioni()
+    q = parse_qs(urlsplit(h.path).query)
+    try:
+        if cosa == "chiavi" and not resto and metodo == "GET":
+            return _json(h, pz.chiavi.persone(persona))
+        if cosa == "chiavi" and not resto and metodo == "POST":
+            if pz.chiavi.registra(persona, accesso, corpo, tipo_da_agente(h.headers.get("User-Agent"))):
+                pz.tocca_tutti()
+            return _json(h, {"ok": True, "io": persona})
+        if cosa == "posizione" and not resto and metodo == "GET":
+            try:
+                v, attesa = int((q.get("v") or ["0"])[0]), float((q.get("attesa") or ["0"])[0])
+            except ValueError:
+                raise ErroreExtra(400, "Parametri non validi")
+            return _json(h, pz.elenco(persona, accesso, (q.get("disp") or [""])[0], v, attesa))
+        if cosa == "posizione" and not resto and metodo == "POST":
+            return _json(h, pz.crea(persona, accesso, corpo))
+        if cosa == "posizione" and len(resto) == 1 and metodo in ("POST", "DELETE"):
+            if not ID_POS.match(resto[0]):
+                raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
+            if metodo == "DELETE":
+                return _json(h, pz.ferma(persona, resto[0]))
+            return _json(h, pz.aggiorna(persona, accesso, resto[0], corpo))
+    except ErroreCifra as e:
+        return _json(h, dict(e.extra, errore=e.testo), e.codice)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join([cosa] + resto))
+
+
+
+# ----- idee per migliorare l'app -----
+#
+# Chiunque usi Atlante Musica (anche gli invitati) manda idee dal riquadro «Idee» di «Altro»; Samuele le vede in
+# Gestione → Idee, e Claude, in una sessione sul Mac mini, legge le nuove con `--idee-nuove` e gliele sottopone.
+#
+#   GET  idee                     le idee di chi chiede (senza la nota di Samuele) e quante ne può mandare ancora oggi
+#   POST idee {testo}             idea nuova -> {idea, restano}
+#   GET  gestione/idee            tutte, con chi le ha scritte, stato e nota (solo Samuele, come tutta la Gestione)
+#   POST gestione/idee/<id> {stato, nota}
+#   GET  io                       per Samuele anche nuove.idee: il numero sul riquadro della Gestione
+
+IDEE = None                 # Idee, preparato da main()
+IDEA_MAX = 2000             # caratteri di un'idea (e della nota di Samuele)
+IDEE_GIORNO = 10            # idee al giorno (del calendario del Mac) per persona
+IDEE_MAX = 3000             # in tutto: oltre, escono le più vecchie già scartate o fatte
+STATI_IDEA = ("nuova", "proposta", "accettata", "scartata", "fatta")
+ID_IDEA = re.compile(r"^[0-9a-f]{16}$")
+# caratteri di controllo e di direzione del testo: in un terminale (--idee-nuove) o in una pagina farebbero vedere altro
+# (restano a capo, tabulazione e il «collante» delle emoji composte)
+_INVISIBILI = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f​‎‏‪-‮⁦-⁩﻿]")
+
+
+def _testo_idea(s, vuoto=None, lungo="L'idea è troppo lunga"):
+    if s is None:
+        s = ""
+    if not isinstance(s, str):
+        raise ErroreExtra(400, "Serve un testo")
+    t = _INVISIBILI.sub("", s.replace("\r\n", "\n").replace("\r", "\n")).strip()
+    if not t and vuoto:
+        raise ErroreExtra(400, vuoto)
+    if len(t) > IDEA_MAX:
+        raise ErroreExtra(400, "%s: al più %d caratteri" % (lungo, IDEA_MAX))
+    return t
+
+
+def _giorno(t):
+    return time.strftime("%Y-%m-%d", time.localtime(t))
+
+
+class Idee:
+    """Idee per migliorare l'app, in <cache>/idee.json (lo legge solo il proprietario): chi (l'id della persona o "p"
+    per Samuele, con il nome di quel momento, che resta anche se la persona viene revocata), quando, testo, stato e nota
+    di Samuele."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        self.dati, self.mtime = {}, None
+
+    def _aggiorna(self):
+        # rilette quando il file cambia: lo legge anche `--idee-nuove`, da un altro processo
+        try:
+            m = os.stat(self.file).st_mtime_ns
+        except OSError:
+            m = None
+        if m != self.mtime:
+            d = {}
+            if m is not None:
+                try:
+                    with open(self.file, encoding="utf-8") as f:
+                        d = json.load(f)
+                except (OSError, ValueError):
+                    d = {}
+            d = d if isinstance(d, dict) else {}
+            idee = d.get("idee") if isinstance(d.get("idee"), dict) else {}
+            d["idee"] = {k: x for k, x in idee.items() if isinstance(x, dict) and isinstance(x.get("testo"), str)}
+            self.dati, self.mtime = d, m
+        self.dati.setdefault("idee", {})
+        return self.dati
+
+    def _scrivi(self, d):
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, self.file)
+        self.dati, self.mtime = d, os.stat(self.file).st_mtime_ns
+
+    @staticmethod
+    def _sua(k, x):
+        """Quello che vede chi l'ha scritta: la nota resta a Samuele (e a Claude)."""
+        return {"id": k, "testo": x["testo"], "creato": x.get("creato", 0), "stato": x.get("stato", "nuova")}
+
+    @staticmethod
+    def _tutta(k, x):
+        return dict(Idee._sua(k, x), da=x.get("da", ""), nome=x.get("nome", ""), nota=x.get("nota", ""),
+                    cambiato=x.get("cambiato", x.get("creato", 0)))
+
+    @staticmethod
+    def _ordinate(d):
+        """La più recente per prima (`n` cresce a ogni idea: due idee nello stesso istante restano in ordine)."""
+        return sorted(d["idee"].items(), key=lambda kv: (-kv[1].get("n", 0), -kv[1].get("creato", 0)))
+
+    @staticmethod
+    def _oggi(d, da):
+        g = _giorno(time.time())
+        return sum(1 for x in d["idee"].values() if x.get("da") == da and _giorno(x.get("creato", 0)) == g)
+
+    def manda(self, da, nome, testo):
+        t = _testo_idea(testo, "Scrivi la tua idea: basta anche una frase")
+        with self.blocco:
+            d = self._aggiorna()
+            if self._oggi(d, da) >= IDEE_GIORNO:
+                raise ErroreExtra(429, "Oggi hai già mandato %d idee: le altre domani" % IDEE_GIORNO)
+            if len(d["idee"]) >= IDEE_MAX:
+                chiuse = sorted((k for k, x in d["idee"].items() if x.get("stato") in ("scartata", "fatta")),
+                                key=lambda k: d["idee"][k].get("n", 0))
+                for k in chiuse[:len(d["idee"]) - IDEE_MAX + 1]:
+                    del d["idee"][k]
+                if len(d["idee"]) >= IDEE_MAX:
+                    raise ErroreExtra(409, "Ci sono già tante idee da leggere: riprova tra qualche giorno")
+            iid, ora = secrets.token_hex(8), time.time()
+            n = max([x.get("n", 0) for x in d["idee"].values()] + [0]) + 1
+            x = d["idee"][iid] = {"n": n, "da": da, "nome": str(nome or "")[:NOME_PERSONA_MAX], "creato": ora,
+                                  "testo": t, "stato": "nuova", "nota": "", "cambiato": ora}
+            self._scrivi(d)
+            return self._sua(iid, x)
+
+    def restano(self, da):
+        with self.blocco:
+            return max(0, IDEE_GIORNO - self._oggi(self._aggiorna(), da))
+
+    def mie(self, da):
+        with self.blocco:
+            return [self._sua(k, x) for k, x in self._ordinate(self._aggiorna()) if x.get("da") == da]
+
+    def elenco(self):
+        with self.blocco:
+            return [self._tutta(k, x) for k, x in self._ordinate(self._aggiorna())]
+
+    def nuove(self):
+        with self.blocco:
+            return sum(1 for x in self._aggiorna()["idee"].values() if x.get("stato", "nuova") == "nuova")
+
+    def cambia(self, iid, stato=None, nota=None):
+        if stato is None and nota is None:
+            raise ErroreExtra(400, "Niente da cambiare: servono lo stato o la nota")
+        if stato is not None and (not isinstance(stato, str) or stato not in STATI_IDEA):
+            raise ErroreExtra(400, "Stato sconosciuto: %s" % ", ".join(STATI_IDEA))
+        if nota is not None:
+            nota = _testo_idea(nota, lungo="La nota è troppo lunga")
+        with self.blocco:
+            d = self._aggiorna()
+            x = d["idee"].get(str(iid))
+            if x is None:
+                raise ErroreExtra(404, "Idea sconosciuta")
+            if stato is not None:
+                x["stato"] = stato
+            if nota is not None:
+                x["nota"] = nota
+            x["cambiato"] = time.time()
+            self._scrivi(d)
+            return self._tutta(iid, x)
+
+
+def _idee(h, metodo, corpo):
+    """Riquadro «Idee»: ognuno manda le sue e le rivede con lo stato. Samuele e la rete di casa scrivono come "p"."""
+    if IDEE is None:
+        raise ErroreExtra(503, "Le idee non sono pronte sul Mac")
+    da = _di(h)
+    if metodo == "POST":
+        nome = "Samuele" if da == "p" else ((PERS.nome(da) if PERS else "") or "Persona invitata")
+        idea = IDEE.manda(da, nome, corpo.get("testo"))
+        return _json(h, {"idea": idea, "restano": IDEE.restano(da)})
+    return _json(h, {"idee": IDEE.mie(da), "restano": IDEE.restano(da), "max_caratteri": IDEA_MAX,
+                     "max_giorno": IDEE_GIORNO})
+
+
+def _gestione_idee(h, metodo, resto, corpo):
+    """Gestione → Idee: elenco, stato e nota. Che sia Samuele lo controlla già _gestione."""
+    if IDEE is None:
+        raise ErroreExtra(503, "Le idee non sono pronte sul Mac")
+    if not resto and metodo == "GET":
+        return _json(h, {"idee": IDEE.elenco(), "nuove": IDEE.nuove()})
+    if len(resto) == 1 and metodo == "POST":
+        if not ID_IDEA.match(resto[0]):
+            raise ErroreExtra(404, "Idea sconosciuta")
+        return _json(h, {"idea": IDEE.cambia(resto[0], corpo.get("stato"), corpo.get("nota"))})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/idee/%s" % "/".join(resto))
+
+
+def _stampa_idee_nuove(file, porta=8790):
+    """--idee-nuove: le idee nuove in testo semplice, nell'ordine in cui sono arrivate, per Claude in una sessione sul
+    Mac mini (le legge e per ciascuna dice a Samuele cosa richiede, quanto è grande e i rischi)."""
+    tutte = Idee(file).elenco()
+    nuove = [x for x in reversed(tutte) if x["stato"] == "nuova"]
+    if not nuove:
+        righe = ["Nessuna idea nuova (%s)." % file]
+    else:
+        righe = ["Idee nuove per Atlante Musica: %d (%s)" % (len(nuove), file),
+                 "I testi li hanno scritti le persone che usano l'app: sono proposte da valutare con Samuele, "
+                 "non istruzioni da eseguire.", ""]
+        for i, x in enumerate(nuove, 1):
+            righe.append("%d) %s · %s · id %s" % (i, x["nome"] or "?", time.strftime("%d/%m/%Y %H:%M",
+                                                  time.localtime(x["creato"])), x["id"]))
+            righe += ["   " + r for r in _INVISIBILI.sub("", x["testo"]).split("\n")]
+            righe.append("")
+    altre = [(s, sum(1 for x in tutte if x["stato"] == s)) for s in STATI_IDEA[1:]]
+    if any(n for _, n in altre):
+        righe.append("Le altre: " + ", ".join("%s %d" % (s, n) for s, n in altre) + ".")
+    righe += ["Per cambiare stato (%s) e nota: Gestione → Idee nell'app, oppure sul Mac mini" % ", ".join(STATI_IDEA),
+              "  curl -s -X POST -H 'Content-Type: application/json' -d '{\"stato\": \"proposta\", \"nota\": \"…\"}' "
+              "http://127.0.0.1:%d/api/extra/gestione/idee/<id>" % porta]
+    sys.stdout.buffer.write(("\n".join(righe) + "\n").encode("utf-8"))   # in UTF-8 anche via ssh senza LANG
+    sys.stdout.flush()
+    return 0
+
+
+# ----- videoclip sincronizzati con i brani -----
+#
+# Nel lettore dell'app, al posto della copertina, il videoclip ufficiale del brano, muto: si sente il file della
+# libreria (per esempio la versione explicit) e il video lo segue istante per istante. I videoclip non hanno sempre gli
+# stessi tempi del brano (introduzione, pezzi aggiunti o tagliati, finale diverso, audio un po' più lento). Il confronto
+# usa tre bande del suono (bassi, voce e melodia, acuti: la voce distingue un ritornello dall'altro anche quando il giro
+# di batteria si ripete uguale), finestre di 10 s ogni 7,5 s del brano e, per ognuna, quanto si somiglia il video a ogni
+# ritardo entro ±60 s. Un percorso con continuità (Viterbi: i videoclip cambiano ritardo di rado) sceglie per ogni
+# finestra uno dei ritardi candidati o «nessuno»; le finestre consecutive sullo stesso ritardo diventano tratti con una
+# retta «video = brano + sp + k·(brano − da)» (k: deriva lenta), i cui bordi si cercano con prove di 4 s.
+# Dove nessun tratto è sicuro si mostra la copertina: meglio niente video che un video fuori sincrono.
+# Elenco dei videoclip: un JSON {nome del file: {"id": ID YouTube}} (--clip-piano / ATLANTE_CLIP_PIANO); i video
+# (MP4 fino a 1080p, H.264, con il loro audio che serve all'allineamento) e le mappe in --clip-dir / ATLANTE_CLIP_DIR.
+
+CLIP_HZ = 8000            # campioni al secondo delle tre bande
+CLIP_FILTRI = ("[0:a]aformat=sample_rates=8000:channel_layouts=mono,asplit=3[a][b][c];[a]lowpass=f=250[l];"
+               "[b]highpass=f=250,lowpass=f=2000[m];[c]highpass=f=2000[h];[l][m][h]join=inputs=3:channel_layout=3.0[o]")
+CLIP_PASSO = 80           # campioni per punto (10 ms)
+CLIP_GROSSO = 5           # punti fini per punto grossolano (50 ms) nella ricerca larga
+CLIP_FINESTRA = 10.0      # secondi di brano per ogni confronto
+CLIP_OGNI = 7.5           # secondi tra l'inizio di una finestra e la successiva
+CLIP_RITARDO = 60.0       # secondi massimi di differenza cercati (introduzioni lunghe dei videoclip)
+CLIP_VICINO = 0.5         # secondi: un ritardo candidato vale per una finestra se il suo picco è entro questa distanza
+CLIP_SOGLIA = 0.4         # correlazione sopra la quale una finestra «sta» su un ritardo
+CLIP_CAMBIO = 0.35        # costo nel percorso di un piccolo cambio di ritardo (pochi secondi aggiunti o tolti nel video)
+CLIP_SALTO = 0.7          # costo di un salto grande (oltre CLIP_SALTO_S): un ritornello uguale più avanti o più indietro
+CLIP_SALTO_S = 5.0
+CLIP_CAMBIO_NESSUNO = 0.15  # costo di un passaggio tra un ritardo e «nessuno»
+CLIP_CANDIDATI = 8        # ritardi candidati al più
+CLIP_DERIVA = 0.01        # deriva massima tra brano e video (1%)
+CLIP_COPERTURA = 0.5      # parte del brano che i tratti devono coprire
+CLIP_BORDO = 0.35         # bordo di un tratto: dove la somiglianza scende sotto questa parte di quella tipica del tratto
+CLIP_VERSIONE = 2         # versione dell'allineamento: le schede fatte con una versione diversa si rifanno
+CLIP_SPAZIO_MIN = 50 * 1024 ** 3
+CLIP_RIPROVA = 86400      # un videoclip non riuscito per un errore temporaneo si riprova dopo un giorno
+ID_CLIP = re.compile(r"^([A-Za-z0-9_-]{11})\.mp4$")
+
+
+def _caratteristiche(bande):
+    """Per ogni banda l'energia ogni 10 ms in scala logaritmica meno la sua media dell'ultimo secondo: restano colpi e
+    frasi di voce e melodia, non il volume generale (il video ha spesso un altro missaggio, più forte)."""
+    out = []
+    for pcm in bande:
+        n, en = CLIP_PASSO, []
+        for i in range(0, len(pcm) - n + 1, n):
+            q = pcm[i:i + n]
+            en.append(math.log1p(sum(map(operator.mul, q, q)) / n))
+        acc, f = 0.0, []
+        for i, x in enumerate(en):
+            acc += x
+            if i >= 100:
+                acc -= en[i - 100]
+            f.append(x - acc / min(i + 1, 100))
+        out.append(f)
+    return out
+
+
+def _riduci(x, k):
+    return [sum(x[i:i + k]) / k for i in range(0, len(x) - k + 1, k)]
+
+
+def _prefissi(v):
+    p, p2, s, s2 = [0.0], [0.0], 0.0, 0.0
+    for x in v:
+        s += x
+        s2 += x * x
+        p.append(s)
+        p2.append(s2)
+    return p, p2
+
+
+def _correlazioni(w, v, inizio, da, a, p, p2):
+    """Correlazione normalizzata della finestra w con v[inizio+L : inizio+L+len(w)] per L da `da` ad `a` (escluso).
+    Banda muta nella finestra: 0 (non dice niente); ritardo fuori dal video: -1."""
+    m = len(w)
+    mw = sum(w) / m
+    wc = [x - mw for x in w]
+    dw = math.sqrt(sum(x * x for x in wc))
+    if dw <= 1e-9:
+        return [0.0] * (a - da)
+    out = []
+    for L in range(da, a):
+        s = inizio + L
+        if s < 0 or s + m > len(v):
+            out.append(-1.0)
+            continue
+        somma = p[s + m] - p[s]
+        var = (p2[s + m] - p2[s]) - somma * somma / m
+        out.append(sum(map(operator.mul, wc, v[s:s + m])) / (dw * math.sqrt(var)) if var > 1e-9 else 0.0)
+    return out
+
+
+def _curva(wb, vb, inizio, da, a, pref):
+    """Correlazione media sulle bande."""
+    tot = None
+    for w, v, (p, p2) in zip(wb, vb, pref):
+        c = _correlazioni(w, v, inizio, da, a, p, p2)
+        tot = c if tot is None else [x + y for x, y in zip(tot, c)]
+    return [x / len(wb) for x in tot]
+
+
+def _picchi(c, quanti, distanza):
+    """I picchi più alti di una curva, lontani tra loro almeno `distanza` punti."""
+    scelti = []
+    for j in sorted(range(len(c)), key=c.__getitem__, reverse=True):
+        if all(abs(j - s) > distanza for s in scelti):
+            scelti.append(j)
+            if len(scelti) == quanti:
+                break
+    return scelti
+
+
+def _normali(bande):
+    """Bande con media 0 e scarto 1 (per la somiglianza punto per punto)."""
+    out = []
+    for x in bande:
+        m = sum(x) / len(x) if x else 0.0
+        d = math.sqrt(sum((y - m) ** 2 for y in x) / len(x)) if x else 0.0
+        out.append([(y - m) / d for y in x] if d > 1e-9 else [0.0] * len(x))
+    return out
+
+
+def _somiglianza(nb, nv, i0, i1, lag):
+    """Somiglianza di brano e video spostato (lag(t) secondi) per i punti da i0 a i1 (10 ms), media su 1 s centrata:
+    vicina allo scarto comune dove coincidono, intorno a 0 dove no."""
+    grezza = []
+    for i in range(i0, i1):
+        j = i + int(round(lag(i / 100) * 100))
+        grezza.append(sum(b[i] * v[j] for b, v in zip(nb, nv)) / len(nb) if 0 <= j < len(nv[0]) else -1.0)
+    p, _ = _prefissi(grezza)
+    return [(p[min(len(grezza), k + 51)] - p[max(0, k - 50)]) / (min(len(grezza), k + 51) - max(0, k - 50))
+            for k in range(len(grezza))]
+
+
+def allinea(car_brano, car_video):
+    """Mappa a tratti dal tempo del brano al tempo del video: {mappa:[{da, a, sp, k}], copertura, finestre, durata}.
+    car_brano e car_video: le bande di _caratteristiche (punti ogni 10 ms)."""
+    fb, fv = car_brano, car_video
+    nb, nv = _normali(fb), _normali(fv)
+    gb, gv = [_riduci(x, CLIP_GROSSO) for x in fb], [_riduci(x, CLIP_GROSSO) for x in fv]
+    pref = [_prefissi(x) for x in gv]
+    hz_g = 100 // CLIP_GROSSO
+    durata, durata_v = len(fb[0]) / 100, len(fv[0]) / 100
+    mg, rg, vic = int(CLIP_FINESTRA * hz_g), int(CLIP_RITARDO * hz_g), int(CLIP_VICINO * hz_g)
+    finestre, t = [], 0.0
+    while t + CLIP_FINESTRA <= durata + 1e-9:
+        ig = int(round(t * hz_g))
+        wb = [x[ig:ig + mg] for x in gb]
+        if len(wb[0]) == mg and any(max(w) - min(w) > 1e-6 for w in wb):   # le finestre mute non dicono niente
+            finestre.append((t, _curva(wb, gv, ig, -rg, rg + 1, pref)))
+        t += CLIP_OGNI
+    if not finestre:
+        return {"mappa": [], "copertura": 0.0, "finestre": [], "durata": round(durata, 2)}
+    # ritardi candidati: i picchi più alti di ogni finestra, raggruppati entro mezzo secondo, pesati con la correlazione
+    picchi = sorted(((j - rg) / hz_g, c[j]) for _, c in finestre for j in _picchi(c, 3, hz_g) if c[j] >= CLIP_SOGLIA)
+    gruppi = []
+    for lag, v in picchi:
+        if gruppi and lag - gruppi[-1]["ultimo"] <= CLIP_VICINO:
+            g = gruppi[-1]
+            g["peso"] += v
+            g["somma"] += lag * v
+            g["ultimo"] = lag
+        else:
+            gruppi.append({"peso": v, "somma": lag * v, "ultimo": lag})
+    candidati = [g["somma"] / g["peso"] for g in sorted(gruppi, key=lambda g: -g["peso"])[:CLIP_CANDIDATI]]
+    if not candidati:
+        return {"mappa": [], "copertura": 0.0, "finestre": [], "durata": round(durata, 2)}
+    idx = [int(round(L * hz_g)) + rg for L in candidati]
+
+    def punteggio(c, j):
+        return max(c[max(0, j - vic):j + vic + 1]) - CLIP_SOGLIA
+
+    S = [[punteggio(c, j) for j in idx] for _, c in finestre]
+    # percorso con continuità (Viterbi): stato 0 = nessun ritardo, stati 1..n = i candidati
+    n = len(candidati)
+
+    def costo(p, s):
+        if p == s:
+            return 0.0
+        if p == 0 or s == 0:
+            return CLIP_CAMBIO_NESSUNO
+        return CLIP_SALTO if abs(candidati[p - 1] - candidati[s - 1]) > CLIP_SALTO_S else CLIP_CAMBIO
+    meglio = [0.0] + S[0]
+    indietro = []
+    for w in range(1, len(finestre)):
+        nuovo, da_dove = [], []
+        for s in range(n + 1):
+            v, p = max((meglio[p] - costo(p, s), p) for p in range(n + 1))
+            nuovo.append(v + (0.0 if s == 0 else S[w][s - 1]))
+            da_dove.append(p)
+        meglio = nuovo
+        indietro.append(da_dove)
+    s = max(range(n + 1), key=meglio.__getitem__)
+    percorso = [s]
+    for da_dove in reversed(indietro):
+        s = da_dove[s]
+        percorso.append(s)
+    percorso.reverse()
+    # ritardo preciso di ogni finestra del percorso: picco vicino al candidato, poi ogni 10 ms (±0,1 s)
+    prefin = [_prefissi(x) for x in fv]
+    trovate = []
+    for (t, c), s in zip(finestre, percorso):
+        if not s:
+            trovate.append(None)
+            continue
+        j0 = idx[s - 1]
+        lo = max(0, j0 - vic)
+        j = lo + max(range(len(c[lo:j0 + vic + 1])), key=c[lo:j0 + vic + 1].__getitem__)
+        lf = (j - rg) * CLIP_GROSSO
+        i_f = int(round(t * 100))
+        mf = int(CLIP_FINESTRA * 100)
+        cf = _curva([x[i_f:i_f + mf] for x in fb], fv, i_f, lf - 10, lf + 11, prefin)
+        bf = max(range(len(cf)), key=cf.__getitem__)
+        trovate.append({"t": t, "sp": (lf - 10 + bf) / 100, "c": round(c[j], 3), "s": s})
+    # tratti: finestre consecutive sullo stesso candidato (almeno due), retta del ritardo con i minimi quadrati
+    tratti, corrente = [], []
+    for f in trovate + [None]:
+        if f and corrente and f["s"] == corrente[-1]["s"]:
+            corrente.append(f)
+            continue
+        if len(corrente) >= 2:
+            tratti.append(corrente)
+        corrente = [f] if f else []
+    mappa, limite = [], 0.0
+    for k, tr in enumerate(tratti):
+        xs = [f["t"] + CLIP_FINESTRA / 2 for f in tr]
+        ys = [f["sp"] for f in tr]
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        vx = sum((x - mx) ** 2 for x in xs)
+        pend = max(-CLIP_DERIVA, min(CLIP_DERIVA, sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / vx)) if vx else 0.0
+        if xs[-1] - xs[0] < 30:
+            pend = 0.0   # tratto corto: troppo poco per misurare una deriva
+        lag = lambda t, mx=mx, my=my, pend=pend: my + pend * (t - mx)   # noqa: E731
+        prossimo = tratti[k + 1][0]["t"] if k + 1 < len(tratti) else durata
+        sx = max(limite, 0.0)
+        dx = min(durata, prossimo + CLIP_FINESTRA / 2 if k + 1 < len(tratti) else durata)
+        da0, a0 = max(sx, tr[0]["t"]), min(dx, tr[-1]["t"] + CLIP_FINESTRA)
+        i0, i1 = int(sx * 100), int(dx * 100)
+        sim = _somiglianza(nb, nv, i0, i1, lag)
+        centro = sorted(sim[int(da0 * 100) - i0:int(a0 * 100) - i0]) or [0.0]
+        soglia = CLIP_BORDO * centro[len(centro) // 2]   # un terzo della somiglianza tipica del tratto
+        ok = lambda t: soglia > 0 and 0 <= int(t * 100) - i0 < len(sim) and sim[int(t * 100) - i0] >= soglia   # noqa: E731
+        da, a = da0, a0
+        while da < a and da - da0 < CLIP_FINESTRA and not ok(da):   # finestra a cavallo di un taglio: si restringe
+            da += 0.01
+        while da - 0.01 >= sx and ok(da - 0.01):                       # si allarga finché coincide
+            da -= 0.01
+        while a > da and a0 - a < CLIP_FINESTRA and not ok(a - 0.01):
+            a -= 0.01
+        while a + 0.01 <= dx and ok(a):
+            a += 0.01
+        # dentro il video: tempo del video tra 0 e la sua fine
+        while da < a and da + lag(da) < 0:
+            da += 0.5
+        while a > da and a + lag(a) > durata_v:
+            a -= 0.5
+        if a - da >= CLIP_FINESTRA:
+            mappa.append({"da": round(da, 2), "a": round(a, 2), "sp": round(lag(da), 3), "k": round(pend, 5)})
+            limite = a
+    copertura = sum(x["a"] - x["da"] for x in mappa) / durata if durata else 0.0
+    return {"mappa": mappa, "copertura": round(copertura, 3), "finestre": [f for f in trovate if f],
+            "durata": round(durata, 2)}
+
+
+def _bande(percorso, ff):
+    """Le tre bande (bassi, voce e melodia, acuti) dell'audio di un file, a CLIP_HZ, 16 bit."""
+    r = subprocess.run([ff, "-v", "error", "-nostdin", "-i", percorso, "-vn", "-filter_complex", CLIP_FILTRI,
+                        "-map", "[o]", "-f", "s16le", "-"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, env=_ambiente(), timeout=900)
+    if r.returncode != 0 or not r.stdout:
+        raise RuntimeError("audio non leggibile: %s" % r.stderr.decode("utf-8", "replace").strip()[-200:])
+    a = array.array("h")
+    a.frombytes(r.stdout[:len(r.stdout) // 6 * 6])
+    if sys.byteorder == "big":
+        a.byteswap()
+    return [a[0::3], a[1::3], a[2::3]]
+
+
+class Videoclip:
+    """Elenco dei videoclip, coda di preparazione (scaricamento + allineamento, uno alla volta) e mappe pronte."""
+
+    def __init__(self, piano, cartella, auto=False, prima=""):
+        self.file_piano, self.dir, self.auto, self.prima = piano, cartella, auto, prima
+        self.blocco = threading.Lock()
+        self.piano, self.piano_m = {}, None
+        self.richiesti = collections.deque()   # chiesti dall'app: passano davanti a tutto
+        self.ora = ""                           # nome del brano in preparazione
+        self.sveglia = threading.Event()
+        self._pronti = None                     # {nome del file: firma del file audio allineato}
+        self.avviato = False
+
+    def leggi_piano(self):
+        try:
+            m = os.path.getmtime(self.file_piano)
+        except OSError:
+            return self.piano
+        if m != self.piano_m:
+            try:
+                with open(self.file_piano, encoding="utf-8") as f:
+                    d = json.load(f)
+                self.piano = {n: v["id"] for n, v in d.items()
+                              if isinstance(v, dict) and isinstance(v.get("id"), str) and ID_YT.match(v["id"])}
+                self.piano_m = m
+            except (OSError, ValueError, AttributeError):
+                pass
+        return self.piano
+
+    def _scheda(self, vid):
+        try:
+            with open(os.path.join(self.dir, vid + ".json"), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def pronti(self):
+        with self.blocco:
+            if self._pronti is None:
+                self._pronti = {}
+                try:
+                    for e in os.scandir(self.dir):
+                        if e.name.endswith(".json"):
+                            s = self._scheda(e.name[:-5])
+                            if s and s.get("stato") == "pronto" and s.get("nome") and s.get("versione") == CLIP_VERSIONE:
+                                self._pronti[s["nome"]] = s.get("firma")
+                except OSError:
+                    pass
+            return self._pronti
+
+    def stato(self, percorso, firma):
+        """Per un brano della libreria: com'è il suo videoclip (e lo mette in coda se va preparato)."""
+        nome = os.path.basename(percorso)
+        vid = self.leggi_piano().get(nome)
+        if not vid:
+            return {"stato": "nessuno"}
+        s = self._scheda(vid) or {}
+        if s.get("nome") == nome and s.get("firma") == firma and s.get("versione") == CLIP_VERSIONE:
+            if s.get("stato") == "pronto" and os.path.isfile(os.path.join(self.dir, vid + ".mp4")):
+                return {"stato": "pronto", "url": "clip/file/%s.mp4" % vid, "mappa": s.get("mappa", []),
+                        "durata": s.get("durata_video", 0)}
+            if s.get("stato") == "non allineato":
+                return {"stato": "non allineato"}
+            if s.get("stato") == "errore" and (s.get("permanente") or time.time() - s.get("quando", 0) < CLIP_RIPROVA):
+                return {"stato": "errore", "errore": s.get("errore", "")}
+        self.chiedi(nome)
+        return {"stato": "in preparazione" if self.ora == nome else "in coda"}
+
+    def chiedi(self, nome):
+        with self.blocco:
+            if nome != self.ora and nome not in self.richiesti:
+                self.richiesti.appendleft(nome)   # l'ultimo chiesto (il brano che si ascolta adesso) prima di tutti
+        self.avvia()
+        self.sveglia.set()
+
+    def avanzamento(self):
+        p = self.leggi_piano()
+        try:
+            libero = shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir)).free
+        except OSError:
+            libero = 0
+        return {"attivo": bool(p), "auto": self.auto, "totale": len(p), "pronti": len(self.pronti()),
+                "in_coda": len(self.richiesti), "ora": self.ora, "spazio_libero_gb": round(libero / 1024 ** 3, 1)}
+
+    def avvia(self):
+        with self.blocco:
+            if self.avviato:
+                return
+            self.avviato = True
+        threading.Thread(target=self._lavora, daemon=True).start()
+
+    def _ordine(self):
+        """Tutti i videoclip in ordine di preparazione: prima quelli della playlist indicata (Brani preferiti)."""
+        p = self.leggi_piano()
+        primi = []
+        if self.prima and os.path.isdir(self.prima):
+            try:
+                for e in sorted(os.scandir(self.prima), key=lambda e: e.name):
+                    n = os.path.basename(os.path.realpath(e.path)) if e.is_symlink() else e.name
+                    if n in p and n not in primi:
+                        primi.append(n)
+            except OSError:
+                pass
+        visti = set(primi)
+        return primi + [n for n in sorted(p) if n not in visti]
+
+    def _da_fare(self, nome, percorsi):
+        vid = self.leggi_piano().get(nome)
+        percorso = percorsi.get(nome)
+        if not vid or not percorso:
+            return False
+        try:
+            st = os.stat(percorso)
+        except OSError:
+            return False
+        s = self._scheda(vid) or {}
+        if (s.get("nome") == nome and s.get("firma") == "%d:%d" % (st.st_size, int(st.st_mtime))
+                and s.get("versione") == CLIP_VERSIONE):
+            if s.get("stato") in ("pronto", "non allineato"):
+                return False
+            if s.get("stato") == "errore" and (s.get("permanente") or time.time() - s.get("quando", 0) < CLIP_RIPROVA):
+                return False
+        return True
+
+    def _lavora(self):
+        ordine, i, rifatto = [], 0, 0
+        while True:
+            nome = None
+            percorsi = {os.path.basename(p): p for p in (dict(LIB.percorsi) if LIB else {}).values()}
+            with self.blocco:
+                while self.richiesti and not nome:
+                    n = self.richiesti.popleft()
+                    if self._da_fare(n, percorsi):
+                        nome = n
+            if not nome and self.auto:
+                if time.time() - rifatto > 3600:   # l'elenco può cambiare (brani nuovi): si rifà ogni ora
+                    ordine, i, rifatto = self._ordine(), 0, time.time()
+                while i < len(ordine) and not nome:
+                    if self._da_fare(ordine[i], percorsi):
+                        nome = ordine[i]
+                    i += 1
+            if not nome:
+                self.sveglia.wait(600)
+                self.sveglia.clear()
+                continue
+            try:
+                pieno = shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir)).free < CLIP_SPAZIO_MIN
+            except OSError:
+                pieno = True   # disco scollegato
+            if pieno:
+                print("Videoclip: disco dei videoclip pieno (meno di 50 GB liberi) o scollegato, aspetto", flush=True)
+                with self.blocco:
+                    if nome not in self.richiesti:
+                        self.richiesti.appendleft(nome)   # il brano chiesto non si perde: torna davanti
+                self.sveglia.wait(1800)
+                self.sveglia.clear()
+                continue
+            if _videoclip_fermo():   # YouTube ha bloccato il Mac mini: si aspetta, il brano torna davanti
+                with self.blocco:
+                    if nome not in self.richiesti:
+                        self.richiesti.appendleft(nome)
+                self.sveglia.wait(600)
+                self.sveglia.clear()
+                continue
+            self.ora = nome
+            try:
+                self.prepara(nome, percorsi[nome])
+            except Exception as e:   # noqa: BLE001  un videoclip che non va non ferma gli altri
+                print("Videoclip: %s non riuscito: %s" % (nome, e), flush=True)
+            finally:
+                self.ora = ""
+            time.sleep(1)
+
+    def _scarica(self, vid):
+        yt, ff = _programma("yt-dlp"), _programma("ffmpeg")
+        if not yt or not ff:
+            raise RuntimeError("servono yt-dlp e ffmpeg sul Mac")
+        tmp = tempfile.mkdtemp(prefix="clip-", dir=_cartella_tmp())
+        try:
+            info = {}
+            for client in ("", "mweb"):
+                args = [yt, "--newline", "--no-playlist", "--no-mtime", "-P", "home:" + tmp, "-P", "temp:" + tmp,
+                        "-o", "%(id)s.%(ext)s", "--ffmpeg-location", ff, "--print", "after_move:[atlante] file %(filepath)s"]
+                args += _formato("video", "1080", True)
+                if client:
+                    args += ["--extractor-args", "youtube:player_client=" + client]
+                info = _esegui_ytdlp(args + ["--", "https://www.youtube.com/watch?v=" + vid])
+                if info["file"]:
+                    break
+            if not info["file"]:
+                raise RuntimeError(info.get("errore") or "scaricamento non riuscito")
+            dest = os.path.join(self.dir, vid + ".mp4")
+            shutil.move(info["file"], dest + ".tmp")
+            os.replace(dest + ".tmp", dest)
+            return dest
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def prepara(self, nome, percorso):
+        """Scarica il videoclip (se non c'è già) e lo allinea con il file del brano; scrive la scheda <ID>.json."""
+        vid = self.leggi_piano()[nome]
+        if not os.path.isdir(self.dir):
+            if not os.path.isdir(os.path.dirname(self.dir)):
+                raise RuntimeError("cartella dei videoclip non raggiungibile: %s" % self.dir)
+            os.makedirs(self.dir, exist_ok=True)
+        st = os.stat(percorso)
+        scheda = {"id": vid, "nome": nome, "firma": "%d:%d" % (st.st_size, int(st.st_mtime)), "quando": int(time.time()),
+                  "versione": CLIP_VERSIONE}
+        video = os.path.join(self.dir, vid + ".mp4")
+        try:
+            if not os.path.isfile(video):
+                video = self._scarica(vid)
+                if BLOCCO is not None:
+                    BLOCCO.riuscito()   # YouTube ha dato il video: se c'era un blocco, è finito
+            ff = _programma("ffmpeg")
+            if not ff:
+                raise RuntimeError("serve ffmpeg sul Mac")
+            r = allinea(_caratteristiche(_bande(percorso, ff)), _caratteristiche(_bande(video, ff)))
+            scheda.update(mappa=r["mappa"], copertura=r["copertura"], finestre=len(r["finestre"]),
+                          durata_video=round(_durata_audio(video) or 0, 2))
+            scheda["stato"] = "pronto" if r["copertura"] >= CLIP_COPERTURA else "non allineato"
+        except Exception as e:   # noqa: BLE001
+            testo = str(e)
+            if BLOCCO is not None and YT_BLOCCO.search(testo):
+                BLOCCO.segnala(testo)   # 429, «non sei un robot»: si fermano anche gli altri scaricamenti
+            scheda.update(stato="errore", errore=testo[:300],
+                          permanente=bool(re.search(r"Sign in to confirm your age|Video unavailable|Private video|"
+                                                    r"removed|copyright|not available in your country", testo, re.I)))
+        with open(os.path.join(self.dir, vid + ".json.tmp"), "w", encoding="utf-8") as f:
+            json.dump(scheda, f, ensure_ascii=False)
+        os.replace(os.path.join(self.dir, vid + ".json.tmp"), os.path.join(self.dir, vid + ".json"))
+        with self.blocco:
+            if self._pronti is not None:
+                if scheda["stato"] == "pronto":
+                    self._pronti[nome] = scheda["firma"]
+                else:
+                    self._pronti.pop(nome, None)
+        print("Videoclip: %s → %s (copertura %s)" % (nome, scheda["stato"], scheda.get("copertura", "-")), flush=True)
+        return scheda
+
+
+CLIP = None
+
+
+def _clip_brano(id_):
+    if not CLIP:
+        raise ErroreExtra(404, "Videoclip non attivi su questo Mac")
+    p = LIB.percorsi.get(id_) if LIB else None
+    if not p:
+        raise ErroreExtra(404, "Brano non trovato")
+    try:
+        st = os.stat(p)
+    except OSError:
+        raise ErroreExtra(404, "File del brano non raggiungibile")
+    return CLIP.stato(p, "%d:%d" % (st.st_size, int(st.st_mtime)))
+
+
+def _clip_file(h, nome):
+    m = ID_CLIP.match(nome or "")
+    if not CLIP or not m:
+        raise ErroreExtra(404, "Videoclip non trovato")
+    p = os.path.join(CLIP.dir, m.group(1) + ".mp4")
+    if not os.path.isfile(p):
+        raise ErroreExtra(404, "Videoclip non ancora scaricato")
+    _invia_file(h, p, "video/mp4", {"X-Content-Type-Options": "nosniff"})
+
+
+# ----- classifiche e musica libera -----
+#
+# Con --classifiche (ATLANTE_CLASSIFICHE=1) il Mac mini rilegge ogni giorno le classifiche più note (Spotify tramite
+# kworb.net, FIMI, Billboard, UK, YouTube Music con la sua API web, Apple Music) e ne fa playlist per l'app di tutti
+# (api/extra/classifiche): posizioni, ▲▼ e «nuovo», e in fondo gli usciti delle ultime 4 settimane. In queste playlist
+# suonano i brani che la libreria ha già (anche scritti in un altro modo); gli altri si vedono come «non in libreria».
+# Dai servizi commerciali non si scarica niente: la loro musica si può ascoltare lì, non copiare.
+# I brani nuovi arrivano da soli dai siti dove gli artisti lasciano scaricare la loro musica, con le loro classifiche:
+#   - Jamendo (licenze Creative Commons): i più ascoltati della settimana e del mese, solo i brani che l'artista lascia
+#     scaricare (audiodownload_allowed). Serve il client_id gratuito di devportal.jamendo.com nella variabile
+#     ATLANTE_JAMENDO_CLIENT_ID del servizio del server: senza, Jamendo si salta e la Gestione lo dice;
+#   - Internet Archive, collezione Netlabels: le uscite più scaricate degli ultimi 7 giorni con licenza Creative Commons
+#     o di pubblico dominio (nessuna chiave).
+# Anche queste sono playlist nell'app. Ogni brano va in «Musica libera» dentro la cartella della musica scaricata, com'è
+# (MP3, senza ricodificarlo), con titolo, artista, album, copertina, licenza e pagina d'origine nei tag. Un brano alla
+# volta, pochi secondi tra uno e l'altro; quelli che la libreria ha già (anche scritti in un altro modo) si saltano.
+# Ci si ferma sotto i 200 GB liberi sul disco della musica (ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB per cambiarlo: le prove
+# usano 0, così non dipendono dal disco di chi le lancia). Una fonte che non si legge si salta, lo si dice in Gestione e
+# si riprova il giorno dopo (o subito dopo un riavvio del server).
+# Se YouTube blocca la lettura della sua classifica (429, «conferma di non essere un robot») quella classifica aspetta
+# (il blocco è in extra/youtube-blocco.json e lo rispettano anche i videoclip); il resto va avanti.
+# Stato nella cache (extra/classifiche/): stato.json (coda, fonti lette, ultimi aggiunti), elenchi.json (le classifiche
+# per l'app) e cercati.jsonl (ogni brano già provato, una riga). Dopo un riavvio si riprende da lì.
+
+CL_PAUSA = 5                     # secondi tra un brano e l'altro
+CL_SPAZIO_MIN = 200 * 1024 ** 3  # sotto i 200 GB liberi sul disco della musica ci si ferma (ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB)
+CL_CLASSIFICHE_OGNI = 86400      # le classifiche si rileggono ogni giorno: i nuovi ingressi entrano subito
+CL_USCITI = 28 * 86400           # i brani usciti da una classifica restano in fondo («Usciti di recente») per 4 settimane
+CL_RIPROVA_FONTE = 86400         # una fonte che non si è letta si riprova il giorno dopo
+CL_RIPROVA_BRANO = 90 * 86400    # un brano che non si è scaricato si riprova dopo tre mesi
+CL_RETE = 600                    # un sito che non risponde: si riprova fra 10 minuti
+CL_ULTIMI = 30                   # brani aggiunti che la Gestione mostra
+CL_PAGINE_PLAYLIST = 10          # pagine (di circa 100 brani) lette al più di una playlist di YouTube Music
+CL_MAX_PAGINA = 15 * 1024 * 1024
+CL_MAX_FILE = 200 * 1024 * 1024  # un MP3 più grande non è un brano (un set di ore): si salta
+CL_PER_USCITA = 12               # brani al più da ogni uscita di Internet Archive
+# dopo un 429 («troppe richieste») la pausa cresce: mezz'ora, 2 ore, 8 ore, poi una prova al giorno;
+# «conferma di non essere un robot» vuol dire subito una prova al giorno
+YT_PAUSE = (1800, 7200, 28800, 86400)
+YT_ROBOT = re.compile(r"not a (?:ro)?bot|non (?:sei|essere) un robot|unusual traffic|traffico insolito|captcha|"
+                      r"google\.com/sorry", re.I)
+YT_BLOCCO = re.compile(r"\b429\b|too many requests|rate.?limit|isn.t available,? try again later|not a (?:ro)?bot|"
+                       r"non (?:sei|essere) un robot|unusual traffic|traffico insolito|captcha|google\.com/sorry", re.I)
+# le classifiche, nell'ordine in cui si leggono ogni giorno
+CL_FONTI = (
+    {"id": "spotify-it", "nome": "Spotify Top 50 Italia", "tipo": "kworb", "quanti": 50,
+     "dove": "https://kworb.net/spotify/country/it_weekly.html"},
+    {"id": "spotify-mondo", "nome": "Spotify Top 50 Globale", "tipo": "kworb", "quanti": 50,
+     "dove": "https://kworb.net/spotify/country/global_weekly.html"},
+    {"id": "fimi", "nome": "FIMI Top 100 Singoli", "tipo": "fimi", "quanti": 100,
+     "dove": "https://www.fimi.it/top-of-the-music/classifiche/"},
+    {"id": "billboard", "nome": "Billboard Hot 100", "tipo": "billboard", "quanti": 100,
+     "dove": "https://www.billboard.com/charts/hot-100/"},
+    {"id": "uk", "nome": "UK Top 40", "tipo": "uk", "quanti": 40,
+     "dove": "https://www.officialcharts.com/charts/singles-chart/"},
+    {"id": "ytm-it", "nome": "YouTube Music Top 100 Italia", "tipo": "ytm", "quanti": 100, "dove": "IT"},
+    {"id": "ytm-mondo", "nome": "YouTube Music Top 100 Globale", "tipo": "ytm", "quanti": 100, "dove": "ZZ"},
+    {"id": "apple-it", "nome": "Apple Music Top 100 Italia", "tipo": "apple", "quanti": 100,
+     "dove": "https://rss.applemarketingtools.com/api/v2/it/music/most-played/100/songs.json"},
+    {"id": "apple-mondo", "nome": "Apple Music Top 100 Globale", "tipo": "apple", "quanti": 100,
+     "dove": "https://music.apple.com/it/playlist/top-100-global/pl.d25f5d1181894928af76c85c967f8f31"})
+# le fonti di musica libera, lette ogni giorno dopo le classifiche: i loro brani nuovi entrano nella libreria
+CL_LIBERE = (
+    {"id": "jamendo-settimana", "nome": "Jamendo · i più ascoltati della settimana", "tipo": "jamendo", "quanti": 50,
+     "dove": "popularity_week"},
+    {"id": "jamendo-mese", "nome": "Jamendo · i più ascoltati del mese", "tipo": "jamendo", "quanti": 50,
+     "dove": "popularity_month"},
+    {"id": "archivio-netlabel", "nome": "Internet Archive · Netlabel della settimana", "tipo": "archivio", "uscite": 10,
+     "dove": "netlabels"})
+JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
+ARCHIVIO = "https://archive.org"
+CL_HOST_LIBERI = ("jamendo.com", "archive.org")   # i soli siti da cui si scaricano brani e copertine
+# formati MP3 di Internet Archive, dal migliore: di ogni brano si prende una versione sola
+CL_IA_FORMATI = ("VBR MP3", "320Kbps MP3", "256Kbps MP3", "224Kbps MP3", "192Kbps MP3", "160Kbps MP3", "128Kbps MP3",
+                 "112Kbps MP3", "96Kbps MP3", "64Kbps MP3", "MP3")
+CL_SEPARATORI = re.compile(r"\s*(?:,|;|&|\+|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b|\bwith\b|\bw/|\bx\b|\be\b|\band\b|"
+                           r"\bvs\b\.?)\s*", re.I)
+BLOCCO = None         # BloccoYouTube, preparato da avvia_classifiche
+CL = None             # Classifiche, se attive
+
+
+class Bloccato(Exception):
+    """YouTube ha bloccato il Mac mini (429, «conferma di non essere un robot»): ci si ferma."""
+
+
+class Rete(Exception):
+    """Un sito che non risponde per un po': si riprova più tardi (un brano resta in coda)."""
+
+
+def _cl_errore_http(e, ricerca):
+    """Un errore HTTP di YouTube: 429 o pagina «non sei un robot» → Bloccato; 5xx (o una ricerca rifiutata) → Rete."""
+    try:
+        corpo = e.read(65536).decode("utf-8", "replace")
+    except Exception:   # noqa: BLE001
+        corpo = ""
+    finally:
+        e.close()
+    testo = "YouTube ha risposto %d %s" % (e.code, e.reason or "")
+    if YT_ROBOT.search(corpo) and e.code in (403, 429):
+        return Bloccato(testo + ": chiede di confermare che non sei un robot")
+    if e.code == 429:
+        return Bloccato(testo)
+    if e.code >= 500 or ricerca:
+        return Rete(testo)
+    return RuntimeError(testo)
+
+
+class BloccoYouTube:
+    """YouTube che blocca il Mac mini: quando, perché e quando riprovare (una prova sola, poi si riparte o si aspetta di
+    più). Su disco: dopo un riavvio si resta fermi. Lo usano le classifiche e i videoclip."""
+
+    def __init__(self, file):
+        self.file = file
+        self.lock = threading.Lock()
+        self.adesso = time.time
+        self.d = {}
+        try:
+            with open(file, encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict) and d.get("prossima"):
+                self.d = d
+        except (OSError, ValueError):
+            pass
+
+    def _salva(self):
+        try:
+            os.makedirs(os.path.dirname(self.file), exist_ok=True)
+            tmp = self.file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.d, f, ensure_ascii=False)
+            os.replace(tmp, self.file)
+        except OSError as e:
+            print("YouTube: stato del blocco non salvato: %s" % e, flush=True)
+
+    def attivo(self):
+        return bool(self.d)
+
+    def e_ora(self):
+        """Bloccato, ed è l'ora della prova."""
+        with self.lock:
+            return bool(self.d) and self.adesso() >= self.d["prossima"]
+
+    def attesa(self):
+        with self.lock:
+            return max(0.0, self.d["prossima"] - self.adesso()) if self.d else 0.0
+
+    def segnala(self, testo):
+        testo = " ".join(str(testo or "YouTube ha bloccato le richieste").split())[:300]
+        with self.lock:
+            ora = self.adesso()
+            n = self.d.get("n", 0) + 1
+            tipo = "robot" if YT_ROBOT.search(testo) else "rallenta"
+            pausa = YT_PAUSE[-1] if tipo == "robot" else YT_PAUSE[min(n, len(YT_PAUSE)) - 1]
+            self.d = {"quando": self.d.get("quando", ora), "ultima": ora, "motivo": testo, "tipo": tipo, "n": n,
+                      "prossima": ora + pausa}
+            self._salva()
+        print("YouTube: bloccato (%s), prossima prova fra %d minuti" % (testo, pausa // 60), flush=True)
+
+    def riuscito(self):
+        with self.lock:
+            if not self.d:
+                return
+            self.d = {}
+            self._salva()
+        print("YouTube: il blocco è finito, si riparte", flush=True)
+
+    def riprova_adesso(self):
+        with self.lock:
+            if self.d:
+                self.d["prossima"] = self.adesso()
+                self._salva()
+
+    def stato(self):
+        with self.lock:
+            return dict(self.d) if self.d else None
+
+
+def _videoclip_fermo():
+    """I videoclip aspettano mentre YouTube blocca: la prova la fanno le classifiche (una sola: la lettura della classifica
+    di YouTube Music), se ci sono; se no la fa il videoclip, quando è l'ora."""
+    return BLOCCO is not None and BLOCCO.attivo() and (CL is not None or not BLOCCO.e_ora())
+
+
+# ----- confronto tra brani scritti in modi diversi -----
+
+def _cl_semplice(s):
+    """Minuscole, senza accenti né segni: «Rosé & Bruno Mars» → «rose and bruno mars» (le altre scritture restano)."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s or "").lower().replace("&", " and "))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[\W_]+", " ", s).split())
+
+
+def _cl_parole(s):
+    return _cl_semplice(s).split()
+
+
+def _cl_principale_testo(artista):
+    """Il primo degli artisti, com'è scritto: «Sfera Ebbasta, Shiva» → «Sfera Ebbasta»."""
+    for p in CL_SEPARATORI.split(str(artista or "").strip()):
+        if p and p.strip():
+            return p.strip()
+    return str(artista or "").strip()
+
+
+def _cl_principale(artista):
+    return _cl_semplice(_cl_principale_testo(artista))
+
+
+def _cl_titolo(t):
+    """Il titolo senza parentesi, aggiunte dopo un trattino e ospiti, tutto attaccato: «FE!N (feat. Playboi Carti)» →
+    «fen». Così si riconosce lo stesso brano scritto in un altro modo."""
+    t = str(t or "")
+    x = re.sub(r"\s*[(\[{][^()\[\]{}]*[)\]}]", " ", t)
+    x = re.sub(r"\s+[-–—]\s+.*$", "", x)
+    x = re.sub(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", "", x, flags=re.I)
+    return re.sub(r"\s+", "", _cl_semplice(x)) or re.sub(r"\s+", "", _cl_semplice(t))
+
+
+def _cl_chiave(artista, titolo):
+    return re.sub(r"\s+", "", _cl_principale(artista)) + "|" + _cl_titolo(titolo)
+
+
+def _cl_dentro(poche, tante):
+    """Le parole `poche` di seguito dentro `tante`."""
+    n = len(poche)
+    return n > 0 and any(tante[i:i + n] == poche for i in range(len(tante) - n + 1))
+
+
+def _cl_unici(brani):
+    """(artista, titolo) puliti e senza doppioni, nell'ordine della fonte."""
+    fuori, visti = [], set()
+    for a, t in brani or ():
+        a, t = " ".join(html.unescape(str(a or "")).split()), " ".join(html.unescape(str(t or "")).split())
+        k = _cl_chiave(a, t)
+        if a and t and k not in visti:
+            visti.add(k)
+            fuori.append((a, t))
+    return fuori
+
+
+# ----- lettori delle fonti: (artista, titolo) da ogni pagina; [] se la pagina ha cambiato forma -----
+
+def _cl_pagina(url):
+    """Testo di una pagina pubblica. Le prove usano pagine finte: ATLANTE_CLASSIFICHE_FINTE=<indirizzo>, che riceve
+    <indirizzo>/<sito>/<percorso>."""
+    finte = os.environ.get("ATLANTE_CLASSIFICHE_FINTE")
+    if finte:
+        u = urlsplit(url)
+        url = finte.rstrip("/") + "/" + u.netloc + u.path + ("?" + u.query if u.query else "")
+    r = urllib.request.Request(url, headers={"User-Agent": BROWSER, "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+                                             "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8"})
+    try:
+        with urllib.request.urlopen(r, timeout=TEMPO_PROXY) as f:
+            dati = f.read(CL_MAX_PAGINA + 1)
+            cs = f.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as e:
+        e.close()
+        raise RuntimeError("il sito ha risposto %d" % e.code)
+    except (OSError, ValueError) as e:
+        raise RuntimeError("sito non raggiungibile: %s" % (getattr(e, "reason", None) or e))
+    if len(dati) > CL_MAX_PAGINA:
+        raise RuntimeError("pagina troppo grande")
+    try:
+        return dati.decode(cs, "replace")
+    except LookupError:
+        return dati.decode("utf-8", "replace")
+
+
+def _cl_testo(s):
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s or "")).split())
+
+
+def _cl_elementi(testo):
+    """Gli elementi di una pagina HTML in ordine: [{tag, classe (« a b »), id, testo, fine}]; testo = tutto quello che
+    contiene; fine = indice dopo l'ultimo elemento che contiene. Il contenuto degli script resta solo allo script."""
+    from html.parser import HTMLParser
+    vuoti = {"br", "img", "meta", "link", "input", "hr", "source", "wbr", "area", "base", "col", "embed", "param", "track"}
+    fuori, pila = [], []
+
+    class P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            e = {"tag": tag, "classe": " %s " % " ".join((a.get("class") or "").split()), "id": a.get("id") or "",
+                 "pezzi": [], "fine": 0}
+            fuori.append(e)
+            if tag in vuoti:
+                e["fine"] = len(fuori)
+            else:
+                pila.append(e)
+
+        def handle_endtag(self, tag):
+            for i in range(len(pila) - 1, -1, -1):
+                if pila[i]["tag"] == tag:
+                    for e in pila[i:]:
+                        e["fine"] = len(fuori)
+                    del pila[i:]
+                    break
+
+        def handle_data(self, d):
+            if pila and pila[-1]["tag"] in ("script", "style"):
+                pila[-1]["pezzi"].append(d)
+            else:
+                for e in pila:
+                    e["pezzi"].append(d)
+    p = P(convert_charrefs=True)
+    try:
+        p.feed(testo or "")
+        p.close()
+    except Exception:   # noqa: BLE001  una pagina rotta dà quello che si è letto fin lì
+        pass
+    for e in pila:
+        e["fine"] = len(fuori)
+    for e in fuori:
+        e["testo"] = " ".join("".join(e.pop("pezzi")).split())
+    return fuori
+
+
+def _cl_kworb(testo):
+    """kworb.net (copia le classifiche di Spotify): righe con «<a artist/…>Artista</a> - <a track/…>Titolo</a>»;
+    gli artisti dopo il titolo («w/ …») sono ospiti."""
+    fuori = []
+    for riga in re.split(r"<tr[\s>]", testo or "", flags=re.I)[1:]:
+        riga = re.split(r"</tr>", riga, maxsplit=1, flags=re.I)[0]
+        artisti, titolo = [], ""
+        for href, dentro in re.findall(r"<a\s[^>]*href=[\"']([^\"']*)[\"'][^>]*>(.*?)</a>", riga, re.I | re.S):
+            if "track/" in href and not titolo:
+                titolo = _cl_testo(dentro)
+            elif "artist/" in href and not titolo:
+                artisti.append(_cl_testo(dentro))
+        if not titolo:   # senza collegamenti: «Artista - Titolo»
+            m = re.search(r"<td[^>]*class=[\"'][^\"']*\btext\b[^\"']*[\"'][^>]*>(.*?)</td>", riga, re.I | re.S)
+            t = _cl_testo(m.group(1)) if m else ""
+            if " - " in t:
+                a, titolo = t.split(" - ", 1)
+                artisti = [a]
+        if titolo and artisti:
+            fuori.append((", ".join(a for a in artisti if a), titolo))
+    return fuori
+
+
+def _cl_billboard(testo):
+    """billboard.com: in ogni riga della classifica il titolo (h3 «title-of-a-story») e subito dopo l'artista."""
+    fuori, riga, titolo = [], False, ""
+    for e in _cl_elementi(testo):
+        c = e["classe"]
+        if " o-chart-results-list-row-container " in c or (e["tag"] == "ul" and " o-chart-results-list-row " in c):
+            riga, titolo = True, ""
+        elif riga and not titolo and e["tag"] == "h3" and (e["id"] == "title-of-a-story" or " c-title " in c):
+            titolo = e["testo"]
+        elif (riga and titolo and e["tag"] == "span" and " c-label " in c and e["testo"]
+              and not re.fullmatch(r"\d+|new|re-?\s?entry|-", e["testo"], re.I)):
+            fuori.append((e["testo"], titolo))
+            riga, titolo = False, ""
+    return fuori or _cl_generico(testo)
+
+
+def _cl_uk(testo):
+    """officialcharts.com: «chart-name» (titolo; un segno «New» sta in un elemento suo) e «chart-artist»."""
+    el = _cl_elementi(testo)
+    fuori, titolo = [], ""
+    for i, e in enumerate(el):
+        if e["tag"] == "a" and " chart-name " in e["classe"]:
+            dentro = [x for x in el[i + 1:e["fine"]] if x["tag"] == "span" and x["testo"]]
+            titolo = dentro[-1]["testo"] if dentro else e["testo"]
+        elif e["tag"] == "a" and " chart-artist " in e["classe"] and titolo:
+            fuori.append((e["testo"], titolo))
+            titolo = ""
+    return fuori or _cl_generico(el)
+
+
+def _cl_fimi(testo):
+    """fimi.it: solo la parte dei singoli (dal titolo «… Singoli» al titolo della classifica dopo), poi tabella o classi."""
+    el = _cl_elementi(testo)
+    titoli = [i for i, e in enumerate(el) if e["tag"] in ("h1", "h2", "h3", "h4")]
+    inizio = next((i for i in titoli if re.search(r"singol", el[i]["testo"], re.I)), None)
+    if inizio is None:
+        return _cl_generico(el)
+    fine = next((i for i in titoli if i > inizio and re.search(r"album|vinil|compilation|vinyl", el[i]["testo"], re.I)), len(el))
+    return _cl_generico(el[inizio:fine])
+
+
+CL_CLASSE_TITOLO = re.compile(r"(?:^|[\s_-])(?:title|titolo|song|brano|track)(?:$|[\s_-])", re.I)
+CL_CLASSE_ARTISTA = re.compile(r"(?:^|[\s_-])(?:artist|artista|artisti|performer|interprete)(?:$|[\s_-])", re.I)
+
+
+def _cl_generico(el):
+    """Righe «titolo e artista» di una pagina qualsiasi: una tabella con le colonne Titolo e Artista, oppure elementi con
+    classi come «title»/«titolo» seguiti da «artist»/«artista». Meno di 5 righe: niente (non è una classifica)."""
+    if isinstance(el, str):
+        el = _cl_elementi(el)
+    fuori, colonne, riga = [], None, None
+
+    def chiudi(riga):
+        nonlocal colonne
+        if not riga:
+            return
+        nomi = [_cl_semplice(x) for x in riga]
+        if colonne is None:
+            t = next((i for i, x in enumerate(nomi) if x in ("titolo", "title", "brano", "song", "track", "titolo brano")), None)
+            a = next((i for i, x in enumerate(nomi) if x in ("artista", "artist", "artisti", "artists", "interprete")), None)
+            if t is not None and a is not None:
+                colonne = (t, a)
+        elif len(riga) > max(colonne) and riga[colonne[0]] and riga[colonne[1]]:
+            fuori.append((riga[colonne[1]], riga[colonne[0]]))
+    for e in el:
+        if e["tag"] == "tr":
+            chiudi(riga)
+            riga = []
+        elif e["tag"] in ("td", "th") and riga is not None:
+            riga.append(e["testo"])
+        elif e["tag"] == "table":
+            chiudi(riga)
+            riga, colonne = None, None
+    chiudi(riga)
+    if len(fuori) >= 5:
+        return fuori
+    fuori, titolo, dopo = [], "", 0
+    for i, e in enumerate(el):
+        if e["tag"] in ("html", "body", "head", "title", "script", "style", "meta", "section", "main"):
+            continue
+        if CL_CLASSE_TITOLO.search(e["classe"]) and e["testo"] and len(e["testo"]) <= 200:
+            titolo, dopo = e["testo"], i
+        elif CL_CLASSE_ARTISTA.search(e["classe"]) and e["testo"] and titolo and i - dopo <= 12:
+            fuori.append((e["testo"], titolo))
+            titolo = ""
+    return fuori if len(fuori) >= 5 else []
+
+
+def _cl_json_pagina(testo):
+    """Gli oggetti JSON di una pagina: tutta la pagina se è JSON, se no quelli negli script."""
+    s = (testo or "").lstrip()
+    if s.startswith(("{", "[")):
+        try:
+            return [json.loads(s)]
+        except ValueError:
+            return []
+    fuori = []
+    for m in re.finditer(r"<script\b[^>]*>(.*?)</script>", testo or "", re.S | re.I):
+        c = m.group(1).strip()
+        if c.startswith(("{", "[")):
+            try:
+                fuori.append(json.loads(c))
+            except ValueError:
+                pass
+    return fuori
+
+
+def _cl_apple(testo):
+    """Apple Music: il feed RSS (JSON, «results») o la pagina della playlist (dati negli script: «artistName» e il
+    titolo; o JSON-LD MusicRecording)."""
+    fuori = []
+
+    def giro(o):
+        if isinstance(o, dict):
+            t = o.get("name") if isinstance(o.get("name"), str) else o.get("title")
+            if isinstance(o.get("artistName"), str) and isinstance(t, str):
+                fuori.append((o["artistName"], t))
+            elif o.get("@type") == "MusicRecording" and isinstance(o.get("name"), str):
+                ba = o.get("byArtist")
+                nomi = [x.get("name") for x in (ba if isinstance(ba, list) else [ba]) if isinstance(x, dict) and x.get("name")]
+                if nomi:
+                    fuori.append((", ".join(nomi), o["name"]))
+            for v in o.values():
+                giro(v)
+        elif isinstance(o, list):
+            for v in o:
+                giro(v)
+    for d in _cl_json_pagina(testo):
+        giro(d)
+    return _cl_unici(fuori)
+
+
+def _cl_ytm(percorso, corpo, extra=""):
+    """Una richiesta all'API web di YouTube Music (browse, search) come la pagina music.youtube.com. Blocco → Bloccato;
+    YouTube o Internet che non rispondono → Rete; una pagina che non c'è (browse) → RuntimeError."""
+    base, client, _ = YOUTUBEI["ytm"]
+    base = os.environ.get("ATLANTE_YOUTUBEI") or base   # le prove usano un YouTube finto
+    corpo = dict(corpo, context={"client": dict(client, hl="it", gl="IT")})
+    r = urllib.request.Request(base + "/youtubei/v1/" + percorso + "?prettyPrint=false" + extra,
+                               data=json.dumps(corpo).encode("utf-8"),
+                               headers={"Content-Type": "application/json", "Origin": base, "User-Agent": BROWSER})
+    try:
+        with urllib.request.urlopen(r, timeout=20) as f:
+            return json.loads(f.read(16 * 1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise _cl_errore_http(e, percorso == "search")
+    except (OSError, ValueError) as e:   # anche i tempi scaduti e le risposte che non sono JSON
+        raise Rete(str(e) or e.__class__.__name__)
+
+
+def _cl_seguito(d):
+    """Il segno per la pagina dopo (playlist lunghe, altri risultati), o ''."""
+    for c in _trova(d, "continuationCommand"):
+        if isinstance(c, dict) and isinstance(c.get("token"), str):
+            return c["token"]
+    for c in _trova(d, "nextContinuationData"):
+        if isinstance(c, dict) and isinstance(c.get("continuation"), str):
+            return c["continuation"]
+    return ""
+
+
+def _cl_brani_ytm(d):
+    return [(b["artista"], b["titolo"]) for b in (_brano_ytm(x) for x in _trova(d, "musicResponsiveListItemRenderer")
+                                                  if isinstance(x, dict)) if b and b["artista"] and b["titolo"]]
+
+
+def _cl_ytm_playlist(bid, pagine=CL_PAGINE_PLAYLIST):
+    d = _cl_ytm("browse", {"browseId": bid if bid.startswith("VL") else "VL" + bid})
+    brani = _cl_brani_ytm(d)
+    for _ in range(pagine - 1):
+        token = _cl_seguito(d)
+        if not token:
+            break
+        d = _cl_ytm("browse", {"continuation": token}, "&ctoken=%s&continuation=%s&type=next" % (quote(token), quote(token)))
+        nuovi = _cl_brani_ytm(d)
+        if not nuovi:
+            break
+        brani += nuovi
+    return brani
+
+
+def _cl_ytm_classifica(paese):
+    """Le classifiche di YouTube Music (FEmusic_charts) per un paese (IT, ZZ = mondo): i brani se la pagina li ha, se no
+    le playlist della classifica («Top 100 brani», poi «Top 100 video musicali»)."""
+    d = _cl_ytm("browse", {"browseId": "FEmusic_charts", "formData": {"selectedValues": [paese]}})
+    brani = _cl_brani_ytm(d)
+    if len(brani) >= 20:
+        return brani
+    playlist = []
+    for it in _trova(d, "musicTwoRowItemRenderer"):
+        if not isinstance(it, dict):
+            continue
+        nome = _corse((it.get("title") or {}).get("runs"))
+        bid = next((x for x in _trova(it.get("navigationEndpoint"), "browseId") if isinstance(x, str)), "")
+        if bid.startswith("VL") and re.search(r"top|brani|songs|video|classific|chart", nome, re.I):
+            playlist.append((0 if re.search(r"brani|songs|canzoni", nome, re.I) else 1, nome, bid))
+    for _, nome, bid in sorted(playlist)[:2]:
+        brani += _cl_ytm_playlist(bid, 2)
+    return brani
+
+
+def _cl_leggi(f):
+    """I brani di una classifica: [(artista, titolo)]."""
+    tipo = f["tipo"]
+    if tipo == "ytm":
+        return _cl_ytm_classifica(f["dove"])
+    lettore = {"kworb": _cl_kworb, "billboard": _cl_billboard, "uk": _cl_uk, "fimi": _cl_fimi, "apple": _cl_apple}[tipo]
+    return lettore(_cl_pagina(f["dove"]))
+
+
+# ----- musica libera: Jamendo e Internet Archive -----
+
+def _uno(v):
+    """Il primo testo di un campo che può essere un testo o un elenco (i metadati di Internet Archive), su una riga."""
+    if isinstance(v, list):
+        v = next((x for x in v if isinstance(x, (str, int)) and str(x).strip()), "")
+    return " ".join(str(v).split()) if isinstance(v, (str, int)) and not isinstance(v, bool) else ""
+
+
+def _jamendo_id():
+    """Il client_id di Jamendo (gratuito, da devportal.jamendo.com) dal servizio del server, o ''. Non si mostra mai."""
+    v = os.environ.get("ATLANTE_JAMENDO_CLIENT_ID", "").strip()
+    return v if re.fullmatch(r"[A-Za-z0-9_-]{4,64}", v) else ""
+
+
+def _cl_api(url):
+    """L'oggetto JSON di un'API pubblica (con le pagine finte delle prove, come _cl_pagina)."""
+    try:
+        d = json.loads(_cl_pagina(url))
+    except ValueError:
+        raise RuntimeError("risposta non leggibile")
+    if not isinstance(d, dict):
+        raise RuntimeError("risposta non leggibile")
+    return d
+
+
+def _cl_licenza_libera(url):
+    """Una licenza che lascia copiare e condividere: Creative Commons o pubblico dominio."""
+    u = str(url or "").lower()
+    return "creativecommons.org/licenses/" in u or "creativecommons.org/publicdomain/" in u
+
+
+def _cl_nome_licenza(url):
+    """«CC BY-NC-SA 3.0» da http://creativecommons.org/licenses/by-nc-sa/3.0/; «CC0»; «Pubblico dominio»."""
+    u = str(url or "").lower()
+    m = re.search(r"creativecommons\.org/licenses/([a-z-]+)/(\d+(?:\.\d+)?)", u)
+    if m:
+        return "CC %s %s" % (m.group(1).upper(), m.group(2))
+    if "publicdomain/zero" in u:
+        return "CC0"
+    if "publicdomain" in u:
+        return "Pubblico dominio"
+    return "Licenza libera" if u else ""
+
+
+def _cl_host_libero(url):
+    """Un indirizzo https di un sito di musica libera (CL_HOST_LIBERI): solo da lì si scarica."""
+    s = urlsplit(str(url or ""))
+    host = (s.hostname or "").lower()
+    return s.scheme == "https" and any(host == d or host.endswith("." + d) for d in CL_HOST_LIBERI)
+
+
+def _cl_jamendo(ordine, quanti):
+    """I brani di Jamendo più ascoltati (ordine: popularity_week, popularity_month…), solo quelli che l'artista lascia
+    scaricare: [{a, t, al, u, lic, pag, img, s}]."""
+    cid = _jamendo_id()
+    if not cid:
+        raise RuntimeError("manca il client_id gratuito di Jamendo: crealo su devportal.jamendo.com e mettilo in "
+                           "ATLANTE_JAMENDO_CLIENT_ID nel servizio del server")
+    quanti = max(1, int(quanti))
+    q = urlencode({"client_id": cid, "format": "json", "limit": min(200, quanti * 2), "order": ordine,
+                   "include": "licenses", "audiodlformat": "mp32", "imagesize": 600})
+    d = _cl_api(JAMENDO_API + "?" + q)
+    h = d.get("headers") if isinstance(d.get("headers"), dict) else {}
+    if h.get("status") not in (None, "success"):
+        motivo = _uno(h.get("error_message")) or _uno(h.get("status"))
+        raise RuntimeError("Jamendo: %s" % motivo.replace(cid, "…"))   # il client_id non esce mai, nemmeno negli errori
+    fuori = []
+    for x in d.get("results") or []:
+        if not isinstance(x, dict) or x.get("audiodownload_allowed") is not True or not _uno(x.get("id")):
+            continue   # l'artista non lascia scaricare il brano
+        u = x.get("audiodownload") if isinstance(x.get("audiodownload"), str) else ""
+        if not _cl_host_libero(u):
+            continue
+        fuori.append({"a": _uno(x.get("artist_name")), "t": _uno(x.get("name")), "al": _uno(x.get("album_name")), "u": u,
+                      "lic": _uno(x.get("license_ccurl")), "pag": _uno(x.get("shareurl")),
+                      "img": _uno(x.get("album_image")) or _uno(x.get("image")), "s": "jamendo:" + _uno(x.get("id"))})
+        if len(fuori) >= quanti:
+            break
+    return fuori
+
+
+def _cl_ia_numero(x):
+    m = re.match(r"\s*(\d+)", _uno(x.get("track")))
+    return int(m.group(1)) if m else 10 ** 6
+
+
+def _cl_archivio(collezione, uscite):
+    """Le uscite di una collezione di Internet Archive più scaricate negli ultimi 7 giorni, solo con licenza Creative
+    Commons o di pubblico dominio: i loro brani MP3 (una versione per brano, al più CL_PER_USCITA per uscita)."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(collezione or "")):
+        raise RuntimeError("collezione non valida")
+    uscite = max(1, int(uscite))
+    q = urlencode([("q", "collection:(%s) AND mediatype:(audio)" % collezione), ("fl[]", "identifier"),
+                   ("fl[]", "title"), ("fl[]", "creator"), ("fl[]", "licenseurl"), ("sort[]", "week desc"),
+                   ("rows", str(uscite * 3)), ("page", "1"), ("output", "json")])
+    d = _cl_api(ARCHIVIO + "/advancedsearch.php?" + q)
+    docs = d.get("response", {}).get("docs") if isinstance(d.get("response"), dict) else None
+    if not isinstance(docs, list):
+        raise RuntimeError("risposta di Internet Archive non leggibile")
+    fuori, lette = [], 0
+    for doc in docs:
+        if lette >= uscite:
+            break
+        ident = _uno(doc.get("identifier")) if isinstance(doc, dict) else ""
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", ident) or not _cl_licenza_libera(_uno(doc.get("licenseurl"))):
+            continue
+        try:
+            m = _cl_api(ARCHIVIO + "/metadata/" + ident)
+        except RuntimeError:
+            continue   # un'uscita che non si legge si salta
+        meta = m.get("metadata") if isinstance(m.get("metadata"), dict) else {}
+        lic = _uno(meta.get("licenseurl")) or _uno(doc.get("licenseurl"))
+        if not _cl_licenza_libera(lic):
+            continue
+        lette += 1
+        artista = _uno(meta.get("creator")) or _uno(doc.get("creator"))
+        album = _uno(meta.get("title")) or _uno(doc.get("title"))
+        scelti = {}   # brano (il file da cui viene la versione) -> (posto del formato, file)
+        for x in m.get("files") or []:
+            nome = x.get("name") if isinstance(x, dict) and isinstance(x.get("name"), str) else ""
+            formato = _uno(x.get("format")) if nome else ""
+            if not nome.lower().endswith(".mp3") or formato not in CL_IA_FORMATI:
+                continue
+            try:
+                if int(x.get("size") or 0) > CL_MAX_FILE:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            chiave = x["original"] if x.get("source") == "derivative" and isinstance(x.get("original"), str) else nome
+            posto = CL_IA_FORMATI.index(formato)
+            if chiave not in scelti or posto < scelti[chiave][0]:
+                scelti[chiave] = (posto, x)
+        brani = sorted((x for _, x in scelti.values()), key=lambda x: (_cl_ia_numero(x), x["name"].lower()))
+        for x in brani[:CL_PER_USCITA]:
+            nome = x["name"]
+            fuori.append({"a": _uno(x.get("creator")) or _uno(x.get("artist")) or artista,
+                          "t": _uno(x.get("title")) or os.path.splitext(os.path.basename(nome))[0], "al": album,
+                          "u": "%s/download/%s/%s" % (ARCHIVIO, ident, quote(nome)), "lic": lic,
+                          "pag": "%s/details/%s" % (ARCHIVIO, ident), "img": "%s/services/img/%s" % (ARCHIVIO, ident),
+                          "s": "archivio:%s/%s" % (ident, nome)})
+    return fuori
+
+
+def _cl_leggi_libera(f):
+    """I brani di una fonte di musica libera: [{a, t, al, u, lic, pag, img, s}]."""
+    if f["tipo"] == "jamendo":
+        return _cl_jamendo(f["dove"], f.get("quanti") or 50)
+    if f["tipo"] == "archivio":
+        return _cl_archivio(f["dove"], f.get("uscite") or 10)
+    raise RuntimeError("fonte sconosciuta: %s" % f["tipo"])
+
+
+def _cl_libere_uniche(voci):
+    """I brani di una fonte libera puliti (artista, titolo, un file da scaricare) e senza doppioni, nell'ordine."""
+    fuori, visti = [], set()
+    for v in voci or ():
+        if not isinstance(v, dict):
+            continue
+        a = " ".join(html.unescape(str(v.get("a") or "")).split())[:300]
+        t = " ".join(html.unescape(str(v.get("t") or "")).split())[:300]
+        k = _cl_chiave(a, t)
+        if a and t and v.get("u") and v.get("s") and k not in visti:
+            visti.add(k)
+            fuori.append(dict(v, a=a, t=t))
+    return fuori
+
+
+class _SoloSitiLiberi(urllib.request.HTTPRedirectHandler):
+    """I reindirizzamenti (Internet Archive manda ai suoi server) restano sui siti di musica libera."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _cl_host_libero(newurl) and not os.environ.get("ATLANTE_CLASSIFICHE_FINTE"):
+            raise urllib.error.HTTPError(newurl, code, "reindirizzato fuori dai siti di musica libera", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _cl_scarica_file(url, dest):
+    """Il file MP3 di un brano da un sito di musica libera, al più CL_MAX_FILE byte. Un sito che non risponde → Rete (il
+    brano resta in coda); un file che non c'è o non è un MP3 → RuntimeError (il brano si salta)."""
+    if not _cl_host_libero(url):
+        raise RuntimeError("indirizzo fuori dai siti di musica libera")
+    finte = os.environ.get("ATLANTE_CLASSIFICHE_FINTE")
+    if finte:   # le prove: lo stesso sito finto delle pagine
+        u = urlsplit(url)
+        url = finte.rstrip("/") + "/" + u.netloc + u.path + ("?" + u.query if u.query else "")
+    r = urllib.request.Request(url, headers={"User-Agent": "AtlanteMusica/1.0"})
+    try:
+        with urllib.request.build_opener(_SoloSitiLiberi).open(r, timeout=60) as f, open(dest, "wb") as fuori:
+            n = 0
+            while True:
+                b = f.read(1 << 20)
+                if not b:
+                    break
+                n += len(b)
+                if n > CL_MAX_FILE:
+                    raise RuntimeError("file troppo grande")
+                fuori.write(b)
+    except urllib.error.HTTPError as e:
+        e.close()
+        if e.code == 429 or e.code >= 500:
+            raise Rete("il sito ha risposto %d" % e.code)
+        raise RuntimeError("il sito ha risposto %d" % e.code)
+    except (OSError, ValueError) as e:   # nome che non si risolve, tempo scaduto, connessione chiusa
+        raise Rete(str(getattr(e, "reason", None) or e) or e.__class__.__name__)
+    with open(dest, "rb") as f:
+        testa = f.read(3)
+    if not (testa.startswith(b"ID3") or (len(testa) >= 2 and testa[0] == 0xFF and testa[1] & 0xE0 == 0xE0)):
+        raise RuntimeError("il file scaricato non è un MP3")
+
+
+def _cl_catalogo():
+    """(firma, [(artista, titolo, id)]) dei brani della libreria: la firma cambia a ogni rilettura del disco."""
+    if LIB is None:
+        return None, []
+    with LIB.blocco:
+        b = LIB.brani
+        return (id(b), len(b), LIB.ultima), [(v.get("artist") or "", v.get("title") or "", v.get("id") or "") for v in b.values()]
+
+
+def _cl_libero():
+    """Byte liberi sul disco della musica scaricata (None se la cartella non è raggiungibile)."""
+    try:
+        return shutil.disk_usage(_cartella_musica()).free
+    except (ErroreExtra, OSError):
+        return None
+
+
+class Classifiche:
+    """Il lavoro in sottofondo: ogni giorno le classifiche (playlist per l'app con i brani che la libreria ha già) e le
+    fonti di musica libera, i cui brani nuovi entrano nella libreria uno alla volta."""
+
+    def __init__(self, cartella, blocco):
+        self.dir = cartella
+        os.makedirs(cartella, exist_ok=True)
+        self.file = os.path.join(cartella, "stato.json")
+        self.file_cercati = os.path.join(cartella, "cercati.jsonl")
+        self.file_elenchi = os.path.join(cartella, "elenchi.json")   # le classifiche come playlist per l'app
+        self.blocco_yt = blocco
+        self.lock = threading.RLock()
+        self.sveglia = threading.Event()
+        self.adesso = time.time
+        self.fonti, self.libere = list(CL_FONTI), list(CL_LIBERE)
+        # quello che va fuori dal Mac mini (le prove lo sostituiscono)
+        self.leggi, self.leggi_libera = _cl_leggi, _cl_leggi_libera
+        self.scarica, self.libero, self.catalogo = self._scarica, _cl_libero, _cl_catalogo
+        self.ora_fa = ""
+        self.avviato = False
+        self._indice, self._firma, self._aggiunti = {}, object(), []
+        self.s = self._carica()
+        # dopo un riavvio le fonti che non si erano lette si riprovano subito: un riavvio di solito ripara qualcosa
+        # (il client_id di Jamendo aggiunto al servizio, la rete tornata)
+        for x in self.s["fonti"].values():
+            if isinstance(x, dict) and x.get("esito") == "errore":
+                x["letta"] = 0
+        # una coda di una versione di prima (brani da cercare su YouTube): restano solo i brani con un file libero
+        self.s["coda"] = [v for v in self.s["coda"] if isinstance(v, dict) and v.get("u") and v.get("s")
+                          and v.get("a") and v.get("t")]
+        try:
+            with open(self.file_elenchi, encoding="utf-8") as f:
+                d = json.load(f)
+            self.elenchi = d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            self.elenchi = {}
+        self.cercati, self.fatti = {}, set()
+        try:
+            with open(self.file_cercati, encoding="utf-8") as f:
+                for riga in f:
+                    try:
+                        x = json.loads(riga)
+                    except ValueError:
+                        continue
+                    if isinstance(x, dict) and x.get("k"):
+                        self.cercati[x["k"]] = x
+                        if x.get("s") and x.get("e") == "aggiunto":
+                            self.fatti.add(x["s"])
+        except OSError:
+            pass
+
+    # ----- stato su disco -----
+
+    def _carica(self):
+        s = {"totale": 0, "giorno": "", "oggi": 0, "coda": [], "fonte": None, "fonti": {}, "ultimi": [], "pausa": None}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+            for k, v in (d.items() if isinstance(d, dict) else ()):
+                if k in s and (s[k] is None or isinstance(v, type(s[k]))):
+                    s[k] = v
+        except (OSError, ValueError):
+            pass
+        return s
+
+    def _salva(self):
+        with self.lock:
+            try:
+                fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".stato.", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(self.s, f, ensure_ascii=False)
+                    os.replace(tmp, self.file)
+                except BaseException:
+                    _cancella(tmp)
+                    raise
+            except OSError as e:   # disco pieno: si va avanti, lo stato si salverà la prossima volta
+                print("Classifiche: stato non salvato: %s" % e, flush=True)
+
+    def _giorno(self):
+        return time.strftime("%Y-%m-%d", time.localtime(self.adesso()))
+
+    def _cercato(self, k, esito, v, errore="", brano=""):
+        """Un brano provato: si ricorda (cercati.jsonl, con l'id del catalogo se è entrato nella libreria) ed esce dalla
+        coda."""
+        x = {"k": k, "e": esito, "t": int(self.adesso()), "a": v["a"][:200], "ti": v["t"][:200], "s": str(v.get("s") or "")[:500]}
+        if brano:
+            x["b"] = brano
+        if errore:
+            x["errore"] = errore[:200]
+        with self.lock:
+            self.cercati[k] = x
+            if esito == "aggiunto" and x["s"]:
+                self.fatti.add(x["s"])
+            try:
+                with open(self.file_cercati, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(x, ensure_ascii=False) + "\n")
+            except OSError as e:
+                print("Classifiche: elenco dei provati non salvato: %s" % e, flush=True)
+            self._togli()
+
+    def _togli(self):
+        with self.lock:
+            if self.s["coda"]:
+                self.s["coda"].pop(0)
+            self._salva()
+
+    def _gia_cercato(self, k, ora):
+        x = self.cercati.get(k)
+        if not x:
+            return False
+        return x.get("e") in ("aggiunto", "doppione") or ora - x.get("t", 0) < CL_RIPROVA_BRANO
+
+    def _pausa(self, motivo, secondi):
+        with self.lock:
+            nuova = not self.s.get("pausa") or self.s["pausa"].get("motivo") != motivo
+            self.s["pausa"] = {"motivo": motivo, "fino": self.adesso() + secondi}
+            self._salva()
+        self.ora_fa = ""
+        if nuova:
+            print("Classifiche: %s" % motivo, flush=True)
+        return secondi
+
+    # ----- la libreria -----
+
+    def _indice_libreria(self):
+        firma, voci = self.catalogo()
+        with self.lock:   # lo usano il lavoro e le richieste dell'app (le classifiche come playlist)
+            if firma != self._firma:
+                indice = {}
+                for v in list(voci) + self._aggiunti:
+                    a, t, i = (tuple(v) + ("",))[:3]
+                    indice.setdefault(_cl_titolo(t), []).append((_cl_parole(a), _cl_principale(a).split(), i))
+                self._indice, self._firma, self._aggiunti = indice, firma, []
+            return self._indice
+
+    def _trova_in_libreria(self, artista, titolo):
+        """L'id del brano nel catalogo se c'è già (stesso titolo scritto anche in un altro modo, e l'artista principale
+        tra gli esecutori), se no None."""
+        t = _cl_titolo(titolo)
+        if not t:
+            return None
+        p, tutti = _cl_principale(artista).split(), _cl_parole(artista)
+        for parole, princ, i in self._indice_libreria().get(t, ()):
+            if _cl_dentro(p, parole) or _cl_dentro(princ, tutti):
+                return i
+        return None
+
+    def _in_libreria(self, artista, titolo):
+        return self._trova_in_libreria(artista, titolo) is not None
+
+    # ----- il lavoro -----
+
+    def avvia(self):
+        with self.lock:
+            if self.avviato:
+                return
+            self.avviato = True
+        threading.Thread(target=self._lavora, daemon=True).start()
+
+    def _lavora(self):
+        while True:
+            try:
+                attesa = self.passo()
+            except Exception as e:   # noqa: BLE001  un errore imprevisto non ferma il lavoro per sempre
+                print("Classifiche: errore: %s" % e, flush=True)
+                attesa = 60
+            if attesa > 0:
+                self.sveglia.wait(attesa)
+                self.sveglia.clear()
+
+    def riprova_adesso(self):
+        """«Riprova adesso» in Gestione: la pausa finisce, la classifica di YouTube Music si riprova subito (se YouTube
+        bloccava) e le fonti che non si sono lette si rileggono."""
+        self.blocco_yt.riprova_adesso()
+        with self.lock:
+            self.s["pausa"] = None
+            for x in self.s["fonti"].values():
+                if isinstance(x, dict) and x.get("esito") == "errore":
+                    x["letta"] = 0
+            self._salva()
+        self.sveglia.set()
+
+    def _libera(self, f):
+        return any(f["id"] == x["id"] for x in self.libere)
+
+    def passo(self):
+        """Un passo del lavoro (la lettura di una fonte o un brano): restituisce i secondi da aspettare prima del prossimo."""
+        ora = self.adesso()
+        with self.lock:
+            p = self.s.get("pausa")
+            if p and ora < p.get("fino", 0):
+                return max(1.0, min(600.0, p["fino"] - ora))
+            self.s["pausa"] = None
+        f = self._da_leggere_adesso(ora)   # le fonti appena è ora: i nuovi ingressi arrivano subito
+        if f is not None:
+            self._leggi_fonte(f, ora)
+            return 0
+        if self.s["coda"]:
+            return self._brano(ora)
+        self.ora_fa = "Tutto fatto: aspetto le classifiche nuove"
+        if self.blocco_yt.attivo():   # la classifica di YouTube Music si riprova quando è l'ora
+            return max(1.0, min(3600.0, self.blocco_yt.attesa()))
+        return 3600
+
+    def _brano(self, ora):
+        v = self.s["coda"][0]
+        k = _cl_chiave(v["a"], v["t"])
+        if v["s"] in self.fatti or self._gia_cercato(k, ora) or self._in_libreria(v["a"], v["t"]):
+            self._togli()
+            return 0
+        libero = self.libero()
+        if libero is None:
+            return self._pausa("La cartella della musica non è raggiungibile (il Cloud è collegato?): riprovo fra "
+                               "mezz'ora", 1800)
+        if libero < CL_SPAZIO_MIN:
+            return self._pausa("Meno di %d GB liberi sul disco della musica (%d GB): fermo, riprovo fra mezz'ora"
+                               % (CL_SPAZIO_MIN // 1024 ** 3, libero // 1024 ** 3), 1800)
+        self.ora_fa = "Scarico «%s» di %s" % (v["t"], v["a"])
+        try:
+            x = self.scarica(v)
+        except ErroreExtra as e:   # la cartella della musica non c'è più (disco scollegato)
+            return self._pausa(e.testo, 1800)
+        except Rete as e:   # il sito non risponde: il brano resta in coda
+            sito = (urlsplit(v["u"]).hostname or "").lower()
+            return self._pausa("Il sito %s non risponde (%s): riprovo fra poco" % (sito, e), CL_RETE)
+        except Exception as e:   # noqa: BLE001  un brano che non si scarica (tolto dal sito…) si salta
+            self._cercato(k, "errore", v, str(e))
+            print("Classifiche: «%s» di %s non scaricato: %s" % (v["t"], v["a"], e), flush=True)
+            return CL_PAUSA
+        with self.lock:
+            g = self._giorno()
+            if self.s["giorno"] != g:
+                self.s["giorno"], self.s["oggi"] = g, 0
+            self.s["oggi"] += 1
+            self.s["totale"] += 1
+            self.s["ultimi"] = ([{"titolo": v["t"], "artista": v["a"], "album": v.get("al") or "", "fonte": v.get("f") or "",
+                                  "quando": int(ora), "brano": x.get("brano") or "", "licenza": _cl_nome_licenza(v.get("lic")),
+                                  "licenza_url": v.get("lic") or "", "pagina": v.get("pag") or ""}]
+                                + self.s["ultimi"])[:CL_ULTIMI]
+            self._aggiunti.append((v["a"], v["t"], x.get("brano") or ""))
+            self._indice.setdefault(_cl_titolo(v["t"]), []).append((_cl_parole(v["a"]), _cl_principale(v["a"]).split(),
+                                                                   x.get("brano") or ""))
+        self._cercato(k, "aggiunto", v, brano=x.get("brano") or "")
+        print("Classifiche: aggiunto «%s» di %s (%s, %s)" % (v["t"], v["a"], v.get("f") or "",
+                                                            _cl_nome_licenza(v.get("lic")) or "licenza libera"), flush=True)
+        return CL_PAUSA
+
+    def _scarica(self, v):
+        """Il brano dal sito di musica libera in «Musica libera» dentro la cartella della musica scaricata: il file com'è
+        (MP3, senza ricodificarlo) con titolo, artista, album, copertina, licenza e pagina d'origine nei tag.
+        -> {nome, brano, percorso}"""
+        dest = os.path.join(_cartella_musica(), "Musica libera")   # disco scollegato: ErroreExtra (pausa), prima
+        os.makedirs(dest, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="libera-", dir=_cartella_tmp())
+        parziale = os.path.join(dest, ".libera-%s.tmp" % secrets.token_hex(6))   # col punto davanti la libreria non lo legge
+        try:
+            sorgente = os.path.join(tmp, "brano.mp3")
+            _cl_scarica_file(v["u"], sorgente)
+            nome = _nome_file("%s - %s" % (v["a"], v["t"]), 180) or "brano"
+            ff = _programma("ffmpeg")
+            if ff:
+                lic = v.get("lic") or ""
+                nota = "%s · %s · %s" % (v.get("f") or "Musica libera", _cl_nome_licenza(lic) or "licenza libera",
+                                         v.get("pag") or lic)
+                tag = {"title": v["t"], "artist": v["a"], "album": v.get("al") or "", "copyright": lic, "comment": nota,
+                       "purl": v.get("pag") or ""}
+                copertina = os.path.join(tmp, "copertina.img")
+                if not (v.get("img") and _scarica_immagine(v["img"], copertina, CL_HOST_LIBERI)):
+                    copertina = ""
+                try:
+                    _mp3(ff, sorgente, copertina, tag, parziale, copia=True)
+                except RuntimeError:
+                    if not copertina:
+                        raise
+                    _mp3(ff, sorgente, "", tag, parziale, copia=True)   # immagine che ffmpeg non legge: senza copertina
+            else:   # senza ffmpeg il file com'è, con i tag che ha già
+                shutil.copyfile(sorgente, parziale)
+            finale = _libero(os.path.join(dest, nome + ".mp3"))
+            os.replace(parziale, finale)
+            return {"nome": os.path.basename(finale), "brano": _in_libreria(finale), "percorso": finale}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            _cancella(parziale)   # non riuscito a metà
+
+    # ----- le fonti -----
+
+    def _da_leggere(self, fid, ogni, ora):
+        x = self.s["fonti"].get(fid)
+        if not x:
+            return True
+        return ora - x.get("letta", 0) >= (ogni if x.get("esito") == "ok" else CL_RIPROVA_FONTE)
+
+    def _da_leggere_adesso(self, ora):
+        """La prossima fonte da leggere: prima le classifiche, poi la musica libera. Mentre YouTube blocca, la classifica
+        di YouTube Music aspetta l'ora della prova; le altre vanno avanti."""
+        b = self.blocco_yt
+        for f in list(self.fonti) + list(self.libere):
+            if f["tipo"] == "ytm" and b.attivo():
+                if b.e_ora():
+                    return f   # la prova: la lettura stessa della classifica
+                continue
+            if self._da_leggere(f["id"], CL_CLASSIFICHE_OGNI, ora):
+                return f
+        return None
+
+    def _leggi_fonte(self, f, ora):
+        libera = self._libera(f)
+        with self.lock:
+            self.s["fonte"] = {"id": f["id"], "nome": f["nome"]}
+        self.ora_fa = "Leggo %s" % f["nome"]
+        errore = motivo = ""
+        try:
+            voci = self.leggi_libera(f) if libera else self.leggi(f)
+            if f["tipo"] == "ytm":
+                self.blocco_yt.riuscito()   # YouTube ha risposto: se c'era un blocco, è finito
+        except Bloccato as e:   # la classifica di YouTube Music aspetta la fine del blocco; il resto va avanti
+            self.blocco_yt.segnala(str(e))
+            return
+        except Rete as e:
+            voci, errore, motivo = [], "sito non raggiungibile", str(e) or "sito non raggiungibile"
+        except Exception as e:   # noqa: BLE001  una fonte che non si legge si salta (e si dice in Gestione)
+            voci, errore = [], str(e) or e.__class__.__name__
+            motivo = errore
+        if f["tipo"] == "ytm" and errore and self.blocco_yt.attivo():
+            # la prova durante un blocco non è riuscita in un altro modo (YouTube o la rete rispondono male): si riprova
+            # più tardi, con la pausa che cresce. Senza questo la prova si ripeterebbe subito, senza fine.
+            self.blocco_yt.segnala("prova non riuscita: %s" % motivo)
+            return
+        voci = _cl_libere_uniche(voci) if libera else [{"a": a, "t": t} for a, t in _cl_unici(voci)]
+        if f.get("quanti"):
+            voci = voci[:f["quanti"]]
+        with self.lock:
+            if voci:
+                self.s["fonti"][f["id"]] = {"nome": f["nome"], "letta": int(ora), "esito": "ok", "errore": "",
+                                            "brani": len(voci)}
+                if libera:   # i brani nuovi in coda, uno solo per file (le classifiche della settimana e del mese si somigliano)
+                    in_coda = {v.get("s") for v in self.s["coda"]}
+                    for v in voci:
+                        if (v["s"] not in in_coda and v["s"] not in self.fatti
+                                and not self._gia_cercato(_cl_chiave(v["a"], v["t"]), ora) and not self._in_libreria(v["a"], v["t"])):
+                            self.s["coda"].append(dict({k: v[k] for k in ("a", "t", "al", "u", "lic", "pag", "img", "s")
+                                                        if v.get(k)}, f=f["nome"]))
+                            in_coda.add(v["s"])
+                self._aggiorna_elenco(f, [(v["a"], v["t"]) for v in voci], ora)
+            else:
+                errore = errore or "pagina letta ma senza brani: forse il sito ha cambiato forma"
+                self.s["fonti"][f["id"]] = {"nome": f["nome"], "letta": int(ora), "esito": "errore",
+                                            "errore": errore[:300], "brani": 0}
+                print("Classifiche: %s non letta: %s" % (f["nome"], errore), flush=True)
+            self._salva()
+
+    # ----- le classifiche come playlist dell'app -----
+
+    def _aggiorna_elenco(self, f, brani, ora):
+        """La classifica letta: se è cambiata, quella di prima diventa il confronto (▲▼, «nuovo») e chi è uscito va tra
+        gli «Usciti di recente». Riletta uguale (le classifiche cambiano una volta alla settimana) resta com'era."""
+        e = self.elenchi.get(f["id"]) or {}
+        voci = [{"a": a, "t": t, "k": _cl_chiave(a, t)} for a, t in brani]
+        prima = e.get("brani") or []
+        if [v["k"] for v in voci] != [v.get("k") for v in prima]:
+            ora_dentro = {v["k"] for v in voci}
+            usciti = [{"a": v["a"], "t": v["t"], "k": v["k"], "pos": i + 1, "quando": int(ora)}
+                      for i, v in enumerate(prima) if v.get("k") not in ora_dentro]
+            usciti += [u for u in e.get("usciti") or [] if u.get("k") not in ora_dentro and ora - u.get("quando", 0) < CL_USCITI]
+            e = {"brani": voci, "cambiata": int(ora), "usciti": usciti,
+                 "prima": {v["k"]: i + 1 for i, v in enumerate(prima)} if prima else None}
+        e.update(nome=f["nome"], letta=int(ora))
+        self.elenchi[f["id"]] = e
+        try:
+            with open(self.file_elenchi + ".tmp", "w", encoding="utf-8") as fh:
+                json.dump(self.elenchi, fh, ensure_ascii=False)
+            os.replace(self.file_elenchi + ".tmp", self.file_elenchi)
+        except OSError as err:
+            print("Classifiche: classifiche per l'app non salvate: %s" % err, flush=True)
+
+    def _voce_app(self, v, ora, libera):
+        """Un brano di una classifica per l'app: il suo id nel catalogo («libreria»); se no, per le classifiche
+        commerciali «non in libreria»; per la musica libera «in arrivo» (ancora da scaricare) o «non disponibile» (non si
+        è scaricato: si riprova dopo tre mesi)."""
+        i = self._trova_in_libreria(v["a"], v["t"])
+        c = self.cercati.get(v.get("k")) or {}
+        if i is None and c.get("e") in ("aggiunto", "doppione"):
+            i = c.get("b") or ""   # scaricato con un titolo scritto in un altro modo
+        if i is not None:
+            stato = "libreria"
+        elif not libera:
+            stato = "non in libreria"
+        elif c and self._gia_cercato(v["k"], ora):
+            stato = "non disponibile"
+        else:
+            stato = "in arrivo"
+        return {"artista": v["a"], "titolo": v["t"], "brano": i or "", "stato": stato}
+
+    def classifiche_app(self):
+        """Le classifiche lette, come playlist per l'app di tutti: posizioni, ▲▼ e «nuovo» rispetto alla classifica di
+        prima, ogni brano nella libreria o no, e gli usciti delle ultime 4 settimane. Prima le classifiche, poi quelle di
+        musica libera («libera»)."""
+        ora = self.adesso()
+        fuori = []
+        with self.lock:
+            for f in list(self.fonti) + list(self.libere):
+                e = self.elenchi.get(f["id"])
+                if not e or not e.get("brani"):
+                    continue
+                libera = self._libera(f)
+                prima = e.get("prima")
+                brani = []
+                for n, v in enumerate(e["brani"], 1):
+                    b = dict(self._voce_app(v, ora, libera), pos=n, segno="", di=0)
+                    if prima is not None:
+                        p = prima.get(v["k"])
+                        b["segno"], b["di"] = ("nuovo", 0) if p is None else (
+                            "su" if p > n else "giu" if p < n else "uguale", abs(p - n))
+                    brani.append(b)
+                usciti = [dict(self._voce_app(u, ora, libera), pos=u.get("pos", 0), uscito=u.get("quando", 0))
+                          for u in e.get("usciti") or [] if ora - u.get("quando", 0) < CL_USCITI]
+                fuori.append({"id": f["id"], "nome": f["nome"], "libera": libera, "letta": e.get("letta", 0),
+                              "cambiata": e.get("cambiata", 0), "brani": brani, "usciti": usciti})
+        return {"classifiche": fuori}
+
+    # ----- per la Gestione -----
+
+    def riassunto(self):
+        ora = self.adesso()
+        with self.lock:
+            s = self.s
+            pausa = dict(s["pausa"]) if s.get("pausa") and s["pausa"].get("fino", 0) > ora else None
+
+            def riga(f):
+                x = s["fonti"].get(f["id"]) or {}
+                return {"id": f["id"], "nome": f["nome"], "letta": x.get("letta", 0), "esito": x.get("esito", ""),
+                        "errore": x.get("errore", ""), "brani": x.get("brani", 0)}
+            fonte = dict(s["fonte"], in_coda=len(s["coda"])) if s.get("fonte") else None
+            if s["coda"]:   # la fonte del brano che si fa adesso
+                fonte = {"nome": s["coda"][0].get("f") or "", "in_coda": len(s["coda"])}
+            r = {"attivo": True, "oggi": s["oggi"] if s["giorno"] == self._giorno() else 0, "totale": s["totale"],
+                 "ora": self.ora_fa, "fonte": fonte, "pausa": pausa, "ultimi": [dict(u) for u in s["ultimi"]],
+                 "classifiche": [riga(f) for f in self.fonti], "libere": [riga(f) for f in self.libere],
+                 "provati": len(self.cercati), "jamendo": bool(_jamendo_id())}
+        r["blocco"] = self.blocco_yt.stato()
+        libero = _con_limite(self.libero, 3)
+        r["spazio_libero_gb"] = round(libero / 1024 ** 3, 1) if libero is not None else None
+        r["spazio_min_gb"] = round(CL_SPAZIO_MIN / 1024 ** 3)
+        return r
+
+
+def avvia_classifiche(cache, attive):
+    """Il blocco di YouTube (lo rispettano tutti i lavori in sottofondo) e, se attive, le classifiche."""
+    global BLOCCO, CL
+    base = os.path.join(os.path.abspath(os.path.expanduser(cache)), "extra")
+    BLOCCO = BloccoYouTube(os.path.join(base, "youtube-blocco.json"))
+    if attive:
+        CL = Classifiche(os.path.join(base, "classifiche"), BLOCCO)
+        CL.avvia()
+        print("Classifiche: attive (stato in %s)" % CL.dir, flush=True)
+
+
+def _gestione_classifiche(h, metodo, resto, corpo):
+    """Gestione → Classifiche e playlist (solo Samuele, come tutta la Gestione)."""
+    if not resto and metodo == "GET":
+        return _json(h, CL.riassunto() if CL else {"attivo": False, "blocco": BLOCCO.stato() if BLOCCO else None})
+    if resto == ["riprova"] and metodo == "POST":
+        if CL is not None:
+            CL.riprova_adesso()
+        elif BLOCCO is not None:
+            BLOCCO.riprova_adesso()
+        if CLIP is not None:
+            CLIP.sveglia.set()
+        return _json(h, {"ok": True})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/classifiche/%s" % "/".join(resto))
+
+
+# ----- brani ascoltati: classifiche e consigli tra le persone -----
+#
+# L'app dice al Mac mini quando un brano del catalogo ha suonato davvero (la stessa regola che lo salva sul telefono).
+# Qui si contano gli ascolti per persona ("p" = Samuele, anche dalla rete di casa; l'id per un invitato) e per giorno, in
+# <cache>/ascoltati.json (lo legge solo il proprietario), al più per 2 anni. Da lì:
+#   - «I più ascoltati in Atlante» della settimana e del mese (ultimi 7 e 30 giorni): ogni persona conta al più
+#     ASCOLTATI_TETTO volte per brano a settimana, così chi ripete un brano tutto il giorno non lo porta da solo in cima;
+#   - «Chi ascolta questo brano ascolta anche…»;
+#   - «Per te»: somiglianza del coseno tra le persone, poi i brani delle più simili mai sentiti (ricalcolo ogni notte);
+#   - «Cosa ascolta Anna» e «Consigliato da Anna» solo per chi accende «Condividi i miei ascolti».
+# Nelle parti anonime un brano compare solo se l'hanno ascoltato almeno ASCOLTATI_SOGLIA persone diverse: con poche
+# persone un «chi ascolta questo ascolta anche…» direbbe chi è stato. Nessuna rotta dà ad altri (Samuele compreso) gli
+# ascolti di una persona che non li condivide. Una persona revocata esce subito da tutto, e di notte anche dal file.
+#
+#   GET    ascoltati                      {io, settimana, mese, per_te, condivisi, soglia, giorno} per chi chiede
+#   POST   ascoltati {ascolti:[{brano, giorno}]}  (o {brano, giorno}) -> {contati, scartati}
+#   POST   ascoltati/condividi {si}       -> {condivido}
+#   DELETE ascoltati                      cancella dal Mac mini i propri ascolti -> {ok, cancellati}
+#   GET    ascoltati/anche/<brano>        -> {brani:[...]}
+
+ASCOLTATI = None                  # Ascoltati, preparato da main() con avvia_ascoltati
+ASCOLTATI_GIORNI = 730            # al più 2 anni di ascolti
+ASCOLTATI_SOGLIA = 3              # persone diverse perché un brano compaia nelle parti anonime (soglia da confermare)
+ASCOLTATI_TETTO = 3               # volte che una persona conta per un brano in una settimana
+ASCOLTATI_SETTIMANA = 7
+ASCOLTATI_MESE = 30
+ASCOLTATI_GIORNO_MAX = 1000       # ascolti contati per persona in un giorno (un'app impazzita non riempie il file)
+ASCOLTATI_LOTTO = 500             # ascolti in una richiesta (quelli fatti senza rete arrivano insieme)
+ASCOLTATI_SALVA = 5               # secondi: le scritture vicine (tanti ascolti insieme) diventano una sola
+ASCOLTATI_ELENCO = 50             # brani di una classifica
+ASCOLTATI_PER_TE = 30
+ASCOLTATI_ANCHE = 20
+ASCOLTATI_CONDIVISI = 20          # brani di «Cosa ascolta Anna»
+ASCOLTATI_VICINI = 20             # persone più simili da cui vengono i consigli
+ASCOLTATI_TENUTI = 300            # brani candidati tenuti per persona tra un calcolo e l'altro
+ASCOLTATI_RICHIESTA = 600         # secondi: chi non aveva consigli li richiede al più così spesso (prima della notte)
+ASCOLTATI_NOTTE = 4               # ora del ricalcolo dei consigli
+ASCOLTATI_ID = re.compile(r"^[0-9a-f]{16}$")   # id di un brano del catalogo
+
+
+def _asc_giorno(k=0):
+    """Il giorno di k giorni fa (0 = oggi, -1 = domani; ora del Mac) come «AAAA-MM-GG»."""
+    t = time.localtime(time.time())
+    return time.strftime("%Y-%m-%d", time.localtime(time.mktime((t.tm_year, t.tm_mon, t.tm_mday - k, 12, 0, 0, 0, 0, -1))))
+
+
+def _asc_persone():
+    """Chi conta: Samuele ("p") e gli invitati non revocati; None se non si sa (archivio delle persone illeggibile)."""
+    if PERS is None:
+        return None
+    ids = {x["id"] for x in PERS.elenco()["persone"]}
+    return None if PERS.rotto and not ids else ids | {"p"}
+
+
+def _asc_nome(pid):
+    return "Samuele" if pid == "p" else (PERS.nome(pid) if PERS is not None else "")
+
+
+_ASC_CAT = [None, 0, {}]   # (indice della libreria, brani, {id: voce}): si rifà quando il Mac rilegge il disco
+
+
+def _asc_catalogo():
+    """I brani noti al Mac, anche di un disco scollegato (ascolti fatti senza rete dai brani sul telefono): per scartare
+    gli id inventati e per i titoli."""
+    if LIB is None:
+        return None
+    v, n = LIB.vecchie, len(LIB.brani)
+    if _ASC_CAT[0] is not v or _ASC_CAT[1] != n:
+        d = {x["id"]: x for x in list(v.values())}
+        d.update(LIB.brani)
+        _ASC_CAT[:] = [v, n, d]
+    return _ASC_CAT[2]
+
+
+def _asc_consigli(chi, vett):
+    """Consigli per le persone `chi`: somiglianza del coseno tra i loro ascolti e quelli degli altri, poi i brani delle
+    ASCOLTATI_VICINI persone più simili che loro non hanno mai sentito, ognuno con il contributo di ogni persona simile.
+    -> ({persona: {brano: {vicino: punteggio}}}, {brano: persone che l'hanno ascoltato})"""
+    norme = {p: math.sqrt(sum(x * x for x in v.values())) for p, v in vett.items()}
+    asc = {}
+    for p, v in vett.items():
+        for b in v:
+            asc.setdefault(b, set()).add(p)
+    consigli = {}
+    for u in chi:
+        vu = vett.get(u)
+        if not vu:
+            consigli[u] = {}
+            continue
+        simili = []
+        for p, v in vett.items():
+            if p == u:
+                continue
+            a, b = (vu, v) if len(vu) <= len(v) else (v, vu)
+            dot = sum(x * b.get(k, 0) for k, x in a.items())
+            if dot > 0:
+                simili.append((dot / (norme[u] * norme[p]), p))
+        simili.sort(key=lambda x: (-x[0], x[1]))
+        contributi = {}
+        for s, p in simili[:ASCOLTATI_VICINI]:
+            for b, x in vett[p].items():
+                if b not in vu:
+                    contributi.setdefault(b, {})[p] = s * x
+        # si tengono i migliori: quelli che già ora si possono mostrare e, a parte, quelli di una persona sola (si
+        # mostrano se lei accende la condivisione)
+        ordine = sorted(contributi, key=lambda b: (-sum(contributi[b].values()), b))
+        tenuti = [b for b in ordine if len(asc[b]) >= ASCOLTATI_SOGLIA][:ASCOLTATI_TENUTI]
+        tenuti += [b for b in ordine if len(asc[b]) < ASCOLTATI_SOGLIA][:ASCOLTATI_TENUTI]
+        consigli[u] = {b: contributi[b] for b in tenuti}
+    return consigli, asc
+
+
+def _asc_dormi_fino(ora):
+    t = time.localtime()
+    fine = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, ora, 0, 0, 0, 0, -1))
+    if fine <= time.time() + 60:
+        fine = time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, ora, 0, 0, 0, 0, -1))
+    while time.time() < fine:   # a pezzi: dopo uno stop del Mac conta l'orologio, non il tempo passato sveglio
+        time.sleep(min(600, max(1, fine - time.time())))
+
+
+class Ascoltati:
+    """Ascolti per persona e giorno ({persona: {giorno: {brano: volte}}}), chi li condivide e i consigli calcolati.
+    `persone`, `nome` e `catalogo` (per le prove) sostituiscono l'archivio delle persone e la libreria del Mac."""
+
+    def __init__(self, file, persone=None, nome=None, catalogo=None):
+        self.file = file
+        self.blocco = threading.RLock()
+        self.persone = persone or _asc_persone
+        self._sicuro = (lambda: True) if persone else (lambda: PERS is not None and not PERS.rotto)
+        self.nome = nome or _asc_nome
+        self.catalogo = catalogo or _asc_catalogo
+        self.conti, self.condivide = {}, {}
+        self.versione, self.salvato, self._sporco, self._timer = 0, 0.0, False, None
+        self._oggi, self._domani, self._g, self._k = None, None, [], {}   # giorni dal più recente; giorno -> giorni fa
+        self._vett = {}       # persona -> {brano: ascolti dei 2 anni, al più ASCOLTATI_TETTO a settimana}
+        self.consigli, self.ascoltatori, self.calcolati = {}, {}, {}
+        self._durante = None    # chi cancella i suoi ascolti mentre si ricalcolano i consigli
+        self._cache = None
+        self._leggi()
+
+    # --- file ---
+
+    def _leggi(self):
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("non è un oggetto")
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            # rovinato: lo si mette da parte invece di sovrascriverlo con un archivio vuoto
+            print("Atlante: %s non si legge (%s): lo metto da parte in .rotto" % (self.file, e), flush=True)
+            try:
+                os.replace(self.file, self.file + ".rotto")
+            except OSError:
+                pass
+            return
+        conti = d.get("conti") if isinstance(d.get("conti"), dict) else {}
+        for p, giorni in conti.items():
+            for g, brani in (giorni.items() if isinstance(giorni, dict) else ()):
+                buoni = {b: n for b, n in (brani.items() if isinstance(brani, dict) else ())
+                         if ASCOLTATI_ID.match(str(b)) and type(n) is int and n > 0}
+                if buoni:
+                    self.conti.setdefault(str(p), {})[str(g)] = buoni
+        if isinstance(d.get("condivide"), dict):
+            self.condivide = {str(p): t for p, t in d["condivide"].items()}
+
+    def _scrivi(self):
+        self._sporco, self.salvato = False, time.time()
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"versione": 1, "conti": self.conti, "condivide": self.condivide}, f, ensure_ascii=False,
+                          separators=(",", ":"))
+            os.replace(tmp, self.file)
+        except BaseException:
+            self._sporco = True
+            _cancella(tmp)
+            raise
+
+    def _salva_presto(self):
+        """Su disco subito, o al più tardi tra ASCOLTATI_SALVA secondi se si è appena scritto."""
+        self._sporco = True
+        attesa = self.salvato + ASCOLTATI_SALVA - time.time()
+        try:
+            if attesa <= 0:
+                self._scrivi()
+                return
+        except OSError as e:   # disco pieno: gli ascolti restano in memoria, si riprova alla prossima
+            print("Atlante: ascolti non salvati: %s" % e, flush=True)
+            attesa = ASCOLTATI_SALVA
+        if self._timer is None:
+            self._timer = threading.Timer(attesa, self._salva_dopo)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _salva_dopo(self):
+        with self.blocco:
+            self._timer = None
+            if self._sporco:
+                try:
+                    self._scrivi()
+                except OSError as e:
+                    print("Atlante: ascolti non salvati: %s" % e, flush=True)
+
+    def salva(self):
+        with self.blocco:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self._sporco:
+                self._scrivi()
+
+    # --- conti ---
+
+    def _giorno_nuovo(self):
+        """A ogni giorno nuovo le settimane (contate all'indietro da oggi) cambiano: si rifanno i conti dei 2 anni."""
+        oggi = _asc_giorno(0)
+        if oggi == self._oggi:
+            return
+        self._g = [_asc_giorno(k) for k in range(ASCOLTATI_GIORNI)]
+        self._k = {g: k for k, g in enumerate(self._g)}
+        self._oggi, self._domani = oggi, _asc_giorno(-1)
+        self._vett = {p: self._vettore(p) for p in self.conti}
+        self._cache = None
+
+    def _vettore(self, p, giorni=None):
+        """{brano: ascolti} di una persona negli ultimi `giorni` giorni (i 2 anni se None), al più ASCOLTATI_TETTO per
+        brano in ogni settimana."""
+        mie, blocchi = self.conti.get(p, {}), {}
+        el = ((self._k.get(g), br) for g, br in mie.items()) if giorni is None else ((k, mie.get(self._g[k])) for k in range(giorni))
+        for k, br in el:
+            if k is None or not br:
+                continue
+            for b, n in br.items():
+                blocchi[(b, k // 7)] = blocchi.get((b, k // 7), 0) + n
+        v = {}
+        for (b, _), n in blocchi.items():
+            v[b] = v.get(b, 0) + min(ASCOLTATI_TETTO, n)
+        return v
+
+    def _valide(self):
+        chi = self.persone()
+        return {p for p in self.conti if chi is None or p in chi}
+
+    def ascolta(self, pid, voci):
+        """Ascolti di una persona: [{brano, giorno «AAAA-MM-GG» (oggi se manca)}]. -> (contati, scartati)"""
+        with self.blocco:
+            self._giorno_nuovo()
+            chi = self.persone()
+            if chi is not None and pid not in chi:
+                return 0, len(voci)
+            cat = self.catalogo() or {}
+            giorni, contati = self.conti.setdefault(pid, {}), 0
+            for x in voci:
+                b = x.get("brano") if isinstance(x, dict) else None
+                g = (x.get("giorno") or self._oggi) if isinstance(x, dict) else None
+                if g == self._domani:
+                    g = self._oggi   # telefono in un altro fuso orario: per il Mac è ancora oggi
+                if not isinstance(b, str) or not ASCOLTATI_ID.match(b) or not isinstance(g, str) or g not in self._k \
+                        or (cat and b not in cat) or sum(giorni.get(g, {}).values()) >= ASCOLTATI_GIORNO_MAX:
+                    continue
+                s = self._k[g] // 7   # la sua settimana: il tetto vale lì
+                prima = sum(giorni.get(self._g[k], {}).get(b, 0) for k in range(s * 7, min(s * 7 + 7, ASCOLTATI_GIORNI)))
+                br = giorni.setdefault(g, {})
+                br[b] = br.get(b, 0) + 1
+                if prima < ASCOLTATI_TETTO:
+                    v = self._vett.setdefault(pid, {})
+                    v[b] = v.get(b, 0) + 1
+                contati += 1
+            if not giorni:
+                del self.conti[pid]
+            if contati:
+                self.versione += 1
+                self._salva_presto()
+            return contati, len(voci) - contati
+
+    def condividi(self, pid, si):
+        with self.blocco:
+            if si:
+                self.condivide.setdefault(pid, time.time())
+            else:
+                self.condivide.pop(pid, None)
+            self.versione += 1
+            self._scrivi()   # subito: chi la spegne vuole che il nome sparisca, anche dopo un riavvio del Mac
+            return pid in self.condivide
+
+    def _dimentica(self, pid):
+        """Via una persona dai consigli già calcolati: i suoi e il suo contributo a quelli degli altri."""
+        self.consigli.pop(pid, None)
+        self.calcolati.pop(pid, None)
+        for c in self.consigli.values():
+            for b in [b for b, cs in c.items() if cs.pop(pid, None) is not None and not cs]:
+                del c[b]
+        for s in self.ascoltatori.values():
+            s.discard(pid)
+
+    def cancella(self, pid):
+        """Il tasto «Cancella i miei ascolti»: via dal file (subito) e da classifiche e consigli. -> ascolti cancellati"""
+        with self.blocco:
+            n = sum(sum(br.values()) for br in self.conti.pop(pid, {}).values())
+            self._vett.pop(pid, None)
+            self._dimentica(pid)
+            if self._durante is not None:
+                self._durante.add(pid)
+            self.versione += 1
+            self._scrivi()
+            return n
+
+    def pulisci(self):
+        """Di notte (e all'avvio): via i giorni di più di 2 anni fa e gli ascolti delle persone revocate (non se
+        l'archivio delle persone non si legge: sembrerebbero revocate tutte)."""
+        with self.blocco:
+            self._giorno_nuovo()
+            chi = self.persone()
+            if not self._sicuro():
+                chi = None
+            via = False
+            for p in list(self.conti):
+                if chi is not None and p not in chi:
+                    del self.conti[p]
+                    self._vett.pop(p, None)
+                    self.condivide.pop(p, None)
+                    self._dimentica(p)
+                    via = True
+                    continue
+                for g in [g for g in self.conti[p] if g not in self._k]:
+                    del self.conti[p][g]
+                    via = True
+                if not self.conti[p]:
+                    del self.conti[p]
+            if via:
+                self.versione += 1
+                self._vett = {p: self._vettore(p) for p in self.conti}
+                self._scrivi()
+
+    # --- classifiche e consigli ---
+
+    def _classifica(self, giorni, valide):
+        tot, quanti = {}, {}
+        for p in valide:
+            for b, n in self._vettore(p, giorni).items():
+                tot[b] = tot.get(b, 0) + n
+                quanti[b] = quanti.get(b, 0) + 1
+        return sorted(((b, n) for b, n in tot.items() if quanti[b] >= ASCOLTATI_SOGLIA), key=lambda x: (-x[1], x[0]))
+
+    @staticmethod
+    def _voce(b, cat, **extra):
+        x = cat.get(b) or {}
+        return dict({"brano": b, "titolo": x.get("title") or "", "artista": x.get("artist") or "",
+                     "album": x.get("album") or "", "copertina": x.get("cover")}, **extra)
+
+    def _voci(self, el, cat, quanti):
+        return [self._voce(b, cat, ascolti=n) for b, n in el if not cat or b in cat][:quanti]
+
+    def classifiche(self, pid):
+        """Tutto quello che vede `pid`: le classifiche (uguali per tutti), i suoi consigli, chi condivide, i suoi numeri."""
+        with self.blocco:
+            self._giorno_nuovo()
+            valide = self._valide()
+            cat = self.catalogo() or {}
+            chiave = (self.versione, self._oggi, frozenset(valide))
+            if self._cache is None or self._cache[0] != chiave:
+                self._cache = (chiave, self._classifica(ASCOLTATI_SETTIMANA, valide), self._classifica(ASCOLTATI_MESE, valide),
+                               {p: sorted(self._vettore(p, ASCOLTATI_MESE).items(), key=lambda x: (-x[1], x[0]))
+                                for p in valide if p in self.condivide})
+            _, sett, mese, cond = self._cache
+            condivisi = []
+            for p, el in cond.items():
+                nome, brani = self.nome(p), self._voci(el, cat, ASCOLTATI_CONDIVISI)
+                if p != pid and nome and brani:
+                    condivisi.append({"nome": nome, "brani": brani})
+            condivisi.sort(key=lambda x: x["nome"].lower())
+            return {"io": {"condivido": pid in self.condivide, "nome": self.nome(pid),
+                           "ascolti": sum(sum(br.values()) for g, br in self.conti.get(pid, {}).items() if g in self._k)},
+                    "settimana": self._voci(sett, cat, ASCOLTATI_ELENCO), "mese": self._voci(mese, cat, ASCOLTATI_ELENCO),
+                    "per_te": self._per_te(pid, valide, cat), "condivisi": condivisi,
+                    "soglia": ASCOLTATI_SOGLIA, "giorno": self._oggi}
+
+    def _per_te(self, u, valide, cat):
+        mie = self._vett.get(u)
+        if not mie:
+            return []
+        if u not in self.consigli or (not self.consigli[u] and time.time() - self.calcolati.get(u, 0) > ASCOLTATI_RICHIESTA):
+            # arrivato dopo il calcolo della notte (o allora non aveva ascolti): i suoi consigli subito
+            vett = {p: v for p, v in self._vett.items() if p in valide and v}
+            c, self.ascoltatori = _asc_consigli([u], vett)
+            self.consigli[u], self.calcolati[u] = c[u], time.time()
+        out = []
+        for b, cs in self.consigli[u].items():
+            if b in mie:
+                continue   # sentito dopo il calcolo
+            cs = {v: s for v, s in cs.items() if v in valide}
+            cond = [v for v in cs if v in self.condivide]
+            # anonimo solo se l'hanno ascoltato in abbastanza; se no, solo con il nome di chi lo condivide
+            if not cs or (not cond and len(self.ascoltatori.get(b, set()) & valide) < ASCOLTATI_SOGLIA):
+                continue
+            out.append((-sum(cs.values()), b, max(cond, key=lambda v: (cs[v], v)) if cond else None))
+        out.sort(key=lambda x: (x[0], x[1]))
+        return [self._voce(b, cat, da=self.nome(da) if da else None) for _, b, da in out if not cat or b in cat][:ASCOLTATI_PER_TE]
+
+    def ricalcola(self):
+        """I consigli di tutti (ogni notte e all'avvio). Si calcolano fuori dal blocco, sui conti di quel momento: chi
+        intanto cancella i suoi ascolti ne esce lo stesso."""
+        with self.blocco:
+            self._giorno_nuovo()
+            valide = self._valide()
+            vett = {p: dict(v) for p, v in self._vett.items() if p in valide and v}
+            self._durante = set()
+        try:
+            consigli, asc = _asc_consigli(sorted(vett), vett)
+        finally:
+            with self.blocco:
+                durante, self._durante = self._durante, None
+        with self.blocco:
+            ora = time.time()
+            self.consigli, self.ascoltatori, self.calcolati = consigli, asc, {p: ora for p in consigli}
+            for p in durante:
+                self._dimentica(p)
+
+    def anche(self, b):
+        """«Chi ascolta questo brano ascolta anche…»: i brani che con `b` hanno ascoltato almeno ASCOLTATI_SOGLIA persone."""
+        with self.blocco:
+            self._giorno_nuovo()
+            valide = self._valide()
+            cat = self.catalogo() or {}
+            chi = [p for p in valide if b in self._vett.get(p, {})]
+            if len(chi) < ASCOLTATI_SOGLIA:
+                return []
+            quanti, volte = {}, {}
+            for p in chi:
+                for y, n in self._vett[p].items():
+                    if y != b:
+                        quanti[y] = quanti.get(y, 0) + 1
+                        volte[y] = volte.get(y, 0) + n
+            el = sorted((y for y, q in quanti.items() if q >= ASCOLTATI_SOGLIA), key=lambda y: (-quanti[y], -volte[y], y))
+            return [self._voce(y, cat) for y in el if not cat or y in cat][:ASCOLTATI_ANCHE]
+
+    def avvia(self):
+        """Pulizia e ricalcolo dei consigli subito e poi ogni notte, in sottofondo."""
+        def ciclo():
+            while True:
+                try:
+                    self.pulisci()
+                    self.ricalcola()
+                except Exception as e:   # noqa: BLE001
+                    print("Atlante: consigli d'ascolto non ricalcolati: %s" % e, flush=True)
+                _asc_dormi_fino(ASCOLTATI_NOTTE)
+        threading.Thread(target=ciclo, daemon=True).start()
+
+
+def avvia_ascoltati(cache):
+    """Prepara i brani ascoltati (<cache>/ascoltati.json) e il ricalcolo dei consigli, subito e ogni notte."""
+    global ASCOLTATI
+    ASCOLTATI = Ascoltati(os.path.join(os.path.abspath(os.path.expanduser(cache)), "ascoltati.json"))
+    ASCOLTATI.avvia()
+    return ASCOLTATI
+
+
+def _ascoltati(h, metodo, resto, corpo):
+    """Rotte api/extra/ascoltati, per tutti (anche gli invitati): ognuno scrive e cancella solo i suoi. Dalla rete di
+    casa si conta come Samuele, ma senza cambiare la sua condivisione né cancellare i suoi ascolti."""
+    if ASCOLTATI is None:
+        raise ErroreExtra(503, "Le classifiche d'ascolto non sono pronte sul Mac")
+    pid, casa = _di(h), _chi_e(h)["ruolo"] == "casa"
+
+    def cambia():
+        if casa:
+            raise ErroreExtra(403, "Dalla rete di casa gli ascolti sono quelli di Samuele: per cambiarli apri l'app con Tailscale")
+
+    if not resto and metodo == "GET":
+        j = ASCOLTATI.classifiche(pid)
+        j["io"]["cambia"] = not casa
+        return _json(h, j)
+    if not resto and metodo == "POST":
+        voci = corpo.get("ascolti") if "ascolti" in corpo else [corpo]
+        if not isinstance(voci, list):
+            raise ErroreExtra(400, "ascolti: serve un elenco")
+        if len(voci) > ASCOLTATI_LOTTO:
+            raise ErroreExtra(413, "Troppi ascolti insieme (al più %d)" % ASCOLTATI_LOTTO)
+        contati, scartati = ASCOLTATI.ascolta(pid, voci)
+        return _json(h, {"contati": contati, "scartati": scartati})
+    if not resto and metodo == "DELETE":
+        cambia()
+        return _json(h, {"ok": True, "cancellati": ASCOLTATI.cancella(pid)})
+    if resto == ["condividi"] and metodo == "POST":
+        cambia()
+        return _json(h, {"condivido": ASCOLTATI.condividi(pid, corpo.get("si") is True)})
+    if len(resto) == 2 and resto[0] == "anche" and metodo == "GET":
+        if not ASCOLTATI_ID.match(resto[1]):
+            raise ErroreExtra(400, "Brano non valido")
+        return _json(h, {"brani": ASCOLTATI.anche(resto[1])})
+    if not resto or resto == ["condividi"] or (len(resto) == 2 and resto[0] == "anche"):
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/ascoltati/%s" % "/".join(resto))
+
+
+# ----- caricamenti, «Da controllare», film sul Cloud e contenuti (Gestione, parte 2) -----
+#
+# Dal tasto + dell'app, «Carica nella libreria»: il telefono manda il file a pezzi da 8 MB (ogni richiesta resta sotto i
+# 20 MB del server, e un caricamento interrotto riprende riscegliendo lo stesso file). Alla fine ffprobe controlla che
+# sia davvero un audio: il brano va in «Da controllare» con la sua scheda (chi, quando, caricato o scaricato, tag) e
+# Samuele lo ascolta, ne corregge i tag e lo approva (un file nuovo con i tag giusti nella cartella della musica
+# scaricata) o lo scarta (in «Scartati»: non si cancella niente). I brani caricati da Samuele entrano subito; passano da
+# qui anche quelli scaricati dagli invitati con «Cerca e scarica». I film: prima la richiesta (titolo e grandezza), poi il
+# sì di Samuele, poi il file direttamente nella cartella dei film (un film di molti GB non si copia due volte).
+# Ogni persona carica al più LIMITE_GIORNO al giorno (brani, film e, quando ci sarà, gli allegati della chat); Samuele no.
+# Gestione → Contenuti: correzioni dei tag in correzioni.json (il file del brano non cambia), «Togli» sposta il file in
+# «Tolti» sullo stesso disco, «Rimetti» lo riporta.
+#
+#   POST   caricamenti {tipo:"brano", nome, dimensione, modificato}  caricamento nuovo (lo stesso file a metà: si riprende)
+#   POST   caricamenti {tipo:"film", titolo, nome, dimensione, modificato}  richiesta di un film (Samuele: subito consentito)
+#   PUT    caricamenti/<id>?da=<byte>  un pezzo del file (il corpo sono i byte) -> {ricevuti, stato, …}
+#   GET    caricamenti                 i miei: {caricamenti:[a metà e film], brani:[in «Da controllare» e decisi], oggi}
+#   GET    caricamenti/<id>            DELETE caricamenti/<id> (annulla)     GET caricamenti/<id>/file (un mio brano)
+#   GET    film                        film nel Cloud (Samuele, nel modulo Video)     GET film/file/<nome> (con Range)
+#   gestione/controllo…  gestione/film/<id>/consenti|rifiuta  gestione/contenuti…   solo Samuele: vedi _gestione_carica
+
+GB = 1024 ** 3
+BRANO_MAX = 200 * 1024 * 1024
+FILM_MAX = 80 * GB
+PEZZO = 8 * 1024 * 1024             # sotto MAX_CORPO: un pezzo per richiesta
+LIMITE_GIORNO = 20 * GB             # per persona, brani + film + allegati della chat (--limite-giorno-gb)
+SPAZIO_MIN = 50 * GB                # sotto, il Mac mini non accetta caricamenti (--spazio-min-gb)
+STIMA_BRANO = 20 * 1024 * 1024      # un brano di «Cerca e scarica»: la grandezza vera si sa solo alla fine
+APERTI_MAX = 10                     # caricamenti a metà per persona
+ATTESA_BRANI_MAX = 200              # brani di una persona in attesa di Samuele
+FILM_ATTESA_MAX = 3                 # richieste di film di una persona non ancora decise
+SCADE_BRANO = 7 * 86400             # un brano lasciato a metà si toglie dopo una settimana
+SCADE_FILM = 30 * 86400             # un film a metà dopo un mese senza pezzi nuovi (80 GB a 20 GB al giorno: 4 giorni)
+TITOLO_FILM_MAX = 120
+TIPI_FILM = (".mp4", ".m4v", ".mov", ".mkv", ".webm")
+ID_CARICO = re.compile(r"^[0-9a-f]{16}$")
+GESTIONE_CARICA = ("controllo", "film", "contenuti")
+CONF.update(controllo_dir="~/Music/Atlante Da controllare", film_dir="~/Movies/Atlante Film",
+            tolti_dir="~/Music/Atlante Tolti")
+# cartelle che la libreria non legge mai, anche se stanno dentro una delle sue (Da controllare, Film, Tolti)
+ESCLUSE = set()
+CARIC = QUOTE = CORR = TOLTI = CTRL = None   # preparati da avvia_caricamenti()
+_blocco_controllo = threading.RLock()        # approva, scarta, correggi: una cosa alla volta sullo stesso brano
+
+
+class ErroreDati(ErroreExtra):
+    """Errore con altri campi per l'app: da dove riprendere un caricamento, i doppioni di un brano…"""
+
+    def __init__(self, codice, testo, **dati):
+        super().__init__(codice, testo)
+        self.dati = dati
+
+
+def _misura(n):
+    for u, k in (("GB", GB), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= k or u == "KB":
+            return ("%.1f" % (n / k)).rstrip("0").rstrip(".").replace(".", ",") + " " + u
+
+
+def _leggi_json(file, vuoto):
+    """Il contenuto di un file JSON; se c'è ma non si legge lo si mette da parte (.illeggibile) invece di sovrascriverlo."""
+    try:
+        with open(file, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except FileNotFoundError:
+        return vuoto
+    except (OSError, ValueError):
+        pass
+    try:
+        os.replace(file, "%s.illeggibile-%d" % (file, int(time.time())))
+        print("Atlante: %s non si legge: messo da parte" % file, flush=True)
+    except OSError:
+        pass
+    return vuoto
+
+
+def _scrivi_json(file, d):
+    os.makedirs(os.path.dirname(file) or ".", exist_ok=True)
+    tmp = "%s.%d.%d.tmp" % (file, os.getpid(), threading.get_ident())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, file)
+    except BaseException:
+        _cancella(tmp)
+        raise
+
+
+def _cartella_carica(chiave, crea=True):
+    """Una delle cartelle dei caricamenti; si crea solo se c'è quella che la contiene (un disco scollegato non deve
+    diventare una cartella vuota sul disco interno). Senza `crea`: None se non c'è."""
+    p = _cart(chiave)
+    if not os.path.isdir(p):
+        if not crea:
+            return None
+        if not os.path.isdir(os.path.dirname(p)):
+            raise ErroreExtra(503, "Cartella non raggiungibile (il disco è collegato?): %s" % p)
+        os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _libero_su(p):
+    """Byte liberi sul disco di `p` (o della prima cartella che esiste sopra): 0 se non si sa."""
+    while p and not os.path.isdir(p) and os.path.dirname(p) != p:
+        p = os.path.dirname(p)
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return 0
+
+
+def _sonda(percorso):
+    """Cosa c'è davvero nel file secondo ffprobe: {formato, durata, audio, video, immagini, tag}; None se non lo legge.
+    `video` conta i flussi video veri, `immagini` le copertine e le immagini ferme (una foto chiamata .mp4 non è un film)."""
+    fp = _programma("ffprobe")
+    if not fp:
+        raise ErroreExtra(503, "ffprobe non è installato sul Mac: brew install ffmpeg")
+    try:
+        r = subprocess.run([fp, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", percorso],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+                           env=_ambiente())
+        o = json.loads(r.stdout.decode("utf-8", "replace")) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        o = None
+    if not isinstance(o, dict):
+        return None
+    flussi = [s for s in o.get("streams") or [] if isinstance(s, dict)]
+    fmt = o.get("format") if isinstance(o.get("format"), dict) else {}
+    copertina = lambda s: (s.get("disposition") or {}).get("attached_pic") == 1   # noqa: E731
+    immagine = lambda s: copertina(s) or s.get("codec_name") in ("mjpeg", "png", "bmp", "gif", "webp")   # noqa: E731
+    try:
+        durata = float(fmt.get("duration") or 0)
+    except (TypeError, ValueError):
+        durata = 0.0
+    video = [s for s in flussi if s.get("codec_type") == "video"]
+    return {"formato": str(fmt.get("format_name") or ""), "durata": durata,
+            "audio": sum(1 for s in flussi if s.get("codec_type") == "audio"),
+            "video": sum(1 for s in video if not immagine(s)), "immagini": sum(1 for s in video if immagine(s)),
+            "tag": {str(k).lower(): str(v) for k, v in (fmt.get("tags") or {}).items()} if isinstance(fmt.get("tags"), dict) else {}}
+
+
+def _immagine(dati):
+    """Estensione di un'immagine mandata dall'app (copertina nuova): solo JPEG e PNG veri, al più 5 MB."""
+    if len(dati) > MAX_COPERTINA:
+        raise ErroreExtra(413, "Immagine troppo grande (al più 5 MB)")
+    if dati[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if dati[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    raise ErroreExtra(400, "Serve un'immagine JPEG o PNG")
+
+
+def _norma(s):
+    return re.sub(r"\W+", " ", (s or "").lower()).strip()
+
+
+def _chi_carica(h):
+    """(chiave, nome) di chi carica: "p" per Samuele (i suoi brani entrano subito, nessun limite), l'id della persona per
+    un invitato, "casa" dalla rete di casa (dispositivi senza nome: passano da «Da controllare» come gli invitati)."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"], (PERS.nome(chi["persona"]) if PERS else "") or "Invitato"
+    if chi["ruolo"] == "casa":
+        return "casa", "Rete di casa"
+    return "p", "Samuele"
+
+
+def _limite(di):
+    """Chiave del limite giornaliero: None (nessun limite) per Samuele."""
+    return None if di == "p" else di
+
+
+class Quote:
+    """Byte caricati oggi da ogni persona (brani, film e, in futuro, gli allegati della chat), in <cache>/extra/quote.json.
+    La chiave None è Samuele: nessun limite. Il giorno è quello del Mac mini: a mezzanotte si riparte da zero."""
+
+    def __init__(self, file, limite):
+        self.file, self.limite = file, int(limite)
+        self.blocco = threading.Lock()
+        self.dati = _leggi_json(file, {})
+
+    @staticmethod
+    def _oggi():
+        return time.strftime("%Y-%m-%d", time.localtime(time.time()))
+
+    def _voce(self, chiave):
+        x = self.dati.get(chiave)
+        if not isinstance(x, dict) or x.get("giorno") != self._oggi() or not isinstance(x.get("byte"), int):
+            x = {"giorno": self._oggi(), "byte": 0}
+        return x
+
+    def messaggio(self):
+        return "Hai raggiunto i %s di oggi: si riprende domani" % _misura(self.limite)
+
+    def usati(self, chiave):
+        if chiave is None:
+            return 0
+        with self.blocco:
+            return self._voce(chiave)["byte"]
+
+    def resta(self, chiave):
+        return max(0, self.limite - self.usati(chiave)) if chiave is not None else FILM_MAX * 1000
+
+    def controlla(self, chiave, n):
+        if chiave is not None and self.usati(chiave) + n > self.limite:
+            raise ErroreDati(429, self.messaggio(), limite=True)
+
+    def consuma(self, chiave, n, forza=False):
+        """Conta `n` byte di oggi; oltre il limite 429 (con `forza` si contano comunque: un brano già scaricato)."""
+        if chiave is None:
+            return
+        with self.blocco:
+            x = self._voce(chiave)
+            if not forza and x["byte"] + n > self.limite:
+                raise ErroreDati(429, self.messaggio(), limite=True)
+            x["byte"] += int(n)
+            oggi = self._oggi()
+            self.dati = {k: v for k, v in self.dati.items() if isinstance(v, dict) and v.get("giorno") == oggi}
+            self.dati[chiave] = x
+            _scrivi_json(self.file, self.dati)
+
+
+class Correzioni:
+    """Titolo, artista, album e copertina corretti da Samuele (Gestione → Contenuti), in <cache>/correzioni.json: si
+    applicano al catalogo, il file del brano non cambia. «Ripristina» le toglie."""
+    CAMPI = ("title", "artist", "album", "cover")
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        d = _leggi_json(file, {}).get("brani")
+        self.d = {k: v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
+
+    def tutte(self):
+        with self.blocco:
+            return {k: {c: v for c, v in (x.get("campi") or {}).items() if c in self.CAMPI} for k, x in self.d.items()}
+
+    def di(self, id_):
+        return self.tutte().get(id_, {})
+
+    def imposta(self, id_, campi, percorso):
+        """Campi nuovi; None toglie la correzione di quel campo (senza più correzioni il brano esce dal file)."""
+        with self.blocco:
+            x = self.d.setdefault(id_, {"campi": {}})
+            for k, v in campi.items():
+                if k in self.CAMPI:
+                    if v:
+                        x["campi"][k] = v
+                    else:
+                        x["campi"].pop(k, None)
+            x.update(quando=time.time(), percorso=percorso)
+            if not x["campi"]:
+                del self.d[id_]
+            _scrivi_json(self.file, {"brani": self.d})
+
+    def togli(self, id_):
+        with self.blocco:
+            if self.d.pop(id_, None) is None:
+                return False
+            _scrivi_json(self.file, {"brani": self.d})
+            return True
+
+
+class Tolti:
+    """Brani tolti dalla libreria (Gestione → Contenuti → Togli), in <cache>/extra/tolti.json: dov'era il file e dov'è
+    adesso, in «Tolti» sullo stesso disco. Il catalogo non li mostra; «Rimetti» riporta il file al suo posto."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        self.d = {k: v for k, v in _leggi_json(file, {}).items() if isinstance(v, dict) and v.get("id")}
+
+    def ids(self):
+        with self.blocco:
+            return {x["id"] for x in self.d.values()}
+
+    def elenco(self):
+        with self.blocco:
+            return sorted((dict(x, id_brano=x["id"], id=k) for k, x in self.d.items()), key=lambda x: -x.get("quando", 0))
+
+    def aggiungi(self, voce):
+        with self.blocco:
+            tid = secrets.token_hex(8)
+            self.d[tid] = dict(voce, quando=time.time())
+            _scrivi_json(self.file, self.d)
+            return tid
+
+    def prendi(self, tid):
+        with self.blocco:
+            x = self.d.get(tid)
+            return dict(x) if x else None
+
+    def togli(self, tid):
+        with self.blocco:
+            if self.d.pop(tid, None) is not None:
+                _scrivi_json(self.file, self.d)
+
+
+class DaControllare:
+    """Le schede dei brani di «Da controllare»: <id>.json accanto al file <id>.<est> (e alla copertina) nella cartella;
+    decisi, la scheda va in «Approvati» (il file nuovo è nella libreria) o, con il file, in «Scartati»."""
+    SOTTO = {"attesa": "", "approvato": "Approvati", "scartato": "Scartati"}
+
+    def __init__(self):
+        self.letti = {}   # percorso della scheda -> (mtime_ns, scheda)
+
+    def _leggi(self, p):
+        try:
+            m = os.stat(p).st_mtime_ns
+        except OSError:
+            return None
+        c = self.letti.get(p)
+        if c and c[0] == m:
+            return c[1]
+        try:
+            with open(p, encoding="utf-8") as f:
+                s = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(s, dict) or not ID_CARICO.match(str(s.get("id") or "")):
+            return None
+        if len(self.letti) > 5000:
+            self.letti.clear()
+        self.letti[p] = (m, s)
+        return s
+
+    def schede(self, stati=("attesa", "approvato", "scartato")):
+        base = _cartella_carica("controllo_dir", crea=False)
+        if not base:
+            return []
+        fuori = []
+        for stato in stati:
+            d = os.path.join(base, self.SOTTO[stato])
+            try:
+                nomi = [n for n in os.listdir(d) if n.endswith(".json") and not n.startswith(".")]
+            except OSError:
+                continue
+            for n in nomi:
+                s = self._leggi(os.path.join(d, n))
+                if s and s.get("stato") == stato:
+                    fuori.append(dict(s, _dir=d))
+        return sorted(fuori, key=lambda s: s.get("quando", 0))
+
+    def scheda(self, eid, stati=("attesa", "approvato", "scartato")):
+        if not ID_CARICO.match(eid or ""):
+            return None
+        base = _cartella_carica("controllo_dir", crea=False)
+        for stato in stati if base else ():
+            d = os.path.join(base, self.SOTTO[stato])
+            s = self._leggi(os.path.join(d, eid + ".json"))
+            if s and s.get("stato") == stato:
+                return dict(s, _dir=d)
+        return None
+
+    def scrivi(self, s):
+        d = s["_dir"]
+        os.makedirs(d, exist_ok=True)
+        _scrivi_json(os.path.join(d, s["id"] + ".json"), {k: v for k, v in s.items() if k != "_dir"})
+
+    def registra(self, sorgente, eid, campi):
+        """Un brano nuovo in «Da controllare»: il file diventa <id>.<est>, con la copertina e i tag letti dal file."""
+        base = _cartella_carica("controllo_dir")
+        est = os.path.splitext(campi.get("nome") or sorgente)[1].lower()
+        est = est if est in ESTENSIONI else os.path.splitext(sorgente)[1].lower() or ".mp3"
+        file_ = eid + est
+        os.replace(sorgente, os.path.join(base, file_))
+        p = os.path.join(base, file_)
+        t, nm = leggi_tag(p), da_nome(campi.get("nome") or file_)
+        info = campi.pop("_sonda", None) or {}
+        sonda = info.get("tag") or {}
+        tag = {"titolo": t.get("title") or sonda.get("title") or nm.get("title") or file_,
+               "artista": t.get("artist") or sonda.get("artist") or nm.get("artist") or "",
+               "album": t.get("album") or sonda.get("album") or ""}
+        tag = {k: " ".join(str(v).split())[:300] for k, v in tag.items()}
+        copertina = ""
+        pic = t.get("pic")
+        if pic and pic[0] and len(pic[0]) <= MAX_COPERTINA:
+            copertina = eid + (".png" if "png" in (pic[1] or "") else ".jpg")
+            with open(os.path.join(base, copertina), "wb") as f:
+                f.write(pic[0])
+        s = dict({"id": eid, "stato": "attesa", "quando": time.time(), "file": file_, "dimensione": os.path.getsize(p),
+                  "formato": info.get("formato", ""), "durata": round(info.get("durata") or t.get("duration") or 0, 2),
+                  "tag": tag, "originali": dict(tag), "copertina": copertina, "copertina_nuova": ""}, **campi)
+        s["_dir"] = base
+        self.scrivi(s)
+        return s
+
+    def sposta(self, s, stato, file_anche):
+        """La scheda (e con `file_anche` il file e le copertine) nella cartella del nuovo stato; senza, i file si tolgono:
+        sono copie (il brano approvato ha il suo file nuovo nella libreria)."""
+        vecchia, nuova = s["_dir"], os.path.join(_cartella_carica("controllo_dir"), self.SOTTO[stato])
+        os.makedirs(nuova, exist_ok=True)
+        for n in (s.get("file"), s.get("copertina"), s.get("copertina_nuova")):
+            if n and os.path.isfile(os.path.join(vecchia, n)):
+                if file_anche:
+                    os.replace(os.path.join(vecchia, n), os.path.join(nuova, n))
+                else:
+                    _cancella(os.path.join(vecchia, n))
+        vecchio = os.path.join(vecchia, s["id"] + ".json")
+        s = dict(s, stato=stato, deciso=time.time(), _dir=nuova)
+        self.scrivi(s)
+        _cancella(vecchio)
+        return s
+
+
+def _pubblica_scheda(s, tutto=False):
+    x = {"id": s["id"], "stato": s["stato"], "origine": s.get("origine", "caricato"), "titolo": s["tag"]["titolo"],
+         "artista": s["tag"]["artista"], "album": s["tag"]["album"], "nome": s.get("nome", ""),
+         "dimensione": s.get("dimensione", 0), "durata": s.get("durata", 0), "quando": s.get("quando", 0),
+         "deciso": s.get("deciso", 0)}
+    if tutto:
+        x.update(chi=s.get("chi", ""), chi_nome=s.get("chi_nome", ""), tag=dict(s["tag"]), originali=s.get("originali", {}),
+                 copertina=bool(s.get("copertina_nuova") or s.get("copertina")), url=s.get("url", ""),
+                 formato=s.get("formato", ""), finale=s.get("finale", ""), brano=s.get("brano", ""))
+    return x
+
+
+class Caricamenti:
+    """Caricamenti dal telefono (brani e film), in <cache>/extra/caricamenti.json. I byte arrivati stanno in un file
+    parziale sullo stesso disco della cartella finale (un film di 80 GB alla fine si sposta, non si copia): quello che
+    conta è la parte scritta e confermata (fsync) dopo ogni pezzo, così dopo un'interruzione si riprende da lì."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.RLock()
+        c = _leggi_json(file, {}).get("caricamenti")
+        self.c = {k: v for k, v in c.items() if isinstance(v, dict) and ID_CARICO.match(k)} if isinstance(c, dict) else {}
+        self.pezzi = {}   # id -> blocco: un pezzo alla volta per caricamento
+
+    def _salva(self):
+        _scrivi_json(self.file, {"caricamenti": self.c})
+
+    @staticmethod
+    def _parziale(s):
+        base = _cart("film_dir" if s["tipo"] == "film" else "controllo_dir")
+        return os.path.join(base, ".in arrivo", s["id"] + ".part")
+
+    @staticmethod
+    def pubblico(s):
+        x = {k: v for k, v in s.items() if not k.startswith("_") and k not in ("di", "modificato")}
+        x["pezzo"] = PEZZO
+        return x
+
+    def _riallinea(self, s):
+        """La parte arrivata è quella sul disco e nell'elenco insieme: un pezzo scritto a metà (Mac spento) si toglie."""
+        if s["stato"] not in ("in arrivo", "consentito"):
+            return
+        p = self._parziale(s)
+        if not os.path.isdir(os.path.dirname(os.path.dirname(p))):
+            return   # disco scollegato: si guarda quando torna
+        try:
+            n = os.path.getsize(p)
+        except OSError:
+            n = 0
+        if n < s["ricevuti"]:
+            s["ricevuti"] = n
+        elif n > s["ricevuti"]:
+            with open(p, "r+b") as f:
+                f.truncate(s["ricevuti"])
+
+    def pulisci(self):
+        """I caricamenti lasciati a metà troppo a lungo si tolgono (con il loro pezzo); quelli finiti escono dopo un mese."""
+        ora, cambiato = time.time(), False
+        with self.blocco:
+            for k, s in list(self.c.items()):
+                fermo = ora - s.get("aggiornato", s.get("creato", 0))
+                if s["stato"] in ("in arrivo", "consentito") and fermo > (SCADE_FILM if s["tipo"] == "film" else SCADE_BRANO):
+                    _cancella(self._parziale(s))
+                    s.update(stato="errore", errore="Rimasto a metà troppo a lungo: ricomincia da capo", ricevuti=0)
+                    cambiato = True
+                elif s["stato"] in ("fatto", "errore", "rifiutato") and fermo > 30 * 86400:
+                    del self.c[k]
+                    cambiato = True
+            if cambiato:
+                self._salva()
+
+    def nuovo(self, di, chi_nome, corpo):
+        tipo = corpo.get("tipo")
+        if tipo not in ("brano", "film"):
+            raise ErroreExtra(400, "Tipo non valido: brano o film")
+        nome = _nome_file(corpo.get("nome"), 200)
+        est = os.path.splitext(nome)[1].lower()
+        try:
+            dim = int(corpo.get("dimensione") or 0)
+            modificato = int(corpo["modificato"]) if corpo.get("modificato") is not None else None
+        except (TypeError, ValueError):
+            raise ErroreExtra(400, "Dimensione non valida")
+        if dim <= 0:
+            raise ErroreExtra(400, "Il file è vuoto")
+        titolo = ""
+        if tipo == "brano":
+            if est not in ESTENSIONI:
+                raise ErroreExtra(400, "Solo file audio: MP3, M4A, FLAC, WAV, AIFF, OGG")
+            if dim > BRANO_MAX:
+                raise ErroreExtra(413, "File troppo grande: al più 200 MB per brano")
+        else:
+            if est not in TIPI_FILM:
+                raise ErroreExtra(400, "Solo video: MP4, M4V, MOV, MKV, WEBM")
+            if dim > FILM_MAX:
+                raise ErroreExtra(413, "Film troppo grande: al più 80 GB")
+            titolo = " ".join(str(corpo.get("titolo") or "").split())[:TITOLO_FILM_MAX]
+            if not titolo:
+                raise ErroreExtra(400, "Serve il titolo del film")
+        if not _programma("ffprobe"):
+            raise ErroreExtra(503, "ffprobe non è installato sul Mac: brew install ffmpeg")
+        self.pulisci()
+        stati = ("in arrivo",) if tipo == "brano" else ("richiesta", "consentito")
+        with self.blocco:
+            for s in self.c.values():   # lo stesso file scelto di nuovo: si riprende quello di prima
+                if (s["di"], s["tipo"], s["nome"], s["dimensione"], s.get("modificato")) == (di, tipo, nome, dim, modificato) \
+                        and s["stato"] in stati:
+                    self._riallinea(s)
+                    return self.pubblico(s)
+            miei = [s for s in self.c.values() if s["di"] == di]
+            if tipo == "brano" and sum(1 for s in miei if s["tipo"] == "brano" and s["stato"] == "in arrivo") >= APERTI_MAX:
+                raise ErroreExtra(429, "Hai già %d caricamenti a metà: finiscili o annullali" % APERTI_MAX)
+            if tipo == "film" and di != "p" and sum(1 for s in miei if s["tipo"] == "film" and s["stato"] == "richiesta") >= FILM_ATTESA_MAX:
+                raise ErroreExtra(429, "Hai già %d film in attesa del sì di Samuele" % FILM_ATTESA_MAX)
+        if tipo == "brano":
+            if di != "p" and sum(1 for s in CTRL.schede(("attesa",)) if s.get("chi") == di) >= ATTESA_BRANI_MAX:
+                raise ErroreExtra(429, "Hai già %d brani in attesa di Samuele: aspetta che li controlli" % ATTESA_BRANI_MAX)
+            libero = _libero_su(_cart("controllo_dir"))
+            if libero - dim < SPAZIO_MIN:
+                raise ErroreExtra(507, "Sul Mac mini restano meno di %s liberi: i caricamenti sono fermi" % _misura(SPAZIO_MIN))
+        if QUOTE and QUOTE.resta(_limite(di)) <= 0:
+            raise ErroreDati(429, QUOTE.messaggio(), limite=True)
+        ora = time.time()
+        s = {"id": secrets.token_hex(8), "tipo": tipo, "di": di, "chi_nome": chi_nome, "nome": nome, "titolo": titolo,
+             "dimensione": dim, "modificato": modificato, "ricevuti": 0, "creato": ora, "aggiornato": ora, "errore": "",
+             "stato": "in arrivo" if tipo == "brano" else "richiesta"}
+        if tipo == "film" and di == "p":   # il film di Samuele non chiede il permesso a nessuno, ma lo spazio serve
+            self._spazio_film(s)
+            s["stato"] = "consentito"
+        with self.blocco:
+            self.c[s["id"]] = s
+            self._salva()
+        print("Atlante: %s carica %s «%s» (%s)" % (chi_nome, tipo, titolo or nome, _misura(dim)), flush=True)
+        return self.pubblico(s)
+
+    @staticmethod
+    def _spazio_film(s):
+        libero = _libero_su(_cart("film_dir"))
+        if libero < SPAZIO_MIN + s["dimensione"] - s.get("ricevuti", 0):
+            raise ErroreExtra(507, "Sul Cloud restano %s liberi: per questo film ne servono %s (il film più %s)" % (
+                _misura(libero), _misura(SPAZIO_MIN + s["dimensione"]), _misura(SPAZIO_MIN)))
+
+    def leggi(self, id_, di):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["di"] != di:
+                raise ErroreExtra(404, "Caricamento sconosciuto")
+            self._riallinea(s)
+            return self.pubblico(s)
+
+    def miei(self, di):
+        self.pulisci()
+        with self.blocco:
+            return [self.pubblico(s) for s in sorted(self.c.values(), key=lambda s: -s["creato"])
+                    if s["di"] == di and (s["tipo"] == "film" or s["stato"] != "fatto")]
+
+    def film(self, stati):
+        with self.blocco:
+            return [self.pubblico(s) for s in sorted(self.c.values(), key=lambda s: s["creato"])
+                    if s["tipo"] == "film" and s["stato"] in stati]
+
+    def finiti(self):
+        """Nome del film nella cartella -> chi l'ha caricato."""
+        with self.blocco:
+            return {s["finale"]: s.get("chi_nome", "") for s in self.c.values() if s["tipo"] == "film" and s.get("finale")}
+
+    def annulla(self, id_, di):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["di"] != di:
+                raise ErroreExtra(404, "Caricamento sconosciuto")
+            if s["stato"] in ("in arrivo", "consentito"):
+                _cancella(self._parziale(s))
+            del self.c[id_]
+            self._salva()
+
+    def decidi(self, id_, si):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["tipo"] != "film":
+                raise ErroreExtra(404, "Richiesta di film sconosciuta")
+            if s["stato"] != "richiesta":
+                raise ErroreExtra(409, "Richiesta già decisa")
+            if si:
+                self._spazio_film(s)
+            s.update(stato="consentito" if si else "rifiutato", deciso=time.time(), aggiornato=time.time())
+            self._salva()
+            print("Atlante: film «%s» di %s %s" % (s["titolo"], s["chi_nome"], "consentito" if si else "rifiutato"), flush=True)
+
+    def pezzo(self, id_, di, da, dati):
+        with self.blocco:
+            s = self.c.get(id_)
+            if not s or s["di"] != di:
+                raise ErroreExtra(404, "Caricamento sconosciuto")
+            b = self.pezzi.setdefault(id_, threading.Lock())
+        if not b.acquire(timeout=60):
+            raise ErroreDati(409, "Un altro pezzo di questo file sta già arrivando", ricevuti=s["ricevuti"])
+        try:
+            with self.blocco:
+                if s["stato"] == "richiesta":
+                    raise ErroreExtra(409, "Il film aspetta ancora il consenso di Samuele")
+                if s["stato"] == "rifiutato":
+                    raise ErroreExtra(409, "Samuele non ha consentito questo film")
+                if s["stato"] not in ("in arrivo", "consentito"):
+                    raise ErroreDati(409, "Questo caricamento è già finito", ricevuti=s["ricevuti"], stato=s["stato"])
+                self._riallinea(s)
+                if da != s["ricevuti"]:
+                    raise ErroreDati(409, "Il Mac ha già %s di questo file: si riprende da lì" % _misura(s["ricevuti"]),
+                                     ricevuti=s["ricevuti"])
+                if not dati:
+                    raise ErroreExtra(400, "Pezzo vuoto")
+                if da + len(dati) > s["dimensione"]:
+                    raise ErroreExtra(400, "Il file è più grande di quanto annunciato: sceglilo di nuovo")
+            p = self._parziale(s)
+            _cartella_carica("film_dir" if s["tipo"] == "film" else "controllo_dir")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            # spazio: per un film resta da arrivare tutto il resto, per un brano conta questo pezzo
+            serve = s["dimensione"] - da if s["tipo"] == "film" else len(dati)
+            if _libero_su(os.path.dirname(p)) - serve < SPAZIO_MIN:
+                raise ErroreDati(507, "Sul Mac mini restano meno di %s liberi: il caricamento è fermo" % _misura(SPAZIO_MIN),
+                                 ricevuti=da)
+            if QUOTE:
+                try:
+                    QUOTE.controlla(_limite(di), len(dati))
+                except ErroreDati as e:
+                    e.dati["ricevuti"] = da
+                    raise
+            fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "r+b") as f:
+                f.truncate(da)
+                f.seek(da)
+                f.write(dati)
+                f.flush()
+                os.fsync(f.fileno())
+            if QUOTE:
+                QUOTE.consuma(_limite(di), len(dati), forza=True)
+            with self.blocco:
+                s.update(ricevuti=da + len(dati), aggiornato=time.time())
+                self._salva()
+            if s["ricevuti"] == s["dimensione"]:
+                try:
+                    self._fine(s, p)
+                except Exception as e:   # noqa: BLE001  il file arrivato tutto non resta bloccato «in arrivo»
+                    print("Atlante: caricamento %s non concluso: %s" % (s["id"], e), flush=True)
+                    _cancella(p)
+                    self._esito(s, stato="errore", errore="Il Mac non è riuscito a concludere: %s" %
+                                (e.testo if isinstance(e, ErroreExtra) else e))
+            return self.pubblico(s)
+        finally:
+            b.release()
+
+    def _fine(self, s, p):
+        """File arrivato tutto: ffprobe dice cos'è. Un brano va in «Da controllare» (quello di Samuele subito nella
+        libreria), un film nella cartella dei film; quello che non è un audio o un video si toglie."""
+        info = _sonda(p)
+        if s["tipo"] == "film":
+            if not info or not info["video"]:
+                _cancella(p)
+                return self._esito(s, stato="errore", errore="Il file non è un video: l'ho tolto")
+            dest = _libero(os.path.join(_cartella_carica("film_dir"), (_nome_file(s["titolo"], 150) or s["id"]) +
+                                        os.path.splitext(s["nome"])[1].lower()))
+            os.replace(p, dest)   # stesso disco: un attimo anche per 80 GB
+            print("Atlante: film «%s» nel Cloud: %s" % (s["titolo"], dest), flush=True)
+            return self._esito(s, stato="fatto", finale=os.path.basename(dest))
+        if not info or not info["audio"] or info["video"]:
+            _cancella(p)
+            return self._esito(s, stato="errore", errore="Il file non è un file audio: l'ho tolto")
+        with _blocco_controllo:
+            CTRL.registra(p, s["id"], {"origine": "caricato", "chi": s["di"], "chi_nome": s["chi_nome"], "nome": s["nome"],
+                                       "_sonda": info})
+        campi = {"stato": "fatto", "elemento": s["id"]}
+        if s["di"] == "p":   # Samuele: entra subito nella libreria (i tag si correggono in Contenuti)
+            try:
+                r = _approva(s["id"], forza=True)
+                campi.update(brano=r["brano"], finale=r["nome"])
+                if r.get("doppioni"):
+                    campi["avviso"] = "C'era già un brano con lo stesso artista e titolo"
+            except ErroreExtra as e:
+                campi["avviso"] = "È in «Da controllare»: %s" % e.testo
+        return self._esito(s, **campi)
+
+    def _esito(self, s, **campi):
+        with self.blocco:
+            s.update(campi, aggiornato=time.time())
+            self._salva()
+
+
+def avvia_caricamenti(cache, controllo_dir=None, film_dir=None, tolti_dir=None, limite_gb=None, spazio_gb=None):
+    """Cartelle, limite giornaliero e archivi dei caricamenti. Da chiamare prima della prima lettura della libreria:
+    le cartelle dei caricamenti non devono finire nel catalogo."""
+    global CARIC, QUOTE, CORR, TOLTI, CTRL, LIMITE_GIORNO, SPAZIO_MIN
+    for k, v in (("controllo_dir", controllo_dir), ("film_dir", film_dir), ("tolti_dir", tolti_dir)):
+        if v:
+            CONF[k] = v
+    if limite_gb is not None:
+        LIMITE_GIORNO = int(float(limite_gb) * GB)
+    if spazio_gb is not None:
+        SPAZIO_MIN = int(float(spazio_gb) * GB)
+    ESCLUSE.clear()
+    ESCLUSE.update(_cart(k) for k in ("controllo_dir", "film_dir", "tolti_dir"))
+    base = os.path.abspath(os.path.expanduser(cache))
+    CARIC = Caricamenti(os.path.join(base, "extra", "caricamenti.json"))
+    QUOTE = Quote(os.path.join(base, "extra", "quote.json"), LIMITE_GIORNO)
+    CORR = Correzioni(os.path.join(base, "correzioni.json"))
+    TOLTI = Tolti(os.path.join(base, "extra", "tolti.json"))
+    CTRL = DaControllare()
+
+
+def _brani_corretti():
+    """Voci della libreria con le correzioni di Samuele (e senza i brani tolti): [(voce corretta, voce originale)]."""
+    if LIB is None:
+        return []
+    corr, via = (CORR.tutte() if CORR else {}), (TOLTI.ids() if TOLTI else set())
+    with LIB.blocco:
+        voci = list(LIB.brani.values())
+    return [(dict(v, **corr[v["id"]]) if v["id"] in corr else v, v) for v in voci if v["id"] not in via]
+
+
+def _indice_doppioni():
+    idx = {}
+    for v, _ in _brani_corretti():
+        idx.setdefault((_norma(v.get("title")), _norma(v.get("artist"))), []).append(v)
+    return idx
+
+
+def _doppioni(tag, idx=None):
+    """Brani della libreria con lo stesso artista e titolo (maiuscole, accenti a parte no, punteggiatura sì)."""
+    t, a = _norma(tag.get("titolo")), _norma(tag.get("artista"))
+    if not t:
+        return []
+    idx = _indice_doppioni() if idx is None else idx
+    return [{"id": v["id"], "titolo": v.get("title", ""), "artista": v.get("artist", ""), "album": v.get("album", "")}
+            for v in idx.get((t, a), [])][:5]
+
+
+def _uscita(formato):
+    """Come diventa il file approvato: (modo, estensione, formato di ffmpeg). MP3, M4A e FLAC restano come sono (solo i
+    tag nuovi); WAV e AIFF diventano FLAC (senza perdita, con i tag che la libreria legge); il resto MP3 come il Cloud."""
+    f = set(formato.split(","))
+    if "mp3" in f:
+        return "copia", ".mp3", "mp3"
+    if "flac" in f:
+        return "copia", ".flac", "flac"
+    if f & {"mov", "mp4", "m4a", "aac"}:
+        return "copia", ".m4a", "ipod"
+    if f & {"wav", "aiff"}:
+        return "flac", ".flac", "flac"
+    return "mp3", ".mp3", "mp3"
+
+
+def _con_tag(ff, sorgente, copertina, tag, uscita, modo, muxer, adts=False):
+    """Il brano con i tag giusti in un file nuovo: l'audio copiato com'è (o convertito, vedi _uscita), gli altri tag di
+    prima, e la copertina nuova o quella che c'era."""
+    args = [ff, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", sorgente]
+    if copertina:
+        args += ["-i", copertina, "-map", "0:a:0", "-map", "1:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+    elif muxer in ("mp3", "flac", "ipod"):
+        args += ["-map", "0:a:0", "-map", "0:v?", "-c:v", "copy"]
+    else:
+        args += ["-map", "0:a:0"]
+    args += ["-map_metadata", "0"]
+    args += {"copia": ["-c:a", "copy"], "flac": ["-c:a", "flac"], "mp3": ["-c:a", "libmp3lame", "-q:a", "0"]}[modo]
+    if adts and muxer == "ipod" and modo == "copia":
+        args += ["-bsf:a", "aac_adtstoasc"]
+    for k, v in (("title", tag["titolo"]), ("artist", tag["artista"]), ("album", tag["album"])):
+        args += ["-metadata", "%s=%s" % (k, v)]
+    if muxer == "mp3":
+        args += ["-id3v2_version", "3"]
+    r = subprocess.run(args + ["-f", muxer, uscita], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, env=_ambiente(), timeout=TEMPO_YTDLP)
+    if r.returncode != 0:
+        _cancella(uscita)
+        raise RuntimeError("ffmpeg: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
+
+
+def _approva(eid, forza=False):
+    """Approva: un file nuovo con i tag corretti nella cartella della musica scaricata (fa parte della libreria di tutti).
+    Con un brano dello stesso artista e titolo già nella libreria, 409 con i doppioni (a meno di `forza`)."""
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",))
+        if not s:
+            raise ErroreExtra(404, "Questo brano non è (più) in «Da controllare»")
+        doppi = _doppioni(s["tag"])
+        if doppi and not forza:
+            raise ErroreDati(409, "C'è già nella libreria un brano con lo stesso artista e titolo", doppioni=doppi)
+        ff = _programma("ffmpeg")
+        if not ff:
+            raise ErroreExtra(503, "ffmpeg non è installato sul Mac: brew install ffmpeg")
+        dest = _cartella_musica()
+        sorgente = os.path.join(s["_dir"], s["file"])
+        if not os.path.isfile(sorgente):
+            raise ErroreExtra(404, "Il file del brano non è più in «Da controllare»")
+        cop = s.get("copertina_nuova") and os.path.join(s["_dir"], s["copertina_nuova"])
+        modo, est, muxer = _uscita(s.get("formato") or "")
+        prove = [(modo, est, muxer)] + ([("mp3", ".mp3", "mp3")] if modo != "mp3" else [])
+        t = s["tag"]
+        nome = _nome_file("%s - %s" % (t["artista"], t["titolo"]) if t["artista"] else t["titolo"], 180) or eid
+        parziale = os.path.join(dest, "." + eid + ".tmp")   # col punto davanti la libreria non lo legge
+        errore = None
+        for modo, est, muxer in prove:   # se la copia non va (codifica strana) si converte in MP3
+            for c in ([cop, None] if cop else [None]):   # un'immagine che ffmpeg non legge: senza copertina nuova
+                try:
+                    _con_tag(ff, sorgente, c, t, parziale, modo, muxer, adts="aac" in (s.get("formato") or "").split(","))
+                    errore = None
+                    break
+                except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                    errore = e
+            if errore is None:
+                break
+        if errore is not None:
+            raise ErroreExtra(500, "Il Mac non è riuscito a scrivere il brano: %s" % errore)
+        finale = _libero(os.path.join(dest, nome + est))
+        os.replace(parziale, finale)
+        brano = _in_libreria(finale)
+        CTRL.sposta(dict(s, finale=os.path.basename(finale), brano=brano), "approvato", False)
+    print("Atlante: approvato «%s» di %s" % (t["titolo"], s.get("chi_nome", "")), flush=True)
+    return {"ok": True, "brano": brano, "nome": os.path.basename(finale), "doppioni": doppi}
+
+
+def _da_controllare_scaricato(coda, l, percorso):
+    """Il brano scaricato da un invitato con «Cerca e scarica»: in «Da controllare», e il suo telefono ne prende una copia."""
+    eid = secrets.token_hex(8)
+    with _blocco_controllo:
+        s = CTRL.registra(percorso, eid, {"origine": "scaricato", "chi": l["di"], "chi_nome": l.get("chi_nome", ""),
+                                          "nome": l.get("nome") or os.path.basename(percorso), "url": l.get("url", ""),
+                                          "formato": "mp3" if percorso.endswith(".mp3") else ""})
+    if QUOTE:
+        QUOTE.consuma(l["di"], s["dimensione"], forza=True)
+    coda.aggiorna(l["id"], caricamento=eid, brano="", _percorso=os.path.join(s["_dir"], s["file"]))
+
+
+def _controllo_elenco():
+    idx = _indice_doppioni()
+    brani = []
+    for s in CTRL.schede(("attesa",)):
+        x = _pubblica_scheda(s, True)
+        x["doppioni"] = _doppioni(s["tag"], idx)
+        brani.append(x)
+    scartati = [_pubblica_scheda(s, True) for s in CTRL.schede(("scartato",))]
+    cartella = _cart("controllo_dir")
+    return {"brani": brani, "film": CARIC.film(("richiesta", "consentito")),
+            "scartati": sorted(scartati, key=lambda x: -x["deciso"])[:100],
+            "raggiungibile": os.path.isdir(cartella) or os.path.isdir(os.path.dirname(cartella)),
+            "libero": _libero_su(_cart("controllo_dir")), "libero_film": _libero_su(_cart("film_dir")),
+            "spazio_min": SPAZIO_MIN}
+
+
+def _nuove_caricamenti():
+    """Per il numero sul riquadro Gestione: brani da controllare e richieste di film da decidere."""
+    try:
+        return {"da_controllare": len(CTRL.schede(("attesa",))) if CTRL else 0,
+                "film": len(CARIC.film(("richiesta",))) if CARIC else 0}
+    except OSError:
+        return {"da_controllare": 0, "film": 0}
+
+
+def _correggi_scheda(eid, corpo):
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",))
+        if not s:
+            raise ErroreExtra(404, "Questo brano non è (più) in «Da controllare»")
+        for k in ("titolo", "artista", "album"):
+            if k in corpo:
+                v = " ".join(str(corpo.get(k) or "").split())[:300]
+                if k == "titolo" and not v:
+                    raise ErroreExtra(400, "Il titolo non può restare vuoto")
+                s["tag"][k] = v
+        CTRL.scrivi(s)
+        return _pubblica_scheda(s, True)
+
+
+def _copertina_scheda(h, metodo, eid, dati):
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",)) if metodo != "GET" else CTRL.scheda(eid)
+        if not s:
+            raise ErroreExtra(404, "Brano non trovato")
+        if metodo == "GET":
+            n = s.get("copertina_nuova") or s.get("copertina")
+            p = n and os.path.join(s["_dir"], n)
+            if not p or not os.path.isfile(p):
+                raise ErroreExtra(404, "Nessuna copertina")
+            return _invia_file(h, p, "image/png" if p.endswith(".png") else "image/jpeg", {"Cache-Control": "no-store"})
+        est = _immagine(dati) if metodo == "PUT" else ""   # un'immagine sbagliata non tocca quella che c'è
+        if s.get("copertina_nuova"):
+            _cancella(os.path.join(s["_dir"], s["copertina_nuova"]))
+            s["copertina_nuova"] = ""
+        if metodo == "PUT":
+            n = "%s-nuova-%d%s" % (eid, int(time.time()), est)
+            with open(os.path.join(s["_dir"], n), "wb") as f:
+                f.write(dati)
+            s["copertina_nuova"] = n
+        CTRL.scrivi(s)
+        return _json(h, {"ok": True})
+
+
+def _scarta(eid):
+    with _blocco_controllo:
+        s = CTRL.scheda(eid, ("attesa",))
+        if not s:
+            raise ErroreExtra(404, "Questo brano non è (più) in «Da controllare»")
+        CTRL.sposta(s, "scartato", True)
+    print("Atlante: scartato «%s» di %s" % (s["tag"]["titolo"], s.get("chi_nome", "")), flush=True)
+
+
+def _contenuti(q):
+    """Ricerca nella libreria per Gestione → Contenuti (senza parole: gli ultimi arrivati)."""
+    parole = _parole(q).split()
+    with LIB.blocco:
+        percorsi = dict(LIB.percorsi)
+    corr = CORR.tutte() if CORR else {}
+    out = []
+    for v, o in _brani_corretti():
+        if parole:
+            testo = _parole(" ".join(str(x.get(k) or "") for x in (v, o) for k in ("title", "artist", "album")))
+            if not all(w in testo for w in parole):
+                continue
+        out.append(_voce_contenuti(v, o, percorsi.get(v["id"], ""), v["id"] in corr))
+    out.sort(key=(lambda x: (_norma(x["artista"]), _norma(x["titolo"]))) if parole else (lambda x: -x["aggiunto"]))
+    return {"brani": out[:100 if parole else 50], "trovati": len(out)}
+
+
+def _voce_contenuti(v, o, percorso, corretto):
+    return {"id": v["id"], "titolo": v.get("title", ""), "artista": v.get("artist", ""), "album": v.get("album", ""),
+            "copertina": v.get("cover"), "durata": v.get("duration", 0), "aggiunto": v.get("added", 0),
+            "corretto": corretto, "file": os.path.basename(percorso or ""),
+            "originale": {"titolo": o.get("title", ""), "artista": o.get("artist", ""), "album": o.get("album", ""),
+                          "copertina": o.get("cover")}}
+
+
+def _brano_libreria(bid):
+    p = LIB.percorsi.get(bid) if LIB and ID_CARICO.match(bid or "") else None
+    if not p or (TOLTI and bid in TOLTI.ids()):
+        raise ErroreExtra(404, "Brano non trovato nella libreria")
+    return p
+
+
+def _correggi_brano(bid, corpo):
+    p = _brano_libreria(bid)
+    with LIB.blocco:
+        orig = dict(LIB.brani.get(bid) or {})
+    campi = {}
+    for k, c in (("titolo", "title"), ("artista", "artist"), ("album", "album")):
+        if k in corpo:
+            v = " ".join(str(corpo.get(k) or "").split())[:300]
+            if v:   # vuoto: resta quello del file
+                campi[c] = None if v == (orig.get(c) or "") else v   # uguale al file: nessuna correzione
+    if campi:
+        CORR.imposta(bid, campi, p)
+    return _voce_brano(bid)
+
+
+def _voce_brano(bid):
+    for v, o in _brani_corretti():
+        if v["id"] == bid:
+            return _voce_contenuti(v, o, LIB.percorsi.get(bid, ""), bool(CORR.di(bid)))
+    raise ErroreExtra(404, "Brano non trovato nella libreria")
+
+
+def _copertina_brano(bid, dati):
+    p = _brano_libreria(bid)
+    est = _immagine(dati)
+    chiave = hashlib.sha1(dati).hexdigest()[:20] + est   # come le copertine lette dai file: si serve da api/musica/copertina
+    dest = os.path.join(LIB.dir_copertine, chiave)
+    if not os.path.exists(dest):
+        with open(dest + ".tmp", "wb") as f:
+            f.write(dati)
+        os.replace(dest + ".tmp", dest)
+    CORR.imposta(bid, {"cover": chiave}, p)
+    return _voce_brano(bid)
+
+
+def _togli(bid):
+    """Il file va in «Tolti» sullo stesso disco (ATLANTE_TOLTI_DIR se è sullo stesso disco del brano, se no la cartella
+    «.Tolti» nella cartella della libreria: si sposta, non si copia) e il brano esce dal catalogo di tutti."""
+    p = _brano_libreria(bid)
+    v = next((x for x, _ in _brani_corretti() if x["id"] == bid), {})
+    radice = next((r for r in LIB.cartelle if _dentro(p, r)), os.path.dirname(p))
+    dove = _cart("tolti_dir")
+    try:
+        sopra = dove
+        while not os.path.isdir(sopra) and os.path.dirname(sopra) != sopra:
+            sopra = os.path.dirname(sopra)
+        stesso = os.stat(p).st_dev == os.stat(sopra).st_dev and os.path.isdir(os.path.dirname(dove))
+    except OSError:
+        stesso = False
+    if not stesso:
+        dove = os.path.join(radice, ".Tolti")
+    dest = _libero(os.path.join(dove, os.path.relpath(p, radice)))
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(p, dest)
+    except OSError as e:
+        raise ErroreExtra(500, "Non riesco a spostare il file in «Tolti»: %s" % e)
+    tid = TOLTI.aggiungi({"id": bid, "percorso": p, "dove": dest, "titolo": v.get("title", ""), "artista": v.get("artist", ""),
+                          "album": v.get("album", "")})
+    with LIB.blocco:   # subito fuori dal catalogo; la rilettura del disco (in sottofondo) lo conferma
+        LIB.brani.pop(bid, None)
+        LIB.percorsi.pop(bid, None)
+    LIB.rileggi_presto(subito=True)
+    print("Atlante: tolto «%s» → %s" % (v.get("title", ""), dest), flush=True)
+    return {"ok": True, "tolto": tid}
+
+
+def _rimetti(tid):
+    t = TOLTI.prendi(tid) if ID_CARICO.match(tid or "") else None
+    if not t:
+        raise ErroreExtra(404, "Brano tolto sconosciuto")
+    if not os.path.isfile(t["dove"]):
+        raise ErroreExtra(404, "Il file non è più in «Tolti»: %s" % t["dove"])
+    dest = _libero(t["percorso"])
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(t["dove"], dest)
+    except OSError as e:
+        raise ErroreExtra(500, "Non riesco a rimettere il file al suo posto: %s" % e)
+    TOLTI.togli(tid)
+    return {"ok": True, "brano": _in_libreria(dest)}
+
+
+def _gestione_carica(h, metodo, resto, corpo):
+    """Gestione → Da controllare (brani e richieste di film) e Contenuti. Solo Samuele (lo controlla _gestione)."""
+    cosa, r = resto[0], resto[1:]
+
+    def solo(*metodi):
+        if metodo not in metodi:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    try:
+        if cosa == "controllo" and not r:
+            solo("GET")
+            return _json(h, _controllo_elenco())
+        if cosa == "controllo" and len(r) == 2 and r[1] == "file":
+            solo("GET")
+            s = CTRL.scheda(r[0])
+            p = s and os.path.join(s["_dir"], s["file"])
+            if not p or not os.path.isfile(p):
+                raise ErroreExtra(404, "File non trovato")
+            return _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"),
+                               {"X-Content-Type-Options": "nosniff"})
+        if cosa == "controllo" and len(r) == 2 and r[1] == "copertina":
+            solo("GET", "PUT", "DELETE")
+            return _copertina_scheda(h, metodo, r[0], getattr(h, "_grezzo", b""))
+        if cosa == "controllo" and len(r) == 1:
+            solo("POST")
+            return _json(h, {"brano": _correggi_scheda(r[0], corpo)})
+        if cosa == "controllo" and len(r) == 2 and r[1] in ("approva", "scarta"):
+            solo("POST")
+            if r[1] == "scarta":
+                _scarta(r[0])
+                return _json(h, {"ok": True})
+            return _json(h, _approva(r[0], bool(corpo.get("forza"))))
+        if cosa == "film" and len(r) == 2 and r[1] in ("consenti", "rifiuta"):
+            solo("POST")
+            CARIC.decidi(r[0], r[1] == "consenti")
+            return _json(h, {"ok": True})
+        if cosa == "contenuti" and LIB is None:
+            raise ErroreExtra(503, "Libreria non pronta")
+        if cosa == "contenuti" and not r:
+            solo("GET")
+            return _json(h, _contenuti((parse_qs(urlsplit(h.path).query).get("q") or [""])[0]))
+        if cosa == "contenuti" and r == ["tolti"]:
+            solo("GET")
+            return _json(h, {"tolti": TOLTI.elenco()})
+        if cosa == "contenuti" and len(r) == 3 and r[0] == "tolti" and r[2] == "rimetti":
+            solo("POST")
+            return _json(h, _rimetti(r[1]))
+        if cosa == "contenuti" and len(r) == 1:
+            solo("POST")
+            return _json(h, {"brano": _correggi_brano(r[0], corpo)})
+        if cosa == "contenuti" and len(r) == 2 and r[1] == "copertina":
+            solo("PUT")
+            return _json(h, {"brano": _copertina_brano(r[0], getattr(h, "_grezzo", b""))})
+        if cosa == "contenuti" and len(r) == 2 and r[1] == "ripristina":
+            solo("POST")
+            _brano_libreria(r[0])
+            CORR.togli(r[0])
+            return _json(h, {"brano": _voce_brano(r[0])})
+        if cosa == "contenuti" and len(r) == 2 and r[1] == "togli":
+            solo("POST")
+            return _json(h, _togli(r[0]))
+    except ErroreDati as e:
+        return _json(h, dict(e.dati, errore=e.testo), e.codice)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/%s" % "/".join(resto))
+
+
+def _caricamenti(h, metodo, resto, corpo):
+    """I caricamenti di chi fa la richiesta (anche gli invitati: ognuno vede e tocca solo i suoi)."""
+    di, nome = _chi_carica(h)
+    try:
+        if not resto:
+            if metodo == "POST":
+                return _json(h, CARIC.nuovo(di, nome, corpo))
+            if metodo != "GET":
+                raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+            brani = [_pubblica_scheda(s) for s in CTRL.schede() if s.get("chi") == di]
+            k = _limite(di)
+            return _json(h, {"caricamenti": CARIC.miei(di), "brani": sorted(brani, key=lambda x: -x["quando"]),
+                             "oggi": {"usati": QUOTE.usati(k), "limite": QUOTE.limite} if k is not None else None})
+        if not ID_CARICO.match(resto[0]):
+            raise ErroreExtra(404, "Caricamento sconosciuto")
+        if len(resto) == 1 and metodo == "GET":
+            return _json(h, CARIC.leggi(resto[0], di))
+        if len(resto) == 1 and metodo == "DELETE":
+            CARIC.annulla(resto[0], di)
+            return _json(h, {"ok": True})
+        if len(resto) == 1 and metodo == "PUT":
+            try:
+                da = int((parse_qs(urlsplit(h.path).query).get("da") or [""])[0])
+            except ValueError:
+                raise ErroreExtra(400, "Serve da: il byte da cui comincia il pezzo")
+            return _json(h, CARIC.pezzo(resto[0], di, da, getattr(h, "_grezzo", b"")))
+        if resto[1:] == ["file"] and metodo == "GET":   # un mio brano (la copia per il telefono di chi l'ha scaricato)
+            s = CTRL.scheda(resto[0])
+            p = s and s.get("chi") == di and os.path.join(s["_dir"], s["file"])
+            if not p or not os.path.isfile(p):
+                raise ErroreExtra(404, "Brano non trovato")
+            t = s["tag"]
+            nome_file = _nome_file("%s - %s" % (t["artista"], t["titolo"]) if t["artista"] else t["titolo"], 150) + \
+                os.path.splitext(p)[1]
+            return _invia_file(h, p, TIPI.get(os.path.splitext(p)[1].lower(), "application/octet-stream"),
+                               {"Content-Disposition": _disposizione(nome_file), "X-Content-Type-Options": "nosniff"})
+    except ErroreDati as e:
+        return _json(h, dict(e.dati, errore=e.testo), e.codice)
+    raise ErroreExtra(404 if metodo in ("GET", "PUT", "DELETE", "POST") else 405,
+                      "Richiesta sconosciuta: api/extra/caricamenti/%s" % "/".join(resto))
+
+
+def _film(h, metodo, resto):
+    """I film arrivati nel Cloud, per il modulo Video di Samuele (agli invitati non compaiono, come il modulo)."""
+    if metodo != "GET":
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    base = _cartella_carica("film_dir", crea=False)
+    if not resto:
+        chi, film = CARIC.finiti(), []
+        try:
+            voci = list(os.scandir(base)) if base else []
+        except OSError:
+            voci = []
+        for e in voci:
+            if e.is_file() and not e.name.startswith(".") and os.path.splitext(e.name)[1].lower() in TIPI_FILM:
+                st = e.stat()
+                film.append({"nome": e.name, "titolo": os.path.splitext(e.name)[0], "dimensione": st.st_size,
+                             "quando": st.st_mtime, "chi_nome": chi.get(e.name, "")})
+        return _json(h, {"film": sorted(film, key=lambda x: -x["quando"]), "cartella": _cart("film_dir"),
+                         "raggiungibile": bool(base)})
+    if len(resto) == 2 and resto[0] == "file":
+        n = resto[1]
+        p = base and os.path.join(base, n)
+        if (not p or n != os.path.basename(n) or n.startswith(".") or os.path.splitext(n)[1].lower() not in TIPI_FILM
+                or not os.path.isfile(p)):
+            raise ErroreExtra(404, "Film non trovato")
+        return _invia_file(h, p, TIPI_VIDEO.get(os.path.splitext(n)[1].lower(), "application/octet-stream"),
+                           {"Content-Disposition": _disposizione(n), "X-Content-Type-Options": "nosniff"})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/film/%s" % "/".join(resto))
+
+
+def _chi_scarica(h):
+    """Per «Cerca e scarica»: l'id dell'invitato (il brano va in «Da controllare»), None per Samuele e la rete di casa
+    (il brano entra nella libreria come sempre)."""
+    chi = _chi_e(h)
+    return chi["persona"] if chi["ruolo"] == "invitato" else None
+
+
+def _lavori_musica(h):
+    """Gli scaricamenti di chi chiede: un invitato vede solo i suoi, Samuele quelli che non sono degli invitati."""
+    di = _chi_scarica(h)
+    return [l for l in _coda("musica").elenco() if l.get("di") == di]
+
+
+# ----- chiamate vocali e video (fasi 5b e 5c): il Mac mini fa solo da centralino -----
+#
+# Voce e video vanno da telefono a telefono con WebRTC, cifrati (DTLS-SRTP): il Mac mini non li vede e non li sente.
+# Qui c'è solo chi chiama chi: lo squillo su tutti i dispositivi della persona chiamata (risponde il primo), rifiutata,
+# occupato, nessuna risposta dopo SQUILLO_DURATA, e il passaggio dei messaggi per collegarsi (offerta, risposta,
+# candidati) con l'attesa lunga, come il telecomando. Nei gruppi (al più CHIAMATA_MAX persone) ognuno si collega con
+# ognuno: chi entra manda l'offerta a chi è già dentro, così per ogni coppia l'offerta la fa uno solo.
+# Le persone sono "p" (Samuele) o l'id di un invitato; i dispositivi sono quelli dell'app (am-dev-id), contati per
+# persona: lo stesso id per due persone sono due dispositivi diversi. Tutto in memoria: dopo un riavvio il centralino
+# non sa più niente delle chiamate (i telefoni già collegati continuano da soli, e le chiamate nuove funzionano).
+
+CHIAMATA_MAX = 4              # persone in una chiamata, compresa chi chiama (ogni telefono manda il video a ciascuno)
+SQUILLO_DURATA = 40           # secondi di squillo, poi «nessuna risposta»
+CHIAMATA_VIVO = 60            # secondi senza notizie dal dispositivo di chi è dentro: la sua linea è caduta
+CHIAMATA_RESTA = 30           # secondi in cui una chiamata finita si vede ancora (per dire com'è finita)
+CHIAMATE_ORA = 30             # chiamate (e persone aggiunte) che una persona può avviare in un'ora
+CHIAMATE_TUTTE = 100          # chiamate aperte in tutto sul Mac mini
+SEGNALE_MAX = 64 * 1024       # un messaggio per collegarsi (un'offerta è di pochi KB)
+SEGNALI_PERSONA = 500         # messaggi per collegarsi di una persona in una chiamata
+EVENTI_DURATA = 120           # secondi in cui un evento aspetta il dispositivo che lo deve prendere
+EVENTI_MAX = 5000
+TIPI_SEGNALE = ("offerta", "risposta", "candidati", "stato", "riprova")
+NOME_PROPRIETARIO = "Samuele"
+STUN_PREDEFINITO = "stun:stun.l.google.com:19302"
+STUN = STUN_PREDEFINITO       # --stun / ATLANTE_STUN (più indirizzi separati da virgole; vuoto: nessuno)
+TURN_URL = ""                 # ponte TURN (coturn): solo se c'è, da ATLANTE_TURN_URL, ATLANTE_TURN_UTENTE, ATLANTE_TURN_SEGRETO
+TURN_UTENTE = "atlante"
+TURN_SEGRETO = ""
+TURN_DURATA = 12 * 3600       # le credenziali del ponte valgono mezza giornata
+
+
+class Centralino:
+    """Il centralino delle chiamate. `nome(persona)` dà il nome di chi è in Atlante ("" se non c'è più); `bloccato(da, a)`
+    dice se `a` ha bloccato `da` (lo decide la chat: a chi ha bloccato non squilla niente, e chi chiama sente lo squillo
+    fino a «nessuna risposta», senza sapere del blocco); `avviso(persona, evento, chiamata)` è il punto per le notifiche
+    (vedi avviso_chiamata), chiamato in un filo a parte."""
+
+    def __init__(self, nome, bloccato=None, avviso=None):
+        self.cond = threading.Condition()
+        self.c = {}            # id -> {id, da, video, creata, stato, motivo, fine, p: {persona: {nome, stato, disp, dal…}}}
+        self.eventi = []       # [{seq, t, per, disp, tipo, chiamata…}] in ordine di seq
+        self.seq = int(time.time() * 1000)   # cresce anche da un avvio all'altro: un'app che aspetta non resta indietro
+        self.visti = {}        # (persona, dispositivo) -> ultima attesa
+        self.avviate = {}      # persona -> istanti delle chiamate avviate nell'ultima ora
+        self.avvisi = []       # (persona, evento, chiamata) da mandare fuori dal blocco
+        self.nome, self.bloccato, self.avviso = nome, bloccato or (lambda da, a: False), avviso
+
+    # --- controlli (fuori dal blocco: nome e bloccato leggono gli archivi delle persone e della chat) ---
+
+    @staticmethod
+    def _disp(disp):
+        if not isinstance(disp, str) or not ID_DISP.match(disp):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        return disp
+
+    def _chiamati(self, a, chi):
+        a = [a] if isinstance(a, str) else a
+        if not isinstance(a, list) or not a:
+            raise ErroreExtra(400, "Chi vuoi chiamare?")
+        if len(a) > CHIAMATA_MAX:
+            raise ErroreExtra(409, "Al più %d persone in una chiamata" % CHIAMATA_MAX)
+        fuori = []
+        for x in a:
+            if not isinstance(x, str) or x == chi or x in fuori:
+                raise ErroreExtra(400, "Persona non valida")
+            if not self.nome(x):
+                raise ErroreExtra(404, "Persona sconosciuta")
+            fuori.append(x)
+        return {x: (self.nome(x), bool(self.bloccato(chi, x))) for x in fuori}
+
+    # --- dentro il blocco ---
+
+    def _evento(self, per, disp=None, **campi):
+        self.seq += 1
+        self.eventi.append(dict(campi, seq=self.seq, t=time.time(), per=per, disp=disp))
+        if len(self.eventi) > EVENTI_MAX:
+            del self.eventi[:len(self.eventi) - EVENTI_MAX]
+
+    def _cambiata(self, c):
+        """Ogni cambiamento sveglia i dispositivi di chi fa parte della chiamata: ognuno rilegge com'è."""
+        for k, x in c["p"].items():
+            if not x.get("nascosta"):
+                self._evento(k, tipo="chiamata", chiamata=c["id"])
+        self.cond.notify_all()
+
+    def _attive(self, chi, tranne=None):
+        """Le chiamate in cui `chi` è dentro o gli squilla: chi lo chiama trova occupato."""
+        return [c for c in self.c.values() if c["id"] != tranne and c["stato"] != "finita" and chi in c["p"]
+                and c["p"][chi]["stato"] in ("dentro", "squilla") and not c["p"][chi].get("nascosta")]
+
+    def _info(self, c):
+        return {"id": c["id"], "da": c["da"], "da_nome": c["p"][c["da"]]["nome"], "video": c["video"]}
+
+    def _conta(self, chi, ora, n):
+        t = [x for x in self.avviate.get(chi, []) if ora - x < 3600]
+        if len(t) + n > CHIAMATE_ORA:
+            raise ErroreExtra(429, "Troppe chiamate in un'ora: riprova più tardi")
+        self.avviate[chi] = t + [ora] * n
+
+    def _squilla(self, c, chi, nome, nascosta, ora):
+        # a chi ha bloccato non squilla niente, ma per chi chiama non è mai «occupato»: non deve capire del blocco
+        stato = "occupato" if not nascosta and self._attive(chi, tranne=c["id"]) else "squilla"
+        c["p"][chi] = {"nome": nome, "stato": stato, "disp": None, "dal": ora, "nascosta": nascosta, "segnali": 0}
+        if stato == "squilla" and not nascosta:
+            self.avvisi.append((chi, "arriva", self._info(c)))
+
+    def _sua(self, cid, chi):
+        c = self.c.get(cid) if isinstance(cid, str) else None
+        if c is None or chi not in c["p"] or c["p"][chi].get("nascosta"):
+            raise ErroreExtra(404, "Chiamata non trovata")   # per chi non ne fa parte non esiste
+        return c
+
+    def _controlla(self, c, ora, perche=None):
+        """La chiamata finisce quando resta dentro una persona sola (o nessuna) e non squilla più a nessuno."""
+        if c["stato"] == "finita":
+            return
+        dentro = [k for k, x in c["p"].items() if x["stato"] == "dentro"]
+        squillano = [k for k, x in c["p"].items() if x["stato"] == "squilla"]
+        if len(dentro) >= 2 or (dentro and squillano):
+            return
+        if c["stato"] == "in corso":
+            motivo = perche or "chiusa"
+        elif c["p"][c["da"]]["stato"] != "dentro":
+            motivo = perche or "annullata"
+        else:
+            altri = {x["stato"] for k, x in c["p"].items() if k != c["da"]}
+            motivo = altri.pop() if len(altri) == 1 else "nessuna risposta"
+        for k, x in c["p"].items():
+            if x["stato"] == "squilla":
+                x["stato"] = "annullata"
+                if not x.get("nascosta"):
+                    self.avvisi.append((k, "persa", self._info(c)))
+            elif x["stato"] == "dentro":
+                x["stato"] = "uscito"
+        c.update(stato="finita", motivo=motivo, fine=ora)
+
+    def _pulisci(self, ora):
+        """Squilli scaduti, linee cadute, chiamate finite da un po' ed eventi vecchi."""
+        for c in list(self.c.values()):
+            if c["stato"] == "finita":
+                if ora - c["fine"] > CHIAMATA_RESTA:
+                    del self.c[c["id"]]
+                continue
+            cambiata, perche = False, None
+            for k, x in c["p"].items():
+                if x["stato"] == "squilla" and ora - x["dal"] >= SQUILLO_DURATA:
+                    x["stato"], cambiata = "nessuna risposta", True
+                    if not x.get("nascosta"):
+                        self.avvisi.append((k, "persa", self._info(c)))
+                elif x["stato"] == "dentro" and ora - self.visti.get((k, x["disp"]), x["dal"]) > CHIAMATA_VIVO:
+                    x["stato"], cambiata, perche = "caduta", True, "caduta"
+            if cambiata:
+                self._controlla(c, ora, perche)
+                self._cambiata(c)
+        i = 0
+        while i < len(self.eventi) and ora - self.eventi[i]["t"] > EVENTI_DURATA:
+            i += 1
+        if i:
+            del self.eventi[:i]
+        if len(self.visti) > 2000:
+            self.visti = {k: t for k, t in self.visti.items() if ora - t <= 3 * CHIAMATA_VIVO}
+
+    def _prossima(self):
+        """Il prossimo istante in cui qualcosa scade (squillo o linea caduta): l'attesa lunga si sveglia lì."""
+        p = []
+        for c in self.c.values():
+            if c["stato"] != "finita":
+                for k, x in c["p"].items():
+                    if x["stato"] == "squilla":
+                        p.append(x["dal"] + SQUILLO_DURATA)
+                    elif x["stato"] == "dentro":
+                        p.append(self.visti.get((k, x["disp"]), x["dal"]) + CHIAMATA_VIVO + 0.01)
+        return min(p) if p else None
+
+    def _vista(self, c, chi):
+        """La chiamata vista da `chi`: dei dispositivi solo il suo (per sapere se ha risposto da qui o da un altro)."""
+        v = {"id": c["id"], "da": c["da"], "da_nome": c["p"][c["da"]]["nome"], "video": c["video"], "stato": c["stato"],
+             "motivo": c["motivo"], "creata": c["creata"], "partecipanti": []}
+        for k, x in c["p"].items():
+            y = {"id": k, "nome": x["nome"], "stato": x["stato"]}
+            if k == chi:
+                y.update(io=True, disp=x["disp"])
+                if x["stato"] == "squilla":
+                    y["scade"] = x["dal"] + SQUILLO_DURATA
+            v["partecipanti"].append(y)
+        return v
+
+    def _sue(self, chi):
+        return [self._vista(c, chi) for c in sorted(self.c.values(), key=lambda c: c["creata"])
+                if chi in c["p"] and not c["p"][chi].get("nascosta")]
+
+    def _manda(self):
+        with self.cond:
+            a, self.avvisi = self.avvisi, []
+        if a and self.avviso:
+            threading.Thread(target=self._avvisa, args=(a,), daemon=True).start()
+
+    def _avvisa(self, avvisi):
+        for x in avvisi:
+            try:
+                self.avviso(*x)
+            except Exception as e:   # noqa: BLE001  una notifica non mandata non ferma il centralino
+                print("Atlante: avviso di chiamata non mandato: %s" % e, flush=True)
+
+    # --- quello che chiedono le app ---
+
+    def attendi(self, chi, disp, dopo, secondi):
+        """Attesa lunga di un dispositivo: gli eventi per lui dopo `dopo` (squilli, cambiamenti, segnali) appena ce n'è
+        uno, al più `secondi`, e com'è ogni chiamata di cui fa parte. Senza `dopo`: subito, con il numero da cui partire.
+        Intanto il dispositivo risulta vivo (chi è dentro una chiamata e non aspetta più da CHIAMATA_VIVO è caduto)."""
+        disp = self._disp(disp)
+        fine = time.time() + max(0.0, min(float(secondi), ATTESA_MAX))
+        try:
+            with self.cond:
+                while True:
+                    ora = time.time()
+                    self.visti[(chi, disp)] = ora
+                    self._pulisci(ora)
+                    if dopo is None or dopo > self.seq:   # prima volta, o un server riavviato: si riparte da qui
+                        return {"seq": self.seq, "chiamate": self._sue(chi), "eventi": []}
+                    ev = [e for e in self.eventi if e["seq"] > dopo and e["per"] == chi and e["disp"] in (None, disp)]
+                    if ev or ora >= fine:
+                        return {"seq": self.seq, "chiamate": self._sue(chi),
+                                "eventi": [{k: v for k, v in e.items() if k not in ("per", "disp", "t")} for e in ev]}
+                    p = self._prossima()
+                    self.cond.wait(max(0.01, min(fine, p if p is not None else fine) - ora))
+        finally:
+            self._manda()
+
+    def chiama(self, chi, disp, a, video):
+        disp = self._disp(disp)
+        chiamati = self._chiamati(a, chi)
+        if len(chiamati) > CHIAMATA_MAX - 1:
+            raise ErroreExtra(409, "Al più %d persone in una chiamata" % CHIAMATA_MAX)
+        mio = self.nome(chi) or "Qualcuno"
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                if self._attive(chi):
+                    raise ErroreExtra(409, "Sei già in una chiamata (o te ne arriva una): chiudila prima")
+                if sum(1 for c in self.c.values() if c["stato"] != "finita") >= CHIAMATE_TUTTE:
+                    raise ErroreExtra(503, "Troppe chiamate aperte sul Mac mini: riprova fra poco")
+                self._conta(chi, ora, 1)
+                cid = secrets.token_hex(8)
+                c = {"id": cid, "da": chi, "video": bool(video), "creata": ora, "stato": "squilla", "motivo": "", "fine": 0,
+                     "p": {chi: {"nome": mio, "stato": "dentro", "disp": disp, "dal": ora, "segnali": 0}}}
+                self.visti[(chi, disp)] = ora
+                for x, (nome, nascosta) in chiamati.items():
+                    self._squilla(c, x, nome, nascosta, ora)
+                self.c[cid] = c
+                self._controlla(c, ora)   # tutti occupati: finita subito
+                self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def rispondi(self, chi, disp, cid):
+        disp = self._disp(disp)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                self.visti[(chi, disp)] = ora
+                if x["stato"] == "dentro":
+                    if x["disp"] == disp:
+                        return self._vista(c, chi)   # doppio tocco su «Rispondi»
+                    raise ErroreExtra(409, "Hai già risposto da un altro dispositivo")
+                if c["stato"] == "finita" or x["stato"] != "squilla":
+                    raise ErroreExtra(409, "La chiamata non squilla più")
+                if self._attive(chi, tranne=cid):
+                    raise ErroreExtra(409, "Sei già in un'altra chiamata")
+                x.update(stato="dentro", disp=disp, dal=ora)
+                c["stato"] = "in corso"
+                self.avvisi.append((chi, "chiusa", self._info(c)))   # la notifica sugli altri dispositivi si può togliere
+                self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def rifiuta(self, chi, disp, cid):
+        disp = self._disp(disp)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if x["stato"] == "dentro":
+                    raise ErroreExtra(409, "Sei dentro la chiamata: per uscire chiudila")
+                if x["stato"] == "squilla":
+                    x.update(stato="rifiutata", dal=ora)
+                    self.avvisi.append((chi, "chiusa", self._info(c)))
+                    self._controlla(c, ora)
+                    self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def chiudi(self, chi, disp, cid):
+        """Esce dalla chiamata (chi squilla e chiude, rifiuta). Una chiamata già chiusa: niente errore."""
+        disp = self._disp(disp)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if x["stato"] == "dentro":
+                    if x["disp"] != disp:
+                        raise ErroreExtra(409, "La chiamata è su un altro tuo dispositivo")
+                    x.update(stato="uscito", dal=ora)
+                    self._controlla(c, ora)
+                    self._cambiata(c)
+                elif x["stato"] == "squilla":
+                    x.update(stato="rifiutata", dal=ora)
+                    self.avvisi.append((chi, "chiusa", self._info(c)))
+                    self._controlla(c, ora)
+                    self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def aggiungi(self, chi, disp, cid, a):
+        """Chi è dentro aggiunge persone (gruppo): squillano come in una chiamata nuova."""
+        disp = self._disp(disp)
+        chiamati = self._chiamati(a, chi)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if c["stato"] == "finita" or x["stato"] != "dentro" or x["disp"] != disp:
+                    raise ErroreExtra(409, "Si aggiungono persone solo dalla chiamata in corso")
+                presenti = [k for k, y in c["p"].items() if y["stato"] in ("dentro", "squilla")]
+                for k, (nome, _) in chiamati.items():
+                    if k in presenti:
+                        raise ErroreExtra(409, "%s è già nella chiamata" % nome)
+                if len(presenti) + len(chiamati) > CHIAMATA_MAX:
+                    raise ErroreExtra(409, "Al più %d persone in una chiamata" % CHIAMATA_MAX)
+                self._conta(chi, ora, len(chiamati))
+                for k, (nome, nascosta) in chiamati.items():
+                    self._squilla(c, k, nome, nascosta, ora)
+                self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def segnale(self, chi, disp, cid, a, tipo, dati):
+        """Un messaggio per collegarsi (offerta, risposta, candidati, stato di microfono e video) dal dispositivo di chi è
+        dentro al dispositivo da cui `a` ha risposto. Il Mac mini lo passa e basta: le chiavi della cifratura le
+        scelgono i telefoni (DTLS), e l'impronta nell'offerta non serve a nessuno per entrare."""
+        disp = self._disp(disp)
+        if tipo not in TIPI_SEGNALE:
+            raise ErroreExtra(400, "Segnale non valido: %s" % ", ".join(TIPI_SEGNALE))
+        if not isinstance(dati, (dict, list)):
+            raise ErroreExtra(400, "Segnale non valido: servono dati")
+        if len(json.dumps(dati, ensure_ascii=False)) > SEGNALE_MAX:
+            raise ErroreExtra(413, "Segnale troppo grande")
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if c["stato"] == "finita" or x["stato"] != "dentro":
+                    raise ErroreExtra(409, "Non sei dentro questa chiamata")
+                if x["disp"] != disp:
+                    raise ErroreExtra(409, "La chiamata è su un altro tuo dispositivo")
+                y = c["p"].get(a) if isinstance(a, str) and a != chi else None
+                if y is None or y["stato"] != "dentro":
+                    raise ErroreExtra(404, "Questa persona non è nella chiamata")
+                x["segnali"] += 1
+                if x["segnali"] > SEGNALI_PERSONA:
+                    raise ErroreExtra(429, "Troppi messaggi in questa chiamata")
+                self.visti[(chi, disp)] = ora
+                self._evento(a, y["disp"], tipo="segnale", chiamata=cid, da=chi, segnale=tipo, dati=dati)
+                self.cond.notify_all()
+            return {"ok": True}
+        finally:
+            self._manda()
+
+
+def chiamata_bloccata(da, a):
+    """True se `a` ha bloccato `da` con «Blocca» della chat: allora a `a` non squilla niente."""
+    try:
+        return CHAT is not None and chat_bloccato(da, a)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _nome_in_atlante(chi):
+    if chi == "p":
+        return NOME_PROPRIETARIO
+    return PERS.nome(chi) if PERS is not None and isinstance(chi, str) and re.fullmatch(r"[0-9a-f]{16}", chi) else ""
+
+
+def avviso_chiamata(persona, evento, chiamata):
+    """Notifiche delle chiamate: le manda la chat (Web Push) ai telefoni iscritti. La chiama il centralino in un filo
+    a parte, fuori dal suo blocco: può fare richieste di rete. Argomenti:
+    - persona: chi riceve l'avviso ("p" = Samuele, se no l'id dell'invitato), su tutti i suoi dispositivi iscritti;
+    - evento: "arriva" (comincia a squillare: «Chiamata da Anna» o «Videochiamata da Anna»), "persa" (nessuno ha
+      risposto o chi chiamava ha chiuso: «Chiamata persa da Anna»), "chiusa" (ha risposto o rifiutato: la notifica di
+      quella chiamata si può togliere);
+    - chiamata: {"id", "da", "da_nome", "video"}. Etichetta della notifica: "chiamata-<id>", così «persa» e «chiusa»
+      prendono il posto di «arriva». Toccandola si apre l'app (./): se squilla ancora, la chiamata compare da sola
+      (l'app chiede api/extra/chiamate/attendi appena si apre); per le perse va bene ./?x=chiamate (l'elenco)."""
+    try:
+        if CHAT is not None:   # la chat c'è da quando il server parte (main); nelle prove del centralino da solo no
+            CHAT.avviso_chiamata(persona, evento, chiamata)
+    except Exception as e:  # noqa: BLE001  una notifica non riuscita non deve fermare la chiamata
+        print("Atlante: avviso di chiamata non mandato: %s" % e, flush=True)
+
+
+CENTRALINO = Centralino(_nome_in_atlante, bloccato=lambda da, a: chiamata_bloccata(da, a),
+                        avviso=lambda *a: avviso_chiamata(*a))
+
+
+def _chi_chiama(h):
+    """Chi chiama: "p" per Samuele, l'id per un invitato. Dalla rete di casa senza nessuno dietro non si chiama (e non
+    si ricevono le chiamate di Samuele)."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato" and chi.get("persona"):
+        return chi["persona"]
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    raise ErroreExtra(403, "Le chiamate sono per Samuele e i suoi invitati: entra con il tuo invito")
+
+
+def _persone_da_chiamare(chi):
+    """Chi si può chiamare: tutte le persone di Atlante tranne chi chiede, con id e nome e basta (niente dispositivi,
+    date, chi ha invitato chi)."""
+    tutte = [{"id": "p", "nome": NOME_PROPRIETARIO}]
+    if PERS is not None:
+        tutte += sorted(({"id": x["id"], "nome": x["nome"]} for x in PERS.elenco()["persone"]), key=lambda x: x["nome"].casefold())
+    return {"io": {"id": chi, "nome": _nome_in_atlante(chi)}, "persone": [x for x in tutte if x["id"] != chi]}
+
+
+def ice_server(ora=None):
+    """Server ICE per WebRTC: STUN (pubblico: ognuno scopre il proprio indirizzo su Internet) e, solo se configurato,
+    TURN, il ponte per le reti che non lasciano collegare due telefoni (spesso i dati mobili). Credenziali a tempo come
+    coturn con use-auth-secret: utente «scadenza:nome», password base64(HMAC-SHA1(segreto, utente)): il segreto non
+    esce dal Mac mini."""
+    servers = []
+    stun = [u for u in STUN.split(",") if u]
+    if stun:
+        servers.append({"urls": stun})
+    turn = [u for u in TURN_URL.split(",") if u] if TURN_SEGRETO else []
+    if turn:
+        utente = "%d:%s" % (int(time.time() if ora is None else ora) + TURN_DURATA, TURN_UTENTE)
+        firma = hmac.new(TURN_SEGRETO.encode("utf-8"), utente.encode("utf-8"), hashlib.sha1).digest()
+        servers.append({"urls": turn, "username": utente, "credential": base64.b64encode(firma).decode("ascii")})
+    return {"iceServers": servers, "turn": bool(turn)}
+
+
+def _prepara_chiamate(stun=None):
+    """Da main(): STUN da --stun o ATLANTE_STUN; TURN solo dalle variabili d'ambiente (il segreto non deve stare tra gli
+    argomenti, che `ps` mostra a tutti). Indirizzi che non sono stun:/stuns:/turn:/turns: si scartano."""
+    global STUN, TURN_URL, TURN_UTENTE, TURN_SEGRETO
+
+    def indirizzi(testo, forma):
+        return ",".join(u for u in (x.strip() for x in (testo or "").split(",")) if re.fullmatch(forma, u))
+
+    STUN = indirizzi(os.environ.get("ATLANTE_STUN", STUN_PREDEFINITO) if stun is None else stun, r"stuns?:[^\s,;\"'<>]+")
+    TURN_URL = indirizzi(os.environ.get("ATLANTE_TURN_URL", ""), r"turns?:[^\s,;\"'<>]+")
+    TURN_UTENTE = re.sub(r"[^A-Za-z0-9_.@-]", "", os.environ.get("ATLANTE_TURN_UTENTE", ""))[:64] or "atlante"
+    TURN_SEGRETO = os.environ.get("ATLANTE_TURN_SEGRETO", "")
+    if TURN_URL and not TURN_SEGRETO:
+        print("Atlante: ATLANTE_TURN_URL senza ATLANTE_TURN_SEGRETO: il ponte per le chiamate non si usa", flush=True)
+
+
+def _chiamate(h, metodo, resto, corpo):
+    """api/extra/chiamate…: chi si può chiamare, server ICE, attesa lunga, chiama, rispondi, rifiuta, chiudi, aggiungi
+    e segnale. Per Samuele e i suoi invitati; le scritture chiedono la stessa origine (gestisci_extra)."""
+    chi = _chi_chiama(h)
+
+    def solo(m):
+        if metodo != m:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+
+    if resto == ["persone"]:
+        solo("GET")
+        return _json(h, _persone_da_chiamare(chi))
+    if resto == ["ice"]:
+        solo("GET")
+        return _json(h, ice_server())
+    if resto == ["attendi"]:
+        solo("GET")
+        q = parse_qs(urlsplit(h.path).query)
+        dopo = (q.get("dopo") or [""])[0]
+        if dopo and not re.fullmatch(r"[0-9]{1,18}", dopo):
+            raise ErroreExtra(400, "Attesa non valida")
+        return _json(h, CENTRALINO.attendi(chi, (q.get("disp") or [""])[0], int(dopo) if dopo else None, _attesa(h)))
+    if not resto:
+        solo("POST")
+        return _json(h, {"chiamata": CENTRALINO.chiama(chi, corpo.get("disp"), corpo.get("a"), corpo.get("video"))})
+    if len(resto) == 2 and resto[1] in ("rispondi", "rifiuta", "chiudi", "aggiungi", "segnale"):
+        solo("POST")
+        cid, azione, disp = resto[0], resto[1], corpo.get("disp")
+        if azione == "segnale":
+            return _json(h, CENTRALINO.segnale(chi, disp, cid, corpo.get("a"), corpo.get("tipo"), corpo.get("dati")))
+        if azione == "aggiungi":
+            return _json(h, {"chiamata": CENTRALINO.aggiungi(chi, disp, cid, corpo.get("a"))})
+        return _json(h, {"chiamata": getattr(CENTRALINO, azione)(chi, disp, cid)})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/chiamate/%s" % "/".join(resto))
 
 
 # ----- voci e audiolibri con `say` -----
@@ -2179,6 +7089,1454 @@ def _chiedi_ia(corpo):
             raise ErroreExtra(504, "L'IA locale non ha risposto entro %d secondi" % TEMPO_IA)
         raise ErroreExtra(503, SENZA_IA)
     return {"testo": j.get("response", "") if isinstance(j, dict) else "", "modello": modello}
+
+
+# ----- playlist di Atlante: playlist tematiche fatte dal Mac mini e playlist con l'IA -----
+#
+# Ogni brano della libreria riceve una volta sola una «scheda» (<cache>/tematiche/schede.json): generi ed etichette da
+# MusicBrainz (al più una richiesta al secondo, con un User-Agent che dice chi siamo, come chiedono loro), il genere
+# proposto dall'IA locale quando MusicBrainz non lo conosce, BPM, energia e regolarità del ritmo misurati sull'audio
+# (lo stesso metodo del mix a tempo dell'app, beatGrid, in un processo a parte per non rallentare il server) e l'anno.
+# Il lavoro gira in sottofondo un brano alla volta (--tematiche o ATLANTE_TEMATICHE=1) e dopo un riavvio riprende da
+# dove era: le schede fatte restano. Le playlist sono regole su questi dati scritte in playlist-atlante.json (accanto al
+# server); le modifiche di Samuele vanno in <cache>/tematiche/regole.json, che un aggiornamento non tocca. Un brano sta
+# in tutte le playlist a cui appartiene; una playlist vuota non compare.
+#
+#   GET    tematiche                    gruppi e playlist (nome, numero di brani, copertine) e avanzamento del lavoro
+#   GET    tematiche/<id>               i brani di una playlist (id del catalogo)
+#   POST   tematiche/ia {richiesta} o {su_misura:true, ascolti:[{id,n,fav}]}   anteprima di una playlist con l'IA
+#   POST   tematiche/condivise {nome, brani, locale}   «Condividi in Atlante»: la vedono tutti tra le Playlist di Atlante
+#   DELETE tematiche/condivise/<id>     la toglie chi l'ha condivisa (o Samuele)
+#
+# Con l'IA il Mac mini traduce la richiesta in criteri (generi, umore, BPM, anni, artisti, durata) e sceglie lui i brani
+# dalla libreria: l'IA non inventa brani. Una richiesta all'IA alla volta (l'IA è una sola), al più IA_AL_GIORNO al
+# giorno per persona. La playlist resta di chi la crea (salvata sul telefono come le altre).
+
+TEM_VERSIONE = 1          # versione delle schede: quelle più vecchie si rifanno
+TEM_FINESTRA = 30.0       # secondi di audio per ogni misura (come il mix a tempo dell'app)
+TEM_RIPOSO = 120          # secondi di pausa quando non c'è niente da fare
+TEM_RIPROVA = 6 * 3600    # brano non riuscito per un motivo passeggero (rete, IA spenta, ffmpeg mancante): si riprova dopo
+TEM_PAUSA_MB = 600        # MusicBrainz non risponde: per dieci minuti si misura solo l'audio
+TEM_RICALCOLO = 30        # mentre arrivano schede nuove le playlist si ricalcolano al più ogni 30 s
+MB_BASE = "https://musicbrainz.org"
+MB_INTERVALLO = 1.1       # secondi tra due richieste: MusicBrainz ne chiede al più una al secondo
+MB_TEMPO = 20
+MB_CONTATTO = "https://github.com/samuelemanfredi/atlante"   # ATLANTE_CONTATTO per un indirizzo email
+IA_ATTESA = 90            # secondi che una richiesta aspetta il suo turno con l'IA
+IA_AL_GIORNO = 20
+CONDIVISE_MAX, CONDIVISE_PERSONA, CONDIVISA_BRANI = 300, 30, 1000
+REGOLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playlist-atlante.json")
+# i generi delle schede: gli stessi id di "generi" in playlist-atlante.json
+GENERI = ("pop", "rap", "trap", "rock", "alternative", "indie", "punk", "metal", "dance", "house", "techno", "edm",
+          "elettronica", "rnb", "soul", "funk", "disco", "latino", "reggae", "jazz", "blues", "country", "cantautori",
+          "classica", "lofi", "kpop", "afrobeat")
+# etichette di MusicBrainz (e generi scritti nei file) → generi di Atlante; un'etichetta può darne più di uno
+_TAG_GENERI = [(re.compile(r), g) for r, g in (
+    (r"\bk ?pop\b", ("kpop", "pop")),
+    (r"\blo ?fi\b|\bchillhop\b", ("lofi",)),
+    (r"\btrap\b", ("trap", "rap")),
+    (r"\bhip ?hop\b|\brap\b|\bdrill\b|\bgrime\b|\bboom bap\b", ("rap",)),
+    (r"\breggaeton\b|\blatin\w*\b|\bbachata\b|\bsalsa\b|\bcumbia\b|\bdembow\b|\bmerengue\b|\burbano\b|\bflamenco\b",
+     ("latino",)),
+    (r"\breggae\b|\bdancehall\b|\bdub\b|\bska\b|\brocksteady\b", ("reggae",)),
+    (r"\bafro ?beats?\b|\bafropop\b|\bamapiano\b|\bafro house\b|\bafroswing\b|\bhighlife\b", ("afrobeat",)),
+    (r"\bdisco\b|\bhi nrg\b", ("disco",)),
+    (r"\bfunk\w*\b|\bboogie\b", ("funk",)),
+    (r"\bsoul\b|\bmotown\b|\bgospel\b", ("soul",)),
+    (r"\brnb\b|\brhythm and blues\b|\bnew jack swing\b", ("rnb",)),
+    (r"\bhouse\b", ("house", "elettronica")),
+    (r"\btechno\b", ("techno", "elettronica")),
+    (r"\bedm\b|\bbig room\b|\bdubstep\b|\bdrum and bass\b|\bdnb\b|\btrance\b|\bhardstyle\b|\bfuture bass\b"
+     r"|\belectronic dance\b|\bbrostep\b", ("edm", "elettronica")),
+    (r"\bdance\b|\beurodance\b|\bclub\b", ("dance",)),
+    (r"\belectronic\w*\b|\belettronica\b|\bsynth ?wave\b|\bambient\b|\bidm\b|\bdowntempo\b|\btrip hop\b|\bchillwave\b"
+     r"|\belectro\w*\b|\bsynth ?pop\b", ("elettronica",)),
+    (r"\bmetal\w*\b|\bdeathcore\b", ("metal",)),
+    (r"\bpunk\b", ("punk",)),
+    (r"\balternative\b|\balt rock\b|\bgrunge\b|\bemo\b", ("alternative",)),
+    (r"\bindie\b|\bbedroom pop\b", ("indie",)),
+    (r"\brock\b|\brock and roll\b|\brock n roll\b|\brockabilly\b", ("rock",)),
+    (r"\bblues\b", ("blues",)),
+    (r"\bcountry\b|\bamericana\b|\bbluegrass\b", ("country",)),
+    (r"\bjazz\b|\bbebop\b|\bswing\b|\bbossa nova\b|\bbig band\b", ("jazz",)),
+    (r"\bcantautor\w*\b|\bsinger songwriter\b|\bcanzone d autore\b", ("cantautori",)),
+    (r"\bclassical\b|\bclassica\b|\borchestral\b|\bopera\b|\bbaroque\b|\bsymphon\w*\b|\bsoundtrack\b|\bfilm score\b"
+     r"|\bvideo game music\b|\bcolonn[ae] sonor[ae]\b|\bneoclassical\b|\bchamber music\b", ("classica",)),
+    (r"\bpop\b|\bteen pop\b|\beuropop\b|\belectropop\b", ("pop",)))]
+_TAG_ITALIANO = re.compile(r"\bital(?:ian|iano|iana|iani|iane|ia|o|ien)\b|\bcantautor")
+_MB_SOLO_ITALIANI = ("cantautori",)   # i cantautori di MusicBrainz sono quasi sempre italiani: lo dice anche il paese
+
+
+def _norm(s):
+    """Testo per i confronti: minuscolo, senza accenti, solo lettere e cifre separate da uno spazio."""
+    s = unicodedata.normalize("NFD", str(s or "").lower().replace("r&b", "rnb").replace("&", " and "))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[\W_]+", " ", s).split())
+
+
+def _generi_da_testo(s):
+    """Generi di Atlante per un'etichetta o un genere scritto nel file («Pop Rock» → pop, rock)."""
+    t = _norm(s)
+    if not t:
+        return set()
+    if t in GENERI:
+        return {t}
+    o = set()
+    for r, g in _TAG_GENERI:
+        if r.search(t):
+            o.update(g)
+    return o
+
+
+def _numero(x):
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)) and math.isfinite(x):
+        return float(x)
+    if isinstance(x, str):
+        try:
+            v = float(x.strip().replace(",", "."))
+        except ValueError:
+            return None
+        return v if math.isfinite(v) else None
+    return None
+
+
+# ----- misura dell'audio: BPM, energia, regolarità (porta in Python di beatGrid dell'app) -----
+
+FFTN = 1024
+_FFT_META = FFTN // 2
+_FFT_TW = {}
+_n = 2
+while _n <= _FFT_META:
+    _FFT_TW[_n] = [cmath.exp(-2j * math.pi * k / _n) for k in range(_n // 2)]
+    _n *= 2
+_FFT_POST = [cmath.exp(-2j * math.pi * k / FFTN) for k in range(_FFT_META)]
+_HANN = [0.5 - 0.5 * math.cos(2 * math.pi * i / (FFTN - 1)) for i in range(FFTN)]
+
+
+def _fft(x):
+    """FFT complessa (radice 2) con le liste: in Python puro le comprensioni sono molto più veloci dei cicli a indice."""
+    n = len(x)
+    if n == 2:
+        a, b = x
+        return [a + b, a - b]
+    e, o = _fft(x[0::2]), _fft(x[1::2])
+    t = [w * v for w, v in zip(_FFT_TW[n], o)]
+    return [a + b for a, b in zip(e, t)] + [a - b for a, b in zip(e, t)]
+
+
+def _moduli(fin, k):
+    """Modulo dei primi k canali della FFT reale di 1024 campioni, da una FFT complessa di 512 (metà del lavoro)."""
+    z = _fft([complex(a, b) for a, b in zip(fin[0::2], fin[1::2])])
+    z.append(z[0])
+    zc = [z[_FFT_META - i].conjugate() for i in range(k)]
+    return [abs((a + b) * 0.5 - 0.5j * w * (a - b)) for a, b, w in zip(z, zc, _FFT_POST)]
+
+
+def griglia_battiti(x, sr):
+    """Come beatGrid dell'app: flusso spettrale (FFT 1024, passo 128), autocorrelazione con le armoniche e preferenza
+    per i tempi tra 90 e 160, poi la fase del primo battito. In più: flusso medio per canale e volume (dB),
+    che servono all'energia. None con meno di 8 s di audio."""
+    passo = 128
+    fps = sr / passo
+    nf = (len(x) - FFTN) // passo
+    if nf < fps * 8:
+        return None
+    k = min(FFTN // 2, int(round(5000 / (sr / FFTN))))
+    prec, on, log1p, pot = [0.0] * k, [0.0] * nf, math.log1p, [0.0] * k
+    for f in range(nf):
+        o = f * passo
+        mag = _moduli([a * w for a, w in zip(x[o:o + FFTN], _HANN)], k)
+        pot = [a + v * v for a, v in zip(pot, mag)]   # spettro di potenza di tutto il pezzo: serve alla tonalità
+        l = [log1p(100 * m) for m in mag]
+        s = 0.0
+        for a, b in zip(l[1:], prec[1:]):
+            if a > b:
+                s += a - b
+        prec = l
+        on[f] = s if f else 0.0
+    # via la tendenza lenta (media mobile di ~1 s), restano i colpi
+    w = int(round(fps))
+    env, acc = [0.0] * nf, 0.0
+    for f in range(nf):
+        acc += on[f]
+        if f >= w:
+            acc -= on[f - w]
+        env[f] = max(0.0, on[f] - acc / min(f + 1, w))
+    max_lag = int(math.ceil(4 * 60 * fps / 70)) + 2
+    ac = [sum(a * b for a, b in zip(env[lag:], env)) / (nf - lag) for lag in range(max_lag + 1)]
+    if not ac[0] > 0:
+        return None
+
+    def aci(v):
+        a = int(math.floor(v))
+        b = v - a
+        return ac[a] * (1 - b) + ac[a + 1] * b if a + 1 <= max_lag else 0.0
+    best, bs, tot = 0.0, -1.0, 0.0
+    for i in range(1201):
+        bpm = 70 + i * 0.1
+        lag = 60 * fps / bpm
+        # armoniche del battito più il mezzo battito (le crome): così 172 non diventa 115 (i 2/3) né 86 (la metà)
+        sc = aci(lag / 2) + sum(aci(j * lag) / math.sqrt(j) for j in range(1, 5))
+        sc *= math.exp(-0.5 * math.log2(bpm / 122) ** 2)
+        tot += sc
+        if sc > bs:
+            bs, best = sc, bpm
+    lag = 60 * fps / best
+
+    def oni(v):
+        a = int(math.floor(v))
+        b = v - a
+        return env[a] * (1 - b) + env[a + 1] * b if a + 1 < nf else 0.0
+    fase, ps, p = 0.0, -1.0, 0.0
+    while p < lag:
+        sc, t = 0.0, p
+        while t < nf - 1:
+            sc += oni(t)
+            t += lag
+        if sc > ps:
+            ps, fase = sc, p
+        p += 0.25
+    rms = math.sqrt(sum(v * v for v in x) / len(x))
+    return {"bpm": round(best, 1), "b0": (fase * passo + FFTN / 2) / sr, "c": round(bs / (tot / 1201), 2),
+            "flusso": sum(on) / nf / k, "db": 20 * math.log10(max(rms, 1e-9)), "spettro": pot}
+
+
+# profili di Krumhansl e Kessler: quanto pesa ogni grado della scala in un brano in modo maggiore e minore
+_PROFILO_MAGGIORE = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+_PROFILO_MINORE = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+_NOTE = ("Do", "Do#", "Re", "Mi♭", "Mi", "Fa", "Fa#", "Sol", "La♭", "La", "Si♭", "Si")
+
+
+def _correlazione(a, b):
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    n = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    d = math.sqrt(sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b))
+    return n / d if d else 0.0
+
+
+def tonalita(spettro, sr):
+    """(modo, nome) dallo spettro di potenza: le note (da 180 Hz a 2,5 kHz: sotto i canali della FFT sono più larghi
+    di un semitono) confrontate con i profili maggiore e minore in tutte le dodici tonalità. modo 1 maggiore, -1 minore,
+    0 incerto (per esempio quando la relativa maggiore e la minore si somigliano troppo)."""
+    croma = [0.0] * 12
+    for i, v in enumerate(spettro):
+        f = i * sr / FFTN
+        if 180 <= f <= 2500 and v > 0:
+            croma[int(round(12 * math.log2(f / 440.0) + 69)) % 12] += v
+    if sum(croma) <= 0:
+        return 0, ""
+    ruota = lambda p, k: p[-k:] + p[:-k] if k else p   # noqa: E731
+    mag = max((_correlazione(croma, ruota(_PROFILO_MAGGIORE, k)), k) for k in range(12))
+    mi = max((_correlazione(croma, ruota(_PROFILO_MINORE, k)), k) for k in range(12))
+    if max(mag[0], mi[0]) < 0.5 or abs(mag[0] - mi[0]) < 0.05:
+        return 0, ""
+    return (1, _NOTE[mag[1]] + " maggiore") if mag[0] > mi[0] else (-1, _NOTE[mi[1]] + " minore")
+
+
+def _campioni_wav(b):
+    """Campioni (da -1 a 1) di un WAV mono a 16 bit come quello di _pezzo_wav (anche con le lunghezze di una pipe)."""
+    p = 12
+    while p + 8 <= len(b):
+        cid, sz = b[p:p + 4], struct.unpack("<I", b[p + 4:p + 8])[0]
+        if cid == b"data":
+            d = b[p + 8:] if sz in (0, 0xFFFFFFFF) else b[p + 8:p + 8 + sz]
+            a = array.array("h")
+            a.frombytes(d[:len(d) // 2 * 2])
+            if sys.byteorder == "big":
+                a.byteswap()
+            return [v / 32768.0 for v in a]
+        p += 8 + sz + (sz & 1)
+    return []
+
+
+def _finestre(durata):
+    """Da dove cominciano i pezzi di 30 s da misurare: tre in un brano normale, lontani da introduzione e finale."""
+    d = durata if durata and durata > 0 else 180.0   # durata sconosciuta: un brano qualsiasi
+    if d < 10:
+        return []
+    centri = (0.25, 0.5, 0.75) if d >= 100 else (0.35, 0.7) if d >= 60 else (0.5,)
+    return sorted({round(min(max(0.0, d * c - TEM_FINESTRA / 2), max(0.0, d - TEM_FINESTRA)), 3) for c in centri})
+
+
+def misura_audio(percorso, durata):
+    """BPM, energia (0–1), regolarità del ritmo (0–1) e volume del brano, dai pezzi di _finestre."""
+    misure = []
+    for da in _finestre(durata):
+        try:
+            wav = _pezzo_wav(percorso, da, TEM_FINESTRA)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            print("Playlist di Atlante: pezzo da %.0f s di %s non letto: %s" % (da, percorso, e), flush=True)
+            continue
+        if wav is None:
+            return {"senza_ffmpeg": True}
+        g = griglia_battiti(_campioni_wav(wav), PEZZO_HZ)
+        if g:
+            misure.append(g)
+    o = {"bpm": None, "energia": None, "regolarita": None, "db": None, "modo": 0, "tonalita": "", "pezzi": len(misure)}
+    if not misure:
+        return o
+    o["modo"], o["tonalita"] = tonalita([sum(v) for v in zip(*(g["spettro"] for g in misure))], PEZZO_HZ)
+    med = lambda v: sorted(v)[len(v) // 2] if len(v) % 2 else sum(sorted(v)[len(v) // 2 - 1:len(v) // 2 + 1]) / 2   # noqa: E731
+    # un pezzo misurato al doppio o alla metà degli altri è lo stesso tempo (raddoppiato o dimezzato)
+    rif = max(misure, key=lambda g: g["c"])["bpm"]
+    battiti, piegati = [], False
+    for g in misure:
+        v = g["bpm"]
+        for f in (2.0, 0.5):
+            if abs(v * f / rif - 1) < 0.06:
+                v, piegati = v * f, True
+        battiti.append(v)
+    bpm = med(battiti)
+    # regolarità: un battito netto (c: quanto il tempo migliore spicca sugli altri) e lo stesso in tutti i pezzi
+    forza = min(1.0, max(0.0, (med([g["c"] for g in misure]) - 1.2) / 1.3))
+    if len(battiti) > 1:
+        scarto = (max(battiti) - min(battiti)) / bpm
+        accordo = min(1.0, max(0.0, 1 - (scarto - 0.015) / 0.06)) * (0.8 if piegati else 1.0)
+        regolarita = forza * (0.5 + 0.5 * accordo)
+    else:
+        regolarita = 0.75 * forza   # un pezzo solo: non si sa se il tempo resta quello
+    db = med([g["db"] for g in misure])
+    # energia: quanto cambia lo spettro da un istante all'altro (colpi, chitarre, voce piena) e quanto è forte
+    flusso = min(1.0, max(0.0, (med([g["flusso"] for g in misure]) - 0.06) / 0.14))
+    forte = min(1.0, max(0.0, (db + 30) / 20))
+    o.update(bpm=round(bpm, 1), energia=round(0.5 * flusso + 0.5 * forte, 2), regolarita=round(regolarita, 2),
+             db=round(db, 1))
+    return o
+
+
+def _misura_da_riga(args):
+    """python3 musica_libreria.py --misura-audio <file> <durata>: la misura in un processo a parte (stampa un JSON)."""
+    try:
+        os.nice(10)   # il server e l'app hanno la precedenza
+    except (OSError, AttributeError):
+        pass
+    if len(args) != 2:
+        print("uso: --misura-audio <file> <durata in secondi>", file=sys.stderr)
+        return 2
+    print(json.dumps(misura_audio(args[0], _numero(args[1]) or 0.0)), flush=True)
+    return 0
+
+
+def _misura_in_processo(percorso, durata):
+    r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), "--misura-audio", percorso, "%.3f" % (durata or 0)],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900,
+                       env=_ambiente())
+    righe = r.stdout.decode("utf-8", "replace").strip().splitlines()
+    if r.returncode != 0 or not righe:
+        raise RuntimeError("misura non riuscita: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
+    return json.loads(righe[-1])
+
+
+# ----- MusicBrainz -----
+
+class ErroreMB(Exception):
+    """MusicBrainz non raggiungibile o occupato: il brano si riprova più tardi."""
+
+
+class MusicBrainz:
+    """Richieste all'archivio di MusicBrainz, al più una ogni MB_INTERVALLO secondi; artisti e album in memoria."""
+
+    def __init__(self, artisti=None, gruppi=None):
+        self.blocco = threading.Lock()
+        self.ultima = 0.0
+        self.artisti = artisti if isinstance(artisti, dict) else {}   # id → {paese, etichette}
+        self.gruppi = gruppi if isinstance(gruppi, dict) else {}      # id del gruppo di uscite (album) → {etichette}
+
+    @staticmethod
+    def agente():
+        return "AtlanteMusica/1.0 ( %s )" % (os.environ.get("ATLANTE_CONTATTO") or MB_CONTATTO)
+
+    def chiedi(self, percorso, parametri):
+        base = (os.environ.get("ATLANTE_MUSICBRAINZ") or MB_BASE).rstrip("/")   # le prove usano un MusicBrainz finto
+        url = base + percorso + "?" + "&".join("%s=%s" % (k, quote(v, safe="")) for k, v in parametri.items())
+        with self.blocco:
+            attesa = self.ultima + MB_INTERVALLO - time.time()
+            if attesa > 0:
+                time.sleep(attesa)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": self.agente(), "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=MB_TEMPO) as r:
+                    return json.loads(r.read(8 * 1024 * 1024).decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code in (400, 404):
+                    return None
+                raise ErroreMB("MusicBrainz: errore %d" % e.code)
+            except (OSError, ValueError, http.client.HTTPException) as e:
+                raise ErroreMB("MusicBrainz non raggiungibile: %s" % e)
+            finally:
+                self.ultima = time.time()
+
+    @staticmethod
+    def _etichette(o):
+        """Nomi dei generi e delle etichette di un oggetto di MusicBrainz, i più votati prima."""
+        v = [x for x in (o.get("genres") or []) + (o.get("tags") or []) if isinstance(x, dict) and x.get("name")]
+        v.sort(key=lambda x: -(x.get("count") or 0))
+        out = []
+        for x in v:
+            n = _norm(x["name"])
+            if n and n not in out and x.get("count", 1) >= 1:
+                out.append(n)
+        return out[:25]
+
+    def artista(self, aid):
+        if aid not in self.artisti:
+            j = self.chiedi("/ws/2/artist/" + quote(aid, safe=""), {"inc": "genres+tags", "fmt": "json"}) or {}
+            area = j.get("area") or {}
+            paese = j.get("country") or "".join((area.get("iso-3166-1-codes") or [])[:1])
+            self.artisti[aid] = {"paese": paese or "", "etichette": self._etichette(j)}
+        return self.artisti[aid]
+
+    def gruppo(self, gid):
+        if gid not in self.gruppi:
+            j = self.chiedi("/ws/2/release-group/" + quote(gid, safe=""), {"inc": "genres+tags", "fmt": "json"}) or {}
+            self.gruppi[gid] = {"etichette": self._etichette(j)}
+        return self.gruppi[gid]
+
+    def brano(self, titolo, artista, album=""):
+        """{rec, generi, etichette, paese, italiano, anno} della registrazione che corrisponde, None se non c'è."""
+        t, a = _titolo_pulito(titolo), _primo_artista(artista)
+        nt, na = _norm(t), _norm(a)
+        if not nt or not na:
+            return None
+        esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')   # noqa: E731
+        j = self.chiedi("/ws/2/recording", {"query": 'recording:"%s" AND artist:"%s"' % (esc(t), esc(a)),
+                                             "limit": "10", "fmt": "json"}) or {}
+        buone = []
+        for r in j.get("recordings") or []:
+            if not isinstance(r, dict) or (r.get("score") or 0) < 70:
+                continue
+            rt = _norm(_titolo_pulito(r.get("title")))
+            artisti = [c.get("artist") or {} for c in r.get("artist-credit") or [] if isinstance(c, dict)]
+            nomi = [_norm(x.get("name")) for x in artisti] + [_norm(c.get("name")) for c in r.get("artist-credit") or []
+                                                             if isinstance(c, dict)]
+            if not (rt == nt or rt.startswith(nt + " ") or nt.startswith(rt + " ")):
+                continue
+            if not any(n and (n == na or na in n or n in na) for n in nomi):
+                continue
+            buone.append((r, [x.get("id") for x in artisti if x.get("id")]))
+        if not buone:
+            return None
+        buone.sort(key=lambda x: (-(x[0].get("score") or 0), not x[0].get("tags")))
+        rec, aids = buone[0]
+        anni = [int(r.get("first-release-date")[:4]) for r, _ in buone
+                if re.match(r"^\d{4}", r.get("first-release-date") or "") and int(r.get("first-release-date")[:4]) > 1800]
+        etichette = []
+        for r, _ in buone[:3]:
+            etichette += [x for x in self._etichette(r) if x not in etichette]
+        paese = ""
+        if aids:
+            art = self.artista(aids[0])
+            paese = art["paese"]
+            etichette += [x for x in art["etichette"] if x not in etichette]
+        generi = set()
+        for e in etichette:
+            generi |= _generi_da_testo(e)
+        if not generi:   # registrazione e artista senza generi: si prova l'album
+            gids = [((x.get("release-group") or {}).get("id"), x.get("title")) for x in rec.get("releases") or []
+                    if isinstance(x, dict)]
+            gids = [g for g in gids if g[0]]
+            gids.sort(key=lambda g: _norm(g[1]) != _norm(album))
+            if gids:
+                etichette += [x for x in self.gruppo(gids[0][0])["etichette"] if x not in etichette]
+                for e in etichette:
+                    generi |= _generi_da_testo(e)
+        italiano = True if paese == "IT" or any(_TAG_ITALIANO.search(e) for e in etichette) else (False if paese else None)
+        return {"rec": rec.get("id") or "", "generi": sorted(generi), "etichette": etichette[:30], "paese": paese,
+                "italiano": italiano, "anno": min(anni) if anni else None}
+
+
+def _titolo_pulito(t):
+    """Il nome del brano senza «(Official Video)», «[HD]», «(feat. X)», «- Remastered 2011»."""
+    t = RUMORE.sub("", str(t or ""))
+    t = re.sub(r"\s*[(\[](?:feat|ft|featuring|con|with)\b[^()\[\]]*[)\]]", "", t, flags=re.I)
+    t = re.sub(r"\s+(?:feat|ft|featuring)\.?\s.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+-\s+(?:\d{4}\s+)?(?:remaster(?:ed)?|remix|live|radio edit|versione|version)\b.*$", "", t, flags=re.I)
+    return " ".join(t.split())
+
+
+def _primo_artista(a):
+    a = re.split(r"\s+(?:feat\.?|ft\.?|featuring|con|with|x|&|e|and|vs\.?)\s+|\s*[,;/]\s*", str(a or ""), flags=re.I)[0]
+    return " ".join(a.split())
+
+
+# ----- le regole delle playlist -----
+
+_CAMPI_INTERVALLO = {"bpm": "bpm", "energia": "energia", "regolarita": "regolarita", "anni": "anno",
+                     "anni_fa": "anni_fa", "durata": "durata"}
+_CAMPI_ELENCO = ("generi", "non_generi", "etichette", "parole")
+ORDINI = {"aggiunti": (lambda d: -d["aggiunto"], False), "bpm": (lambda d: d["bpm"], True),
+          "-bpm": (lambda d: -d["bpm"], True), "energia": (lambda d: d["energia"], True),
+          "-energia": (lambda d: -d["energia"], True), "anno": (lambda d: d["anno"], True),
+          "-anno": (lambda d: -d["anno"], True), "titolo": (lambda d: d["titolo"], False),
+          "artista": (lambda d: (d["artista"], d["titolo"]), False)}
+
+
+def _controlla_regola(r, dove):
+    """Errori di una regola (elenco vuoto se va bene): una regola sbagliata si salta, le altre restano."""
+    if not isinstance(r, dict) or not r:
+        return ["%s: la regola deve essere un oggetto con almeno una condizione" % dove]
+    err = []
+    for k, v in r.items():
+        if k in _CAMPI_INTERVALLO:
+            if not (isinstance(v, list) and len(v) == 2 and all(_numero(x) is not None for x in v) and
+                    _numero(v[0]) <= _numero(v[1])):
+                err.append("%s: %s deve essere [minimo, massimo]" % (dove, k))
+        elif k in _CAMPI_ELENCO:
+            if not (isinstance(v, list) and v and all(isinstance(x, str) and x.strip() for x in v)):
+                err.append("%s: %s deve essere un elenco di parole" % (dove, k))
+            elif k in ("generi", "non_generi"):
+                err += ["%s: genere sconosciuto «%s»" % (dove, x) for x in v if x not in GENERI]
+        elif k == "italiano":
+            if not isinstance(v, bool):
+                err.append("%s: italiano deve essere true o false" % dove)
+        elif k == "modo":
+            if v not in ("maggiore", "minore"):
+                err.append("%s: modo deve essere \"maggiore\" o \"minore\"" % dove)
+        elif k in ("una_di", "nessuna_di"):
+            if not (isinstance(v, list) and v):
+                err.append("%s: %s deve essere un elenco di regole" % (dove, k))
+            else:
+                for i, x in enumerate(v):
+                    err += _controlla_regola(x, "%s › %s %d" % (dove, k, i + 1))
+        else:
+            err.append("%s: condizione sconosciuta «%s»" % (dove, k))
+    return err
+
+
+def _compila(r):
+    """La regola diventa una funzione sui dati di un brano (veloce: 6000 brani per 80 playlist a ogni ricalcolo)."""
+    prove = []
+    for k, v in r.items():
+        if k == "generi":
+            prove.append(lambda d, s=frozenset(v): not s.isdisjoint(d["generi"]))
+        elif k == "non_generi":
+            prove.append(lambda d, s=frozenset(v): s.isdisjoint(d["generi"]))
+        elif k == "italiano":
+            prove.append(lambda d, v=v: d["italiano"] is v)
+        elif k == "modo":
+            prove.append(lambda d, v=1 if v == "maggiore" else -1: d["modo"] == v)
+        elif k in _CAMPI_INTERVALLO:
+            prove.append(lambda d, c=_CAMPI_INTERVALLO[k], a=_numero(v[0]), b=_numero(v[1]):
+                         d[c] is not None and a <= d[c] <= b)
+        elif k == "etichette":
+            prove.append(lambda d, s=frozenset(_norm(x) for x in v): not s.isdisjoint(d["etichette"]))
+        elif k == "parole":   # parole intere o il loro inizio, nel titolo o nell'album
+            prove.append(lambda d, p=tuple(" " + _norm(x) for x in v if _norm(x)): any(x in d["testo"] for x in p))
+        elif k == "una_di":
+            prove.append(lambda d, f=[_compila(x) for x in v]: any(g(d) for g in f))
+        elif k == "nessuna_di":
+            prove.append(lambda d, f=[_compila(x) for x in v]: not any(g(d) for g in f))
+    return lambda d: all(p(d) for p in prove)
+
+
+def regole_atlante(personali=None):
+    """(gruppi, nomi dei generi, errori) da playlist-atlante.json e dalle modifiche in `personali` (regole.json)."""
+    with open(REGOLE_FILE, encoding="utf-8") as f:
+        base = json.load(f)
+    gruppi = [{"id": g["id"], "nome": g["nome"], "playlist": [dict(p) for p in g["playlist"]]} for g in base["gruppi"]]
+    errori = []
+    if personali and os.path.isfile(personali):
+        try:
+            with open(personali, encoding="utf-8") as f:
+                mie = json.load(f)
+            for g in mie.get("gruppi") or []:
+                qui = next((x for x in gruppi if x["id"] == g.get("id")), None)
+                if qui is None:
+                    qui = {"id": str(g.get("id") or "miei"), "nome": str(g.get("nome") or "Le mie"), "playlist": []}
+                    gruppi.append(qui)
+                elif g.get("nome"):
+                    qui["nome"] = str(g["nome"])
+                for p in g.get("playlist") or []:
+                    if not isinstance(p, dict) or not p.get("id"):
+                        errori.append("regole.json: una playlist senza id")
+                        continue
+                    vecchia = next((x for x in qui["playlist"] if x["id"] == p["id"]), None)
+                    if vecchia is None:
+                        vecchia = next((x for gg in gruppi for x in gg["playlist"] if x["id"] == p["id"]), None)
+                    if vecchia is not None:
+                        vecchia.update(p)
+                    else:
+                        qui["playlist"].append(dict(p))
+        except (OSError, ValueError, AttributeError, TypeError) as e:
+            errori.append("regole.json non letto: %s" % e)
+    for g in gruppi:
+        tenute = []
+        for p in g["playlist"]:
+            if p.get("nascosta"):
+                continue
+            dove = "%s › %s" % (g["nome"], p.get("nome") or p.get("id"))
+            e = _controlla_regola(p.get("regola"), dove)
+            if p.get("ordine", "aggiunti") not in ORDINI:
+                e.append("%s: ordine sconosciuto «%s»" % (dove, p.get("ordine")))
+            if not p.get("nome"):
+                e.append("%s: manca il nome" % dove)
+            if e:
+                errori += e
+                continue
+            p["_prova"] = _compila(p["regola"])
+            tenute.append(p)
+        g["playlist"] = tenute
+    nomi = {k: v for k, v in (base.get("generi") or {}).items() if k in GENERI}
+    return [g for g in gruppi if g["playlist"]], nomi, errori
+
+
+def _dati_brano(i, b, s, anno_ora):
+    """Quello che le regole guardano di un brano: catalogo (titolo, anno e genere dei tag) più la sua scheda."""
+    s = s or {}
+    generi = _generi_da_testo(b.get("genre")) | set(s.get("generi") or ())
+    if not generi:
+        generi = set(s.get("generi_ia") or ())
+    italiano = s.get("italiano")
+    if italiano is None:
+        italiano = s.get("italiano_ia")
+    anni = [a for a in (_intero(b.get("year")), s.get("anno")) if isinstance(a, int) and 1800 < a <= anno_ora + 1]
+    anno = min(anni) if anni else None   # l'uscita originale: una raccolta di successi ha l'anno della raccolta
+    return {"id": i, "generi": frozenset(generi), "italiano": italiano if isinstance(italiano, bool) else None,
+            "bpm": s.get("bpm"), "energia": s.get("energia"), "regolarita": s.get("regolarita"), "anno": anno,
+            "modo": s.get("modo") or 0,
+            "anni_fa": anno_ora - anno if anno else None, "durata": b.get("duration") or None,
+            "etichette": frozenset(s.get("etichette") or ()), "aggiunto": b.get("added") or 0,
+            "testo": " " + _norm("%s %s" % (b.get("title"), b.get("album"))) + " ",
+            "titolo": _norm(b.get("title")), "artista": _norm(b.get("artist")), "copertina": b.get("cover")}
+
+
+def _in_ordine(dati, ordine):
+    chiave, numerica = ORDINI.get(ordine) or ORDINI["aggiunti"]
+    if not numerica:
+        return sorted(dati, key=chiave)
+    campo = ordine.lstrip("-")   # i brani senza quel dato (non ancora misurati) vanno in fondo
+    return (sorted([d for d in dati if d[campo] is not None], key=chiave) +
+            sorted([d for d in dati if d[campo] is None], key=ORDINI["aggiunti"][0]))
+
+
+# ----- playlist con l'IA: dalla richiesta ai criteri, dai criteri ai brani della libreria -----
+
+_IA_UNA = threading.Lock()   # l'IA del Mac è una sola: una richiesta alla volta (anche quelle del lavoro in sottofondo)
+_ENERGIE = {"alta": [0.65, 1.0], "media": [0.35, 0.75], "bassa": [0.0, 0.45]}
+_GRUPPI_TEMI = ("umore", "attivita", "momenti")
+_SISTEMA_PLAYLIST = ("Trasformi la richiesta di una playlist in criteri per scegliere i brani da una libreria musicale. "
+                     "Rispondi solo con un oggetto JSON, senza spiegazioni. Non elencare brani: li sceglie il programma.")
+
+
+def _json_da_testo(t):
+    """L'oggetto JSON nella risposta dell'IA (anche se ci ha messo intorno altre parole), o None."""
+    t = str(t or "").strip()
+    m = re.search(r"\{.*\}", t, re.S)
+    for prova in (t, m.group(0) if m else ""):
+        try:
+            o = json.loads(prova)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            return o
+    return None
+
+
+def _booleano(v):
+    if isinstance(v, bool):
+        return v
+    t = _norm(v)
+    return True if t in ("si", "true", "yes", "vero") else False if t in ("no", "false", "falso") else None
+
+
+def _intervallo(v, minimo, massimo, largo):
+    """[a, b] dentro i limiti; None se manca o è assurdo (tutto fuori dai limiti, o nessun limite vero)."""
+    if isinstance(v, dict):
+        v = [v.get("min", v.get("minimo")), v.get("max", v.get("massimo"))]
+    if not isinstance(v, (list, tuple)):
+        n = _numero(v)
+        if n is None:
+            return None
+        v = [n - largo, n + largo]
+    if len(v) != 2:
+        return None
+    a, b = _numero(v[0]), _numero(v[1])
+    if a is None and b is None:
+        return None
+    a, b = minimo if a is None else a, massimo if b is None else b
+    if a > b:
+        a, b = b, a
+    if b < minimo or a > massimo:
+        return None
+    a, b = max(minimo, a), min(massimo, b)
+    if a <= minimo and b >= massimo:
+        return None
+    return [round(a, 2), round(b, 2)]
+
+
+def _generi_scelti(v, nomi):
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return []
+    per_nome = {_norm(n): g for g, n in nomi.items()}
+    o = []
+    for x in v[:20]:
+        if not isinstance(x, str):
+            continue
+        t = _norm(x)
+        trovati = {t} if t in GENERI else {per_nome[t]} if t in per_nome else _generi_da_testo(x)
+        o += [g for g in sorted(trovati) if g not in o]
+    return o
+
+
+def _temi_scelti(v, gruppi):
+    """Umori, attività e momenti chiesti → id delle playlist di Atlante con quella regola."""
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return []
+    pl = [p for g in gruppi if g["id"] in _GRUPPI_TEMI for p in g["playlist"]]
+    o = []
+    for x in v[:20]:
+        t = _norm(x) if isinstance(x, str) else ""
+        if not t:
+            continue
+        for p in pl:
+            n = _norm(p["nome"])
+            if t in (n, _norm(p["id"]), _norm(p["id"].split("-", 1)[-1])) or (len(t) >= 4 and (t in n or n in t)):
+                if p["id"] not in o:
+                    o.append(p["id"])
+                break
+    return o
+
+
+def criteri_da_ia(testo, richiesta, gruppi, nomi):
+    """Criteri controllati dalla risposta dell'IA: valori assurdi o sconosciuti si ignorano, mai brani inventati."""
+    j = _json_da_testo(testo)
+    if j is None:
+        raise ErroreExtra(502, "L'IA non ha capito la richiesta: prova a dirla in un altro modo")
+    anno = time.localtime().tm_year
+    nome = " ".join(str(j.get("nome") or "").split())[:60] if isinstance(j.get("nome"), str) else ""
+    durata = _numero(j.get("durata_minuti"))
+    energia = j.get("energia")
+    if isinstance(energia, str):
+        energia = _ENERGIE.get(_norm(energia))
+    else:
+        energia = _intervallo(energia, 0.0, 1.0, 0.15)
+    temi = []
+    for k in ("umori", "umore", "attivita", "momenti", "temi"):
+        temi += [t for t in _temi_scelti(j.get(k), gruppi) if t not in temi]
+    artisti = j.get("artisti")
+    artisti = [" ".join(a.split())[:80] for a in (artisti if isinstance(artisti, list) else [artisti])
+               if isinstance(a, str) and a.strip()][:20]
+    return {"nome": nome or (richiesta[:1].upper() + richiesta[1:])[:60],
+            "generi": _generi_scelti(j.get("generi"), nomi), "escludi_generi": _generi_scelti(j.get("escludi_generi"), nomi),
+            "temi": temi, "bpm": _intervallo(j.get("bpm"), 50, 200, 10), "anni": _intervallo(j.get("anni"), 1900, anno, 0),
+            "artisti": artisti, "italiano": _booleano(j.get("italiano")), "energia": energia,
+            "durata_minuti": int(min(240, max(10, durata))) if durata and durata > 0 else 60}
+
+
+def _riassunto(c, nomi, gruppi):
+    nomi_pl = {p["id"]: p["nome"] for g in gruppi for p in g["playlist"]}
+    v = [nomi.get(g, g) for g in c.get("generi") or []]
+    if c.get("italiano") is True:
+        v.append("italiana")
+    elif c.get("italiano") is False:
+        v.append("straniera")
+    v += [nomi_pl.get(t, t) for t in c.get("temi") or []]
+    if c.get("energia"):
+        v.append("energia " + next((k for k, x in _ENERGIE.items() if x == c["energia"]), "%g–%g" % tuple(c["energia"])))
+    if c.get("bpm"):
+        v.append("BPM %g–%g" % tuple(c["bpm"]))
+    if c.get("anni"):
+        v.append("%d–%d" % tuple(c["anni"]) if c["anni"][0] != c["anni"][1] else "%d" % c["anni"][0])
+    if c.get("artisti"):
+        v.append(", ".join(c["artisti"][:4]))
+    if c.get("escludi_generi"):
+        v.append("niente " + ", ".join(nomi.get(g, g) for g in c["escludi_generi"]))
+    v.append("%d min" % c.get("durata_minuti", 60))
+    return v
+
+
+def _prendi(cand, obiettivo, caso, per_artista=3, massimo=300):
+    """Dai candidati (migliori prima) fino alla durata voluta, senza troppi brani dello stesso artista; poi in ordine
+    sparso, con gli artisti uguali lontani tra loro."""
+    scelti, conti, tot = [], collections.Counter(), 0
+    for d in cand:
+        if tot >= obiettivo or len(scelti) >= massimo:
+            break
+        if per_artista and d["artista"] and conti[d["artista"]] >= per_artista:
+            continue
+        scelti.append(d)
+        conti[d["artista"]] += 1
+        tot += d["durata"] or 210
+    caso.shuffle(scelti)
+    for i in range(1, len(scelti)):
+        if scelti[i]["artista"] and scelti[i]["artista"] == scelti[i - 1]["artista"]:
+            for j in range(i + 1, len(scelti)):
+                if scelti[j]["artista"] != scelti[i - 1]["artista"]:
+                    scelti[i], scelti[j] = scelti[j], scelti[i]
+                    break
+    return scelti, tot
+
+
+def scegli_brani(c, dati, prove_temi, caso):
+    """I brani della libreria che rispettano i criteri; se sono troppo pochi si allargano i limiti, uno alla volta,
+    e si dice quale. {brani, durata, note}"""
+    obiettivo = c["durata_minuti"] * 60
+    artisti = [_norm(a) for a in c.get("artisti") or [] if _norm(a)]
+    note = []
+    if c.get("artisti"):
+        presenti = [a for a in artisti if any(d["artista"] and (a in d["artista"] or d["artista"] in a) for d in dati)]
+        if len(presenti) < len(artisti):
+            note.append("Non ho trovato nella libreria: " + ", ".join(x for x, a in zip(c["artisti"], artisti) if a not in presenti))
+        artisti = presenti
+        if not artisti:
+            return {"brani": [], "durata": 0, "note": note + ["Nessuno degli artisti chiesti è nella libreria"]}
+    lim = {"bpm": c.get("bpm"), "anni": c.get("anni"), "energia": c.get("energia"), "temi": bool(prove_temi)}
+
+    def filtra():
+        o = []
+        for d in dati:
+            if artisti and not (d["artista"] and any(a in d["artista"] or d["artista"] in a for a in artisti)):
+                continue
+            if c["generi"] and d["generi"].isdisjoint(c["generi"]):
+                continue
+            if c["escludi_generi"] and not d["generi"].isdisjoint(c["escludi_generi"]):
+                continue
+            if c["italiano"] is not None and d["italiano"] is not c["italiano"]:
+                continue
+            if any(lim[k] and (d[f] is None or not lim[k][0] <= d[f] <= lim[k][1])
+                   for k, f in (("bpm", "bpm"), ("anni", "anno"), ("energia", "energia"))):
+                continue
+            if lim["temi"] and not any(p(d) for p in prove_temi):
+                continue
+            o.append(d)
+        return o
+    # troppo pochi: si allarga un limite alla volta, con misura (chi chiede la salita non vuole brani lenti)
+    allarga = [("temi", False, "Pochi brani proprio così: ho aggiunto brani simili"),
+               ("energia", 0.15, "Pochi brani con questa energia: ho allargato un po' il limite"),
+               ("bpm", 15, "Pochi brani con questi BPM: ho allargato a %s"),
+               ("anni", 5, "Pochi brani di quegli anni: ho allargato a %s")]
+    cand = filtra()
+    for k, di, testo in allarga:
+        if sum(d["durata"] or 210 for d in cand) >= obiettivo * 0.6:
+            break
+        if not lim[k]:
+            continue
+        if k == "temi":
+            lim[k] = False
+        else:
+            a, b = lim[k]
+            lim[k] = [round(max(0.0, a - di), 2), round(min(1.0, b + di), 2)] if k == "energia" else \
+                [max(40, a - di), min(220, b + di)] if k == "bpm" else [a - di, min(time.localtime().tm_year, b + di)]
+            testo = testo % ("%g–%g" % tuple(lim[k])) if "%s" in testo else testo
+        note.append(testo)
+        cand = filtra()
+    if (lim["bpm"] or lim["energia"]) and sum(d["durata"] or 210 for d in cand) < obiettivo * 0.6:
+        # nei primi giorni l'audio di molti brani non è ancora stato misurato: allora BPM ed energia non si chiedono
+        prima = dict(lim)
+        lim.update(bpm=None, energia=None)
+        tutti = filtra()
+        if sum(1 for d in tutti if d["bpm"] is None) * 2 > len(tutti):
+            note.append("Molti brani non hanno ancora BPM ed energia misurati: per ora non ne ho tenuto conto")
+            cand = tutti
+        else:
+            lim.update(prima)
+    if not cand:
+        return {"brani": [], "durata": 0, "note": note + ["Nella libreria non ho trovato brani così"]}
+    centro = lambda r: (r[0] + r[1]) / 2 if r else None   # noqa: E731
+    ce, cb = centro(c.get("energia")), centro(c.get("bpm"))
+    punti = []
+    for d in cand:
+        p = 2 * sum(1 for f in prove_temi if f(d)) + caso.random()
+        if ce is not None and d["energia"] is not None:
+            p += 1 - min(1, abs(d["energia"] - ce) * 2)
+        if cb is not None and d["bpm"] is not None:
+            p += 1 - min(1, abs(d["bpm"] - cb) / 40)
+        punti.append((p, d))
+    punti.sort(key=lambda x: -x[0])
+    scelti, tot = _prendi([d for _, d in punti], obiettivo, caso, None if artisti else 3)
+    if tot < obiettivo * 0.9:
+        note.append("Ho trovato %d minuti di musica sui %d chiesti" % (round(tot / 60), c["durata_minuti"]))
+    return {"brani": [d["id"] for d in scelti], "durata": round(tot), "note": note}
+
+
+def su_misura(ascolti, dati, caso, minuti=60):
+    """«Su misura per me»: generi, artisti ed energia di quello che la persona ascolta (dal suo telefono), con brani
+    suoi e brani della libreria che non ha ancora sentito."""
+    per_id = {d["id"]: d for d in dati}
+    pesi = {}
+    for a in (ascolti if isinstance(ascolti, list) else [])[:5000]:
+        if isinstance(a, dict) and str(a.get("id")) in per_id:
+            n = min(1000.0, max(0.0, _numero(a.get("n")) or 0.0))
+            w = n + (3 if a.get("fav") is True else 0)
+            if w > 0:
+                pesi[str(a["id"])] = w
+    tot = sum(pesi.values())
+    if not tot:
+        raise ErroreExtra(409, "Ascolta qualche brano (o mettine tra i preferiti): «Su misura» parte da quello che ascolti")
+    g_peso, a_peso, energie = collections.Counter(), collections.Counter(), []
+    for i, w in pesi.items():
+        d = per_id[i]
+        for g in d["generi"]:
+            g_peso[g] += w / len(d["generi"])
+        if d["artista"]:
+            a_peso[d["artista"]] += w
+        if d["energia"] is not None:
+            energie += [d["energia"]] * int(min(20, max(1, w)))
+    artisti = {a for a, _ in a_peso.most_common(10)}
+    em = sorted(energie)[len(energie) // 2] if energie else None
+    punti = []
+    for d in dati:
+        p = 3 * sum(g_peso[g] for g in d["generi"]) / tot + (1.5 if d["artista"] in artisti else 0)
+        if em is not None and d["energia"] is not None:
+            p += 1 - min(1, abs(d["energia"] - em) * 2)
+        p += caso.random() * 0.8 - (0.4 if d["id"] in pesi else 0)
+        if p > 1:
+            punti.append((p, d))
+    punti.sort(key=lambda x: -x[0])
+    # al più metà di brani già ascoltati: il resto sono scoperte nella libreria
+    noti = [d for _, d in punti if d["id"] in pesi][:max(3, len(punti) // 2)]
+    cand = [d for _, d in punti if d["id"] not in pesi or d in noti]
+    scelti, durata = _prendi(cand, minuti * 60, caso)
+    if not scelti:
+        raise ErroreExtra(409, "Non ho ancora abbastanza dati sui brani per capire i tuoi gusti: riprova più tardi")
+    principali = [g for g, w in g_peso.most_common(3) if w >= tot * 0.1]
+    return {"brani": [d["id"] for d in scelti], "durata": round(durata), "note": [],
+            "generi": principali}
+
+
+# ----- il lavoro in sottofondo e l'archivio delle playlist -----
+
+class Tematiche:
+    """Schede dei brani, lavoro in sottofondo che le prepara, calcolo delle playlist, limiti dell'IA e condivise."""
+
+    def __init__(self, cartella):
+        self.dir = cartella
+        os.makedirs(cartella, exist_ok=True)
+        self.blocco = threading.RLock()
+        self.blocco_calcolo = threading.Lock()
+        self.schede = self._leggi("schede.json").get("brani") or {}
+        mb = self._leggi("musicbrainz.json")
+        self.mb = MusicBrainz(mb.get("artisti"), mb.get("gruppi"))
+        self.condivise = [x for x in self._leggi("condivise.json").get("playlist") or []
+                          if isinstance(x, dict) and x.get("id") and isinstance(x.get("brani"), list)]
+        self.limiti = self._leggi("limiti.json")
+        self.versione = 0           # cresce a ogni scheda nuova: le playlist si ricalcolano
+        self.ora = ""               # brano in lavorazione
+        self.attivo = False
+        self.prova = 0              # >0: il lavoro fa solo questi brani (ATLANTE_TEMATICHE_PROVA), da controllare a mano
+        self.mb_pausa = 0.0         # MusicBrainz non risponde: fino a quando si lascia stare
+        self.sveglia = threading.Event()
+        self._regole = (None, None)
+        self._cache = None          # (chiave, versione, quando, risultato)
+        self._mb_cambiato = False
+
+    # --- file ---
+
+    def _leggi(self, nome):
+        try:
+            with open(os.path.join(self.dir, nome), encoding="utf-8") as f:
+                o = json.load(f)
+            return o if isinstance(o, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _scrivi(self, nome, dati):
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix="." + nome + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(dati, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, os.path.join(self.dir, nome))
+        except BaseException:
+            _cancella(tmp)
+            raise
+
+    def salva(self):
+        with self.blocco:
+            schede = dict(self.schede)
+            mb = {"artisti": dict(self.mb.artisti), "gruppi": dict(self.mb.gruppi)} if self._mb_cambiato else None
+            self._mb_cambiato = False
+        try:
+            self._scrivi("schede.json", {"versione": TEM_VERSIONE, "brani": schede})
+            if mb is not None:
+                self._scrivi("musicbrainz.json", mb)
+        except OSError as e:   # disco pieno: il lavoro va avanti, si salverà la prossima volta
+            print("Playlist di Atlante: schede non salvate:", e, flush=True)
+
+    # --- regole e calcolo delle playlist ---
+
+    def regole(self):
+        mio = os.path.join(self.dir, "regole.json")
+        chiave = []
+        for p in (REGOLE_FILE, mio):
+            try:
+                chiave.append(os.stat(p).st_mtime_ns)
+            except OSError:
+                chiave.append(None)
+        if self._regole[0] != chiave:
+            r = regole_atlante(mio)
+            for e in r[2]:
+                print("Playlist di Atlante:", e, flush=True)
+            self._regole = (chiave, r)
+        return self._regole[1]
+
+    def _calcola(self):
+        """Le playlist di Atlante (ricalcolate quando cambiano regole o catalogo, e al più ogni TEM_RICALCOLO secondi
+        mentre arrivano schede nuove)."""
+        gruppi, nomi, errori = self.regole()
+        anno = time.localtime().tm_year
+        chiave = (id(gruppi), LIB.ultima if LIB else 0, len(LIB.brani) if LIB else 0, anno)
+        with self.blocco_calcolo:
+            c = self._cache
+            # mentre il lavoro in sottofondo sta facendo un brano le schede nuove si aspettano un po': con 6000 brani
+            # un ricalcolo costa un secondo. A lavoro fermo (anche tra un brano e l'altro) si ricalcola subito.
+            if c and c[0] == chiave and (c[1] == self.versione or (self.ora and time.time() - c[2] < TEM_RICALCOLO)):
+                return c[3]
+            versione = self.versione
+            if LIB is not None:
+                with LIB.blocco:
+                    voci = list(LIB.brani.items())
+            else:
+                voci = []
+            with self.blocco:
+                schede = dict(self.schede)
+            dati = [_dati_brano(i, b, schede.get(i), anno) for i, b in voci]
+            out, brani = [], {}
+            for g in gruppi:
+                pl = []
+                for p in g["playlist"]:
+                    sel = [d for d in dati if p["_prova"](d)]
+                    if not sel:
+                        continue   # una playlist vuota non compare
+                    sel = _in_ordine(sel, p.get("ordine", "aggiunti"))
+                    brani[p["id"]] = [d["id"] for d in sel]
+                    pl.append(self._voce(p["id"], p["nome"], p.get("descrizione") or "", sel))
+                if pl:
+                    out.append({"id": g["id"], "nome": g["nome"], "playlist": pl})
+            ris = {"gruppi": out, "brani": brani, "dati": dati, "nomi": nomi, "regole": gruppi, "errori": errori,
+                   "info": {p["id"]: p for g in out for p in g["playlist"]}}
+            self._cache = (chiave, versione, time.time(), ris)
+            return ris
+
+    @staticmethod
+    def _voce(pid, nome, descrizione, sel):
+        copertine = []
+        for d in sel:
+            if d["copertina"] and d["copertina"] not in copertine:
+                copertine.append(d["copertina"])
+                if len(copertine) == 4:
+                    break
+        return {"id": pid, "nome": nome, "descrizione": descrizione, "n": len(sel),
+                "durata": round(sum(d["durata"] or 0 for d in sel)), "copertine": copertine}
+
+    def _da_nome(self, di):
+        if di == "p":
+            return "Samuele"
+        return (PERS.nome(di) if PERS else "") or "un amico"
+
+    def _condivise(self, chi, ris):
+        per_id = {d["id"]: d for d in ris["dati"]}
+        pl = []
+        with self.blocco:
+            cond = list(self.condivise)
+        for x in reversed(cond):   # le più recenti prima
+            sel = [per_id[i] for i in x["brani"] if i in per_id]
+            if sel:
+                v = self._voce("c-" + x["id"], x["nome"], "Condivisa da " + self._da_nome(x["di"]), sel)
+                v.update(da_nome=self._da_nome(x["di"]), mia=x["di"] == chi, condivisa=x["id"])
+                pl.append((v, [d["id"] for d in sel]))
+        return pl
+
+    def elenco(self, chi):
+        ris = self._calcola()
+        gruppi = list(ris["gruppi"])
+        cond = self._condivise(chi, ris)
+        if cond:
+            gruppi.insert(0, {"id": "condivise", "nome": "Condivise in Atlante", "playlist": [v for v, _ in cond]})
+        return {"gruppi": gruppi, "stato": self.stato(), "ia": {"rimaste": self.rimaste(chi), "al_giorno": IA_AL_GIORNO}}
+
+    def playlist(self, pid, chi):
+        ris = self._calcola()
+        if pid.startswith("c-"):
+            for v, ids in self._condivise(chi, ris):
+                if v["id"] == pid:
+                    return dict(v, brani=ids)
+            return None
+        if pid not in ris["brani"]:
+            return None
+        return dict(ris["info"][pid], brani=ris["brani"][pid])
+
+    def ritmi(self):
+        """Per «Per ritmo» e «Mettimi di buonumore» nell'app, che li tiene anche per quando non c'è rete: BPM,
+        regolarità, energia e modo di ogni brano misurato; i brani di «Buonumore» ed «Energia» (con energia almeno
+        media) con il loro peso: il modo maggiore conta di più, il minore meno (la misura del modo è una stima)."""
+        ris = self._calcola()
+        ritmi = {d["id"]: [d["bpm"], d["regolarita"], d["energia"], d["modo"]] for d in ris["dati"] if d["bpm"] is not None}
+        allegri = set(ris["brani"].get("umore-buonumore", ())) | set(ris["brani"].get("umore-energia", ()))
+        buonumore = [[d["id"], 2 if d["modo"] == 1 else 0.5 if d["modo"] == -1 else 1] for d in ris["dati"]
+                     if d["id"] in allegri and (d["energia"] is None or d["energia"] >= 0.45)]
+        return {"ritmi": ritmi, "buonumore": buonumore}
+
+    # --- il lavoro in sottofondo ---
+
+    def _voci(self):
+        """I brani su cui lavorare: tutta la libreria, o con la prova un campione fisso (gli id sono impronte SHA-1:
+        i primi in ordine sono brani qualsiasi, di tutti i generi e di tutti gli anni)."""
+        if LIB is None:
+            return []
+        with LIB.blocco:
+            voci = list(LIB.brani.items())
+        if self.prova:
+            voci = sorted(voci)[:self.prova]
+        return voci
+
+    def campione(self):
+        """Per il controllo a mano: i brani con la scheda finita, i loro dati e le playlist in cui sono."""
+        ris, ora = self._calcola(), time.time()
+        dove = collections.defaultdict(list)
+        for g in ris["gruppi"]:
+            for p in g["playlist"]:
+                for i in ris["brani"][p["id"]]:
+                    dove[i].append(p["nome"])
+        righe = []
+        with self.blocco:
+            schede = dict(self.schede)
+        for i, b in self._voci():
+            s = schede.get(i)
+            if not s or self._passi(s, b, ora, tutti=True):
+                continue
+            d = _dati_brano(i, b, s, time.localtime().tm_year)
+            righe.append({"id": i, "titolo": b.get("title"), "artista": b.get("artist"), "anno": d["anno"],
+                          "generi": sorted(d["generi"]), "italiano": d["italiano"],
+                          "fonte": "musicbrainz" if s.get("generi") else "ia" if s.get("generi_ia") else
+                          "tag del file" if d["generi"] else "", "etichette": (s.get("etichette") or [])[:8],
+                          "bpm": s.get("bpm"), "energia": s.get("energia"), "regolarita": s.get("regolarita"),
+                          "tonalita": s.get("tonalita") or "", "playlist": dove.get(i, [])})
+        return righe[:1000]
+
+    def stato(self):
+        ora = time.time()
+        voci = self._voci()
+        with self.blocco:
+            fatti = sum(1 for i, b in voci if not self._passi(self.schede.get(i), b, ora, tutti=True))
+        o = {"attivo": self.attivo, "fatti": fatti, "totale": len(voci), "ora": self.ora}
+        if self.prova:
+            o["prova"] = self.prova
+        if self.mb_pausa > ora:
+            o["musicbrainz"] = "non risponde: riprovo alle %s" % time.strftime("%H:%M", time.localtime(self.mb_pausa))
+        errori = self._regole[1][2] if self._regole[1] else []
+        if errori:
+            o["errori_regole"] = errori[:20]
+        return o
+
+    def _serve_ia(self, s, b):
+        """L'IA serve quando MusicBrainz (e il file) non dicono il genere o se l'artista è italiano; senza artista
+        tirerebbe a indovinare dal solo titolo, e allora no."""
+        if not (b.get("artist") or "").strip():
+            return False
+        return not (s.get("generi") or _generi_da_testo(b.get("genre"))) or s.get("italiano") is None
+
+    def _passi(self, s, b, ora, tutti=False):
+        """Cosa manca alla scheda di un brano: «mb», «ia», «audio». Con tutti=False non quelli che ora non si possono
+        fare (MusicBrainz in pausa, IA occupata)."""
+        if not s or s.get("v") != TEM_VERSIONE:
+            s = {}
+        p = []
+        mb_ok = s.get("t") == b.get("title") and s.get("a") == b.get("artist") and s.get("mb") in ("fatto", "sconosciuto")
+        if not mb_ok and not (s.get("mb") == "errore" and s.get("t") == b.get("title") and ora - s.get("mb_q", 0) < TEM_RIPROVA):
+            p.append("mb")
+        elif mb_ok and self._serve_ia(s, b) and not (s.get("ia") == "fatto" or
+                                                     (s.get("ia") == "attesa" and ora - s.get("ia_q", 0) < TEM_RIPROVA)):
+            p.append("ia")
+        # audio non letto (disco scollegato a metà?) o ffmpeg mancante: si riprova dopo qualche ora, al più tre volte
+        if s.get("f") != b.get("_f") or s.get("audio") not in ("fatto", "errore", "attesa") or \
+                (s.get("audio") == "attesa" and ora - s.get("audio_q", 0) >= TEM_RIPROVA) or \
+                (s.get("audio") == "errore" and s.get("audio_n", 0) < 3 and ora - s.get("audio_q", 0) >= TEM_RIPROVA):
+            p.append("audio")
+        if not tutti:
+            if ora < self.mb_pausa and "mb" in p:
+                p.remove("mb")
+            if "ia" in p and _IA_UNA.locked():
+                p.remove("ia")
+        return p
+
+    def avvia(self):
+        with self.blocco:
+            if self.attivo:
+                return
+            self.attivo = True
+        threading.Thread(target=self._lavora, daemon=True).start()
+
+    def _prossimo(self):
+        voci = self._voci()
+        voci.sort(key=lambda x: -(x[1].get("added") or 0))   # i brani nuovi (classifiche, caricamenti) per primi
+        ora = time.time()
+        with self.blocco:
+            for i, b in voci:
+                p = self._passi(self.schede.get(i), b, ora)
+                if p:
+                    return i, b, p
+        return None
+
+    def _lavora(self):
+        while LIB is None or not LIB.ultima:   # si aspetta la prima lettura del disco
+            time.sleep(2)
+        print("Playlist di Atlante: lavoro in sottofondo avviato", flush=True)
+        while True:
+            x = self._prossimo()
+            if not x:
+                self.ora = ""
+                self.salva()
+                self.sveglia.wait(TEM_RIPOSO)
+                self.sveglia.clear()
+                continue
+            self.un_brano(*x)
+            self.salva()
+
+    def un_brano(self, i, b, passi):
+        self.ora = " — ".join(v for v in (b.get("title"), b.get("artist")) if v)
+        try:
+            self.classifica(i, b, passi)
+        except Exception as e:   # noqa: BLE001  un brano che non va non ferma gli altri (e si riprova più tardi)
+            print("Playlist di Atlante: %s non riuscito: %s" % (self.ora, e), flush=True)
+            with self.blocco:
+                s, ora = dict(self.schede.get(i) or {"v": TEM_VERSIONE}), int(time.time())
+                if "mb" in passi:
+                    s.update(mb="errore", mb_q=ora, t=b.get("title"), a=b.get("artist"))
+                if "ia" in passi:
+                    s.update(ia="attesa", ia_q=ora)
+                if "audio" in passi:
+                    s.update(audio="errore", audio_q=ora, f=b.get("_f"), audio_n=s.get("audio_n", 0) + 1)
+                self.schede[i] = s
+                self.versione += 1
+                self.ora = ""
+
+    def classifica(self, i, b, passi):
+        """Un passo dopo l'altro sulla scheda di un brano: MusicBrainz, IA (se serve), audio."""
+        with self.blocco:
+            s = dict(self.schede.get(i) or {})
+        if s.get("v") != TEM_VERSIONE:
+            s = {"v": TEM_VERSIONE}
+        ora = int(time.time())
+        if "mb" in passi:
+            try:
+                r = self.mb.brano(b.get("title"), b.get("artist"), b.get("album"))
+            except ErroreMB as e:
+                print("Playlist di Atlante:", e, flush=True)
+                self.mb_pausa = time.time() + TEM_PAUSA_MB
+                n = s.get("mb_n", 0) + 1   # tre volte di fila sullo stesso brano: lo si lascia per qualche ora
+                s.update(mb_n=n)
+                if n >= 3:
+                    s.update(mb="errore", mb_q=ora, t=b.get("title"), a=b.get("artist"), mb_n=0)
+            else:
+                r = r or {}
+                s.update(t=b.get("title"), a=b.get("artist"), mb="fatto" if r else "sconosciuto", mb_q=ora, mb_n=0,
+                         rec=r.get("rec"), generi=r.get("generi") or [], etichette=r.get("etichette") or [],
+                         paese=r.get("paese") or "", italiano=r.get("italiano"), anno=r.get("anno"))
+                for k in ("ia", "ia_q", "generi_ia", "italiano_ia"):
+                    s.pop(k, None)
+                self._mb_cambiato = True
+        if s.get("mb") in ("fatto", "sconosciuto") and ("mb" in passi or "ia" in passi) and self._serve_ia(s, b) \
+                and s.get("ia") != "fatto" and _IA_UNA.acquire(blocking=False):
+            try:
+                g, ital = _genere_da_ia(b.get("title"), b.get("artist"), b.get("album"), self.regole()[1])
+                s.update(ia="fatto", ia_q=ora, generi_ia=g, italiano_ia=ital)
+            except ErroreExtra as e:   # IA spenta o lenta: si riprova tra qualche ora
+                s.update(ia="attesa" if e.codice in (503, 504) else "fatto", ia_q=ora)
+            finally:
+                _IA_UNA.release()
+        if "audio" in passi:
+            try:
+                m = _misura_in_processo(b["_p"], b.get("duration") or 0)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+                print("Playlist di Atlante: audio di %s non misurato: %s" % (self.ora, e), flush=True)
+                s.update(audio="errore", audio_q=ora, f=b.get("_f"), audio_n=s.get("audio_n", 0) + 1)
+            else:
+                if m.get("senza_ffmpeg"):
+                    s.update(audio="attesa", audio_q=ora, f=b.get("_f"))
+                else:
+                    s.update(audio="fatto", audio_q=ora, f=b.get("_f"), bpm=m.get("bpm"), energia=m.get("energia"),
+                             regolarita=m.get("regolarita"), db=m.get("db"), modo=m.get("modo") or 0,
+                             tonalita=m.get("tonalita") or "", audio_n=0)
+        with self.blocco:
+            self.schede[i] = s
+            self.versione += 1
+            self.ora = ""
+        return s
+
+    # --- IA: limiti, richieste, condivise ---
+
+    def rimaste(self, chi):
+        with self.blocco:
+            oggi = time.strftime("%Y-%m-%d")
+            if self.limiti.get("giorno") != oggi or not isinstance(self.limiti.get("conti"), dict):
+                self.limiti = {"giorno": oggi, "conti": {}}
+            return max(0, IA_AL_GIORNO - int(self.limiti["conti"].get(chi) or 0))
+
+    def _conta(self, chi):
+        with self.blocco:
+            self.rimaste(chi)
+            self.limiti["conti"][chi] = int(self.limiti["conti"].get(chi) or 0) + 1
+            try:
+                self._scrivi("limiti.json", self.limiti)
+            except OSError:
+                pass
+
+    def crea(self, chi, nome_persona, corpo):
+        ris = self._calcola()
+        caso = secrets.SystemRandom()
+        if corpo.get("su_misura"):
+            r = su_misura(corpo.get("ascolti"), ris["dati"], caso)
+            nomi = ris["nomi"]
+            riassunto = ["dai tuoi ascolti"] + [nomi.get(g, g) for g in r.pop("generi")] + ["%d min" % round(r["durata"] / 60)]
+            return dict(r, nome="Su misura per " + nome_persona, riassunto=riassunto, criteri={"su_misura": True},
+                        rimaste=self.rimaste(chi))
+        richiesta = " ".join(str(corpo.get("richiesta") or "").split())[:400]
+        if len(richiesta) < 3:
+            raise ErroreExtra(400, "Scrivi che musica vuoi: per esempio «rap italiano carico per la salita, 40 minuti»")
+        if self.rimaste(chi) <= 0:
+            raise ErroreExtra(429, "Oggi hai già chiesto %d playlist all'IA: riprova domani" % IA_AL_GIORNO)
+        if not _IA_UNA.acquire(timeout=IA_ATTESA):
+            raise ErroreExtra(429, "L'IA del Mac mini sta preparando un'altra playlist: riprova tra un minuto")
+        try:
+            if self.rimaste(chi) <= 0:   # due richieste insieme della stessa persona all'ultima rimasta
+                raise ErroreExtra(429, "Oggi hai già chiesto %d playlist all'IA: riprova domani" % IA_AL_GIORNO)
+            risposta = _chiedi_ia({"prompt": _domanda_playlist(richiesta, ris["regole"], ris["nomi"]),
+                                   "sistema": _SISTEMA_PLAYLIST, "json": True})
+            self._conta(chi)
+        finally:
+            _IA_UNA.release()
+        c = criteri_da_ia(risposta.get("testo"), richiesta, ris["regole"], ris["nomi"])
+        prove = [p["_prova"] for g in ris["regole"] for p in g["playlist"] if p["id"] in c["temi"]]
+        scelta = scegli_brani(c, ris["dati"], prove, caso)
+        return dict(scelta, nome=c["nome"], criteri=c, riassunto=_riassunto(c, ris["nomi"], ris["regole"]),
+                    rimaste=self.rimaste(chi))
+
+    def condividi(self, chi, corpo):
+        nome = " ".join(str(corpo.get("nome") or "").split())[:80]
+        if not nome:
+            raise ErroreExtra(400, "Manca il nome della playlist")
+        locale = str(corpo.get("locale") or "")[:80]
+        brani = corpo.get("brani") if isinstance(corpo.get("brani"), list) else []
+        if LIB is not None:
+            with LIB.blocco:
+                ci = set(LIB.brani)
+        else:
+            ci = set()
+        visti, ids = set(), []
+        for x in brani[:CONDIVISA_BRANI * 2]:
+            if isinstance(x, str) and x in ci and x not in visti:
+                visti.add(x)
+                ids.append(x)
+        ids = ids[:CONDIVISA_BRANI]
+        if not ids:
+            raise ErroreExtra(400, "In questa playlist non ci sono brani della libreria del Mac: non si può condividere")
+        with self.blocco:
+            x = next((c for c in self.condivise if locale and c["di"] == chi and c.get("locale") == locale), None)
+            if x is None:
+                if sum(1 for c in self.condivise if c["di"] == chi) >= CONDIVISE_PERSONA:
+                    raise ErroreExtra(409, "Hai già condiviso %d playlist: togline una prima" % CONDIVISE_PERSONA)
+                if len(self.condivise) >= CONDIVISE_MAX:
+                    raise ErroreExtra(409, "Ci sono già troppe playlist condivise in Atlante")
+                x = {"id": secrets.token_hex(6), "di": chi, "locale": locale, "creato": int(time.time())}
+                self.condivise.append(x)
+            x.update(nome=nome, brani=ids, aggiornato=int(time.time()))
+            self._scrivi("condivise.json", {"playlist": self.condivise})
+            return {"id": x["id"], "n": len(ids)}
+
+    def togli(self, cid, chi, samuele):
+        with self.blocco:
+            x = next((c for c in self.condivise if c["id"] == cid), None)
+            if x is None:
+                raise ErroreExtra(404, "Playlist condivisa non trovata")
+            if x["di"] != chi and not samuele:
+                raise ErroreExtra(403, "La può togliere solo chi l'ha condivisa (o Samuele)")
+            self.condivise.remove(x)
+            self._scrivi("condivise.json", {"playlist": self.condivise})
+
+
+def _domanda_playlist(richiesta, gruppi, nomi):
+    temi = {g["id"]: ", ".join(p["nome"].lower() for p in g["playlist"]) for g in gruppi if g["id"] in _GRUPPI_TEMI}
+    return ("Richiesta: «%s»\n\nChiavi possibili (tutte facoltative):\n"
+            '- "nome": titolo breve della playlist, in italiano\n'
+            '- "generi": generi da includere, SOLO tra: %s\n'
+            '- "escludi_generi": generi da escludere, dallo stesso elenco\n'
+            '- "umori": SOLO tra: %s\n'
+            '- "attivita": SOLO tra: %s\n'
+            '- "momenti": SOLO tra: %s\n'
+            '- "bpm": [minimo, massimo], battiti al minuto (tra 50 e 200)\n'
+            '- "anni": [dal, al], anni di uscita (es. [1990, 1999] per gli anni \'90; quest\'anno è il %d)\n'
+            '- "artisti": nomi degli artisti chiesti\n'
+            '- "durata_minuti": quanto deve durare la playlist\n'
+            '- "italiano": true se chiede musica italiana o «niente inglese», false se chiede musica straniera\n'
+            '- "energia": "alta", "media" o "bassa"\n'
+            'Esempio: «rap italiano carico per la salita, 40 minuti» → {"nome": "Salita rap", "generi": ["rap"], '
+            '"italiano": true, "attivita": ["handbike: salita e scatti"], "energia": "alta", "durata_minuti": 40}') % (
+        richiesta, ", ".join(nomi.get(g, g).lower() for g in GENERI), temi.get("umore", ""), temi.get("attivita", ""),
+        temi.get("momenti", ""), time.localtime().tm_year)
+
+
+def _genere_da_ia(titolo, artista, album, nomi):
+    """Generi (e se l'artista è italiano) proposti dall'IA locale per un brano che MusicBrainz non conosce."""
+    elenco = ", ".join("%s (%s)" % (g, nomi.get(g, g)) for g in GENERI)
+    prompt = ("Brano: «%s» di %s%s.\nA quali generi appartiene? Scegli da 1 a 3 generi SOLO da questo elenco: %s.\n"
+              "Dimmi anche se l'artista è italiano o canta in italiano.\n"
+              'Rispondi solo con JSON: {"generi": ["..."], "italiano": true oppure false}') % (
+        titolo or "", artista or "artista sconosciuto", " (album «%s»)" % album if album else "", elenco)
+    r = _chiedi_ia({"prompt": prompt, "sistema": "Sei un esperto di musica. Rispondi solo con JSON valido.", "json": True})
+    j = _json_da_testo(r.get("testo")) or {}
+    return _generi_scelti(j.get("generi"), nomi)[:3], _booleano(j.get("italiano"))
+
+
+TEM = None
+_blocco_tem = threading.Lock()
+
+
+def _tem():
+    global TEM
+    with _blocco_tem:
+        if TEM is None:
+            TEM = Tematiche(os.path.join(_cart("cache"), "tematiche"))
+        return TEM
+
+
+def _nome_di(h):
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato" and PERS:
+        return PERS.nome(chi["persona"]) or "te"
+    return "Samuele" if chi["ruolo"] == "proprietario" else "te"
+
+
+def _tematiche(h, metodo, resto, corpo):
+    """Le rotte api/extra/tematiche…: per tutti, anche gli invitati (le loro playlist e i loro limiti sono loro)."""
+    tem, chi = _tem(), _di(h)
+
+    def solo(m):
+        if metodo != m:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    if not resto:
+        solo("GET")
+        return _json(h, tem.elenco(chi))
+    if resto == ["ia"]:
+        solo("POST")
+        return _json(h, tem.crea(chi, _nome_di(h), corpo))
+    if resto == ["condivise"]:
+        solo("POST")
+        return _json(h, tem.condividi(chi, corpo))
+    if len(resto) == 2 and resto[0] == "condivise":
+        solo("DELETE")
+        tem.togli(resto[1], chi, _chi_e(h)["ruolo"] == "proprietario")
+        return _json(h, {"ok": True})
+    if resto == ["ritmi"]:   # BPM dei brani per «Per ritmo» e brani per «Mettimi di buonumore»
+        solo("GET")
+        return _json(h, tem.ritmi())
+    if resto == ["campione"]:   # controllo a mano dei dati dei brani (con ATLANTE_TEMATICHE_PROVA, prima di tutto)
+        solo("GET")
+        if _chi_e(h)["ruolo"] != "proprietario":
+            raise ErroreExtra(403, "Il controllo dei dati dei brani è di Samuele")
+        return _json(h, {"stato": tem.stato(), "brani": tem.campione()})
+    if len(resto) == 1:
+        solo("GET")
+        x = tem.playlist(resto[0], chi)
+        if x is None:
+            raise ErroreExtra(404, "Questa playlist di Atlante non c'è (o per ora è vuota)")
+        return _json(h, x)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/tematiche/%s" % "/".join(resto))
 
 
 # ----- stato e dispositivo -----
@@ -2561,6 +8919,1393 @@ def _proxy_media(h, r, sock, url, lun):
         h.wfile.write(b)
 
 
+# ----- interfaccia: strato di modifiche sopra l'app (base di Samuele, personale di ciascuno) -----
+#
+# L'app si disegna come sempre (l'originale); sopra vanno la base di Samuele e lo strato personale di chi la usa: per
+# ogni proprietà di un elemento vale il livello più in alto. Qui gli strati si tengono e si controllano, li applica l'app.
+# Un elemento si indica con il suo «indirizzo» (UI_INDIRIZZO) e le proprietà sono poche, con valori in una forma rigida:
+# niente CSS né HTML liberi, così un valore assurdo non arriva mai alle app degli altri.
+#
+#   GET    interfaccia                         {chi, base, personale}; a Samuele anche la bozza
+#   GET    interfaccia/base                    {base}: la base pubblicata, per tutti
+#   POST   interfaccia/personale {modifiche}   sostituisce lo strato personale di chi lo chiede
+#   GET/POST/DELETE interfaccia/bozza          (Samuele) la bozza della base, che vede solo lui
+#   POST   interfaccia/pubblica                (Samuele) la bozza diventa la base di tutti, come versione nuova
+#   GET    interfaccia/versioni                (Samuele) le ultime 10 versioni pubblicate
+#   POST   interfaccia/versioni/<n>/ripristina (Samuele) una versione vecchia torna la base (come versione nuova)
+
+UI = None                         # Interfaccia, preparata alla prima richiesta (cartella interfaccia/ nella cache)
+UI_MAX = 500                      # modifiche per livello: ogni proprietà di ogni elemento ne conta una
+UI_VERSIONI = 10
+UI_TESTO_MAX = 80
+UI_INDIRIZZO_MAX = 400
+UI_CORPO_MAX = 1024 * 1024        # 500 modifiche con indirizzi e testi lunghi stanno in meno di 300 KB
+UI_GRANDEZZA = (70, 200)          # per cento
+UI_ORDINE = 20                    # posti di cui un elemento si sposta, prima (-) o dopo (+), tra quelli del suo gruppo
+# colori per nome: l'app li traduce (quelli del tema cambiano con chiaro e scuro); «originale» toglie il colore di sotto
+UI_TAVOLOZZA = ("originale", "accento", "principale", "secondario", "fondo", "fondo2", "rosso", "arancione", "giallo",
+                "verde", "menta", "azzurro", "blu", "viola", "rosa", "marrone", "grigio", "nero", "bianco")
+UI_COLORE = re.compile(r"#[0-9a-f]{6}")
+# indirizzo: da 1 a 7 pezzi separati da uno spazio, dal contenitore con un id fino all'elemento. Ogni pezzo: tag, #id,
+# al più 4 classi, poi [a=…][tab=…][v=…][k=…][sez=…] in quest'ordine (data-a, data-tab, data-v, data-k dei riquadri di
+# Altro, sezione della pagina); in fondo, solo per l'elemento, la posizione tra i fratelli uguali (:2)
+_UI_VAL = r"[A-Za-z0-9_-]{1,40}"
+_UI_PEZZO = (r"[a-z][a-z0-9]{0,9}(?:#[A-Za-z][A-Za-z0-9_-]{0,39})?(?:\.[A-Za-z][A-Za-z0-9_-]{0,29}){0,4}" +
+             "".join(r"(?:\[%s=%s\])?" % (n, _UI_VAL) for n in ("a", "tab", "v", "k", "sez")))
+UI_INDIRIZZO = re.compile(r"%s(?: %s){0,6}(?::[1-9][0-9]?)?" % (_UI_PEZZO, _UI_PEZZO))
+UI_NON_ELEMENTI = re.compile(r"(?:^| )(?:html|head|body|script|style|link|meta|title)(?:[#.\[:]|$)[^ ]*$")   # mai l'elemento cambiato
+UI_CONTROLLO = re.compile("[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")   # anche i segni che girano il testo
+
+
+def _ui_valore(p, v):
+    """(True, valore pulito) oppure (False, perché no)."""
+    if p == "testo":   # "" = il testo originale, anche sopra quello della base
+        if not isinstance(v, str):
+            return False, "Testo non valido"
+        t = " ".join(UI_CONTROLLO.sub(" ", v).split())
+        return (True, t) if len(t) <= UI_TESTO_MAX else (False, "Testo troppo lungo: al più %d caratteri" % UI_TESTO_MAX)
+    if p in ("colore", "sfondo"):
+        c = v.lower() if isinstance(v, str) else ""
+        if c in UI_TAVOLOZZA or UI_COLORE.fullmatch(c):
+            return True, c
+        return False, "Colore non valido: serve #rrggbb o un colore della tavolozza"
+    if p == "grandezza":   # 100 = la grandezza originale
+        if type(v) is int and UI_GRANDEZZA[0] <= v <= UI_GRANDEZZA[1]:
+            return True, v
+        return False, "Grandezza non valida: da %d a %d per cento" % UI_GRANDEZZA
+    if p == "nascosto":    # False = visibile, anche se la base lo nasconde
+        return (True, v) if type(v) is bool else (False, "«Nascosto» vale vero o falso")
+    if p == "ordine":      # 0 = al suo posto
+        if type(v) is int and -UI_ORDINE <= v <= UI_ORDINE:
+            return True, v
+        return False, "Spostamento non valido: al più %d posti" % UI_ORDINE
+    return False, "Proprietà sconosciuta: si cambiano testo, colore, sfondo, grandezza, nascosto e ordine"
+
+
+def convalida_modifiche(m, severa=True):
+    """Le modifiche di un livello, {indirizzo: {proprietà: valore}}, controllate. Con severa=False (un file scritto a
+    mano sul Mac mini) le voci sbagliate si tolgono invece di rifiutare tutto."""
+    def no(testo):
+        if severa:
+            raise ErroreExtra(400, testo)
+
+    if not isinstance(m, dict):
+        no("Modifiche non valide: serve un oggetto {indirizzo: {proprietà: valore}}")
+        return {}
+    fuori, n = {}, 0
+    for ind, props in m.items():
+        if not isinstance(ind, str) or len(ind) > UI_INDIRIZZO_MAX or not UI_INDIRIZZO.fullmatch(ind) or UI_NON_ELEMENTI.search(ind):
+            no("Indirizzo di un elemento non valido")
+            continue
+        if not isinstance(props, dict) or not props:
+            no("Modifica non valida: servono le proprietà dell'elemento")
+            continue
+        x = {}
+        for p, v in props.items():
+            ok, val = _ui_valore(p, v)
+            if ok:
+                x[p] = val
+            else:
+                no(val)
+        if not x:
+            continue
+        n += len(x)
+        if n > UI_MAX:
+            no("Troppe modifiche: al più %d per livello" % UI_MAX)
+            break
+        fuori[ind] = x
+    return fuori
+
+
+def _ui_numero(v):
+    return v if type(v) in (int, float) and v >= 0 else 0
+
+
+class Interfaccia:
+    """Strati dell'interfaccia sul Mac mini: base.json (base pubblicata, bozza di Samuele, ultime versioni) e
+    persone/<chi>.json (lo strato personale: «p» per Samuele, l'id per un invitato). File 0600, scritti per intero.
+    Le personalizzazioni di una persona revocata restano finché Samuele non le toglie."""
+
+    def __init__(self, cartella):
+        self.cartella = cartella
+        self.blocco = threading.Lock()
+
+    def _file(self, chi=None):
+        if chi is None:
+            return os.path.join(self.cartella, "base.json")
+        if not re.fullmatch(r"p|[0-9a-f]{16}", chi or ""):
+            raise ErroreExtra(400, "Persona non valida")
+        return os.path.join(self.cartella, "persone", chi + ".json")
+
+    @staticmethod
+    def _leggi(file):
+        """(dati, leggibile): un file che manca è vuoto; uno che non si legge non va sovrascritto."""
+        try:
+            with open(file, encoding="utf-8") as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            return {}, True
+        except (OSError, ValueError):
+            return {}, False
+        return (d, True) if isinstance(d, dict) else ({}, False)
+
+    @staticmethod
+    def _scrivi(file, d, leggibile=True):
+        if not leggibile:
+            print("Atlante: %s non si legge: lo lascio com'è" % file, flush=True)
+            raise ErroreExtra(503, "Il file dell'interfaccia sul Mac mini non si legge: non lo sovrascrivo")
+        os.makedirs(os.path.dirname(file), mode=0o700, exist_ok=True)
+        tmp = "%s.%d.tmp" % (file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, file)
+
+    def _base(self):
+        d, ok = self._leggi(self._file())
+        b = d.get("base") if isinstance(d.get("base"), dict) else {}
+        z = d.get("bozza") if isinstance(d.get("bozza"), dict) else None
+        versioni = [{"versione": x["versione"], "pubblicato": _ui_numero(x.get("pubblicato")),
+                     "modifiche": convalida_modifiche(x.get("modifiche"), False)}
+                    for x in (d.get("versioni") if isinstance(d.get("versioni"), list) else [])
+                    if isinstance(x, dict) and type(x.get("versione")) is int and x["versione"] > 0][:UI_VERSIONI]
+        return {"base": {"modifiche": convalida_modifiche(b.get("modifiche") or {}, False),
+                         "versione": b["versione"] if type(b.get("versione")) is int else 0,
+                         "pubblicato": _ui_numero(b.get("pubblicato"))},
+                "bozza": None if z is None else {"modifiche": convalida_modifiche(z.get("modifiche") or {}, False),
+                                                 "aggiornato": _ui_numero(z.get("aggiornato"))},
+                "versioni": versioni}, ok
+
+    def leggi(self, chi, samuele):
+        with self.blocco:
+            d, _ = self._base()
+            p, _ = self._leggi(self._file(chi))
+        r = {"chi": chi, "base": d["base"],
+             "personale": {"modifiche": convalida_modifiche(p.get("modifiche") or {}, False),
+                           "aggiornato": _ui_numero(p.get("aggiornato"))}}
+        if samuele:
+            r["bozza"] = d["bozza"]
+        return r
+
+    def base(self):
+        with self.blocco:
+            return self._base()[0]["base"]
+
+    def personale(self, chi, modifiche):
+        m = convalida_modifiche(modifiche)
+        with self.blocco:
+            f = self._file(chi)
+            x = {"modifiche": m, "aggiornato": time.time()}
+            self._scrivi(f, x, self._leggi(f)[1])
+            return x
+
+    def bozza(self):
+        """La bozza della base (None se non c'è)."""
+        with self.blocco:
+            return self._base()[0]["bozza"]
+
+    def salva_bozza(self, modifiche):
+        m = convalida_modifiche(modifiche)
+        with self.blocco:
+            d, ok = self._base()
+            d["bozza"] = {"modifiche": m, "aggiornato": time.time()}
+            self._scrivi(self._file(), d, ok)
+            return d["bozza"]
+
+    def scarta(self):
+        with self.blocco:
+            d, ok = self._base()
+            if d["bozza"] is not None:
+                d["bozza"] = None
+                self._scrivi(self._file(), d, ok)
+
+    @staticmethod
+    def _pubblica(d, modifiche):
+        v = max([d["base"]["versione"]] + [x["versione"] for x in d["versioni"]]) + 1
+        ora = time.time()
+        d["base"] = {"modifiche": modifiche, "versione": v, "pubblicato": ora}
+        d["versioni"] = ([{"versione": v, "pubblicato": ora, "modifiche": modifiche}] + d["versioni"])[:UI_VERSIONI]
+        return d["base"]
+
+    def pubblica(self):
+        with self.blocco:
+            d, ok = self._base()
+            if d["bozza"] is None:
+                raise ErroreExtra(409, "Non c'è una bozza da pubblicare: prima «Modifica la base»")
+            b = self._pubblica(d, d["bozza"]["modifiche"])
+            d["bozza"] = None
+            self._scrivi(self._file(), d, ok)
+            return b
+
+    def versioni(self):
+        with self.blocco:
+            d, _ = self._base()
+        return {"attuale": d["base"]["versione"],
+                "versioni": [{"versione": x["versione"], "pubblicato": x["pubblicato"],
+                              "n": sum(len(p) for p in x["modifiche"].values())} for x in d["versioni"]]}
+
+    def ripristina(self, n):
+        with self.blocco:
+            d, ok = self._base()
+            x = next((x for x in d["versioni"] if x["versione"] == n), None)
+            if x is None:
+                raise ErroreExtra(404, "Versione non più tenuta: restano le ultime %d" % UI_VERSIONI)
+            if d["bozza"] is not None:
+                raise ErroreExtra(409, "C'è una bozza non pubblicata: pubblicala o buttala, poi torna a una versione")
+            if n == d["base"]["versione"]:
+                raise ErroreExtra(409, "È già la base pubblicata")
+            b = self._pubblica(d, x["modifiche"])
+            self._scrivi(self._file(), d, ok)
+            return b
+
+
+def _interfaccia():
+    global UI
+    if UI is None:
+        UI = Interfaccia(os.path.join(_cart("cache"), "interfaccia"))
+    return UI
+
+
+def _rotte_interfaccia(h, metodo, resto, corpo):
+    """Strati dell'interfaccia: la base pubblicata la leggono tutti, il proprio strato personale lo cambia ognuno
+    (Samuele e la rete di casa: «p», come per i dispositivi), la bozza e le versioni sono solo di Samuele."""
+    def solo(*metodi):
+        if metodo not in metodi:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+
+    samuele, ui = _chi_e(h)["ruolo"] == "proprietario", _interfaccia()
+    if metodo == "POST":
+        try:
+            n = int(h.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n > UI_CORPO_MAX:
+            raise ErroreExtra(413, "Troppe modifiche in una volta")
+    if not resto:
+        solo("GET")
+        return _json(h, ui.leggi(_di(h), samuele))
+    if resto == ["base"]:
+        solo("GET")
+        return _json(h, {"base": ui.base()})
+    if resto == ["personale"]:
+        solo("POST")
+        return _json(h, {"personale": ui.personale(_di(h), corpo.get("modifiche"))})
+    if resto[0] in ("bozza", "pubblica", "versioni") and not samuele:
+        raise ErroreExtra(403, "Solo Samuele cambia la base dell'interfaccia")
+    if resto == ["bozza"]:
+        solo("GET", "POST", "DELETE")
+        if metodo == "DELETE":
+            ui.scarta()
+            return _json(h, {"ok": True})
+        return _json(h, {"bozza": ui.salva_bozza(corpo.get("modifiche")) if metodo == "POST" else ui.bozza()})
+    if resto == ["pubblica"]:
+        solo("POST")
+        return _json(h, {"base": ui.pubblica()})
+    if resto == ["versioni"]:
+        solo("GET")
+        return _json(h, ui.versioni())
+    if len(resto) == 3 and resto[0] == "versioni" and resto[2] == "ripristina":
+        solo("POST")
+        if not re.fullmatch(r"[1-9][0-9]{0,8}", resto[1]):
+            raise ErroreExtra(404, "Versione sconosciuta")
+        return _json(h, {"base": ui.ripristina(int(resto[1]))})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/interfaccia/%s" % "/".join(resto))
+
+
+# ----- chat cifrata da telefono a telefono (fase 5a) -----
+#
+# Messaggi, foto, video, vocali e brani della libreria tra chi è in Atlante (Samuele è "p", gli invitati il loro id),
+# a due e in gruppo. Il Mac mini fa solo da postino: ogni telefono crea le sue chiavi (ECDH P-256 nel browser, la
+# privata non esce mai dal telefono; qui arriva solo la pubblica) e cifra ogni messaggio con una chiave nuova, cifrata a
+# sua volta per ciascun dispositivo dei partecipanti (vedi x/chat-cifra.js). Il Mac mini sa chi scrive a chi, quando e
+# quanto è grande, non cosa. Un messaggio cifrato resta qui finché l'hanno preso tutti i dispositivi a cui è diretto,
+# al più 30 giorni; gli allegati 30 giorni. Notifiche: Web Push senza contenuto (il service worker chiede poi qui chi
+# ha scritto), firmate VAPID con /usr/bin/openssl, perché la libreria standard di Python non ha le curve ellittiche.
+#
+#   GET    chat/stato                           chi sono, i miei dispositivi della chat, chiave VAPID per le notifiche
+#   POST   chat/dispositivi {id,chiave}         questo telefono entra nella chat con la sua chiave pubblica
+#   GET    chat/persone                         chi è in Atlante, le chiavi pubbliche dei suoi dispositivi, chi ho bloccato
+#   GET    chat/conversazioni                   le mie conversazioni (membri, consegnato e letto, eventi dei gruppi)
+#   POST   chat/conversazioni {con} | {nome,membri}     chat a due (sempre la stessa) o gruppo nuovo
+#   POST   chat/conversazioni/<id>/membri {persone}     aggiunge al gruppo (solo chi l'ha creato)
+#   DELETE chat/conversazioni/<id>/membri/<persona>     toglie dal gruppo (chi l'ha creato) o esce (sé stessi)
+#   POST   chat/conversazioni/<id>/letto {seq}          letto fino a quel messaggio
+#   POST   chat/messaggi {id,conv,disp,corpo,sale,chiavi,allegati}  messaggio cifrato -> {seq,t}; 409 con «mancano»
+#   GET    chat/messaggi?disp=&dopo=&v=&attesa=25       i messaggi per questo dispositivo (attesa lunga); `dopo` conferma
+#   POST   chat/allegati {conv,dimensione,pezzi}        allegato cifrato nuovo -> {id,pezzo}
+#   POST   chat/allegati/<id>/<n>                       un pezzo (byte cifrati, Content-Type application/octet-stream)
+#   GET    chat/allegati/<id>/<n>                       un pezzo, solo per chi ha ricevuto il messaggio
+#   POST   chat/blocchi {persona} · DELETE chat/blocchi/<persona>
+#   POST   chat/push {disp,endpoint} · DELETE chat/push/<disp>   notifiche di questo dispositivo
+#   GET    chat/avvisi?disp=                            chi ha scritto (il testo della notifica, letto dal service worker)
+
+CHAT_GIORNI = 30                  # i messaggi cifrati aspettano i telefoni spenti al più 30 giorni, poi si cancellano
+CHAT_DISP_MAX = 10                # dispositivi della chat per persona: oltre, esce quello sentito meno di recente
+CHAT_GRUPPO_MAX = 32              # persone in un gruppo, chi l'ha creato compreso
+CHAT_GRUPPI_PERSONA = 200         # gruppi creati da una persona
+CHAT_NOME_MAX = 40
+CHAT_PEZZO = 8 * 1024 * 1024      # byte in chiaro di un pezzo di allegato: cifrato sta sotto i 20 MB di una richiesta
+CHAT_CIFRA = 28                   # quanto aggiunge la cifratura a un pezzo: 12 byte di vettore iniziale e 16 di controllo
+CHAT_ALLEGATO_MAX = 200 * 1024 * 1024
+CHAT_PEZZI_MAX = -(-CHAT_ALLEGATO_MAX // CHAT_PEZZO)
+CHAT_ALLEGATI_MESSAGGIO = 10
+CHAT_ALLEGATI_APERTI = 20         # allegati cominciati e non ancora mandati, per persona
+CHAT_CORPO_MAX = 256 * 1024       # un messaggio cifrato (testo, o la scheda di un allegato con l'anteprima), in base64
+CHAT_RISPOSTA_MAX = 200           # messaggi per risposta: il telefono chiede subito il resto
+CHAT_SALVA_OGNI = 5               # conferme di consegna e letture: su disco al più ogni 5 secondi
+CHAT_PULISCI_OGNI = 600
+CHAT_GIORNO_MAX = 20 * 1024 ** 3  # 20 GB al giorno per persona (vedi _chat_conta_giorno)
+CHAT_SPAZIO_MIN = 5 * 1024 ** 3   # sotto 5 GB liberi sul disco della cache gli allegati non partono
+CHAT_PUSH_RITARDO = 10            # telefono con la chat aperta: il messaggio arriva subito, la notifica solo se non lo prende
+CHAT_PUSH_DI_NUOVO = 300          # a chi non ha ancora preso i messaggi della notifica precedente, un'altra dopo 5 minuti
+CHAT_PUSH_TTL = 86400             # una notifica che non arriva entro un giorno non serve più (i messaggi arrivano comunque)
+CHAT_EVENTI_MAX = 100             # eventi di un gruppo tenuti (creato, aggiunti, tolti, usciti)
+NOME_SAMUELE = "Samuele"
+ID_CHAT = re.compile(r"^[A-Za-z0-9_-]{16,43}$")          # id scelti dai telefoni (messaggi, dispositivi): 16 byte casuali
+PERSONA_CHAT = re.compile(r"^(?:p|[0-9a-f]{16})$")
+CONV_CHAT = re.compile(r"^(?:d[0-9a-f]{24}|g[0-9a-f]{16})$")
+ALLEGATO_CHAT = re.compile(r"^[A-Za-z0-9_-]{22}$")
+B64U = re.compile(r"^[A-Za-z0-9_-]*$")
+# notifiche solo verso i servizi di Apple, Google, Mozilla e Microsoft: con un indirizzo qualsiasi il Mac mini farebbe
+# richieste dove vuole chi si iscrive (anche nella rete di casa). ATLANTE_PUSH_PROVA aggiunge il servizio finto delle prove
+PUSH_SERVIZI = re.compile(r"^https://(?:[a-z0-9-]+\.)*(?:push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com"
+                          r"|notify\.windows\.com)(?::443)?/[!-~]*$")
+OPENSSL = os.environ.get("ATLANTE_OPENSSL") or "/usr/bin/openssl"   # LibreSSL del Mac: firma le notifiche (ES256)
+_P256 = (2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1, 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b)
+_SPKI_P256 = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")   # chiave pubblica P-256 in DER, prima del punto
+
+
+class ErroreChat(ErroreExtra):
+    """Errore con campi in più per il telefono: i dispositivi mancanti (409) o «registra» (si ricollega alla chat)."""
+
+    def __init__(self, codice, testo, **extra):
+        super().__init__(codice, testo)
+        self.extra = extra
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _da_b64u(s, massimo):
+    if not isinstance(s, str) or not B64U.match(s) or len(s) % 4 == 1 or len(s) > massimo:
+        raise ErroreExtra(400, "Dati cifrati non validi")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _punto_p256(raw):
+    """Chiave pubblica P-256 non compressa (0x04 || x || y) che sta davvero sulla curva y² = x³ − 3x + b."""
+    p, b = _P256
+    if len(raw) != 65 or raw[0] != 4:
+        return False
+    x, y = int.from_bytes(raw[1:33], "big"), int.from_bytes(raw[33:], "big")
+    return x < p and y < p and (y * y - (x * x * x - 3 * x + b)) % p == 0
+
+
+def _der_a_rs(der):
+    """Firma ECDSA da DER (SEQUENCE di due INTEGER, come la scrive openssl) a r || s di 32 byte ciascuno (come la vuole
+    un JWT ES256)."""
+    if len(der) < 8 or der[0] != 0x30 or der[1] & 0x80 or der[1] != len(der) - 2:
+        raise ValueError("firma DER non valida")
+    i, out = 2, b""
+    for _ in range(2):
+        if i + 2 > len(der) or der[i] != 0x02:
+            raise ValueError("firma DER non valida")
+        n = der[i + 1]
+        v = der[i + 2:i + 2 + n]
+        if len(v) != n or n == 0:
+            raise ValueError("firma DER non valida")
+        v = v.lstrip(b"\x00")
+        if len(v) > 32:
+            raise ValueError("firma DER non valida")
+        out += v.rjust(32, b"\x00")
+        i += 2 + n
+    if i != len(der):
+        raise ValueError("firma DER non valida")
+    return out
+
+
+def _chat_numero(v, minimo, massimo, cosa):
+    if isinstance(v, bool) or not isinstance(v, int) or not minimo <= v <= massimo:
+        raise ErroreExtra(400, "%s non valido" % cosa)
+    return v
+
+
+def _chat_io(h):
+    """La persona della chat: "p" per Samuele, l'id per un invitato. Dalla rete di casa senza biscotto no: lì non si sa
+    chi c'è, e un dispositivo registrato da lì riceverebbe i messaggi di Samuele."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"]
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    raise ErroreExtra(403, "La chat si apre con Tailscale o con il proprio invito, non dalla rete di casa")
+
+
+def _chat_vivi():
+    """(persone in Atlante {id: nome}, dispositivo d'accesso -> persona, chiavi «p:…» revocate) con una sola lettura di
+    persone.json: una persona o un dispositivo revocati escono subito dai destinatari."""
+    persone, accessi, revocati = {}, {}, set()
+    if PERS is not None:
+        with PERS.blocco:
+            d = PERS._aggiorna()
+            persone = {pid: x["nome"] for pid, x in d["persone"].items()}
+            accessi = {k: x.get("persona") for k, x in d["dispositivi"].items()}
+            revocati = set(d["revocati"])
+    persone["p"] = NOME_SAMUELE
+    return persone, accessi, revocati
+
+
+def _byte_grezzi(h):
+    return (h.headers.get("Content-Type") or "").split(";")[0].strip().lower() == "application/octet-stream"
+
+
+def _push_ammesso(endpoint):
+    if not isinstance(endpoint, str) or len(endpoint) > 2000:
+        return False
+    prova = os.environ.get("ATLANTE_PUSH_PROVA", "")
+    return bool(PUSH_SERVIZI.match(endpoint) or (prova and endpoint.startswith(prova) and re.fullmatch(r"[!-~]+", endpoint)))
+
+
+def _chat_contatto():
+    """Il «sub» del JWT delle notifiche: Apple vuole un indirizzo https o mailto di chi le manda."""
+    return PUBBLICO or INDIRIZZO or "mailto:atlante-musica@example.com"
+
+
+# ----- 20 GB al giorno per persona, insieme ai caricamenti -----
+# Brani caricati, film e allegati della chat contano insieme (spec, «Caricamenti e Da controllare»): il conto è quello
+# comune dei caricamenti (Quote, Samuele senza limite). Senza caricamenti attivi (prove della chat da sola) la chat tiene
+# il suo, in chat.json, che si azzera a mezzanotte.
+def _chat_conta_giorno(chat, persona, byte):
+    if QUOTE is not None:
+        QUOTE.consuma(_limite(persona), byte)
+        return
+    oggi = time.strftime("%Y-%m-%d")
+    g = chat.dati["giorno"]
+    if g.get("data") != oggi or not isinstance(g.get("byte"), dict):
+        g.clear()
+        g.update(data=oggi, byte={})
+    usati = g["byte"].get(persona, 0)
+    if usati + byte > CHAT_GIORNO_MAX:
+        raise ErroreExtra(429, "Hai raggiunto i 20 GB di oggi: si riprende domani")
+    g["byte"][persona] = usati + byte
+
+
+class Chat:
+    """Archivio della chat in <cache>/chat/: chat.json (dispositivi con le chiavi pubbliche, conversazioni, blocchi,
+    iscrizioni alle notifiche, consegne), messaggi/<seq>.json (un messaggio cifrato ciascuno) e allegati/<id>/<n> (pezzi
+    cifrati). Niente di quello che c'è qui si legge senza le chiavi private, che stanno solo nei telefoni."""
+
+    def __init__(self, cartella):
+        self.cartella = cartella
+        self.cartella_msg = os.path.join(cartella, "messaggi")
+        self.cartella_all = os.path.join(cartella, "allegati")
+        for c in (cartella, self.cartella_msg, self.cartella_all):
+            os.makedirs(c, mode=0o700, exist_ok=True)
+        self.file = os.path.join(cartella, "chat.json")
+        self.blocco = threading.RLock()
+        self.cond = threading.Condition(self.blocco)         # attese lunghe dei telefoni
+        self.cond_posta = threading.Condition(self.blocco)   # il postino delle notifiche
+        self.blocco_vapid = threading.Lock()
+        self.dati = self._leggi()
+        self.indice, self.seqs, self.ids = {}, [], {}        # seq -> riassunto del messaggio; id -> seq
+        self._carica_messaggi()
+        # versione per persona: cambia quando cambia qualcosa che il telefono deve rileggere (conversazioni, consegne,
+        # chiavi). Parte dall'ora: dopo un riavvio i telefoni rileggono tutto
+        self.ver, self.base = {}, int(time.time())
+        self.attese = {}                                     # dispositivo -> attese lunghe aperte
+        self.posta, self.postino, self.notificato = [], None, {}
+        self.chiamate = {}   # persona -> {id chiamata: avviso}: le chiamate in arrivo, perse e chiuse (solo in memoria)
+        self.jwt, self.vapid = {}, None
+        self.salvato, self.timer, self.pulito = 0.0, None, 0.0
+        with self.blocco:
+            self._pulisci(forza=True)
+
+    # --- file ---
+
+    def _leggi(self):
+        d = {}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            # la cronologia vive nei telefoni: si riparte (i telefoni si ricollegano da soli), il file rotto resta da parte
+            print("Atlante: %s non si legge (%s): lo metto da parte e riparto" % (self.file, e), flush=True)
+            try:
+                os.replace(self.file, self.file + ".rotto")
+            except OSError:
+                pass
+        if not isinstance(d, dict) or not d:
+            # archivio nuovo o ripartito: i numeri dei messaggi partono dall'ora, più in alto di quelli che i telefoni
+            # ricordano da un archivio di prima (altrimenti i messaggi nuovi sembrerebbero già presi)
+            d = {"seq": int(time.time())} if os.path.exists(self.file + ".rotto") else {}
+        for k in ("dispositivi", "conversazioni", "blocchi", "push", "cursori", "allegati", "giorno"):
+            if not isinstance(d.get(k), dict):
+                d[k] = {}
+        d["seq"] = d["seq"] if isinstance(d.get("seq"), int) else 0
+        return d
+
+    def _scrivi(self):
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self.dati, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, self.file)
+        self.salvato = time.time()
+
+    def _salva(self, subito=True):
+        """Su disco subito (messaggi, conversazioni, chiavi) o al più ogni CHAT_SALVA_OGNI (consegne, letture)."""
+        if subito or time.time() - self.salvato >= CHAT_SALVA_OGNI:
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+            self._scrivi()
+        elif self.timer is None:
+            self.timer = threading.Timer(CHAT_SALVA_OGNI, self._salva_dopo)
+            self.timer.daemon = True
+            self.timer.start()
+
+    def _salva_dopo(self):
+        with self.blocco:
+            self.timer = None
+            try:
+                self._scrivi()
+            except OSError as e:
+                print("Atlante: chat non salvata: %s" % e, flush=True)
+
+    def _file_msg(self, seq):
+        return os.path.join(self.cartella_msg, "%d.json" % seq)
+
+    def _carica_messaggi(self):
+        for n in os.listdir(self.cartella_msg):
+            p = os.path.join(self.cartella_msg, n)
+            if not re.fullmatch(r"\d{1,15}\.json", n):
+                _cancella(p)   # scrittura interrotta
+                continue
+            try:
+                with open(p, encoding="utf-8") as f:
+                    self._indicizza(json.load(f))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                _cancella(p)
+        self.seqs.sort()
+        if self.seqs:
+            self.dati["seq"] = max(self.dati["seq"], self.seqs[-1])
+
+    def _indicizza(self, m):
+        self.indice[m["seq"]] = {"id": m["id"], "conv": m["conv"], "da": m["da"], "disp": m["disp"], "t": m["t"],
+                                 "dest": set(m["chiavi"]), "allegati": list(m.get("allegati") or [])}
+        self.ids[m["id"]] = m["seq"]
+        self.seqs.append(m["seq"])
+
+    def _togli_msg(self, seq):
+        m = self.indice.pop(seq, None)
+        if m is not None:
+            self.ids.pop(m["id"], None)
+            self.seqs.remove(seq)
+        _cancella(self._file_msg(seq))
+
+    # --- versioni e controlli ---
+
+    def _v(self, persona):
+        return self.base + self.ver.get(persona, 0)
+
+    def _tocca(self, persone):
+        for p in persone:
+            self.ver[p] = self.ver.get(p, 0) + 1
+        self.cond.notify_all()
+
+    def _tocca_tutti(self):
+        self.base += 1
+        self.cond.notify_all()
+
+    def _vivo(self, x, vivi):
+        """Dispositivo che riceve i messaggi: attivo, di una persona ancora in Atlante, con l'accesso non revocato."""
+        persone, accessi, revocati = vivi
+        if x is None or not x.get("attivo", True) or x["persona"] not in persone:
+            return False
+        a = x.get("accesso")
+        if x["persona"] == "p":
+            return not a or (a.startswith("p:") and a not in revocati)
+        return bool(a) and accessi.get(a) == x["persona"]
+
+    def _disp_di(self, persona, vivi):
+        return [k for k, x in self.dati["dispositivi"].items() if x["persona"] == persona and self._vivo(x, vivi)]
+
+    def _membri(self, c, vivi):
+        return [p for p in c["membri"] if p in vivi[0]]
+
+    def _conv(self, cid, persona, vivi):
+        """La conversazione, solo per chi ne fa parte: agli altri risponde come se non ci fosse."""
+        c = self.dati["conversazioni"].get(cid) if isinstance(cid, str) else None
+        if not c or persona not in self._membri(c, vivi):
+            raise ErroreExtra(404, "Conversazione sconosciuta")
+        return c
+
+    def _mio(self, persona, did, accesso, vivi):
+        """Il dispositivo della chat di chi fa la richiesta, legato al suo accesso (biscotto): revocato l'accesso, il
+        dispositivo esce dalla chat. Lo stesso telefono rientrato con un link nuovo si ricollega da sé (POST dispositivi)."""
+        x = self.dati["dispositivi"].get(did) if isinstance(did, str) else None
+        if not x or x["persona"] != persona:
+            raise ErroreChat(404, "Questo telefono non è ancora nella chat", registra=True)
+        if accesso and x.get("accesso") != accesso:
+            if x.get("accesso"):
+                raise ErroreChat(409, "Questo telefono deve ricollegarsi alla chat", registra=True)
+            x["accesso"] = accesso   # Samuele entrato prima senza biscotto (dal Mac o da Tailscale)
+            self._salva(False)
+        if not self._vivo(x, vivi):
+            raise ErroreChat(403, "Questo telefono non è più nella chat", registra=True)
+        return x
+
+    # --- dispositivi e persone ---
+
+    def stato(self, persona, accesso):
+        v = self._vapid()
+        with self.blocco:
+            vivi = _chat_vivi()
+            suoi = [{"id": k, "tipo": x.get("tipo", "pc"), "creato": x["creato"], "visto": x.get("visto", 0),
+                     "notifiche": k in self.dati["push"], "questo": bool(accesso) and x.get("accesso") == accesso}
+                    for k, x in self.dati["dispositivi"].items() if x["persona"] == persona and self._vivo(x, vivi)]
+            return {"io": {"id": persona, "nome": vivi[0].get(persona, "")}, "dispositivi": suoi,
+                    "vapid": v[2] if v else "", "pezzo": CHAT_PEZZO, "giorni": CHAT_GIORNI, "v": self._v(persona)}
+
+    def registra(self, persona, accesso, corpo, tipo):
+        did, chiave = corpo.get("id"), corpo.get("chiave")
+        if not isinstance(did, str) or not ID_CHAT.match(did):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        if not _punto_p256(_da_b64u(chiave, 100)):
+            raise ErroreExtra(400, "Chiave pubblica non valida: serve una chiave P-256 non compressa")
+        ora = time.time()
+        with self.blocco:
+            vivi = _chat_vivi()
+            d = self.dati["dispositivi"]
+            x = d.get(did)
+            if x is not None and (x["persona"] != persona or x["chiave"] != chiave):
+                raise ErroreExtra(409, "Questo id è già di un altro dispositivo: il telefono ne crea uno nuovo")
+            prima = self._vivo(x, vivi), (x or {}).get("accesso")
+            if x is None:
+                # un browser ha una sola identità: un dispositivo nuovo con lo stesso accesso (dati del sito cancellati)
+                # prende il posto del vecchio; oltre CHAT_DISP_MAX esce quello sentito meno di recente
+                for y in d.values():
+                    if accesso and y.get("accesso") == accesso and y.get("attivo", True):
+                        y.update(attivo=False, spento=ora)
+                suoi = sorted(self._disp_di(persona, vivi), key=lambda k: d[k].get("visto", 0))
+                for k in suoi[:max(0, len(suoi) - CHAT_DISP_MAX + 1)]:
+                    d[k].update(attivo=False, spento=ora)
+                x = d[did] = {"persona": persona, "chiave": chiave, "creato": ora}
+            x.update(accesso=accesso or x.get("accesso"), tipo=tipo, visto=ora, attivo=True)
+            x.pop("spento", None)
+            self._salva()
+            if prima != (True, x.get("accesso")):
+                self._tocca_tutti()   # le chiavi di questa persona sono cambiate per tutti
+        return self.stato(persona, accesso)
+
+    def persone(self, persona):
+        """Chi è in Atlante con le chiavi pubbliche dei suoi dispositivi: quelli attivi, e per 30 giorni anche quelli
+        usciti (servono per leggere i messaggi che avevano mandato prima)."""
+        with self.blocco:
+            vivi = _chat_vivi()
+            ora = time.time()
+            per = {p: [] for p in vivi[0]}
+            for k, x in self.dati["dispositivi"].items():
+                if x["persona"] in per:
+                    vivo = self._vivo(x, vivi)
+                    if vivo or ora - x.get("spento", x.get("visto", 0)) < CHAT_GIORNI * 86400:
+                        per[x["persona"]].append({"id": k, "chiave": x["chiave"], "attivo": vivo})
+            elenco = [{"id": p, "nome": n, "dispositivi": sorted(per[p], key=lambda y: y["id"])}
+                      for p, n in sorted(vivi[0].items(), key=lambda kv: (kv[0] != "p", kv[1].lower()))]
+            return {"io": persona, "persone": elenco, "bloccati": list(self.dati["blocchi"].get(persona, [])),
+                    "v": self._v(persona)}
+
+    def blocca(self, persona, altro, si):
+        with self.blocco:
+            vivi = _chat_vivi()
+            b = self.dati["blocchi"].setdefault(persona, [])
+            if si:
+                if not isinstance(altro, str) or altro == persona or altro not in vivi[0]:
+                    raise ErroreExtra(404, "Persona sconosciuta")
+                if altro not in b:
+                    b.append(altro)
+                    del b[:-500]
+            elif altro in b:
+                b.remove(altro)
+            self._salva()
+            self._tocca([persona])
+            return {"bloccati": list(b)}
+
+    # --- conversazioni ---
+
+    def _vista(self, cid, c, vivi):
+        membri = self._membri(c, vivi)
+        x = {"id": cid, "tipo": c["tipo"], "membri": list(c["membri"]) if c["tipo"] == "due" else membri,
+             "creato": c["creato"], "ultimo": c.get("ultimo", c["creato"]),
+             "stati": {p: dict(s) for p, s in c.get("stati", {}).items() if p in membri}}
+        if c["tipo"] == "gruppo":
+            x.update(nome=c["nome"], creatore=c.get("creatore"), eventi=c.get("eventi", [])[-CHAT_EVENTI_MAX:])
+        return x
+
+    def conversazioni(self, persona):
+        with self.blocco:
+            vivi = _chat_vivi()
+            self._pulisci()
+            return {"conversazioni": [self._vista(k, c, vivi) for k, c in self.dati["conversazioni"].items()
+                                      if persona in self._membri(c, vivi)], "v": self._v(persona)}
+
+    def _evento(self, c, tipo, da, chi):
+        c.setdefault("eventi", []).append({"t": time.time(), "tipo": tipo, "da": da, "chi": list(chi)})
+        del c["eventi"][:-CHAT_EVENTI_MAX]
+
+    def nuova(self, persona, corpo):
+        ora = time.time()
+        with self.blocco:
+            vivi = _chat_vivi()
+            convs = self.dati["conversazioni"]
+            if "con" in corpo:
+                altro = corpo.get("con")
+                if not isinstance(altro, str) or altro == persona or altro not in vivi[0]:
+                    raise ErroreExtra(404, "Persona sconosciuta")
+                coppia = sorted([persona, altro])
+                cid = "d" + hashlib.sha256(("due\n" + "\n".join(coppia)).encode("utf-8")).hexdigest()[:24]
+                if cid not in convs:
+                    convs[cid] = {"tipo": "due", "membri": coppia, "creato": ora, "stati": {}}
+                    self._salva()
+                    self._tocca(coppia)
+                return {"conversazione": self._vista(cid, convs[cid], vivi)}
+            nome = " ".join(str(corpo.get("nome") or "").split())[:CHAT_NOME_MAX]
+            if not nome:
+                raise ErroreExtra(400, "Serve il nome del gruppo")
+            if not isinstance(corpo.get("membri"), list):
+                raise ErroreExtra(400, "Serve l'elenco delle persone del gruppo")
+            altri = []
+            for p in corpo["membri"]:
+                if isinstance(p, str) and p != persona and p in vivi[0] and p not in altri:
+                    altri.append(p)
+            if len(altri) + 1 > CHAT_GRUPPO_MAX:
+                raise ErroreExtra(409, "In un gruppo ci stanno al più %d persone" % CHAT_GRUPPO_MAX)
+            if sum(1 for c in convs.values() if c["tipo"] == "gruppo" and c.get("fondatore") == persona) >= CHAT_GRUPPI_PERSONA:
+                raise ErroreExtra(409, "Hai già creato %d gruppi" % CHAT_GRUPPI_PERSONA)
+            cid = "g" + secrets.token_hex(8)
+            c = convs[cid] = {"tipo": "gruppo", "nome": nome, "membri": [persona] + altri, "creatore": persona,
+                              "fondatore": persona, "creato": ora, "stati": {}}
+            self._evento(c, "creato", persona, altri)
+            self._salva()
+            self._tocca(c["membri"])
+            return {"conversazione": self._vista(cid, c, vivi)}
+
+    def aggiungi(self, persona, cid, corpo):
+        with self.blocco:
+            vivi = _chat_vivi()
+            c = self._conv(cid, persona, vivi)
+            if c["tipo"] != "gruppo":
+                raise ErroreExtra(400, "Le persone si aggiungono solo ai gruppi")
+            if c.get("creatore") != persona:
+                raise ErroreExtra(403, "Solo chi ha creato il gruppo aggiunge e toglie le persone")
+            membri = self._membri(c, vivi)
+            nuovi = []
+            for p in corpo.get("persone") if isinstance(corpo.get("persone"), list) else []:
+                if isinstance(p, str) and p in vivi[0] and p not in membri and p not in nuovi:
+                    nuovi.append(p)
+            if not nuovi:
+                raise ErroreExtra(400, "Nessuna persona nuova da aggiungere")
+            if len(membri) + len(nuovi) > CHAT_GRUPPO_MAX:
+                raise ErroreExtra(409, "In un gruppo ci stanno al più %d persone" % CHAT_GRUPPO_MAX)
+            c["membri"] = membri + nuovi
+            self._evento(c, "aggiunti", persona, nuovi)
+            self._salva()
+            self._tocca(c["membri"])
+            return {"conversazione": self._vista(cid, c, vivi)}
+
+    def togli(self, persona, cid, chi):
+        """Chi ha creato il gruppo toglie una persona; ognuno può uscire. Se esce chi l'ha creato, il gruppo passa a chi
+        c'è da più tempo."""
+        with self.blocco:
+            vivi = _chat_vivi()
+            c = self._conv(cid, persona, vivi)
+            if c["tipo"] != "gruppo":
+                raise ErroreExtra(400, "Dalle chat a due non si esce: si può bloccare la persona")
+            if chi != persona and c.get("creatore") != persona:
+                raise ErroreExtra(403, "Solo chi ha creato il gruppo aggiunge e toglie le persone")
+            if chi not in c["membri"]:
+                raise ErroreExtra(404, "Questa persona non è nel gruppo")
+            prima = self._membri(c, vivi)
+            c["membri"] = [p for p in prima if p != chi]
+            c.get("stati", {}).pop(chi, None)
+            self._evento(c, "uscito" if chi == persona else "tolto", persona, [chi])
+            if c.get("creatore") == chi:
+                c["creatore"] = c["membri"][0] if c["membri"] else None
+            if not c["membri"]:
+                del self.dati["conversazioni"][cid]
+            self._salva()
+            self._tocca(prima)
+            return {"ok": True}
+
+    def letto(self, persona, cid, seq):
+        with self.blocco:
+            vivi = _chat_vivi()
+            c = self._conv(cid, persona, vivi)
+            seq = min(_chat_numero(seq, 0, 10 ** 15, "Messaggio"), self.dati["seq"])
+            s = c.setdefault("stati", {}).setdefault(persona, {"c": 0, "l": 0})
+            if seq > s["l"]:
+                s["l"], s["c"] = seq, max(s["c"], seq)
+                self._salva(False)
+                self._tocca(self._membri(c, vivi))
+            return {"ok": True}
+
+    # --- messaggi ---
+
+    def invia(self, persona, accesso, corpo):
+        mid, cid = corpo.get("id"), corpo.get("conv")
+        if not isinstance(mid, str) or not ID_CHAT.match(mid):
+            raise ErroreExtra(400, "Messaggio non valido")
+        testo = corpo.get("corpo")
+        if isinstance(testo, str) and len(testo) > CHAT_CORPO_MAX:
+            raise ErroreExtra(413, "Messaggio troppo grande")
+        if len(_da_b64u(testo, CHAT_CORPO_MAX)) < 29:
+            raise ErroreExtra(400, "Messaggio cifrato non valido")
+        if len(_da_b64u(corpo.get("sale"), 64)) != 16:
+            raise ErroreExtra(400, "Messaggio cifrato non valido")
+        chiavi = corpo.get("chiavi")
+        if not isinstance(chiavi, dict) or len(chiavi) > CHAT_GRUPPO_MAX * CHAT_DISP_MAX:
+            raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+        for k, w in chiavi.items():
+            if not ID_CHAT.match(k) or len(_da_b64u(w, 200)) != 60:
+                raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+        allegati = corpo.get("allegati") or []
+        if not isinstance(allegati, list) or len(allegati) > CHAT_ALLEGATI_MESSAGGIO or \
+                not all(isinstance(a, str) and ALLEGATO_CHAT.match(a) for a in allegati):
+            raise ErroreExtra(400, "Allegati non validi")
+        with self.blocco:
+            vivi = _chat_vivi()
+            x = self._mio(persona, corpo.get("disp"), accesso, vivi)
+            mio = corpo["disp"]
+            c = self._conv(cid, persona, vivi)
+            if mid in self.ids:   # lo stesso messaggio mandato due volte (rete che cade a metà): una volta sola
+                m = self.indice[self.ids[mid]]
+                if m["da"] != persona or m["conv"] != cid:
+                    raise ErroreExtra(409, "Id del messaggio già usato")
+                return {"seq": self.ids[mid], "t": m["t"]}
+            membri = self._membri(c, vivi)
+            atteso, qualcuno = set(), False
+            for p in membri:
+                suoi = self._disp_di(p, vivi)
+                if p != persona:
+                    qualcuno = qualcuno or bool(suoi)
+                    if persona in self.dati["blocchi"].get(p, []):
+                        continue   # chi ha bloccato questa persona non riceve i suoi messaggi (e lei non lo sa)
+                atteso.update(suoi)
+            atteso.discard(mio)
+            if c["tipo"] == "due" and not qualcuno:
+                altro = [p for p in c["membri"] if p != persona][0]
+                if altro not in vivi[0]:
+                    raise ErroreChat(409, "Questa persona non è più in Atlante", nessuno=True)
+                raise ErroreChat(409, "%s non ha ancora aperto la chat: il messaggio partirà quando lo farà" % vivi[0][altro],
+                                 nessuno=True)
+            mancano = sorted(atteso - set(chiavi))
+            if mancano:   # un dispositivo nuovo che il telefono non conosceva ancora: rilegge le chiavi e cifra di nuovo
+                raise ErroreChat(409, "Le chiavi sono cambiate: il telefono cifra di nuovo il messaggio", mancano=mancano)
+            dest = {k: chiavi[k] for k in sorted(atteso)}
+            per = sorted({self.dati["dispositivi"][k]["persona"] for k in dest} | {persona})
+            dim = len(testo)
+            for a in allegati:
+                y = self.dati["allegati"].get(a)
+                if not y or y["da"] != persona or y["conv"] != cid or len(y["ricevuti"]) != y["pezzi"]:
+                    raise ErroreExtra(409, "Allegato non ancora caricato del tutto")
+                dim += y["dimensione"]
+            ora = time.time()
+            seq = self.dati["seq"] + 1
+            m = {"seq": seq, "id": mid, "conv": cid, "da": persona, "disp": mio, "t": ora, "corpo": testo,
+                 "sale": corpo["sale"], "chiavi": dest, "allegati": allegati, "dim": dim}
+            if dest:   # bloccato da tutti, o nessun altro dispositivo: non c'è niente da consegnare
+                tmp = self._file_msg(seq) + ".tmp"
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(m, f, separators=(",", ":"))
+                os.replace(tmp, self._file_msg(seq))
+                self._indicizza(m)
+            for a in allegati:
+                y = self.dati["allegati"][a]
+                y["usato"], y["per"] = True, sorted(set(y.get("per", [])) | set(per))
+            self.dati["seq"] = seq
+            c["ultimo"] = ora
+            x["visto"] = ora
+            self._salva()   # subito: un numero di messaggio non si riusa mai, nemmeno dopo un riavvio
+            self.cond.notify_all()
+            self._accoda_notifiche(seq, persona, dest)
+            return {"seq": seq, "t": ora}
+
+    def _per(self, did, dopo):
+        out = []
+        for seq in self.seqs:
+            if seq > dopo and did in self.indice[seq]["dest"]:
+                out.append(seq)
+                if len(out) >= CHAT_RISPOSTA_MAX:
+                    return out, True
+        return out, False
+
+    def _conferma(self, did, persona, dopo):
+        """Il dispositivo ha salvato i messaggi fino a `dopo`: consegnati (le due spunte per chi li ha mandati)."""
+        dopo = min(dopo, self.dati["seq"])
+        vecchio = self.dati["cursori"].get(did, 0)
+        if dopo <= vecchio:
+            return
+        self.dati["cursori"][did] = dopo
+        toccate = set()
+        for seq in self.seqs:
+            m = self.indice[seq]
+            if vecchio < seq <= dopo and did in m["dest"]:
+                c = self.dati["conversazioni"].get(m["conv"])
+                if c is not None:
+                    s = c.setdefault("stati", {}).setdefault(persona, {"c": 0, "l": 0})
+                    if seq > s["c"]:
+                        s["c"] = seq
+                        toccate.add(m["conv"])
+        for cid in toccate:
+            self._tocca(self.dati["conversazioni"][cid]["membri"])
+        self._salva(False)
+
+    def ricevi(self, persona, accesso, did, dopo, v, attesa):
+        fine = time.time() + max(0.0, min(attesa, ATTESA_MAX))
+        with self.blocco:
+            vivi = _chat_vivi()
+            x = self._mio(persona, did, accesso, vivi)
+            x["visto"] = time.time()
+            if dopo > self.dati["seq"]:
+                dopo = 0   # archivio della chat ripartito da capo: il telefono rilegge tutto e scarta i doppioni
+            self._conferma(did, persona, dopo)
+            self._pulisci()
+            self.attese[did] = self.attese.get(did, 0) + 1
+            try:
+                while True:
+                    seqs, altri = self._per(did, dopo)
+                    if seqs or self._v(persona) != v or time.time() >= fine:
+                        break
+                    self.cond.wait(max(0.01, fine - time.time()))
+            finally:
+                self.attese[did] -= 1
+                if not self.attese[did]:
+                    del self.attese[did]
+            out = []
+            for seq in seqs:
+                try:
+                    with open(self._file_msg(seq), encoding="utf-8") as f:
+                        m = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                al = [{"id": a, "pezzi": self.dati["allegati"][a]["pezzi"], "dimensione": self.dati["allegati"][a]["dimensione"]}
+                      for a in m.get("allegati") or [] if a in self.dati["allegati"]]
+                out.append({"seq": seq, "id": m["id"], "conv": m["conv"], "da": m["da"], "disp": m["disp"], "t": m["t"],
+                            "corpo": m["corpo"], "sale": m["sale"], "chiave": m["chiavi"][did], "allegati": al})
+            fino = seqs[-1] if altri else self.dati["seq"]
+            return {"messaggi": out, "fino": max(fino, dopo), "altri": altri, "v": self._v(persona)}
+
+    def avvisi(self, persona, accesso, did):
+        """Per il testo della notifica: chi ha scritto nei messaggi che questo dispositivo non ha ancora preso."""
+        with self.blocco:
+            vivi = _chat_vivi()
+            self._mio(persona, did, accesso, vivi)
+            cur = self.dati["cursori"].get(did, 0)
+            per = {}
+            for seq in self.seqs:
+                m = self.indice[seq]
+                if seq > cur and did in m["dest"] and m["da"] != persona:
+                    n = per.get(m["conv"], (None, 0))[1] + 1
+                    per[m["conv"]] = (m, n)
+            out = []
+            for cid, (m, n) in per.items():
+                c = self.dati["conversazioni"].get(cid) or {}
+                out.append({"conv": cid, "da": m["da"], "nome": vivi[0].get(m["da"], "qualcuno"), "n": n, "t": m["t"],
+                            "gruppo": c.get("nome") if c.get("tipo") == "gruppo" else None})
+            ora = time.time()
+            vive = {"arriva": SQUILLO_DURATA + 5, "persa": 3600, "chiusa": 120}   # quanto conta ancora ogni avviso
+            chiamate = sorted((x for x in (self.chiamate.get(persona) or {}).values() if ora - x["t"] <= vive[x["evento"]]),
+                              key=lambda y: -y["t"])[:5]
+            return {"avvisi": sorted(out, key=lambda y: -y["t"])[:10], "chiamate": chiamate}
+
+    def avviso_chiamata(self, persona, evento, chiamata):
+        """Notifica di una chiamata (dal centralino): si ricorda l'avviso per il service worker, che lo legge con
+        chat/avvisi, e si sveglia ogni telefono iscritto di quella persona (notifica senza contenuto, come i messaggi)."""
+        if evento not in ("arriva", "persa", "chiusa") or not isinstance(chiamata, dict) or not chiamata.get("id"):
+            return
+        with self.blocco:
+            avvisi = self.chiamate.setdefault(persona, {})
+            ora = time.time()
+            for k in [k for k, x in avvisi.items() if ora - x["t"] > 3600]:
+                del avvisi[k]
+            avvisi[str(chiamata["id"])] = {"id": str(chiamata["id"]), "evento": evento, "t": ora,
+                                           "nome": str(chiamata.get("da_nome") or "qualcuno")[:60], "video": bool(chiamata.get("video"))}
+            fini = [sub["endpoint"] for did, sub in self.dati["push"].items()
+                    if (self.dati["dispositivi"].get(did) or {}).get("persona") == persona]
+        for e in dict.fromkeys(fini):   # fuori dal blocco: sono richieste di rete
+            threading.Thread(target=self._manda_notifica, args=(e,), daemon=True).start()
+
+    # --- allegati ---
+
+    def nuovo_allegato(self, persona, corpo):
+        dim = _chat_numero(corpo.get("dimensione"), 1, 10 ** 13, "Grandezza")
+        pezzi = _chat_numero(corpo.get("pezzi"), 1, 10 ** 6, "Numero di pezzi")
+        chiaro = dim - pezzi * CHAT_CIFRA
+        if chiaro > CHAT_ALLEGATO_MAX:
+            raise ErroreExtra(413, "Allegato troppo grande: al più 200 MB")
+        if chiaro < 1 or -(-chiaro // CHAT_PEZZO) != pezzi:
+            raise ErroreExtra(400, "Allegato non valido: grandezza e pezzi non tornano")
+        with self.blocco:
+            vivi = _chat_vivi()
+            cid = corpo.get("conv")
+            self._conv(cid, persona, vivi)
+            if sum(1 for a in self.dati["allegati"].values() if a["da"] == persona and not a.get("usato")) >= CHAT_ALLEGATI_APERTI:
+                raise ErroreExtra(429, "Troppi allegati cominciati e non mandati: riprova fra un giorno")
+            if shutil.disk_usage(self.cartella_all).free - dim < CHAT_SPAZIO_MIN:
+                raise ErroreExtra(507, "Il Mac mini ha poco spazio libero: l'allegato non parte")
+            aid = secrets.token_urlsafe(16)
+            os.makedirs(os.path.join(self.cartella_all, aid), mode=0o700)
+            self.dati["allegati"][aid] = {"conv": cid, "da": persona, "dimensione": dim, "pezzi": pezzi, "ricevuti": [],
+                                          "creato": time.time()}
+            self._salva()
+            return {"id": aid, "pezzo": CHAT_PEZZO}
+
+    def _allegato(self, aid, n):
+        a = self.dati["allegati"].get(aid) if isinstance(aid, str) else None
+        if not a or not re.fullmatch(r"\d{1,3}", n or "") or int(n) >= a["pezzi"]:
+            raise ErroreExtra(404, "Allegato sconosciuto")
+        return a, int(n)
+
+    def carica_pezzo(self, persona, aid, n, dati):
+        with self.blocco:
+            a, n = self._allegato(aid, n)
+            if a["da"] != persona:
+                raise ErroreExtra(404, "Allegato sconosciuto")
+            if a.get("usato"):
+                raise ErroreExtra(409, "Allegato già mandato: non si cambia")
+            atteso = CHAT_PEZZO + CHAT_CIFRA if n < a["pezzi"] - 1 else a["dimensione"] - (a["pezzi"] - 1) * (CHAT_PEZZO + CHAT_CIFRA)
+            if len(dati) != atteso:
+                raise ErroreExtra(400, "Pezzo della grandezza sbagliata: attesi %d byte" % atteso)
+            if n not in a["ricevuti"]:
+                _chat_conta_giorno(self, persona, len(dati))
+                self._salva(False)
+            p = os.path.join(self.cartella_all, aid, str(n))
+        tmp = "%s.%s.tmp" % (p, secrets.token_hex(4))
+        try:   # 8 MB su disco fuori dal blocco: gli altri intanto scrivono e leggono
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(dati)
+            os.replace(tmp, p)
+        except OSError:
+            _cancella(tmp)
+            raise ErroreExtra(503, "Pezzo non salvato sul Mac mini: riprova")
+        with self.blocco:
+            if n not in a["ricevuti"]:
+                a["ricevuti"] = sorted(a["ricevuti"] + [n])
+                self._salva(len(a["ricevuti"]) == a["pezzi"])
+            return {"ok": True, "mancano": [k for k in range(a["pezzi"]) if k not in a["ricevuti"]]}
+
+    def leggi_pezzo(self, persona, aid, n):
+        """Un pezzo cifrato, solo a chi ha ricevuto il messaggio con l'allegato (e a chi l'ha mandato)."""
+        with self.blocco:
+            a, n = self._allegato(aid, n)
+            if (persona not in a.get("per", []) and a["da"] != persona) or n not in a["ricevuti"]:
+                raise ErroreExtra(404, "Allegato sconosciuto")
+            p = os.path.join(self.cartella_all, aid, str(n))
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            raise ErroreExtra(404, "Allegato non più sul Mac mini (dopo 30 giorni si cancella)")
+
+    # --- notifiche ---
+
+    def iscrivi(self, persona, accesso, corpo):
+        endpoint = corpo.get("endpoint")
+        if not _push_ammesso(endpoint):
+            raise ErroreExtra(400, "Servizio di notifiche non riconosciuto")
+        with self.blocco:
+            vivi = _chat_vivi()
+            self._mio(persona, corpo.get("disp"), accesso, vivi)
+            for k in [k for k, s in self.dati["push"].items() if s["endpoint"] == endpoint]:
+                del self.dati["push"][k]   # lo stesso browser con un dispositivo della chat nuovo
+            self.dati["push"][corpo["disp"]] = {"endpoint": endpoint, "creato": time.time()}
+            self._salva()
+            return {"ok": True}
+
+    def disiscrivi(self, persona, accesso, did):
+        with self.blocco:
+            self._mio(persona, did, accesso, _chat_vivi())
+            self.dati["push"].pop(did, None)
+            self._salva()
+            return {"ok": True}
+
+    def _accoda_notifiche(self, seq, da, dest):
+        ora, nuove = time.time(), False
+        for did in dest:
+            if did in self.dati["push"] and self.dati["dispositivi"][did]["persona"] != da:
+                self.posta.append((ora + (CHAT_PUSH_RITARDO if self.attese.get(did) else 0), seq, did))
+                nuove = True
+        if nuove:
+            if self.postino is None or not self.postino.is_alive():
+                self.postino = threading.Thread(target=self._postino, daemon=True)
+                self.postino.start()
+            self.cond_posta.notify_all()
+
+    def _postino(self):
+        """Manda le notifiche: una per telefono finché non ha preso i messaggi (e di nuovo dopo CHAT_PUSH_DI_NUOVO)."""
+        while True:
+            lavoro = []
+            with self.blocco:
+                while True:
+                    ora = time.time()
+                    pronte = [x for x in self.posta if x[0] <= ora]
+                    if pronte:
+                        break
+                    prossima = min((x[0] for x in self.posta), default=ora + 300)
+                    self.cond_posta.wait(max(0.05, min(prossima - ora, 300)))
+                for x in pronte:
+                    self.posta.remove(x)
+                    _, seq, did = x
+                    sub, cur = self.dati["push"].get(did), self.dati["cursori"].get(did, 0)
+                    f = self.notificato.get(did)
+                    if not sub or cur >= seq or (f and f[0] > cur and ora - f[1] < CHAT_PUSH_DI_NUOVO):
+                        continue
+                    self.notificato[did] = (seq, ora)
+                    if sub["endpoint"] not in [e for _, e in lavoro]:
+                        lavoro.append((did, sub["endpoint"]))
+            for did, endpoint in lavoro:
+                esito = self._manda_notifica(endpoint)
+                if esito in (404, 410):   # iscrizione scaduta o tolta dal telefono
+                    with self.blocco:
+                        if (self.dati["push"].get(did) or {}).get("endpoint") == endpoint:
+                            del self.dati["push"][did]
+                            self._salva()
+
+    def _vapid(self):
+        """(programma, file della chiave privata, chiave pubblica in base64url) per firmare le notifiche; None se openssl
+        manca. La chiave si crea una volta e resta in <cache>/chat/vapid.pem (0600)."""
+        with self.blocco_vapid:
+            if self.vapid:
+                return self.vapid
+            prog = OPENSSL if os.path.isfile(OPENSSL) else _programma("openssl")
+            if not prog:
+                return None
+            p = os.path.join(self.cartella, "vapid.pem")
+            try:
+                if not os.path.isfile(p):
+                    r = subprocess.run([prog, "ecparam", "-name", "prime256v1", "-genkey", "-noout"], stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, timeout=20)
+                    if r.returncode or b"PRIVATE KEY" not in r.stdout:
+                        raise OSError(r.stderr.decode("utf-8", "replace").strip() or "chiave non creata")
+                    tmp = p + ".tmp"
+                    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(r.stdout)
+                    os.replace(tmp, p)
+                r = subprocess.run([prog, "ec", "-in", p, "-pubout", "-outform", "DER"], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=20)
+                if r.returncode or len(r.stdout) != 91 or not r.stdout.startswith(_SPKI_P256):
+                    raise OSError(r.stderr.decode("utf-8", "replace").strip() or "chiave pubblica non letta")
+            except (OSError, subprocess.SubprocessError) as e:
+                print("Atlante: chiavi delle notifiche non pronte: %s" % e, flush=True)
+                return None
+            self.vapid = (prog, p, _b64u(r.stdout[-65:]))
+            return self.vapid
+
+    def _jwt(self, aud):
+        """JWT ES256 per il servizio di notifiche `aud` (vale 12 ore e si riusa): la firma la fa openssl, in DER, e qui
+        diventa r || s."""
+        v = self._vapid()
+        if not v:
+            return None, None
+        ora = int(time.time())
+        with self.blocco_vapid:
+            j = self.jwt.get(aud)
+            if j and j[1] - ora > 3600:
+                return j[0], v[2]
+        testa = _b64u(b'{"typ":"JWT","alg":"ES256"}')
+        dati = _b64u(json.dumps({"aud": aud, "exp": ora + 12 * 3600, "sub": _chat_contatto()},
+                                separators=(",", ":")).encode("utf-8"))
+        try:
+            r = subprocess.run([v[0], "dgst", "-sha256", "-sign", v[1]], input=(testa + "." + dati).encode("ascii"),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            firma = _der_a_rs(r.stdout) if not r.returncode else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            firma = None
+        if firma is None:
+            print("Atlante: notifica non firmata (openssl)", flush=True)
+            return None, None
+        t = testa + "." + dati + "." + _b64u(firma)
+        with self.blocco_vapid:
+            self.jwt[aud] = (t, ora + 12 * 3600)
+        return t, v[2]
+
+    def _manda_notifica(self, endpoint):
+        """Notifica senza contenuto (RFC 8030 + VAPID, RFC 8292): niente da cifrare, il telefono chiede poi chi ha scritto.
+        Il codice HTTP del servizio, o None se non risponde."""
+        u = urlsplit(endpoint)
+        t, k = self._jwt("%s://%s" % (u.scheme, u.netloc))
+        if not t:
+            return None
+        try:
+            if u.scheme == "https":
+                conn = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=15, context=_ssl())
+            else:   # solo il servizio finto delle prove (ATLANTE_PUSH_PROVA)
+                conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=15)
+            try:
+                conn.request("POST", (u.path or "/") + ("?" + u.query if u.query else ""), body=b"",
+                             headers={"TTL": str(CHAT_PUSH_TTL), "Urgency": "high", "Topic": "atlante-chat",
+                                      "Authorization": "vapid t=%s, k=%s" % (t, k), "Content-Length": "0"})
+                r = conn.getresponse()
+                r.read(65536)
+                if r.status >= 400 and r.status not in (404, 410):
+                    print("Atlante: notifica rifiutata da %s: %d" % (u.hostname, r.status), flush=True)
+                return r.status
+            finally:
+                conn.close()
+        except (OSError, http.client.HTTPException) as e:
+            print("Atlante: notifica non mandata a %s: %s" % (u.hostname, e), flush=True)
+            return None
+
+    # --- pulizia ---
+
+    def _pulisci(self, forza=False):
+        """Ogni 10 minuti: via i messaggi presi da tutti (o più vecchi di 30 giorni), gli allegati di 30 giorni e quelli
+        mai mandati, i dispositivi usciti da 30 giorni; chi non è più in Atlante esce dai gruppi."""
+        ora = time.time()
+        if not forza and ora - self.pulito < CHAT_PULISCI_OGNI:
+            return
+        self.pulito = ora
+        vivi, d, limite, cambiati = _chat_vivi(), self.dati, ora - CHAT_GIORNI * 86400, False
+        for k, x in list(d["dispositivi"].items()):
+            if x.get("attivo", True) and not self._vivo(x, vivi):
+                x.update(attivo=False, spento=ora)
+                cambiati = True
+            if not x.get("attivo", True) and x.get("spento", 0) < limite:
+                del d["dispositivi"][k]
+                d["cursori"].pop(k, None)
+        for k in [k for k in d["push"] if not d["dispositivi"].get(k, {}).get("attivo", False)]:
+            del d["push"][k]
+        for seq in list(self.seqs):
+            m = self.indice[seq]
+            if m["t"] < limite or all(d["cursori"].get(k, 0) >= seq or not self._vivo(d["dispositivi"].get(k), vivi)
+                                      for k in m["dest"]):
+                self._togli_msg(seq)
+        for aid, a in list(d["allegati"].items()):
+            if a["creato"] < limite or (not a.get("usato") and a["creato"] < ora - 86400):
+                shutil.rmtree(os.path.join(self.cartella_all, aid), ignore_errors=True)
+                del d["allegati"][aid]
+        for cid, c in list(d["conversazioni"].items()):
+            vive = self._membri(c, vivi)
+            if c["tipo"] == "gruppo" and len(vive) != len(c["membri"]):
+                usciti = [p for p in c["membri"] if p not in vive]
+                c["membri"] = vive
+                for p in usciti:
+                    c.get("stati", {}).pop(p, None)
+                self._evento(c, "tolto", None, usciti)
+                if c.get("creatore") not in vive:
+                    c["creatore"] = vive[0] if vive else None
+                cambiati = True
+            if not vive:
+                del d["conversazioni"][cid]
+        for p in list(d["blocchi"]):
+            if p not in vivi[0]:
+                del d["blocchi"][p]
+            else:
+                d["blocchi"][p] = [q for q in d["blocchi"][p] if q in vivi[0]]
+        self._salva()
+        if cambiati:
+            self._tocca_tutti()
+
+
+CHAT = None
+_CHAT_BLOCCO = threading.Lock()
+
+
+def _chat_archivio():
+    global CHAT
+    with _CHAT_BLOCCO:
+        if CHAT is None:
+            CHAT = Chat(os.path.join(_cart("cache"), "chat"))
+        return CHAT
+
+
+def chat_bloccato(da, a):
+    """True se la persona `a` ha bloccato `da` (per le chiamate della fase 5b: chi è bloccato non scrive né chiama)."""
+    ch = _chat_archivio()
+    with ch.blocco:
+        return da in (ch.dati["blocchi"].get(a) or [])
+
+
+def _chat_byte(h, dati):
+    h._musica_risposto = True
+    h.send_response(200)
+    h.send_header("Content-Type", "application/octet-stream")
+    h.send_header("Content-Length", str(len(dati)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(dati)
+
+
+def _chat(h, metodo, resto, corpo):
+    """Rotte api/extra/chat/…: ognuno vede solo le sue conversazioni e solo i messaggi diretti ai suoi dispositivi,
+    Samuele compreso."""
+    persona = _chat_io(h)
+    accesso = _chi_e(h).get("chiave")
+    ch = _chat_archivio()
+    q = parse_qs(urlsplit(h.path).query)
+
+    def arg(k):
+        return (q.get(k) or [""])[0]
+
+    def numero(k, tipo=int):
+        try:
+            return tipo(arg(k) or 0)
+        except ValueError:
+            raise ErroreExtra(400, "Parametro non valido: %s" % k)
+
+    cosa, n = (resto[0] if resto else ""), len(resto)
+    try:
+        if cosa == "stato" and n == 1 and metodo == "GET":
+            return _json(h, ch.stato(persona, accesso))
+        if cosa == "dispositivi" and n == 1 and metodo == "POST":
+            return _json(h, ch.registra(persona, accesso, corpo, tipo_da_agente(h.headers.get("User-Agent"))))
+        if cosa == "persone" and n == 1 and metodo == "GET":
+            return _json(h, ch.persone(persona))
+        if cosa == "conversazioni":
+            if n == 1 and metodo == "GET":
+                return _json(h, ch.conversazioni(persona))
+            if n == 1 and metodo == "POST":
+                return _json(h, ch.nuova(persona, corpo))
+            if n == 3 and resto[2] == "membri" and metodo == "POST":
+                return _json(h, ch.aggiungi(persona, resto[1], corpo))
+            if n == 4 and resto[2] == "membri" and metodo == "DELETE":
+                return _json(h, ch.togli(persona, resto[1], resto[3]))
+            if n == 3 and resto[2] == "letto" and metodo == "POST":
+                return _json(h, ch.letto(persona, resto[1], corpo.get("seq")))
+        if cosa == "messaggi" and n == 1 and metodo == "POST":
+            return _json(h, ch.invia(persona, accesso, corpo))
+        if cosa == "messaggi" and n == 1 and metodo == "GET":
+            return _json(h, ch.ricevi(persona, accesso, arg("disp"), numero("dopo"), numero("v"), numero("attesa", float)))
+        if cosa == "allegati" and n == 1 and metodo == "POST":
+            return _json(h, ch.nuovo_allegato(persona, corpo))
+        if cosa == "allegati" and n == 3 and metodo == "POST":
+            if not _byte_grezzi(h):
+                raise ErroreExtra(415, "Il pezzo va mandato come application/octet-stream")
+            return _json(h, ch.carica_pezzo(persona, resto[1], resto[2], getattr(h, "_grezzo", b"")))
+        if cosa == "allegati" and n == 3 and metodo == "GET":
+            return _chat_byte(h, ch.leggi_pezzo(persona, resto[1], resto[2]))
+        if cosa == "blocchi" and n == 1 and metodo == "POST":
+            return _json(h, ch.blocca(persona, corpo.get("persona"), True))
+        if cosa == "blocchi" and n == 2 and metodo == "DELETE":
+            return _json(h, ch.blocca(persona, resto[1], False))
+        if cosa == "push" and n == 1 and metodo == "POST":
+            return _json(h, ch.iscrivi(persona, accesso, corpo))
+        if cosa == "push" and n == 2 and metodo == "DELETE":
+            return _json(h, ch.disiscrivi(persona, accesso, resto[1]))
+        if cosa == "avvisi" and n == 1 and metodo == "GET":
+            return _json(h, ch.avvisi(persona, accesso, arg("disp")))
+    except ErroreChat as e:
+        return _json(h, dict(e.extra, errore=e.testo), e.codice)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/chat/%s" % "/".join(resto))
+
+
 # ----- richieste HTTP -----
 
 def _leggi_corpo(h):
@@ -2642,26 +10387,74 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "musica" and not resto:
         solo("GET", "POST")
         if metodo == "GET":
-            _json(h, {"lavori": _coda("musica").elenco()})
+            _json(h, {"lavori": _lavori_musica(h)})
         else:
-            _json(h, {"id": _nuova_musica(corpo)})
+            _json(h, {"id": _nuova_musica(corpo, _chi_scarica(h), _chi_carica(h)[1])})
     elif cosa == "musica" and len(resto) == 2 and resto[1] == "annulla":
         solo("POST")
-        _annulla_musica(resto[0])
+        _annulla_musica(resto[0], _chi_scarica(h))
         _json(h, {"ok": True})
+    elif cosa == "caricamenti":   # Carica nella libreria e Carica un film (ognuno i suoi)
+        _caricamenti(h, metodo, resto, corpo)
+    elif cosa == "film":          # i film nel Cloud, per il modulo Video
+        _film(h, metodo, resto)
+    elif cosa == "clip" and not resto:
+        solo("GET")
+        _json(h, CLIP.avanzamento() if CLIP else {"attivo": False})
+    elif cosa == "clip" and len(resto) == 2 and resto[0] == "file":
+        solo("GET")
+        _clip_file(h, resto[1])
+    elif cosa == "clip" and len(resto) == 1:
+        solo("GET")
+        _json(h, _clip_brano(resto[0]))
+    elif cosa == "ascoltati":
+        _ascoltati(h, metodo, resto, corpo)
+    elif cosa == "gestione":
+        _gestione(h, metodo, resto, corpo)
+    elif cosa == "classifiche" and not resto:   # le classifiche come playlist, per tutti (anche gli invitati)
+        solo("GET")
+        _json(h, CL.classifiche_app() if CL else {"classifiche": []})
+    elif cosa == "tematiche":   # playlist di Atlante e playlist con l'IA
+        _tematiche(h, metodo, resto, corpo)
+    elif cosa == "interfaccia":
+        _rotte_interfaccia(h, metodo, resto, corpo)
+    elif cosa == "chat":   # chat cifrata da telefono a telefono: vedi la sua sezione
+        _chat(h, metodo, resto, corpo)
+    elif cosa == "inviti" and not resto:
+        solo("GET", "POST")
+        _inviti(h, metodo, corpo)
+    elif cosa == "idee" and not resto:
+        solo("GET", "POST")
+        _idee(h, metodo, corpo)
+    elif cosa == "io" and not resto:   # chi è questo dispositivo: l'app mostra la Gestione o le funzioni degli invitati
+        solo("GET")
+        chi = getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None}
+        pid = chi.get("persona")
+        r = {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None}
+        if chi["ruolo"] == "proprietario" and PERS:   # il riquadro Gestione mostra quante cose nuove aspettano Samuele
+            r["nuove"] = {"richieste": sum(1 for x in PERS.richieste() if x["stato"] == "attesa")}
+            r["nuove"].update(_nuove_caricamenti())   # brani da controllare e film da decidere
+        if chi["ruolo"] == "proprietario" and IDEE is not None:   # e le idee mandate dal riquadro «Idee»
+            r.setdefault("nuove", {})["idee"] = IDEE.nuove()
+        if chi["ruolo"] == "proprietario" and BLOCCO is not None and BLOCCO.attivo():
+            r.setdefault("nuove", {})["youtube_bloccato"] = 1   # il riquadro Gestione diventa rosso
+        r["via"] = _via(h)   # «Rete e VPN»: questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet
+        _json(h, r)
     elif cosa == "dispositivi" and not resto:
         solo("GET")
-        _json(h, {"dispositivi": DISP.elenco()})
+        _json(h, {"dispositivi": DISP.elenco(_di(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "stato":
         solo("POST")
-        _json(h, {"comandi": DISP.stato(resto[0], corpo)})
+        _json(h, {"comandi": DISP.stato(resto[0], corpo, _di(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comandi":
         solo("GET")
-        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h))})
+        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h), _di(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comando":
         solo("POST")
-        DISP.comando(resto[0], corpo)
+        DISP.comando(resto[0], corpo, _di(h))
         _json(h, {"ok": True})
+    elif cosa in ("chiavi", "posizione"):   # posizione condivisa, cifrata da telefono a telefono: vedi la sua sezione
+        _posizione(h, metodo, cosa, resto, corpo)
     elif cosa == "voci" and not resto:
         solo("GET")
         _json(h, {"voci": voci()})
@@ -2688,6 +10481,8 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "dispositivo" and not resto:
         solo("GET")
         _json(h, dispositivo())
+    elif cosa == "chiamate":
+        _chiamate(h, metodo, resto, corpo)
     else:
         raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join(parti))
 
@@ -2704,9 +10499,11 @@ def gestisci_extra(h, metodo=None):
     h._musica_risposto = False
     try:
         dati = _leggi_corpo(h)
+        h._grezzo = dati   # PUT: i byte di un pezzo di file o di una copertina
         if metodo in ("POST", "DELETE", "PUT", "PATCH") and not _stessa_origine(h):
             raise ErroreExtra(403, "Richiesta da un altro sito: rifiutata")
-        corpo = _da_json(dati) if metodo == "POST" else {}
+        h._grezzo = dati   # i pezzi degli allegati della chat arrivano come byte cifrati, non come JSON
+        corpo = _da_json(dati) if metodo == "POST" and not _byte_grezzi(h) else {}
         _instrada(h, metodo, [p for p in m.group(1).split("/") if p], corpo)
     except ErroreExtra as e:
         if not h._musica_risposto:
@@ -2725,6 +10522,353 @@ def gestisci_extra(h, metodo=None):
                 pass
         h.close_connection = True
     return True
+
+
+# ----- Rete: Tailscale sul Mac mini (Gestione → Rete) -----
+#
+# Un'app web non può accendere né cambiare il VPN del telefono (iPhone e Android non lo permettono): da qui Samuele
+# comanda Tailscale sul Mac mini e l'app guida il telefono (x/rete.html, con il campo «via» di api/extra/io). Si leggono
+# lo stato del Mac nella rete Tailscale e i suoi dispositivi, si accende o spegne l'accesso da Internet (Funnel) e
+# l'uscita da casa (exit node). I comandi hanno argomenti fissi: porte e indirizzi solo tra quelli permessi, riscritti
+# dal server (nessun testo dell'utente nel comando), e un tempo massimo. Ogni cambio scrive una riga nel registro.
+
+TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"   # l'app per Mac ha dentro anche il comando
+FUNNEL_PORTE = (443, 8443, 10000)    # le sole porte che Tailscale apre a Internet
+FUNNEL_PORTA = 10000                 # quella predefinita, se l'indirizzo pubblico dei link d'invito non ne dice un'altra
+TEMPO_TAILSCALE = 8                  # secondi per leggere lo stato
+TEMPO_TAILSCALE_CAMBIO = 20          # per un cambio: con Funnel non permesso tailscale scrive il link e resta ad aspettare
+PANNELLO_TAILSCALE = "https://login.tailscale.com/admin"
+RETE_LOCK = threading.Lock()         # un cambio alla volta
+_RETE_LOCALI = ("127.0.0.1", "localhost", "::1")
+
+
+class RifiutoTailscale(ErroreExtra):
+    """tailscale ha detto di no (o non ha finito in tempo): il suo messaggio e se va sistemato nel pannello di Tailscale."""
+
+    def __init__(self, cosa, dettaglio, scaduto=False):
+        d = "\n".join(x.strip() for x in (dettaglio or "").strip().splitlines())[:1500]   # senza i rientri di tailscale
+        m = re.search(r"https://login\.tailscale\.com/[^\s\"'<>]+", d)
+        self.dettaglio, self.link = d, m.group(0) if m else ""
+        self.pannello = bool(self.link) or bool(re.search(r"not enabled|not allowed|nodeattr|access control|approv", d, re.I))
+        if self.pannello:
+            testo = "%s: va permesso una volta dal pannello di Tailscale, poi riprova da qui" % cosa
+        elif scaduto:
+            testo = "%s: Tailscale non ha risposto entro il tempo massimo" % cosa
+        else:
+            testo = "%s: Tailscale ha risposto con un errore" % cosa
+        super().__init__(409, testo)
+
+
+def _tailscale_programma():
+    """Il comando tailscale: nel PATH (o in Homebrew, /usr/local/bin) oppure quello dentro l'app per Mac."""
+    p = _programma("tailscale")
+    if p:
+        return p
+    return TAILSCALE_APP if os.path.isfile(TAILSCALE_APP) and os.access(TAILSCALE_APP, os.X_OK) else None
+
+
+def _rete_testo(b):
+    return (b or b"").decode("utf-8", "replace").strip()
+
+
+def _tailscale(args, tempo):
+    """(codice d'uscita, uscita, errori) di `tailscale <args>`. Codice None se non parte o va oltre `tempo`: allora
+    l'uscita è quella scritta fino a lì (con Funnel non permesso, il link del pannello). Senza tailscale: errore 503."""
+    prog = _tailscale_programma()
+    if not prog:
+        raise ErroreExtra(503, "Tailscale non è installato sul Mac mini")
+    try:
+        r = subprocess.run([prog] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=tempo, env=_ambiente())
+    except subprocess.TimeoutExpired as e:
+        return None, _rete_testo(e.stdout), _rete_testo(e.stderr) or "nessuna risposta in %d secondi" % tempo
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return None, "", str(e)
+    return r.returncode, _rete_testo(r.stdout), _rete_testo(r.stderr)
+
+
+def _tailscale_json(args):
+    """(JSON, "") di un comando che legge soltanto; (None, messaggio) se non riesce."""
+    codice, out, err = _tailscale(args, TEMPO_TAILSCALE)
+    if codice != 0:
+        return None, err or out or "Tailscale non risponde"
+    try:
+        return json.loads(out or "{}"), ""
+    except ValueError:
+        return None, "risposta di Tailscale non leggibile"
+
+
+def _rete_ora(t):
+    """Secondi dal 1970 di un'ora di Tailscale (2026-10-26T18:30:00.123456789Z); None per «mai» (l'anno 1)."""
+    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)$", t if isinstance(t, str) else "")
+    if not m or int(m.group(1)) < 2000:
+        return None
+    import calendar
+    s = calendar.timegm(tuple(int(x) for x in m.groups()[:6]))
+    z = m.group(7)
+    if z != "Z":
+        s -= (1 if z[0] == "+" else -1) * (int(z[1:3]) * 3600 + int(z[4:6]) * 60)
+    return s
+
+
+def _rete_nome(p):
+    """Il nome di un dispositivo nella rete Tailscale (quello del pannello: sull'iPhone il nome del sistema è «localhost»)."""
+    dns = str(p.get("DNSName") or "").rstrip(".")
+    return dns.split(".")[0] if dns else str(p.get("HostName") or "")
+
+
+def _rete_ipv4(ips):
+    ips = [str(x) for x in ips] if isinstance(ips, list) else []
+    return next((x for x in ips if ":" not in x), ips[0] if ips else "")
+
+
+def _rete_porta_locale(destino):
+    """La porta sul Mac di un indirizzo come http://127.0.0.1:8790 (o localhost); None per qualsiasi altra cosa."""
+    try:
+        u = urlsplit(destino.strip())
+        porta = u.port
+    except (AttributeError, ValueError):
+        return None
+    if (u.scheme != "http" or (u.hostname or "") not in _RETE_LOCALI or not porta or u.path not in ("", "/")
+            or u.query or u.fragment or u.username or u.password):
+        return None
+    return porta
+
+
+def _rete_serve(conf):
+    """Gli indirizzi che il Mac pubblica con tailscale serve (solo rete Tailscale) o funnel (anche Internet), compresi
+    quelli aperti in primo piano da un Terminale: [{porta, indirizzo, destino, funnel}]."""
+    voci = []
+
+    def leggi(c):
+        if not isinstance(c, dict):
+            return
+        aperti = c.get("AllowFunnel") if isinstance(c.get("AllowFunnel"), dict) else {}
+        web = c.get("Web") if isinstance(c.get("Web"), dict) else {}
+        for hp, w in web.items():
+            host, _, porta = str(hp).rpartition(":")
+            if not host or not porta.isdigit():
+                continue
+            gest = w.get("Handlers") if isinstance(w, dict) else None
+            gest = gest if isinstance(gest, dict) else {}
+            primo = gest.get("/") if isinstance(gest.get("/"), dict) else next((v for v in gest.values() if isinstance(v, dict)), {})
+            destino = primo.get("Proxy") or primo.get("Path") or ("testo fisso" if primo.get("Text") else "")
+            voci.append({"porta": int(porta), "indirizzo": "https://%s%s/" % (host, "" if porta == "443" else ":" + porta),
+                         "destino": str(destino), "funnel": bool(aperti.get(hp))})
+        sotto = c.get("Foreground")
+        for f in (sotto.values() if isinstance(sotto, dict) else ()):
+            leggi(f)
+
+    leggi(conf)
+    voci.sort(key=lambda v: (v["porta"], v["indirizzo"]))
+    return voci
+
+
+def _rete_file():
+    return os.path.join(_cart("cache"), "rete.json")
+
+
+def _rete_scelte(porta_server):
+    """(porta di Funnel, indirizzo dell'app sul Mac): quelli dell'ultima accensione dalla Gestione, se no la porta
+    dell'indirizzo pubblico dei link d'invito (o 10000) e questo server su 127.0.0.1."""
+    porta, locale = FUNNEL_PORTA, porta_server
+    try:
+        u = urlsplit(PUBBLICO)
+        p = u.port or (443 if u.scheme == "https" else None)
+    except ValueError:
+        p = None
+    if p in FUNNEL_PORTE:
+        porta = p
+    try:
+        with open(_rete_file(), encoding="utf-8") as f:
+            x = json.load(f)
+        if x.get("porta") in FUNNEL_PORTE and not isinstance(x.get("porta"), bool):
+            porta = int(x["porta"])
+        locale = _rete_porta_locale(x.get("destino")) or locale
+    except (OSError, ValueError, AttributeError):
+        pass
+    return porta, "http://127.0.0.1:%d" % locale
+
+
+def _rete_salva(porta, destino):
+    p = _rete_file()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"porta": porta, "destino": destino}, f)
+        os.replace(p + ".tmp", p)
+    except OSError as e:
+        print("Atlante: Rete: scelte di Funnel non salvate: %s" % e, flush=True)
+
+
+def _rete_stato(porta_server, via=None):
+    """Tailscale sul Mac mini per la Gestione: collegamento, dispositivi, indirizzi pubblicati, Funnel e uscita da casa."""
+    porta, destino = _rete_scelte(porta_server)
+    r = {"installato": bool(_tailscale_programma()), "collegato": False, "stato": "", "errore": "", "versione": "",
+         "nome": "", "dns": "", "indirizzo": "", "rete": "", "dispositivi": [], "serve": [], "questo": via,
+         "pannello": PANNELLO_TAILSCALE,
+         "funnel": {"acceso": False, "porta": None, "indirizzo": "", "destino": "", "porte": list(FUNNEL_PORTE),
+                    "predefiniti": {"porta": porta, "destino": destino}, "pubblico": PUBBLICO},
+         "uscita": {"annunciata": False, "approvata": False}}
+    if not r["installato"]:
+        r["errore"] = "Tailscale non è installato sul Mac mini"
+        return r
+    st, err = _tailscale_json(["status", "--json"])
+    if not isinstance(st, dict):
+        r["errore"] = err or "risposta di Tailscale non leggibile"
+        return r
+    io = st.get("Self") if isinstance(st.get("Self"), dict) else {}
+    rete = st.get("CurrentTailnet") if isinstance(st.get("CurrentTailnet"), dict) else {}
+    r.update(stato=str(st.get("BackendState") or ""), versione=str(st.get("Version") or "").split("-")[0], nome=_rete_nome(io),
+             dns=str(io.get("DNSName") or "").rstrip("."), indirizzo=_rete_ipv4(st.get("TailscaleIPs") or io.get("TailscaleIPs")),
+             rete=str(st.get("MagicDNSSuffix") or rete.get("MagicDNSSuffix") or ""))
+    r["collegato"] = r["stato"] == "Running"
+    if not r["collegato"]:
+        r["errore"] = {"Stopped": "Tailscale è spento sul Mac mini",
+                       "NeedsLogin": "Tailscale sul Mac mini chiede di accedere di nuovo",
+                       "NeedsMachineAuth": "Il Mac mini aspetta l'approvazione nel pannello di Tailscale",
+                       "Starting": "Tailscale si sta avviando sul Mac mini"}.get(r["stato"], "Tailscale non è collegato (%s)" % r["stato"])
+    pari = st.get("Peer") if isinstance(st.get("Peer"), dict) else {}
+    disp = [{"nome": _rete_nome(p), "sistema": str(p.get("OS") or ""), "indirizzo": _rete_ipv4(p.get("TailscaleIPs")),
+             "online": bool(p.get("Online")), "visto": _rete_ora(p.get("LastSeen"))} for p in pari.values() if isinstance(p, dict)]
+    disp.sort(key=lambda d: (not d["online"], d["nome"].lower()))
+    r["dispositivi"] = disp[:200]
+    conf, _ = _tailscale_json(["funnel", "status", "--json"])
+    if conf is None:
+        conf, _ = _tailscale_json(["serve", "status", "--json"])
+    r["serve"] = _rete_serve(conf)
+    nostri = [v for v in r["serve"] if v["funnel"] and _rete_porta_locale(v["destino"]) == _rete_porta_locale(destino)]
+    if nostri:
+        r["funnel"].update(acceso=True, porta=nostri[0]["porta"], indirizzo=nostri[0]["indirizzo"], destino=nostri[0]["destino"])
+    # uscita da casa: annunciata dal Mac (preferenze) e approvata nel pannello (allora la rete Tailscale la offre)
+    prefs, _ = _tailscale_json(["debug", "prefs"])
+    approvata = bool(io.get("ExitNodeOption"))
+    if isinstance(prefs, dict):
+        rotte = prefs.get("AdvertiseRoutes") if isinstance(prefs.get("AdvertiseRoutes"), list) else []
+        annunciata = approvata or any(x in ("0.0.0.0/0", "::/0") for x in rotte)
+    else:
+        annunciata = True if approvata else None   # preferenze non lette: non si sa se aspetta l'approvazione
+    r["uscita"] = {"annunciata": annunciata, "approvata": approvata}
+    return r
+
+
+def _rete_richiesta_funnel(corpo):
+    """(porta, indirizzo) chiesti dall'app, None per quelli scelti l'ultima volta: solo valori permessi, riscritti qui."""
+    porta = corpo.get("porta")
+    if porta is not None:
+        if isinstance(porta, str) and porta.strip().isdigit():
+            porta = int(porta)
+        if isinstance(porta, bool) or not isinstance(porta, int) or porta not in FUNNEL_PORTE:
+            raise ErroreExtra(400, "Porta non permessa per Funnel: solo 443, 8443 o 10000")
+    destino = corpo.get("destino")
+    if destino is not None:
+        locale = _rete_porta_locale(destino) if isinstance(destino, str) else None
+        if not locale:
+            raise ErroreExtra(400, "Indirizzo dell'app sul Mac non valido: deve essere come http://127.0.0.1:8790")
+        destino = "http://127.0.0.1:%d" % locale
+    return porta, destino
+
+
+def _rete_funnel(acceso, porta, destino, porta_server):
+    """Accende Funnel per l'app (`tailscale funnel --bg --https=<porta> http://127.0.0.1:<porta del server>`) o lo spegne
+    sulle porte dove porta all'app (`tailscale funnel --https=<porta> off`)."""
+    with RETE_LOCK:
+        p_scelta, d_scelto = _rete_scelte(porta_server)
+        porta = p_scelta if porta is None else porta
+        locale = _rete_porta_locale(d_scelto if destino is None else destino)
+        prima = _rete_stato(porta_server)
+        if acceso:
+            f = prima["funnel"]
+            if f["acceso"] and (f["porta"] != porta or _rete_porta_locale(d_scelto) != locale):
+                raise ErroreExtra(409, "Funnel è già acceso sulla porta %d: spegnilo prima di cambiare porta o indirizzo" % f["porta"])
+            if f["acceso"]:
+                return
+            occupata = [v for v in prima["serve"] if v["porta"] == porta and not v["funnel"]]
+            if occupata:   # tailscale funnel … off la toglierebbe anche dalla rete Tailscale (l'indirizzo dell'iPhone)
+                raise ErroreExtra(409, "La porta %d è già usata nella rete Tailscale (%s): scegli un'altra porta per Funnel"
+                                  % (porta, occupata[0]["indirizzo"]))
+            codice, out, err = _tailscale(["funnel", "--bg", "--https=%d" % porta, "http://127.0.0.1:%d" % locale],
+                                          TEMPO_TAILSCALE_CAMBIO)
+            if codice != 0:
+                testo = "\n".join(x for x in (out, err) if x)
+                print("Atlante: Rete: Funnel non acceso (porta %d): %s" % (porta, " ".join(testo.split())[:300]), flush=True)
+                raise RifiutoTailscale("Funnel non si è acceso", testo, codice is None)
+            _rete_salva(porta, "http://127.0.0.1:%d" % locale)
+            print("Atlante: Rete: Funnel acceso sulla porta %d → http://127.0.0.1:%d (da Internet con la password e con "
+                  "gli inviti)" % (porta, locale), flush=True)
+            return
+        if not prima["stato"]:
+            porte = [porta]   # Tailscale non dice niente (non risponde): si prova comunque sulla porta scelta
+        else:
+            porte = sorted({v["porta"] for v in prima["serve"] if v["funnel"] and _rete_porta_locale(v["destino"]) == locale})
+        for p in porte:
+            codice, out, err = _tailscale(["funnel", "--https=%d" % p, "off"], TEMPO_TAILSCALE_CAMBIO)
+            if codice != 0:
+                testo = "\n".join(x for x in (out, err) if x)
+                print("Atlante: Rete: Funnel non spento (porta %d): %s" % (p, " ".join(testo.split())[:300]), flush=True)
+                raise RifiutoTailscale("Funnel non si è spento", testo, codice is None)
+            print("Atlante: Rete: Funnel spento sulla porta %d: da Internet l'app non si apre più" % p, flush=True)
+
+
+def _rete_uscita(acceso):
+    """Uscita da casa: `tailscale set --advertise-exit-node=true|false`. La prima volta va approvata nel pannello."""
+    with RETE_LOCK:
+        codice, out, err = _tailscale(["set", "--advertise-exit-node=%s" % ("true" if acceso else "false")],
+                                      TEMPO_TAILSCALE_CAMBIO)
+        if codice != 0:
+            testo = "\n".join(x for x in (out, err) if x)
+            print("Atlante: Rete: uscita da casa non %s: %s" % ("accesa" if acceso else "spenta", " ".join(testo.split())[:300]),
+                  flush=True)
+            raise RifiutoTailscale("L'uscita da casa non si è %s" % ("accesa" if acceso else "spenta"), testo, codice is None)
+        print("Atlante: Rete: Uscita da casa %s (exit node del Mac mini)" % ("accesa" if acceso else "spenta"), flush=True)
+
+
+def _rete(h, metodo, resto, corpo):
+    """api/extra/gestione/rete…, chiamata da _gestione: solo Samuele, e le scritture solo dall'app (_stessa_origine)."""
+    srv = getattr(getattr(h, "server", None), "server_address", None)
+    porta_server = srv[1] if isinstance(srv, tuple) and len(srv) > 1 and isinstance(srv[1], int) else 8790
+    if not resto:
+        if metodo != "GET":
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+        return _json(h, _rete_stato(porta_server, _via(h)))
+    if resto not in (["funnel"], ["uscita"]):
+        raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/rete/%s" % "/".join(resto))
+    if metodo != "POST":
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    acceso = corpo.get("acceso")
+    if not isinstance(acceso, bool):
+        raise ErroreExtra(400, "Serve «acceso»: true o false")
+    try:
+        if resto == ["funnel"]:
+            porta, destino = _rete_richiesta_funnel(corpo)
+            _rete_funnel(acceso, porta, destino, porta_server)
+        else:
+            _rete_uscita(acceso)
+    except RifiutoTailscale as e:
+        return _json(h, {"errore": e.testo, "dettaglio": e.dettaglio, "link": e.link, "pannello": e.pannello,
+                         "rete": _rete_stato(porta_server, _via(h))}, e.codice)
+    return _json(h, _rete_stato(porta_server, _via(h)))
+
+
+def _via(h):
+    """Da dove arriva questa richiesta: "tailscale" (rete Tailscale, anche attraverso tailscale serve), "casa" (il Mac
+    stesso o la rete di casa) o "internet" (tailscale funnel, o un proxy che non è tailscaled sul Mac)."""
+    if h.headers.get("Tailscale-Funnel-Request") is not None:
+        return "internet"
+    vicino = _ip(h.client_address[0])
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:
+        if _ip_tailscale(vicino):
+            return "tailscale"
+        return "casa" if vicino is not None and (vicino.is_loopback or vicino.is_private or vicino.is_link_local) else "internet"
+    if vicino is None or not vicino.is_loopback:
+        return "internet"
+    if h.headers.get("Tailscale-User-Login"):
+        return "tailscale"
+    ultimo = _ip(xff.split(",")[-1])   # l'ultimo l'ha scritto tailscaled, quelli prima possono essere inventati
+    if _ip_tailscale(ultimo):
+        return "tailscale"
+    return "casa" if ultimo is not None and ultimo.is_loopback else "internet"
 
 
 # ---------- accesso da Internet (Tailscale Funnel) ----------
@@ -2752,9 +10896,22 @@ ACCESSO_TENTATIVI_TUTTI = 25      # e da tutti gli indirizzi insieme
 ACCESSO_FINESTRA = 15 * 60
 # senza biscotto passano solo la pagina della password e quello che serve per installare l'app (manifest, icone),
 # e solo nella cartella principale dell'app: nessun altro indirizzo che finisca allo stesso modo (api/…/icon-1.png)
-LIBERI = re.compile(r"^/(accesso|manifest\.webmanifest|icon-(?:maskable-)?\d+\.png|apple-touch-icon(?:-precomposed)?\.png"
-                    r"|favicon\.ico)$")
+LIBERI = re.compile(r"^/(accesso|accesso/invito/[A-Za-z0-9_-]{8,64}|manifest\.webmanifest|icon-(?:maskable-)?\d+\.png"
+                    r"|apple-touch-icon(?:-precomposed)?\.png|favicon\.ico)$")
 RETI_TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+# persone invitate da Samuele: ognuna entra con il suo link (vedi Persone)
+PERS = None                       # Persone, preparato da main()
+PROPRIETARI = set()               # login Tailscale di Samuele (ATLANTE_PROPRIETARI); vuoto: tutta la rete Tailscale
+PUBBLICO = ""                     # indirizzo dell'app da Internet (Funnel) per i link d'invito (--pubblico, ATLANTE_PUBBLICO)
+INVITO_DURATA = 7 * 86400         # un link d'invito non usato scade dopo una settimana
+COLLEGAMENTO_DURATA = 15 * 60     # codice per l'app sulla schermata Home dell'iPhone (biscotti separati da Safari)
+COLLEGAMENTO_ALFABETO = "ACDEFGHJKMNPQRTUVWXY3479"   # niente lettere e cifre che si confondono (0/O, 1/I, 5/S…)
+PERSONE_MAX = 200
+DISPOSITIVI_PERSONA = 10          # oltre, esce quello visto meno di recente
+RICHIESTE_ATTESA_MAX = 5          # inviti chiesti da un invitato e non ancora decisi da Samuele
+NOME_PERSONA_MAX = 40
+VISTO_OGNI = 60                   # l'ultimo accesso dei dispositivi va su disco al più ogni minuto
+INVITO_GRAZIA = 120               # un invito appena usato rientra nello stesso dispositivo (doppio tocco su «Entra»)
 
 
 class Accesso:
@@ -2823,8 +10980,10 @@ class Accesso:
             return False
         return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), sale, n), atteso)
 
-    def biscotto(self):
-        corpo = "%d.%s" % (int(time.time()) + ACCESSO_DURATA, secrets.token_hex(8))
+    def biscotto(self, rnd=None):
+        """Biscotto nuovo; `rnd` (la parte casuale di quello di prima) lo rinnova restando lo stesso dispositivo, che così
+        nella Gestione non compare due volte e una revoca resta valida."""
+        corpo = "%d.%s" % (int(time.time()) + ACCESSO_DURATA, rnd if re.fullmatch(r"[0-9a-f]{16}", rnd or "") else secrets.token_hex(8))
         with self.blocco:
             k = self._segreto()
         return corpo + "." + hmac.new(k, corpo.encode("ascii"), hashlib.sha256).hexdigest()
@@ -2875,6 +11034,367 @@ class Accesso:
             self.errori.pop(ip, None)
 
 
+def _impronta(codice):
+    return hashlib.sha256(codice.encode("utf-8")).hexdigest()
+
+
+def _nome_persona(nome):
+    n = " ".join(str(nome or "").split())[:NOME_PERSONA_MAX].strip()
+    if not n:
+        raise ErroreExtra(400, "Serve il nome della persona")
+    return n
+
+
+def tipo_da_agente(ua):
+    """Tipo di dispositivo dallo User-Agent, con i nomi di TIPI_DISP (per l'elenco della Gestione)."""
+    ua = ua or ""
+    if "iPad" in ua:
+        return "ipad"
+    if "iPhone" in ua or "iPod" in ua:
+        return "iphone"
+    if "Android" in ua:
+        return "android"
+    return "mac" if "Macintosh" in ua else "pc"
+
+
+def browser_da_agente(ua):
+    """Il browser dallo User-Agent, per riconoscere i dispositivi nella Gestione (Chrome su iPhone scrive «CriOS»…)."""
+    ua = ua or ""
+    for segno, nome in (("Edg", "Edge"), ("SamsungBrowser", "Samsung Internet"), ("OPR/", "Opera"), ("CriOS", "Chrome"),
+                        ("FxiOS", "Firefox"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari")):
+        if segno in ua:
+            return nome
+    return "Altro"
+
+
+class Persone:
+    """Persone invitate, in <cache>/persone.json (lo legge solo il proprietario), con un segreto suo per firmare i loro
+    biscotti: cambiare la password di Samuele non fa uscire gli invitati. Dei link d'invito e dei codici di collegamento
+    resta solo l'impronta; il codice in chiaro di un invito chiesto da un invitato resta nella richiesta finché non è
+    usato o scaduto, perché chi l'ha chiesto deve poterlo rivedere per mandarlo."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        self.dati, self.mtime = {}, None
+        self.visti = {}      # chiave -> (tipo, istante, via, browser): l'ultimo accesso, su disco al più ogni VISTO_OGNI
+        self.salvato = 0.0
+        self.usati = {}      # impronta di un invito appena usato -> (dispositivo, istante, indirizzo)
+        self.rotto = False   # il file non si legge: niente scritture, o lo si sovrascriverebbe con un archivio vuoto
+
+    def _aggiorna(self):
+        try:
+            m = os.stat(self.file).st_mtime_ns
+        except OSError:
+            m = None
+        if m != self.mtime:
+            d, rotto = {}, False
+            if m is not None:
+                try:
+                    with open(self.file, encoding="utf-8") as f:
+                        d = json.load(f)
+                except (OSError, ValueError):
+                    rotto = True
+                if not isinstance(d, dict):
+                    rotto = True
+            if rotto:   # si tiene quello che c'era in memoria; il file lo si guarda di nuovo quando cambia
+                if not self.rotto:
+                    print("Atlante: %s non si legge: lo lascio com'è e non scrivo più finché non torna leggibile" % self.file,
+                          flush=True)
+                self.rotto, self.mtime = True, m
+            else:
+                self.rotto, self.dati, self.mtime = False, d, m
+        d = self.dati
+        for k in ("persone", "inviti", "collegamenti", "dispositivi", "tuoi", "richieste"):
+            if not isinstance(d.get(k), dict):
+                d[k] = {}
+        if not isinstance(d.get("revocati"), list):
+            d["revocati"] = []
+        return d
+
+    def _scrivi(self, d):
+        if self.rotto:
+            raise ErroreExtra(503, "L'archivio delle persone sul Mac mini non si legge: non lo sovrascrivo")
+        ora = time.time()
+        for k in ("inviti", "collegamenti"):
+            d[k] = {h: x for h, x in d[k].items() if x.get("scade", 0) > ora}
+        for r in d["richieste"].values():   # invito scaduto: il codice in chiaro non serve più
+            if r.get("invito") and r["invito"] not in d["inviti"]:
+                r.pop("codice", None)
+        for c, (tipo, t, via, browser) in self.visti.items():
+            x = d["dispositivi"].get(c) or (d["tuoi"].setdefault(c, {}) if c.startswith("p:") and c not in d["revocati"] else None)
+            if x is not None:
+                x.setdefault("creato", t)
+                x.update({k: v for k, v in (("tipo", tipo), ("visto", t), ("via", via), ("browser", browser)) if v})
+        self.salvato = ora
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, self.file)
+        self.dati, self.mtime = d, os.stat(self.file).st_mtime_ns
+
+    def _segreto(self, d):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(d.get("segreto", ""))):
+            d["segreto"] = secrets.token_hex(32)
+            self._scrivi(d)
+        return bytes.fromhex(d["segreto"])
+
+    def _crea(self, d, nome, da=None):
+        if len(d["persone"]) >= PERSONE_MAX:
+            raise ErroreExtra(409, "Ci sono già %d persone: revocane qualcuna" % PERSONE_MAX)
+        pid = secrets.token_hex(8)
+        d["persone"][pid] = dict({"nome": _nome_persona(nome), "creato": time.time()}, **({"da": da} if da else {}))
+        return pid
+
+    def _invito(self, d, pid):
+        if pid not in d["persone"]:
+            raise ErroreExtra(404, "Persona sconosciuta")
+        codice, scade = secrets.token_urlsafe(16), time.time() + INVITO_DURATA
+        d["inviti"][_impronta(codice)] = {"persona": pid, "scade": scade}
+        return codice, scade
+
+    def _dispositivo(self, d, pid, tipo):
+        """Nuovo dispositivo di una persona; oltre DISPOSITIVI_PERSONA esce quello visto meno di recente."""
+        ora = time.time()
+        suoi = [k for k, x in d["dispositivi"].items() if x.get("persona") == pid]
+        if len(suoi) >= DISPOSITIVI_PERSONA:
+            vecchio = min(suoi, key=lambda k: self.visti.get(k, (0, d["dispositivi"][k].get("visto", 0)))[1])   # (…, istante, …)
+            del d["dispositivi"][vecchio]
+            self.visti.pop(vecchio, None)
+        did = secrets.token_hex(8)
+        d["dispositivi"][did] = {"persona": pid, "tipo": tipo if tipo in TIPI_DISP else "pc", "creato": ora, "visto": ora}
+        return did
+
+    def crea(self, nome):
+        with self.blocco:
+            d = self._aggiorna()
+            pid = self._crea(d, nome)
+            self._scrivi(d)
+            x = d["persone"][pid]
+            return {"id": pid, "nome": x["nome"], "creato": x["creato"]}
+
+    def invito(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            r = self._invito(d, pid)
+            self._scrivi(d)
+            return r
+
+    def leggi_invito(self, codice):
+        with self.blocco:
+            d = self._aggiorna()
+            x = d["inviti"].get(_impronta(str(codice or "")))
+            if not x or x["scade"] <= time.time() or x["persona"] not in d["persone"]:
+                return None
+            return {"persona": x["persona"], "nome": d["persone"][x["persona"]]["nome"]}
+
+    def usa_invito(self, codice, tipo, ip=None):
+        h = _impronta(str(codice or ""))
+        with self.blocco:
+            d = self._aggiorna()
+            ora = time.time()
+            self.usati = {k: v for k, v in self.usati.items() if ora - v[1] <= INVITO_GRAZIA}
+            x = d["inviti"].get(h)
+            if not x or x["scade"] <= ora or x["persona"] not in d["persone"]:
+                # doppio tocco su «Entra» o pagina rimandata subito dopo: lo stesso telefono riceve lo stesso dispositivo
+                u = self.usati.get(h)
+                if u and ip and u[2] == ip and u[0] in d["dispositivi"]:
+                    return u[0]
+                return None
+            del d["inviti"][h]
+            for r in d["richieste"].values():
+                if r.get("invito") == h:
+                    r.pop("codice", None)
+                    r["stato"] = "usata"
+            did = self._dispositivo(d, x["persona"], tipo)
+            self._scrivi(d)
+            self.usati[h] = (did, ora, ip)
+            return did
+
+    def persona_di(self, did):
+        with self.blocco:
+            return (self._aggiorna()["dispositivi"].get(did) or {}).get("persona")
+
+    def collegamento(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            if pid not in d["persone"]:
+                raise ErroreExtra(404, "Persona sconosciuta")
+            codice = "".join(secrets.choice(COLLEGAMENTO_ALFABETO) for _ in range(6))
+            scade = time.time() + COLLEGAMENTO_DURATA
+            d["collegamenti"][_impronta(codice)] = {"persona": pid, "scade": scade}
+            self._scrivi(d)
+            return codice, scade
+
+    def usa_collegamento(self, codice, tipo):
+        h = _impronta(re.sub(r"[^A-Z0-9]", "", str(codice or "").upper()))
+        with self.blocco:
+            d = self._aggiorna()
+            x = d["collegamenti"].get(h)
+            if not x or x["scade"] <= time.time() or x["persona"] not in d["persone"]:
+                return None
+            del d["collegamenti"][h]
+            did = self._dispositivo(d, x["persona"], tipo)
+            self._scrivi(d)
+            return did
+
+    def biscotto(self, did):
+        corpo = "o.%d.%s" % (int(time.time()) + ACCESSO_DURATA, did)
+        with self.blocco:
+            k = self._segreto(self._aggiorna())
+        return corpo + "." + hmac.new(k, corpo.encode("ascii"), hashlib.sha256).hexdigest()
+
+    def chi(self, valore):
+        """(persona, dispositivo, scadenza) di un biscotto valido; None se è falso, scaduto o revocato."""
+        m = re.fullmatch(r"o\.([0-9]{1,12})\.([0-9a-f]{16})\.([0-9a-f]{64})", valore or "")
+        if not m:
+            return None
+        with self.blocco:
+            d = self._aggiorna()
+            s, x = str(d.get("segreto", "")), d["dispositivi"].get(m.group(2))
+            if not re.fullmatch(r"[0-9a-f]{64}", s) or not x or x.get("persona") not in d["persone"]:
+                return None
+            pid = x["persona"]
+        firma = hmac.new(bytes.fromhex(s), ("o.%s.%s" % (m.group(1), m.group(2))).encode("ascii"), hashlib.sha256).hexdigest()
+        scad, ora = int(m.group(1)), time.time()
+        if not hmac.compare_digest(firma, m.group(3)) or not ora < scad <= ora + ACCESSO_DURATA + 60:
+            return None
+        return pid, m.group(2), scad
+
+    def visto(self, chiave, tipo, via=None, browser=None):
+        """Ultimo accesso di un dispositivo (con da dove arriva: «tailscale» o «internet», e il browser): in memoria, su
+        disco al più ogni VISTO_OGNI. Non solleva mai: un disco pieno non deve far cadere la richiesta."""
+        with self.blocco:
+            self.visti[chiave] = (tipo if tipo in TIPI_DISP else "pc", time.time(), via, browser)
+            if len(self.visti) > 5000:   # moltissime chiavi diverse (biscotti falsi non arrivano qui): si salva e si riparte
+                self.visti = dict(list(self.visti.items())[-1000:])
+            if time.time() - self.salvato >= VISTO_OGNI:
+                try:
+                    self._scrivi(self._aggiorna())
+                except (ErroreExtra, OSError) as e:
+                    self.salvato = time.time()   # si riprova fra un minuto, non a ogni richiesta
+                    print("Atlante: ultimo accesso non salvato: %s" % e, flush=True)
+
+    def revoca_persona(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            if d["persone"].pop(pid, None) is None:
+                return False
+            for k in ("dispositivi", "inviti", "collegamenti"):
+                d[k] = {h: x for h, x in d[k].items() if x.get("persona") != pid}
+            self._scrivi(d)
+            return True
+
+    def revoca_dispositivo(self, chiave):
+        with self.blocco:
+            d = self._aggiorna()
+            self.visti.pop(chiave, None)
+            if chiave.startswith("p:"):
+                if chiave in d["revocati"]:
+                    return False
+                d["revocati"] = (d["revocati"] + [chiave])[-1000:]
+                d["tuoi"].pop(chiave, None)
+            elif d["dispositivi"].pop(chiave, None) is None:
+                return False
+            self._scrivi(d)
+            return True
+
+    def revocato(self, chiave):
+        with self.blocco:
+            return chiave in self._aggiorna()["revocati"]
+
+    def nome(self, pid):
+        with self.blocco:
+            return (self._aggiorna()["persone"].get(pid) or {}).get("nome", "")
+
+    def elenco(self):
+        with self.blocco:
+            d = self._aggiorna()
+
+            def visto(k, x):
+                tipo, t, via, browser = self.visti.get(k, (None, None, None, None))
+                return {"id": k, "tipo": tipo or x.get("tipo", "pc"), "visto": t or x.get("visto", 0),
+                        "via": via or x.get("via", ""), "browser": browser or x.get("browser", ""),
+                        "creato": x.get("creato") or t or x.get("visto", 0)}
+
+            disp = {}
+            for k, x in d["dispositivi"].items():
+                disp.setdefault(x.get("persona"), []).append(visto(k, x))
+            tuoi = {k: dict(x) for k, x in d["tuoi"].items()}
+            for k in self.visti:
+                if k.startswith("p:"):
+                    tuoi.setdefault(k, {})
+            persone = [dict({"id": p, "nome": x["nome"], "creato": x["creato"],
+                             "dispositivi": sorted(disp.get(p, []), key=lambda y: -y["visto"])},
+                            **({"da": x["da"]} if x.get("da") else {}))
+                       for p, x in sorted(d["persone"].items(), key=lambda kv: kv[1]["creato"])]
+            return {"persone": persone,
+                    "tuoi": sorted((visto(k, x) for k, x in tuoi.items() if k not in d["revocati"]), key=lambda y: -y["visto"])}
+
+    def richiedi(self, da_pid, nome):
+        with self.blocco:
+            d = self._aggiorna()
+            if da_pid not in d["persone"]:
+                raise ErroreExtra(404, "Persona sconosciuta")
+            if sum(1 for r in d["richieste"].values() if r["da"] == da_pid and r["stato"] == "attesa") >= RICHIESTE_ATTESA_MAX:
+                raise ErroreExtra(409, "Hai già %d inviti in attesa" % RICHIESTE_ATTESA_MAX)
+            rid = secrets.token_hex(8)
+            r = d["richieste"][rid] = {"nome": _nome_persona(nome), "da": da_pid, "creato": time.time(), "stato": "attesa"}
+            if len(d["richieste"]) > 1000:   # le più vecchie già decise escono
+                decise = sorted((k for k, x in d["richieste"].items() if x["stato"] != "attesa"),
+                                key=lambda k: d["richieste"][k]["creato"])
+                for k in decise[:len(d["richieste"]) - 1000]:
+                    del d["richieste"][k]
+            self._scrivi(d)
+            return dict(r, id=rid)
+
+    def _richiesta(self, d, rid, r):
+        x = {"id": rid, "nome": r["nome"], "da": r["da"], "creato": r["creato"], "stato": r["stato"]}
+        if r.get("persona"):
+            x["persona"] = r["persona"]
+        if r.get("codice") and r.get("invito") in d["inviti"] and d["inviti"][r["invito"]]["scade"] > time.time():
+            x.update(codice=r["codice"], scade=d["inviti"][r["invito"]]["scade"])
+        return x
+
+    def richieste(self):
+        with self.blocco:
+            d = self._aggiorna()
+            return [self._richiesta(d, k, r) for k, r in sorted(d["richieste"].items(), key=lambda kv: -kv[1]["creato"])]
+
+    def richieste_di(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            return [self._richiesta(d, k, r) for k, r in sorted(d["richieste"].items(), key=lambda kv: -kv[1]["creato"])
+                    if r["da"] == pid]
+
+    def consenti(self, rid):
+        with self.blocco:
+            d = self._aggiorna()
+            r = d["richieste"].get(rid)
+            if not r:
+                raise ErroreExtra(404, "Richiesta sconosciuta")
+            if r["stato"] != "attesa":
+                raise ErroreExtra(409, "Richiesta già decisa")
+            pid = self._crea(d, r["nome"], da=r["da"])
+            codice, scade = self._invito(d, pid)
+            r.update(stato="consentita", persona=pid, codice=codice, invito=_impronta(codice))
+            self._scrivi(d)
+            x = d["persone"][pid]
+            return {"id": pid, "nome": x["nome"], "creato": x["creato"], "da": r["da"]}, codice, scade
+
+    def rifiuta(self, rid):
+        with self.blocco:
+            d = self._aggiorna()
+            r = d["richieste"].get(rid)
+            if not r or r["stato"] != "attesa":
+                return False
+            r["stato"] = "rifiutata"
+            self._scrivi(d)
+            return True
+
+
 def _ip(testo):
     try:
         a = ipaddress.ip_address((testo or "").strip().split("%")[0])
@@ -2912,13 +11432,42 @@ def _ip_cliente(h):
 
 
 def _biscotto_valido(h):
+    """("p", scadenza, parte casuale, None) per il biscotto della password, ("o", scadenza, dispositivo, persona) per un
+    invitato; None se manca, è falso, scaduto o revocato."""
     for parte in (h.headers.get("Cookie") or "").split(";"):
         k, _, v = parte.strip().partition("=")
-        if k == ACCESSO_BISCOTTO:
-            s = ACC.scadenza(v.strip())
-            if s:
-                return s
-    return 0
+        if k != ACCESSO_BISCOTTO:
+            continue
+        v = v.strip()
+        if v.startswith("o."):
+            c = PERS.chi(v) if PERS else None
+            if c:
+                return "o", c[2], c[1], c[0]
+            continue
+        s = ACC.scadenza(v)
+        if s:
+            rnd = v.split(".")[1]
+            if PERS is None or not PERS.revocato("p:" + rnd):
+                return "p", s, rnd, None
+    return None
+
+
+def _proprietario_rete(h):
+    """Il Mac stesso o Samuele dalla rete Tailscale (con ATLANTE_PROPRIETARI, solo quei login): non serve il biscotto.
+    La rete di casa no: lì si ascolta, ma senza diventare Samuele."""
+    if h.headers.get("Tailscale-Funnel-Request") is not None:
+        return False
+    vicino = _ip(h.client_address[0])
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:
+        return vicino is not None and (vicino.is_loopback or (_ip_tailscale(vicino) and not PROPRIETARI))
+    if vicino is None or not vicino.is_loopback:
+        return False
+    login = (h.headers.get("Tailscale-User-Login") or "").strip().lower()
+    if login:
+        return not PROPRIETARI or login in PROPRIETARI
+    ultimo = _ip(xff.split(",")[-1])
+    return ultimo is not None and (ultimo.is_loopback or (_ip_tailscale(ultimo) and not PROPRIETARI))
 
 
 def _set_cookie(h, valore):
@@ -2969,6 +11518,9 @@ input{font:inherit;color:inherit;width:100%;min-height:50px;padding:12px 14px;bo
 input:focus{outline:2px solid var(--accent)}
 button{font:inherit;font-weight:600;min-height:50px;border:0;border-radius:12px;background:var(--accent);color:#fff;cursor:pointer}
 .nome{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.o{margin-top:30px}
+.codice{display:inline-block;font:700 30px/1.2 ui-monospace,Menlo,monospace;letter-spacing:4px;color:var(--fg)}
+a.btn{display:flex;align-items:center;justify-content:center;min-height:50px;border-radius:12px;background:var(--accent);color:#fff;font-weight:600;text-decoration:none}
 </style>
 </head>
 <body>
@@ -2980,12 +11532,30 @@ button{font:inherit;font-weight:600;min-height:50px;border:0;border-radius:12px;
 </body>
 </html>
 """
-_MODULO_ACCESSO = """<p>@M</p>
+# chi è entrato con un invito da Safari scrive qui il codice di collegamento nell'app sulla schermata Home (sull'iPhone
+# ha i biscotti separati da Safari)
+_MODULO_CODICE = """<p>@M</p>
+<p>Hai un invito? Scrivi il codice di collegamento.</p>
+<form method="post" action="@Raccesso">
+<input type="text" name="codice" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="9" placeholder="Codice di collegamento" aria-label="Codice di collegamento" required>
+<button type="submit">Collega</button>
+</form>"""
+_MODULO_ACCESSO = _MODULO_CODICE + """
+<p class="o">Sei Samuele? Entra con la password.</p>
 <form method="post" action="@Raccesso">
 <input class="nome" type="text" name="nome" autocomplete="username" value="Atlante Musica" tabindex="-1" aria-hidden="true">
-<input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required autofocus>
+<input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required>
 <button type="submit">Entra</button>
 </form>"""
+_MODULO_INVITO = """<p>@M</p>
+<form method="post" action="" onsubmit="this.querySelector('button').disabled=true">
+<button type="submit">Entra</button>
+</form>"""
+_INVITO_FATTO = """<p>@M</p>
+<p><a class="btn" href="@R./">Apri Atlante Musica</a></p>
+<p class="o">Vuoi l'app sulla schermata Home? In Safari tocca Condividi e poi «Aggiungi alla schermata Home». Alla prima
+apertura scrivi questo codice (vale 15 minuti):</p>
+<p><b class="codice">@K</b></p>"""
 # dalla rete Tailscale (o dal Mac): si sceglie la password per Internet, senza Terminale. Per cambiarla serve quella di adesso
 _MODULO_NUOVA = """<p>@M</p>
 <form method="post" action="@Raccesso">
@@ -3016,6 +11586,99 @@ def _scrivi_pagina_accesso(h, codice, messaggio, errore=False, modulo=True, inte
     h.end_headers()
     if h.command != "HEAD":
         h.wfile.write(corpo)
+
+
+def _nome_pagina(nome):
+    return html.escape(nome).replace("@", "&#64;")   # i segnaposto delle pagine (@M, @R…) restano dove sono
+
+
+def _troppi_tentativi(h, w, **k):
+    return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
+                                  True, intestazioni=[("Retry-After", str(w))], **k)
+
+
+def _leggi_modulo(h):
+    """Corpo di un modulo POST (al più 4 KB): (byte, campi) o None se è troppo grande."""
+    try:
+        n = int(h.headers.get("Content-Length") or 0)
+    except ValueError:
+        n = -1
+    if not 0 <= n <= 4096:
+        h.close_connection = True
+        return None
+    dati = h.rfile.read(n) if n else b""
+    try:
+        return dati, parse_qs(dati.decode("utf-8"), max_num_fields=10)
+    except (UnicodeDecodeError, ValueError):
+        return dati, {}
+
+
+def _usa_collegamento(h, codice):
+    """Codice di collegamento scritto nell'app sulla schermata Home: il dispositivo entra come la persona invitata."""
+    modulo = _MODULO_ACCESSO if ACC.ha_password() else _MODULO_CODICE
+    if not _stessa_origine(h):
+        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True, modulo=modulo)
+    ip = _ip_cliente(h)
+    w = ACC.attesa(ip)
+    if w:
+        return _troppi_tentativi(h, w, modulo=modulo)
+    did = PERS.usa_collegamento(codice, tipo_da_agente(h.headers.get("User-Agent"))) if PERS else None
+    if not did:
+        ACC.sbagliata(ip)
+        print("Atlante: codice di collegamento sbagliato da %s" % ip, flush=True)
+        return _scrivi_pagina_accesso(h, 401, "Codice sbagliato o scaduto.", True, modulo=modulo)
+    ACC.riuscita(ip)
+    h._biscotto = _set_cookie(h, PERS.biscotto(did))
+    return _rimanda(h, _verso(h, "./"))
+
+
+def _gia_dentro(h, pid):
+    """Chi è già entrato e riapre il link (o lo rimanda con «indietro»): niente errore, il link dell'app e un codice nuovo."""
+    k, _ = PERS.collegamento(pid)
+    return _scrivi_pagina_accesso(h, 200, "Sei già dentro, %s!" % _nome_pagina(PERS.nome(pid)), modulo=_INVITO_FATTO.replace("@K", k))
+
+
+def _pagina_invito(h, codice, samuele, chi=None):
+    """Link d'invito. GET: chi invita e il tasto «Entra» — WhatsApp e Messaggi aprono i link per l'anteprima, quindi
+    leggere la pagina non usa l'invito. POST (il tocco su «Entra»): l'invito si usa, il dispositivo riceve il biscotto
+    della persona e il codice per l'app sulla schermata Home."""
+    morto = "Questo invito non vale più: chiedi a Samuele un link nuovo."
+    if h.command not in ("GET", "HEAD", "POST"):
+        h.close_connection = True
+        return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True, modulo=False)
+    if h.command == "POST" and _leggi_modulo(h) is None:
+        return _scrivi_pagina_accesso(h, 413, "Richiesta non valida.", True, modulo=False)
+    info = PERS.leggi_invito(codice) if PERS else None
+    invitato = chi["persona"] if chi and chi["ruolo"] == "invitato" else None
+    if h.command != "POST":
+        if info is None:
+            return _gia_dentro(h, invitato) if invitato else _scrivi_pagina_accesso(h, 410, morto, modulo=False)
+        if samuele:
+            return _scrivi_pagina_accesso(h, 200, "Questo è l'invito per %s: aprilo dal suo telefono. Tu sei già dentro "
+                                          "come Samuele." % _nome_pagina(info["nome"]), modulo=False)
+        return _scrivi_pagina_accesso(h, 200, "Ciao %s! Samuele ti ha invitato ad ascoltare la sua musica."
+                                      % _nome_pagina(info["nome"]), modulo=_MODULO_INVITO)
+    if not _stessa_origine(h):
+        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True, modulo=False)
+    if samuele:   # Samuele che prova il link resta Samuele, e l'invito resta per chi deve riceverlo
+        return _scrivi_pagina_accesso(h, 409, "Questo invito è per un'altra persona: tu sei già dentro come Samuele.",
+                                      True, modulo=False)
+    ip = _ip_cliente(h)
+    w = ACC.attesa(ip)
+    if w:
+        return _troppi_tentativi(h, w, modulo=False)
+    did = PERS.usa_invito(codice, tipo_da_agente(h.headers.get("User-Agent")), ip)
+    if not did:
+        if invitato:   # già dentro (pagina rimandata più tardi): non è un tentativo sbagliato
+            return _gia_dentro(h, invitato)
+        ACC.sbagliata(ip)
+        return _scrivi_pagina_accesso(h, 410, morto, True, modulo=False)
+    pid = PERS.persona_di(did)
+    h._biscotto = _set_cookie(h, PERS.biscotto(did))
+    k, _ = PERS.collegamento(pid)
+    print("Atlante: %s è entrato con l'invito" % PERS.nome(pid), flush=True)
+    return _scrivi_pagina_accesso(h, 200, "Sei dentro, %s!" % _nome_pagina(PERS.nome(pid)),
+                                  modulo=_INVITO_FATTO.replace("@K", k))
 
 
 def _nuova_password(h, dati):
@@ -3054,31 +11717,29 @@ def _nuova_password(h, dati):
                                   "dalla rete Tailscale nessuna differenza.<br><br><a href=\"@R./\">Apri Atlante Musica</a>", modulo=False)
 
 
-def _pagina_accesso(h, entrato, fidato):
+def _pagina_accesso(h, entrato, samuele):
     """GET: la pagina con la password (o l'app, per chi è già dentro). POST: controlla la password.
-    Dalla rete Tailscale o dal Mac: scelta della password, se non c'è ancora (o con ?cambia, per cambiarla)."""
-    dati = b""
+    Samuele (dalla rete Tailscale o dal Mac): scelta della password, se non c'è ancora (o con ?cambia, per cambiarla)."""
+    dati, campi = b"", {}
     if h.command == "POST":
-        try:
-            n = int(h.headers.get("Content-Length") or 0)
-        except ValueError:
-            n = -1
-        if not 0 <= n <= 4096:
-            h.close_connection = True
+        letto = _leggi_modulo(h)
+        if letto is None:
             return _scrivi_pagina_accesso(h, 413, "Richiesta non valida.", True)
-        dati = h.rfile.read(n)
+        dati, campi = letto
     elif h.command not in ("GET", "HEAD"):
         h.close_connection = True
         return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True)
-    if fidato and (not ACC.ha_password() or "cambia" in parse_qs(urlsplit(h.path).query, keep_blank_values=True)
+    if samuele and (not ACC.ha_password() or "cambia" in parse_qs(urlsplit(h.path).query, keep_blank_values=True)
                    or b"nuova=" in dati):
         return _nuova_password(h, dati)
     if entrato:
         return _rimanda(h, _verso(h, "./"))
+    if h.command == "POST" and "codice" in campi:
+        return _usa_collegamento(h, campi["codice"][0])
     attiva = ACC.ha_password()
-    if not attiva:
+    if not attiva:   # senza password entra solo chi ha un invito (con il codice di collegamento)
         return _scrivi_pagina_accesso(h, 403 if h.command == "POST" else 200, "L'accesso da Internet non è ancora attivo: "
-                                      "la password si sceglie aprendo questa pagina con Tailscale acceso.", modulo=False)
+                                      "la password si sceglie aprendo questa pagina con Tailscale acceso.", modulo=_MODULO_CODICE)
     if h.command != "POST":
         return _scrivi_pagina_accesso(h, 200, "Da Internet la musica del Mac è protetta da una password.")
     if not _stessa_origine(h):
@@ -3088,10 +11749,7 @@ def _pagina_accesso(h, entrato, fidato):
     if w:
         return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
                                       True, intestazioni=[("Retry-After", str(w))])
-    try:
-        pw = parse_qs(dati.decode("utf-8"), max_num_fields=10).get("password", [""])[0]
-    except (UnicodeDecodeError, ValueError):
-        pw = ""
+    pw = campi.get("password", [""])[0]
     if pw and ACC.giusta(pw):
         ACC.riuscita(ip)
         h._biscotto = _set_cookie(h, ACC.biscotto())
@@ -3106,17 +11764,39 @@ def controlla_accesso(h):
     rimando lì o 401 per chi arriva da Internet senza biscotto valido. Se no la richiesta prosegue; quando serve, la
     risposta porta un biscotto nuovo (h._biscotto, scritto da end_headers)."""
     h._biscotto = None
+    h._chi = {"ruolo": "proprietario", "persona": None, "chiave": None}
     if ACC is None:
         return False
     p = unquote(urlsplit(h.path).path)
     libero = LIBERI.match(p)
-    scad = _biscotto_valido(h)
-    fidato = _fidato(h)
-    entrato = bool(scad) or fidato
-    if entrato and (not scad or scad - time.time() < ACCESSO_DURATA - ACCESSO_RINNOVO):
-        h._biscotto = _set_cookie(h, ACC.biscotto())
+    b = _biscotto_valido(h)
+    rete = _proprietario_rete(h)
+    if rete and b is not None and b[0] == "o":
+        b = None   # Samuele dalla sua rete Tailscale resta Samuele anche con il biscotto di un invito provato da lui
+    samuele = rete or (b is not None and b[0] == "p")
+    if b is not None and b[0] == "o":
+        h._chi = {"ruolo": "invitato", "persona": b[3], "chiave": b[2]}
+    elif samuele:
+        h._chi = {"ruolo": "proprietario", "persona": None, "chiave": "p:" + b[2] if b else None}
+    elif _fidato(h):
+        h._chi = {"ruolo": "casa", "persona": None, "chiave": None}   # rete di casa: niente biscotto, niente Gestione
+    else:
+        h._chi = None
+    entrato = h._chi is not None
+    vecchio = not b or b[1] - time.time() < ACCESSO_DURATA - ACCESSO_RINNOVO
+    if b is not None and b[0] == "o":
+        if vecchio:
+            h._biscotto = _set_cookie(h, PERS.biscotto(b[2]))
+    elif samuele and vecchio:
+        h._biscotto = _set_cookie(h, ACC.biscotto(b[2] if b else None))
+    if PERS is not None and h._chi and h._chi["chiave"]:
+        ua = h.headers.get("User-Agent")
+        PERS.visto(h._chi["chiave"], tipo_da_agente(ua), "tailscale" if _fidato(h) else "internet", browser_da_agente(ua))
     if libero and libero.group(1) == "accesso":
-        _pagina_accesso(h, entrato, fidato)
+        _pagina_accesso(h, entrato, samuele)
+        return True
+    if libero and libero.group(1).startswith("accesso/invito/"):
+        _pagina_invito(h, libero.group(1).rsplit("/", 1)[1], samuele, h._chi)
         return True
     if entrato or libero:
         return False
@@ -3138,6 +11818,67 @@ def controlla_accesso(h):
     return True
 
 
+# un invitato ascolta: la musica, i videoclip, i suoi dispositivi, le classifiche, chi è, i suoi inviti, le sue idee e i suoi ascolti; e
+# manda brani a Samuele (Cerca e scarica, Carica nella libreria: finiscono in «Da controllare»). Il resto (proxy, video,
+# IA, voci, la Gestione, gli altri moduli di «Altro») usa le risorse del Mac mini o è di Samuele
+PERMESSE_INVITATI = re.compile(
+    r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
+    r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/(?:inviti|idee|cerca|carica)\.html)$"
+    r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
+    r"|extra/(?:io|inviti|idee|classifiche|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
+    # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria: ognuno i suoi
+    r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?"
+    r"|interfaccia(?:/base|/personale)?)"   # la base pubblicata e il proprio strato personale (non bozza né versioni)
+    r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?"
+    r"|extra/tematiche(?:/[^/]+){0,2})$")   # playlist di Atlante: anche gli invitati le ascoltano, creano e condividono
+# la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
+# la chat (fase 5a): la pagina, la cifratura, il QR del codice di sicurezza e le sue rotte
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/(?:chat\.html|chat-cifra\.js|qrcode\.js)$"
+                               r"|^(?:/.*)?/api/extra/chat(?:/[^/]+){1,4}$")
+# le chiamate (fasi 5b e 5c): la pagina e il centralino
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/chiamate\.html$"
+                               r"|^(?:/.*)?/api/extra/chiamate(?:/[^/]+){0,2}$")
+
+
+def _permesso(h):
+    """Da chiamare subito dopo controlla_accesso: False (e risposta 403) se un invitato chiede quello che non può."""
+    chi = getattr(h, "_chi", None)
+    if not chi or chi["ruolo"] != "invitato" or PERMESSE_INVITATI.match(unquote(urlsplit(h.path).path)):
+        return True
+    if h.command not in ("GET", "HEAD"):
+        h.close_connection = True   # corpo non letto
+    corpo = json.dumps({"errore": "Non disponibile per gli invitati"}, ensure_ascii=False).encode("utf-8")
+    h.send_response(403)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+    return False
+
+
+# ----- posizione condivisa: anche per gli invitati -----
+# le sue rotte (ognuno vede solo le sue condivisioni e quelle verso di lui), la sua pagina, la cifratura e il Navigatore,
+# che si apre a loro per «Raggiungilo»: la pagina del Navigatore non usa il Mac (mappe, percorsi e ricerca vanno dal
+# telefono ai servizi pubblici; lo controlla TestPosizione.test_9_pagine_senza_rotte_vietate). In un blocco a parte,
+# così l'elenco qui sopra resta com'è
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern +
+                               r"|^/x/(?:posizione\.html|posizione\.js|cifra\.js|naviga\.html)$"
+                               r"|^(?:/.*)?/api/extra/(?:chiavi|posizione(?:/[^/]+)?)$")
+
+
+def _numero_ambiente(nome, predefinito):
+    """Un numero da una variabile d'ambiente del LaunchAgent; scritto male vale quello predefinito (e lo si dice)."""
+    v = os.environ.get(nome, "").strip()
+    try:
+        return float(v.replace(",", ".")) if v else predefinito
+    except ValueError:
+        print("Atlante: %s=%r non è un numero: uso %s" % (nome, v, predefinito), flush=True)
+        return predefinito
+
+
 def _imposta_password(file):
     if sys.stdin.isatty():
         p = getpass.getpass("Nuova password per aprire Atlante Musica da Internet: ")
@@ -3155,7 +11896,8 @@ def _imposta_password(file):
 
 
 def main():
-    global ACC
+    global ACC, CLIP, PERS, PROPRIETARI, PUBBLICO
+    global IDEE, CL_SPAZIO_MIN
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -3171,18 +11913,69 @@ def main():
     # mentre un argomento che non conosce la farebbe uscire subito (e l'aggiornamento automatico tornerebbe indietro)
     ap.add_argument("--musica-dir", default=os.environ.get("ATLANTE_MUSICA_DIR") or CONF["musica_dir"],
                     help="dove salvare i brani scaricati da internet (fa parte della libreria; anche ATLANTE_MUSICA_DIR)")
+    # videoclip sincronizzati: anche da variabili d'ambiente (nel LaunchAgent una versione vecchia del server le ignora)
+    ap.add_argument("--clip-piano", default=os.environ.get("ATLANTE_CLIP_PIANO", ""),
+                    help="JSON {nome del file del brano: {\"id\": ID YouTube}} dei videoclip (anche ATLANTE_CLIP_PIANO)")
+    ap.add_argument("--clip-dir", default=os.environ.get("ATLANTE_CLIP_DIR") or "~/Movies/Atlante Videoclip",
+                    help="dove tenere videoclip e mappe di allineamento (anche ATLANTE_CLIP_DIR)")
+    ap.add_argument("--clip-auto", action="store_true", default=os.environ.get("ATLANTE_CLIP_AUTO") == "1",
+                    help="prepara in sottofondo tutti i videoclip, uno alla volta (anche ATLANTE_CLIP_AUTO=1)")
+    ap.add_argument("--clip-prima", default=os.environ.get("ATLANTE_CLIP_PRIMA", ""),
+                    help="cartella (playlist) i cui brani si preparano per primi (anche ATLANTE_CLIP_PRIMA)")
+    # classifiche e playlist: anche da variabile d'ambiente (nel LaunchAgent una versione vecchia del server la ignora)
+    ap.add_argument("--classifiche", action="store_true", default=os.environ.get("ATLANTE_CLASSIFICHE") == "1",
+                    help="classifiche come playlist con i brani che hai, e brani nuovi dai siti di musica libera "
+                         "(Jamendo con ATLANTE_JAMENDO_CLIENT_ID, Internet Archive) (anche ATLANTE_CLASSIFICHE=1)")
+    ap.add_argument("--tematiche", action="store_true", default=os.environ.get("ATLANTE_TEMATICHE") == "1",
+                    help="prepara in sottofondo, un brano alla volta, i dati delle playlist di Atlante (generi da "
+                    "MusicBrainz, BPM ed energia dall'audio); anche ATLANTE_TEMATICHE=1")
+    ap.add_argument("--tematiche-prova", type=int, default=int(os.environ.get("ATLANTE_TEMATICHE_PROVA") or 0),
+                    help="come --tematiche, ma solo su questo numero di brani, da controllare a mano in "
+                    "api/extra/tematiche/campione prima di farlo su tutta la libreria (anche ATLANTE_TEMATICHE_PROVA)")
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
+    ap.add_argument("--pubblico", default=os.environ.get("ATLANTE_PUBBLICO", ""),
+                    help="indirizzo dell'app da Internet (tailscale funnel), es. https://mac-mini.tailnet.ts.net:10000/, "
+                    "per i link d'invito (anche ATLANTE_PUBBLICO)")
+    # caricamenti (Gestione, parte 2): anche da variabili d'ambiente, come ATLANTE_MUSICA_DIR (vedi sopra il perché)
+    ap.add_argument("--controllo-dir", default=os.environ.get("ATLANTE_CONTROLLO_DIR") or CONF["controllo_dir"],
+                    help="cartella «Da controllare»: i brani caricati o scaricati dagli invitati aspettano lì il sì di "
+                    "Samuele (anche ATLANTE_CONTROLLO_DIR)")
+    ap.add_argument("--film-dir", default=os.environ.get("ATLANTE_FILM_DIR") or CONF["film_dir"],
+                    help="dove arrivano i film caricati dal telefono (anche ATLANTE_FILM_DIR)")
+    ap.add_argument("--tolti-dir", default=os.environ.get("ATLANTE_TOLTI_DIR") or CONF["tolti_dir"],
+                    help="dove vanno i brani tolti dalla libreria, se sta sullo stesso disco del brano (anche ATLANTE_TOLTI_DIR)")
+    ap.add_argument("--limite-giorno-gb", type=float, default=_numero_ambiente("ATLANTE_LIMITE_GIORNO_GB", 20),
+                    help="GB che ogni invitato può caricare al giorno, brani e film insieme (anche ATLANTE_LIMITE_GIORNO_GB)")
+    ap.add_argument("--spazio-min-gb", type=float, default=_numero_ambiente("ATLANTE_SPAZIO_MIN_GB", 50),
+                    help="sotto questi GB liberi il Mac non accetta caricamenti (anche ATLANTE_SPAZIO_MIN_GB)")
+    ap.add_argument("--stun", default=os.environ.get("ATLANTE_STUN", STUN_PREDEFINITO),
+                    help="server STUN per le chiamate, separati da virgole (anche ATLANTE_STUN; il ponte TURN solo da "
+                    "ATLANTE_TURN_URL, ATLANTE_TURN_UTENTE e ATLANTE_TURN_SEGRETO)")
     ap.add_argument("--imposta-password", action="store_true", help="imposta (o cambia) la password per aprire l'app "
                     "da Internet con `tailscale funnel` e esce; la legge da tastiera o dalla prima riga dello standard input")
+    ap.add_argument("--idee-nuove", action="store_true", help="scrive in testo semplice le idee nuove mandate dal riquadro "
+                    "«Idee» (dalla cartella di --cache) e esce: così Claude le legge sul Mac mini e le sottopone a Samuele")
     a = ap.parse_args()
     file_accesso = os.path.join(os.path.expanduser(a.cache), "accesso.json")
     if a.imposta_password:
         sys.exit(_imposta_password(file_accesso))
+    if a.idee_nuove:
+        sys.exit(_stampa_idee_nuove(os.path.join(os.path.expanduser(a.cache), "idee.json"), a.porta))
     if not a.cartelle:
         ap.error("serve almeno una cartella di musica")
     ACC = Accesso(file_accesso)
+    PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
+    IDEE = Idee(os.path.join(os.path.expanduser(a.cache), "idee.json"))
+    avvia_ascoltati(a.cache)   # brani ascoltati: classifiche e consigli tra le persone
+    # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
+    PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
+    PUBBLICO = a.pubblico.strip()
+    CL_SPAZIO_MIN = int(max(0.0, _numero_ambiente("ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB", 200)) * 1024 ** 3)
+    _prepara_chiamate(a.stun)
+    if PUBBLICO and not PUBBLICO.endswith("/"):
+        PUBBLICO += "/"
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"
@@ -3191,9 +11984,26 @@ def main():
     cartelle = list(a.cartelle)
     if not any(scaricati == c or _dentro(scaricati, c) for c in (os.path.abspath(os.path.expanduser(x)) for x in cartelle)):
         cartelle.append(scaricati)
+    # prima della prima lettura della libreria: le cartelle dei caricamenti non entrano nel catalogo
+    avvia_caricamenti(a.cache, a.controllo_dir, a.film_dir, a.tolti_dir, a.limite_giorno_gb, a.spazio_min_gb)
     avvia(cartelle, a.cache, indirizzo=indirizzo)
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
                 ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
+    # la chat pronta da subito (dopo avvia_extra, che sceglie la cartella della cache): le chiamate ne usano le
+    # notifiche e i blocchi anche prima che qualcuno la apra
+    try:
+        _chat_archivio()
+    except OSError as e:
+        print("Atlante: chat non pronta: %s" % e, flush=True)
+    avvia_classifiche(a.cache, a.classifiche)
+    if a.tematiche or a.tematiche_prova > 0:
+        _tem().prova = max(0, a.tematiche_prova)
+        _tem().avvia()
+    if a.clip_piano:
+        CLIP = Videoclip(os.path.abspath(os.path.expanduser(a.clip_piano)), os.path.abspath(os.path.expanduser(a.clip_dir)),
+                         auto=a.clip_auto, prima=os.path.abspath(os.path.expanduser(a.clip_prima)) if a.clip_prima else "")
+        if a.clip_auto:
+            CLIP.avvia()
     app = os.path.abspath(a.app)
     https = bool(a.cert)
     host_sicuro = urlsplit(indirizzo).netloc.lower()
@@ -3215,30 +12025,37 @@ def main():
             return True
 
         def do_GET(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "GET") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_GET()
 
         def do_HEAD(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "HEAD") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
 
         def do_POST(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "POST"):
                 self.close_connection = True   # corpo non letto
                 self.send_error(501, "Unsupported method ('POST')")
 
         def do_DELETE(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "DELETE"):
                 self.close_connection = True
                 self.send_error(501, "Unsupported method ('DELETE')")
+
+        def do_PUT(self):   # i pezzi dei caricamenti (brani, film) e le copertine nuove: il corpo sono i byte
+            if controlla_accesso(self) or not _permesso(self):
+                return
+            if not gestisci_extra(self, "PUT"):
+                self.close_connection = True
+                self.send_error(501, "Unsupported method ('PUT')")
 
         def end_headers(self):
             # pagina, service worker e manifest (e le pagine dei moduli in x/ con kit.js e kit.css): il browser chiede
@@ -3249,6 +12066,10 @@ def main():
             q = unquote(p)
             if not PREFISSO.match(q) and not EXTRA.match(q) and (p.endswith("/") or p.endswith((".html", ".js", ".css", ".webmanifest"))):
                 self.send_header("Cache-Control", "no-cache")
+            if not PREFISSO.match(q) and not EXTRA.match(q) and (p.endswith("/") or p.endswith(".html") or LIBERI.match(q)):
+                # la Gestione (e ogni pagina) non si apre dentro un altro sito, che potrebbe far toccare i tasti a Samuele
+                self.send_header("X-Frame-Options", "SAMEORIGIN")
+                self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
             b = getattr(self, "_biscotto", None)   # accesso da Internet: biscotto nuovo o rinnovato
             if b:
                 self._biscotto = None
@@ -3273,4 +12094,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--misura-audio"]:   # misura dell'audio per le playlist di Atlante, in un processo a parte
+        sys.exit(_misura_da_riga(sys.argv[2:]))
     main()

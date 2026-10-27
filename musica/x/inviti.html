@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Invita un amico</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.btn.full{width:100%}
+.link{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;background:var(--fill);border-radius:8px;padding:8px 10px;margin:8px 0}
+.inv{padding:12px 14px;border-bottom:.5px solid var(--sep)}
+.inv:last-child{border-bottom:0}
+.inv .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="sub">Scrivi il nome del tuo amico: la richiesta arriva a Samuele. Quando la consente, qui trovi il link da mandargli.</p>
+  <div class="card">
+    <div class="field"><label for="nome">Nome del tuo amico</label><input class="in" id="nome" maxlength="40" placeholder="Nome" autocomplete="off"></div>
+    <button class="btn pri full" id="chiedi">Chiedi l'invito</button>
+  </div>
+  <h2 class="h2">I miei inviti</h2>
+  <div class="list" id="ilist"></div>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api} = AX;
+AX.header('Invita un amico');
+const STATI = {attesa:['In attesa di Samuele', ''], consentita:['Consentito', 'ok'], rifiutata:['Samuele non l\'ha consentito', 'bad'], usata:['Invito usato', 'ok']};
+function messaggio(nome, link) {
+  return 'Ciao ' + nome + '! Ti invito su Atlante Musica, la libreria musicale di Samuele. Apri questo link sul telefono e sei dentro: ' +
+    'puoi ascoltare tutto e salvare i brani sul telefono. Se ti viene un\'idea per migliorarla, mandala dalla sezione «Idee»: Samuele le legge tutte.\n' + link;
+}
+async function disegna() {
+  let L;
+  try { L = (await api('inviti')).inviti; }
+  catch (e) { $('ilist').innerHTML = '<div class="inv">Non riesco a leggere i tuoi inviti: ' + esc(e.message) + '</div>'; return; }
+  $('ilist').innerHTML = L.length ? L.map((r, i) => {
+    const [testo, cl] = STATI[r.stato] || [r.stato, ''];
+    return '<div class="inv"><div class="top"><b>' + esc(r.nome) + '</b><span class="pill ' + cl + '">' + testo + '</span></div>' +
+      (r.link ? '<div class="link">' + esc(r.link) + '</div><div class="btns"><button class="btn sm pri" data-s="' + i + '">Condividi</button><button class="btn sm" data-c="' + i + '">Copia</button></div>' +
+        '<p class="small">Vale una volta sola, fino al ' + new Date(r.scade * 1000).toLocaleDateString('it-IT') + '.</p>' : '') + '</div>';
+  }).join('') : '<div class="inv"><span class="small">Nessun invito, per ora.</span></div>';
+  $('ilist').querySelectorAll('[data-s]').forEach(b => b.onclick = async () => {
+    const r = L[+b.dataset.s], text = messaggio(r.nome, r.link);
+    if (navigator.share) { try { await navigator.share({text}); } catch (e) {} return; }
+    copia(text);
+  });
+  $('ilist').querySelectorAll('[data-c]').forEach(b => b.onclick = () => copia(L[+b.dataset.c].link));
+}
+async function copia(t) {
+  try { await navigator.clipboard.writeText(t); toast('Copiato'); }
+  catch (e) { toast('Non riesco a copiare: tieni premuto sul link e scegli Copia'); }
+}
+$('chiedi').onclick = async () => {
+  const nome = $('nome').value.trim();
+  if (!nome) { $('nome').focus(); return; }
+  $('chiedi').disabled = true;
+  try { await api('inviti', {method:'POST', body:{nome}}); $('nome').value = ''; toast('Richiesta mandata a Samuele'); disegna(); }
+  catch (e) { toast(e.message); }
+  $('chiedi').disabled = false;
+};
+$('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('chiedi').click(); });
+disegna();
+</script>
+</body>
+</html>

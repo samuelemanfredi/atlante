@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Rete e VPN</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.btn.full{width:100%}
+.stato{display:flex;gap:12px;align-items:flex-start}
+.stato .ic{font-size:30px;line-height:1;flex:none}
+.stato b{display:block;font-size:19px;margin:4px 0}
+.stato p{margin:6px 0 0;color:var(--fg2);font-size:15px}
+.passi{margin:8px 0;padding-left:22px}
+.passi li{margin:8px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card"><div class="stato" id="stato"><span class="ic">⏳</span><span><b>Controllo…</b></span></div></div>
+  <p class="note" id="cose"></p>
+  <div id="guida" hidden>
+    <h2 class="h2">Accendi Tailscale</h2>
+    <div class="btns"><a class="btn pri" id="apri" target="_blank" rel="noopener">Apri Tailscale</a><a class="btn" id="store" target="_blank" rel="noopener" hidden></a></div>
+    <ol class="passi" id="passi"></ol>
+    <p class="small" id="extra"></p>
+  </div>
+  <div id="consigli" hidden>
+    <h2 class="h2">Per non pensarci</h2>
+    <p class="sub" id="consiglio"></p>
+  </div>
+  <div id="samuele" hidden>
+    <h2 class="h2">Il Mac mini</h2>
+    <p class="sub">Accesso da Internet senza Tailscale (Funnel), uscita da casa (exit node) e dispositivi della rete Tailscale: si comandano dalla Gestione.</p>
+    <a class="btn" href="gestione.html#rete">Apri Gestione → Rete</a>
+  </div>
+  <button class="btn full" id="ricontrolla" style="margin-top:20px">Controlla di nuovo</button>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, api} = AX;
+AX.header('Rete e VPN');
+// un'app web non può accendere il VPN del telefono (iPhone e Android non lo permettono): qui si vede se questo
+// dispositivo arriva dal Mac mini attraverso Tailscale e si apre l'app Tailscale per accenderlo
+const UA = navigator.userAgent;
+const IOS = /iP(hone|ad|od)/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // iPadOS si presenta come Mac
+const ANDROID = /Android/.test(UA);
+const APPSTORE = 'https://apps.apple.com/app/tailscale/id1470499037';
+const PLAY = 'https://play.google.com/store/apps/details?id=com.tailscale.ipn';
+// Android: apre l'app Tailscale se c'è, se no la sua pagina su Google Play
+const INTENT = 'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=com.tailscale.ipn;S.browser_fallback_url=' + encodeURIComponent(PLAY) + ';end';
+const SCARICA = 'https://tailscale.com/download';
+const PASSI = IOS ? [
+  'Tocca «Apri Tailscale»: si apre la sua pagina nell\'App Store. Tocca «Apri» (la prima volta «Ottieni», per installarla).',
+  'Solo la prima volta: tocca «Log in», entra con lo stesso account che usi sul Mac mini e consenti la configurazione VPN.',
+  'Accendi l\'interruttore in alto: deve dire «Connected».',
+  'Torna qui e tocca «Controlla di nuovo».'
+] : ANDROID ? [
+  'Tocca «Apri Tailscale» (se non c\'è ancora si apre Google Play: installala).',
+  'Solo la prima volta: entra con lo stesso account che usi sul Mac mini e accetta la richiesta di connessione VPN.',
+  'Accendi l\'interruttore: deve dire «Connected».',
+  'Torna qui e tocca «Controlla di nuovo».'
+] : [
+  'Tocca «Scarica Tailscale» e installalo (sul Mac c\'è anche nell\'App Store).',
+  'Entra con lo stesso account che usi sul Mac mini.',
+  'Accendi Tailscale: sul Mac dall\'icona nella barra dei menu («Connect»).',
+  'Torna qui e tocca «Controlla di nuovo».'
+];
+function preparaGuida() {
+  const a = $('apri'), s = $('store');
+  if (IOS) { a.href = APPSTORE; }
+  else if (ANDROID) { a.href = INTENT; s.href = PLAY; s.textContent = 'Google Play'; s.hidden = false; }
+  else { a.href = SCARICA; a.textContent = 'Scarica Tailscale'; }
+  $('passi').innerHTML = PASSI.map(p => '<li>' + esc(p) + '</li>').join('');
+  $('extra').textContent = IOS ? 'Si accende anche da Impostazioni → VPN → Tailscale.' : ANDROID ? 'Si accende anche dalle Impostazioni rapide (tendina in alto), se hai aggiunto il riquadro di Tailscale.' : '';
+}
+function mostra(ic, titolo, testo, guida) {
+  $('stato').innerHTML = '<span class="ic">' + ic + '</span><span><b>' + esc(titolo) + '</b>' + testo.map(t => '<p>' + esc(t) + '</p>').join('') + '</span>';
+  $('guida').hidden = !guida;
+}
+function ruoloSalvato() {   // l'ultimo ruolo che l'app ha saputo dal Mac (quando il Mac non risponde)
+  try { return (JSON.parse(localStorage.getItem('am-io')) || {}).ruolo || ''; } catch (e) { return ''; }
+}
+async function controlla() {
+  $('ricontrolla').disabled = true;
+  let io = null;
+  try { io = await api('io', {timeout:8000, cache:'no-store'}); } catch (e) {}
+  $('ricontrolla').disabled = false;
+  const ruolo = io ? io.ruolo : ruoloSalvato();
+  $('samuele').hidden = ruolo !== 'proprietario';
+  $('consigli').hidden = true;
+  if (ruolo === 'invitato') {
+    if (io) mostra('👍', 'Per te non serve niente', ['Entri in Atlante Musica da Internet con il tuo invito, ovunque tu sia.',
+      'Tailscale è la rete privata di Samuele: non devi installarlo né accenderlo.'], false);
+    else mostra('⚠️', 'Il Mac di Samuele non risponde', ['Tailscale non ti serve: controlla di avere Internet e riprova più tardi.'], false);
+    $('cose').textContent = 'Se un giorno l\'app ti chiede di entrare di nuovo, chiedi a Samuele un link nuovo.';
+    return;
+  }
+  $('cose').textContent = 'Tailscale è la rete privata che collega i tuoi dispositivi al Mac mini, anche fuori casa. Un\'app web non può accendere il VPN del telefono (iPhone e Android non lo permettono): si accende dall\'app Tailscale, e qui vedi se è acceso.';
+  if (!io) {
+    mostra('⚠️', 'Il Mac mini non risponde', ['Se sei fuori casa, probabilmente Tailscale è spento su questo dispositivo: accendilo e tocca «Controlla di nuovo».',
+      'Se è già acceso, il Mac mini potrebbe essere spento o senza Internet.'], true);
+  } else if (io.via === 'tailscale') {
+    mostra('✅', 'Tailscale è acceso', ['Arrivi dal Mac mini attraverso Tailscale: funziona ovunque, anche fuori casa, e senza password.', 'Lascialo acceso.'], false);
+    if (IOS || ANDROID) {
+      $('consigli').hidden = false;
+      $('consiglio').textContent = 'Nelle impostazioni dell\'app Tailscale, se c\'è, attiva la connessione automatica (' + (IOS ? '«VPN On Demand»' : '«Always-on VPN» nelle impostazioni VPN di Android') + '): Tailscale si riaccende da solo e l\'app trova sempre il Mac mini.';
+    }
+  } else if (io.via === 'casa') {
+    mostra('🏠', 'Sei sulla rete di casa', ['Qui il Mac mini risponde anche senza Tailscale.',
+      'Fuori casa ti serve Tailscale acceso (oppure la password, se l\'accesso da Internet è attivo): preparalo adesso.'], true);
+  } else {
+    mostra('🌍', 'Arrivi da Internet: Tailscale è spento', ['Su questo dispositivo Tailscale è spento (o non c\'è). L\'app funziona lo stesso, con la password.',
+      'Con Tailscale acceso arrivi direttamente al Mac mini, senza password e senza passare da Internet.'], true);
+  }
+}
+preparaGuida();
+$('ricontrolla').onclick = controlla;
+addEventListener('pageshow', e => { if (e.persisted) controlla(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) controlla(); });   // di ritorno dall'app Tailscale
+controlla();
+</script>
+</body>
+</html>

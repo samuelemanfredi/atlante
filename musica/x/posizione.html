@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Condividi la posizione</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.btn.full{width:100%}
+.seg button{padding:0 6px}
+#durata button:last-child{flex:1.7}
+.chi{display:flex;align-items:center;gap:12px;padding:11px 14px;min-height:52px;border-bottom:.5px solid var(--sep);cursor:pointer}
+.chi:last-child{border-bottom:0}
+.chi input{width:22px;height:22px;flex:none;accent-color:var(--ok);margin:0}
+.chi .tx{flex:1;min-width:0}
+.chi .tx b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chi .tx span{display:block;color:var(--fg2);font-size:13px}
+.cond{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:.5px solid var(--sep)}
+.cond:last-child{border-bottom:0}
+.cond .tx{flex:1;min-width:0}
+.cond .tx b{display:block;font-weight:600}
+.cond .tx span{display:block;color:var(--fg2);font-size:13px}
+.vai{background:var(--ok)!important;color:#fff!important}
+.note.warn{background:rgba(255,159,10,.16);color:var(--fg)}
+.note b{color:var(--fg)}
+.note p{margin:0 0 8px}.note p:last-child{margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="nota" class="note warn" hidden></div>
+  <div id="mie"></div>
+  <h2 class="h2">Condividi</h2>
+  <div class="card">
+    <div class="seg" id="modo"><button data-m="vivo" class="on">Dal vivo</button><button data-m="punto">Un punto solo</button></div>
+    <p class="small" id="modoNota"></p>
+    <div class="field"><label>Per quanto tempo</label>
+      <div class="seg" id="durata"><button data-d="900">15 min</button><button data-d="3600" class="on">1 ora</button><button data-d="0">Finché non la fermi</button></div>
+      <div class="small" id="durataNota"></div>
+    </div>
+    <div class="field"><label>Con chi</label><div class="list" id="chi"><div class="chi"><span class="small">Carico le persone di Atlante…</span></div></div></div>
+    <button class="btn pri full vai" id="vai">Condividi la posizione</button>
+  </div>
+  <h2 class="h2">Condivise con te</h2>
+  <div class="list" id="perMe"></div>
+  <h2 class="h2">Come funziona</h2>
+  <div class="note">
+    <p><b>Cifrata da telefono a telefono.</b> La posizione si cifra su questo telefono e si apre solo su quelli delle persone che scegli: il Mac mini di Samuele la passa senza poterla leggere. Per calcolare il percorso, il Navigatore di chi ti raggiunge manda partenza e arrivo al servizio pubblico di percorsi (OSRM), come fa ogni navigatore.</p>
+    <p><b>Dal vivo</b> la posizione parte al più ogni 5 secondi e solo quando ti sei spostato di almeno 20 metri (comunque una volta al minuto, così chi ti segue sa che è aggiornata). Si ferma da sola alla scadenza, oppure con «Ferma» nella barra blu in alto, che resta visibile finché condividi.</p>
+    <p><b>Sull'iPhone la posizione arriva solo con l'app aperta sullo schermo:</b> se passi a un'altra app o lo schermo si spegne, Apple la ferma, e riparte quando torni qui. Per questo, mentre condividi dal vivo, l'app tiene lo schermo acceso (dove il telefono lo permette): tienila aperta, per esempio sul supporto del manubrio o dell'auto.</p>
+    <p><b>Chi la riceve</b> vede l'avviso «<i>Nome</i> condivide la sua posizione» quando ha l'app aperta (ad app chiusa non arrivano notifiche) e con «Raggiungilo» il Navigatore lo porta da te, ricalcolando il percorso mentre ti sposti.</p>
+  </div>
+  <div class="small" id="schermo"></div>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast} = AX;
+AX.header('Condividi la posizione');
+const POS = (() => { try { return window.parent !== window && window.parent.POS ? window.parent.POS : null; } catch (e) { return null; } })();
+let modo = 'vivo', durata = 3600, persone = null, scelte = new Set(AX.store.get('posizione-scelte', [])), occupato = false;
+
+const ora2 = s => new Date(s * 1000).toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+const fino = c => c.durata ? 'fino alle ' + ora2(c.scade) : 'finché non la fermi (al più fino alle ' + ora2(c.scade) + ')';
+const nomi = L => { const n = L.map(x => x.nome); return n.length < 2 ? n.join('') : n.slice(0, -1).join(', ') + ' e ' + n[n.length - 1]; };
+function fa(s) {
+  const d = Math.max(0, Date.now() / 1000 - s);
+  return d < 45 ? 'adesso' : d < 3600 ? Math.round(d / 60) + ' min fa' : 'alle ' + ora2(s);
+}
+
+function scegliModo(m) {
+  modo = m;
+  document.querySelectorAll('#modo button').forEach(b => b.classList.toggle('on', b.dataset.m === m));
+  $('modoNota').textContent = m === 'vivo'
+    ? 'La tua posizione si aggiorna mentre ti muovi: chi la riceve ti raggiunge anche se ti sposti.'
+    : 'Solo il punto dove sei adesso, una volta: per esempio dove hai parcheggiato o dove aspetti.';
+  $('vai').textContent = m === 'vivo' ? 'Condividi la posizione dal vivo' : 'Condividi questo punto';
+  scegliDurata(durata);
+}
+function scegliDurata(d) {
+  durata = d;
+  document.querySelectorAll('#durata button').forEach(b => b.classList.toggle('on', +b.dataset.d === d));
+  $('durataNota').textContent = d ? '' : (modo === 'vivo' ? 'Finché tocchi «Ferma»: al più 12 ore.' : 'Finché lo togli: al più 12 ore.');
+}
+$('modo').onclick = e => { const b = e.target.closest('[data-m]'); if (b) scegliModo(b.dataset.m); };
+$('durata').onclick = e => { const b = e.target.closest('[data-d]'); if (b) scegliDurata(+b.dataset.d); };
+
+async function caricaPersone() {
+  try {
+    const r = await POS.persone();
+    persone = r.persone.filter(p => p.id !== r.io);
+    disegnaPersone();
+  } catch (e) { $('chi').innerHTML = '<div class="chi"><span class="small">' + esc(e.message) + '</span></div>'; }
+}
+function disegnaPersone() {
+  if (!persone) return;
+  if (!persone.length) { $('chi').innerHTML = '<div class="chi"><span class="small">In Atlante non c\'è ancora nessun altro: invita qualcuno dalla Gestione.</span></div>'; return; }
+  $('chi').innerHTML = persone.map(p => {
+    const n = p.dispositivi.length;
+    return '<label class="chi"><input type="checkbox" data-p="' + esc(p.id) + '"' + (scelte.has(p.id) ? ' checked' : '') + '><span class="tx"><b>' + esc(p.nome) + '</b><span>' +
+      (n ? (n === 1 ? 'la riceve sul suo telefono' : 'la riceve su ' + n + ' dispositivi') : 'non ha ancora aperto l\'app aggiornata: la vedrà quando la apre') + '</span></span></label>';
+  }).join('');
+}
+$('chi').addEventListener('change', e => {
+  const c = e.target.closest('[data-p]'); if (!c) return;
+  if (c.checked) scelte.add(c.dataset.p); else scelte.delete(c.dataset.p);
+  AX.store.set('posizione-scelte', [...scelte]);
+});
+
+$('vai').onclick = async () => {
+  if (occupato) return;
+  const a = (persone || []).filter(p => scelte.has(p.id)).map(p => p.id);
+  if (!a.length) { toast('Scegli almeno una persona'); return; }
+  occupato = true; $('vai').disabled = true;
+  const prima = $('vai').textContent; $('vai').textContent = 'Cerco la tua posizione…';
+  try {
+    await POS.condividi({tipo:modo, a, durata});
+    toast(modo === 'vivo' ? 'Condividi la posizione con ' + nomi(persone.filter(p => a.includes(p.id))) : 'Punto condiviso');
+  } catch (e) { toast(e.message); }
+  occupato = false; $('vai').disabled = false; $('vai').textContent = prima;
+};
+
+function disegna(s) {
+  $('nota').hidden = s.pronto || !s.spiega;
+  $('nota').textContent = s.spiega || '';
+  const v = s.vivo;
+  $('mie').innerHTML = s.mie.length ? '<h2 class="h2">Stai condividendo</h2><div class="list">' + s.mie.map(c => {
+    const qui = v && v.id === c.id;
+    const det = c.tipo === 'vivo'
+      ? (qui ? (v.geo === 'negato' ? 'Permesso di posizione negato' : v.inviate ? 'Ultimo invio ' + (c.t ? fa(c.t) : 'adesso') : 'In attesa del GPS…') : 'Dal vivo da un altro tuo dispositivo')
+      : 'Un punto';
+    return '<div class="cond"><div class="tx"><b>Con ' + esc(nomi(c.a)) + '</b><span>' + esc(det + ' · ' + fino(c)) + '</span>' +
+      (c.mancano && c.mancano.length ? '<span>Ancora da cifrare per ' + c.mancano.length + ' dispositivo' + (c.mancano.length > 1 ? 'i' : '') + ' nuovo' + (c.mancano.length > 1 ? 'i' : '') + '</span>' : '') +
+      '</div><button class="btn sm" data-ferma="' + esc(c.id) + '" style="color:var(--bad)">' + (c.tipo === 'vivo' ? 'Ferma' : 'Togli') + '</button></div>';
+  }).join('') + '</div>' : '';
+  $('perMe').innerHTML = s.perMe.length ? s.perMe.map(c => {
+    const det = c.tipo === 'vivo' ? 'Dal vivo · ' + (c.t ? 'aggiornata ' + fa(c.t) : 'in attesa della posizione') : 'Un punto' + (c.aperta ? ' · delle ' + ora2(c.aperta.t / 1000) : '');
+    return '<div class="cond"><div class="tx"><b>' + esc(c.da.nome) + ' condivide la sua posizione</b><span>' + esc(det + ' · ' + fino(c)) + '</span></div>' +
+      '<button class="btn sm pri vai" data-vai="' + esc(c.id) + '">Raggiungilo</button></div>';
+  }).join('') : '<div class="cond"><span class="small">Nessuno sta condividendo la posizione con te, adesso.</span></div>';
+  $('schermo').textContent = !s.wakeLock ? 'Questo browser non può tenere lo schermo acceso da solo: mentre condividi dal vivo impostalo tu (su iPhone: Impostazioni ▸ Schermo e luminosità ▸ Blocco automatico ▸ Mai).'
+    : v ? (v.wakeOk ? 'Schermo sempre acceso mentre condividi dal vivo ✓' : 'Lo schermo può spegnersi: tieni l\'app aperta, o imposta Blocco automatico ▸ Mai.') : '';
+}
+$('mie').addEventListener('click', async e => {
+  const b = e.target.closest('[data-ferma]'); if (!b) return;
+  b.disabled = true;
+  try { await POS.ferma(b.dataset.ferma); toast('Fatto: non la condividi più'); } catch (er) { toast(er.message); b.disabled = false; }
+});
+$('perMe').addEventListener('click', e => {
+  const b = e.target.closest('[data-vai]'); if (b) POS.raggiungi(b.dataset.vai);
+});
+
+scegliModo('vivo');
+if (!POS) {
+  $('nota').hidden = false;
+  $('nota').textContent = 'Apri «Condividi la posizione» dalla scheda Altro dell\'app: la condivisione dal vivo continua mentre usi il resto dell\'app.';
+  $('vai').disabled = true; $('chi').innerHTML = '';
+} else {
+  const smetti = POS.onChange(disegna);
+  addEventListener('pagehide', smetti);   // un altro modulo prende il riquadro: l'app non chiama più questa pagina
+  disegna(POS.stato());
+  caricaPersone();
+  setInterval(() => disegna(POS.stato()), 15000);
+}
+</script>
+</body>
+</html>

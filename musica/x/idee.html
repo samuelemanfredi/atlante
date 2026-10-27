@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Idee</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.btn.full{width:100%}
+.invito .tit{display:block;font-size:19px;font-weight:700;margin:0 0 6px}
+.invito p{margin:0 0 12px}
+.invito textarea.in{background:var(--bg)}
+.conta{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:var(--fg2);margin:-4px 4px 10px}
+.grazie{color:var(--ok);font-weight:600;text-align:center;margin:12px 0 2px}
+.idea{padding:12px 14px;border-bottom:.5px solid var(--sep)}
+.idea:last-child{border-bottom:0}
+.idea .itop{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
+.idea .testo{white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card invito">
+    <b class="tit">Hai un'idea per Atlante Musica?</b>
+    <p>Atlante Musica cresce insieme a chi la usa. Se c'è qualcosa che ti manca, che non capisci o che faresti diversamente, scrivilo qui: basta anche una frase. Ogni idea arriva a Samuele, che le legge tutte e decide cosa costruire.</p>
+    <div class="field"><textarea class="in" id="testo" maxlength="2000" aria-label="La tua idea" placeholder="Per esempio: vorrei…"></textarea></div>
+    <div class="conta"><span id="restano"></span><span id="caratteri">0/2000</span></div>
+    <button class="btn pri full" id="manda">Manda un'idea</button>
+    <p class="grazie" id="grazie" role="status" hidden>Grazie! La tua idea è arrivata.</p>
+  </div>
+  <p class="note" id="tutte" hidden>Le idee di tutti le trovi in Gestione → Idee.</p>
+  <h2 class="h2">Le tue idee</h2>
+  <div class="list" id="ilist"></div>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api, store} = AX;
+AX.header('Idee');
+let MAX = 2000, GIORNO = 10;
+// cosa vede chi l'ha scritta (la nota di Samuele resta a lui e a Claude)
+const STATI = {nuova:['Arrivata a Samuele', ''], proposta:['Samuele la sta valutando', 'warn'], accettata:['Accettata: si farà', 'ok'],
+  scartata:['Non si farà, per ora', ''], fatta:['Fatta: è nell\'app', 'ok']};
+
+function quando(t) {
+  const d = new Date(t * 1000), ora = new Date(), hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const giorni = Math.floor((new Date(ora.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (giorni <= 0) return 'oggi alle ' + hm;
+  if (giorni === 1) return 'ieri alle ' + hm;
+  return d.toLocaleDateString('it-IT', {day:'numeric', month:'long', year:d.getFullYear() === ora.getFullYear() ? undefined : 'numeric'});
+}
+function conta() { $('caratteri').textContent = $('testo').value.length + '/' + MAX; }
+function restano(n) {
+  $('restano').textContent = n <= 0 ? 'Per oggi hai mandato ' + GIORNO + ' idee: le altre domani' : n < GIORNO ? 'Oggi ne puoi mandare ancora ' + n : '';
+  $('manda').disabled = n <= 0;
+}
+async function disegna() {
+  let j;
+  try { j = await api('idee'); }
+  catch (e) { $('ilist').innerHTML = '<div class="idea"><span class="small">Non riesco a leggere le tue idee: ' + esc(e.message) + '</span></div>'; return; }
+  MAX = j.max_caratteri || MAX; GIORNO = j.max_giorno || GIORNO; $('testo').maxLength = MAX; conta();
+  restano(j.restano);
+  $('ilist').innerHTML = j.idee.length ? j.idee.map(x => {
+    const [t, cl] = STATI[x.stato] || [x.stato, ''];
+    return '<div class="idea"><div class="itop"><span class="small">' + esc(quando(x.creato)) + '</span><span class="pill ' + cl + '">' + esc(t) + '</span></div>' +
+      '<div class="testo">' + esc(x.testo) + '</div></div>';
+  }).join('') : '<div class="idea"><span class="small">Nessuna idea, per ora: la prima può essere la tua.</span></div>';
+}
+// la bozza resta sul telefono finché non parte: chiudere il riquadro o perdere la rete non la cancella
+$('testo').value = store.get('idee-bozza', '');
+conta();
+$('testo').addEventListener('input', () => { conta(); $('grazie').hidden = true; store.set('idee-bozza', $('testo').value); });
+$('manda').onclick = async () => {
+  const testo = $('testo').value.trim();
+  if (!testo) { $('testo').focus(); return; }
+  $('manda').disabled = true;
+  try {
+    const j = await api('idee', {method:'POST', body:{testo}});
+    $('testo').value = ''; store.set('idee-bozza', ''); conta();
+    $('grazie').hidden = false;
+    restano(j.restano);
+    disegna();
+  } catch (e) {
+    $('manda').disabled = false;
+    toast(e.name === 'AbortError' || e instanceof TypeError ? 'Il Mac non risponde: la tua idea resta qui, riprova più tardi' : e.message);
+  }
+};
+api('io').then(j => { $('tutte').hidden = j.ruolo !== 'proprietario'; }).catch(() => {});
+disegna();
+</script>
+</body>
+</html>

@@ -64,7 +64,8 @@ svg.i{width:20px;height:20px;display:block;flex:none}
 
   <h2 class="h2">Cerca anche su</h2>
   <div id="siti" class="list siti"></div>
-  <p class="small">I brani scaricati vanno nella libreria del Mac e compaiono su tutti i tuoi dispositivi, nel formato e alla qualità di quelli del Cloud. Si scarica la versione explicit: le censurate sono in fondo. Solo per ascolto personale: i brani restano dei loro autori. Dai servizi protetti (Spotify, Apple Music, Amazon Music) non si scarica.</p>
+  <p class="small" id="perTe" hidden>I brani che scarichi arrivano subito sul tuo telefono e a Samuele, che li controlla prima di metterli nella libreria di tutti. Solo per ascolto personale: i brani restano dei loro autori.</p>
+  <p class="small" id="perSamuele">I brani scaricati vanno nella libreria del Mac e compaiono su tutti i tuoi dispositivi, nel formato e alla qualità di quelli del Cloud. Si scarica la versione explicit: le censurate sono in fondo. Solo per ascolto personale: i brani restano dei loro autori. Dai servizi protetti (Spotify, Apple Music, Amazon Music) non si scarica.</p>
 </div>
 <script src="kit.js"></script>
 <script>
@@ -125,7 +126,7 @@ async function cerca(q) {
 function riga(b) {
   const l = lavoroDi(b.id), ora = player.now(), qui = ora && ora.id === 'yt:' + b.id;
   const fatto = l && l.stato === 'fatto', lib = fatto && l.brano && host && host.suona;
-  const meta = (fatto ? '✓ In libreria · ' : '') + [b.artista, b.album, durata(b.durata)].filter(Boolean).join(' · ');
+  const meta = (fatto ? (l.controllo ? '✓ Sul tuo telefono · ' : '✓ In libreria · ') : '') + [b.artista, b.album, durata(b.durata)].filter(Boolean).join(' · ');
   let az, play = '<button class="round' + (qui ? ' on' : '') + '" data-a="ascolta" data-id="' + esc(b.id) + '" aria-label="' + (qui && ora.playing ? 'Pausa' : 'Ascolta prima di scaricare') + '">' + (qui && ora.playing ? ICON.pause : ICON.play) + '</button>';
   if (lib) {   // già scaricato: si suona dalla libreria (con il mix e la copia sull'iPhone), non più l'anteprima
     play = '<button class="round" data-a="suona" data-b="' + esc(l.brano) + '" aria-label="Riproduci «' + esc(b.titolo) + '»">' + ICON.play + '</button>';
@@ -146,7 +147,7 @@ function mostra() {
   const L = lavori.slice(0, 20);
   $('lav').innerHTML = L.map(l => {
     const fatto = l.stato === 'fatto', err = l.stato === 'errore';
-    const sotto = fatto ? (l.artista ? esc(l.artista) + ' · ' : '') + 'nella libreria' : err ? '<span class="err">' + esc(l.errore || 'Non riuscito') + '</span>' : l.stato === 'in coda' ? 'in attesa…' : 'scarico sul Mac… ' + Math.round(l.progresso || 0) + '%';
+    const sotto = fatto ? (l.artista ? esc(l.artista) + ' · ' : '') + (l.controllo ? 'sul tuo telefono · Samuele lo controlla' : 'nella libreria') : err ? '<span class="err">' + esc(l.errore || 'Non riuscito') + '</span>' : l.stato === 'in coda' ? 'in attesa…' : 'scarico sul Mac… ' + Math.round(l.progresso || 0) + '%';
     const az = fatto && l.brano && host && host.suona ? '<button class="round" data-a="suona" data-b="' + esc(l.brano) + '" aria-label="Riproduci">' + ICON.play + '</button><button class="round" data-a="dopo" data-b="' + esc(l.brano) + '" aria-label="Riproduci dopo">' + ICON.dopo + '</button>'
       : attivo(l) ? '<button class="round" data-a="annulla" data-l="' + esc(l.id) + '" aria-label="Annulla">' + ICON.x + '</button>'
       : '<button class="round" data-a="togli" data-l="' + esc(l.id) + '" aria-label="Togli dall\'elenco">' + ICON.x + '</button>';
@@ -167,8 +168,12 @@ async function aggiornaLavori() {
   try { lavori = (await api('musica', {timeout:10000})).lavori || []; } catch (e) { giro = setTimeout(aggiornaLavori, 10000); return; }
   let nuovi = false;
   for (const l of lavori) if (l.stato === 'fatto' && l.brano && !noti.has(l.id)) { noti.add(l.id); if (!primoGiro) nuovi = true; }
+  // invitati: il brano è in «Da controllare» e il telefono ne prende subito una copia (anche al primo giro: l'app la prende una volta sola)
+  let copie = false;
+  for (const l of lavori) if (l.stato === 'fatto' && l.controllo && l.caricamento && !noti.has(l.id)) { noti.add(l.id); copie = true; }
   primoGiro = false;
   if (nuovi && host && host.libreria) { try { await host.libreria(); } catch (e) {} toast('Scaricato: è nella libreria'); }
+  if (copie && host && host.copie) { try { await host.copie(); } catch (e) {} }
   mostra();
   if (lavori.some(attivo)) giro = setTimeout(aggiornaLavori, 1500);
 }
@@ -214,7 +219,9 @@ player.onChange(n => { const s = n ? n.id + (n.playing ? '1' : '0') : ''; if (s 
 segnaFonte(); siti();
 const q0 = new URLSearchParams(location.search).get('q') || '';
 $('q').value = q0;
-AX.stato().then(s => { $('nomac').hidden = s.ok; });
+// «chi sono» risponde a tutti (lo stato del Mac no agli invitati): dice se il Mac c'è e cosa vale per chi scarica
+api('io', {timeout:6000}).then(io => { $('nomac').hidden = true; const tu = io.ruolo === 'invitato'; $('perTe').hidden = !tu; $('perSamuele').hidden = tu; },
+  () => { $('nomac').hidden = false; });
 aggiornaLavori();
 if (q0) cerca(q0); else setTimeout(() => $('q').focus(), 300);
 </script>
