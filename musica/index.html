@@ -191,6 +191,16 @@ body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .xtile.xyt{box-shadow:inset 0 0 0 2px #ff3b30}
 .xtile.xyt::after{content:"YouTube ha bloccato gli scaricamenti";color:#ff3b30;font-size:13px;font-weight:600;line-height:1.25}
 .xtile.xyt .xn{background:#ff3b30}
+/* classifiche: posizione con ▲▼ e «nuovo», brani in arrivo dal Mac mini */
+.cllead{display:flex;align-items:center;gap:10px}
+.clpos{width:30px;display:flex;flex-direction:column;align-items:center;font-variant-numeric:tabular-nums;line-height:1.15}
+.clpos b{font-size:16px;font-weight:600}
+.clpos small{font-size:12px;color:var(--fg2);white-space:nowrap}
+.cls{font-style:normal;font-size:11px;font-weight:700;color:var(--fg3)}
+.cls.su{color:#34c759}
+.cls.giu{color:#ff3b30}
+.cls.nuovo{color:var(--accent);font-size:10px;text-transform:uppercase}
+.trk.clno .tx,.trk.clno .art{opacity:.5}
 .xtile .xn{position:absolute;top:10px;right:10px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--accent);color:#fff;font-size:13px;font-weight:700;line-height:22px;text-align:center}
 .xtile{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:14px;background:var(--bg2);text-align:left;min-height:118px}
 .xtile .xi{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px}
@@ -774,6 +784,7 @@ async function loadServer() {
   if (put.length) rematch(put.filter(t => T.has(t.id)));   // brani nuovi o cambiati: forse sono quelli che mancavano alle playlist importate
   nuoviGemelli();
   scaricaTutto();
+  clCarica();
   return true;
 }
 // playlist e coda della versione precedente: i brani del Mac mai ascoltati né preferiti avevano l'id senza «r».
@@ -1294,7 +1305,7 @@ function topBar(right) {
   return '<div class="top">' + (prev ? '<button class="back" data-a="back">' + ic('chevL') + '<span>' + esc(routeTitle(prev)) + '</span></button>' : '<span></span>') + (right || '') + '</div>';
 }
 function routeTitle(r) {
-  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone'}[r.v] ||
+  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche'}[r.v] || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
     (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : '');
 }
 function emptyState() {
@@ -1330,6 +1341,7 @@ const pages = {
     if (rec.length) h += '<h2 class="h2">Ascoltati di recente</h2><div class="shelf">' + rec.map(tile).join('') + '</div>';
     h += '<h2 class="h2"><button data-a="go" data-v="albums" style="display:flex;align-items:center;gap:4px">Aggiunti di recente<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' + al.sort((a, b) => b.added - a.added).slice(0, 12).map(tile).join('') + '</div>';
     if (P.length) h += '<h2 class="h2">Le tue playlist</h2><div class="shelf">' + P.map(p => { const tr = plTracks(p); return '<button class="tile" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<div class="n">' + esc(p.name) + '</div><div class="a">' + tr.length + ' brani</div></button>'; }).join('') + '</div>';
+    h += clScaffale();
     const top = [...T.values()].filter(t => t.plays).sort((a, b) => b.plays - a.plays).slice(0, 8);
     if (top.length) h += '<h2 class="h2">I più ascoltati</h2>' + trackRows(top, {label:'I più ascoltati'});
     return h;
@@ -1343,7 +1355,7 @@ const pages = {
     if (SRV && SRVSCAN) h += '<div class="banner"><span class="bt">Il Mac sta leggendo il disco di backup' + (SRVN ? ': ' + SRVN + ' brani finora…' : '…') + '</span></div>';
     else if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span>' + (IO.ruolo !== 'invitato' ? '<button class="ba" data-a="rescan">Aggiorna</button>' : '') + '</div>';
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
-    h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
+    h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + (CLS.length ? row('classifiche', 'classifica', 'Classifiche') : '') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
     if (rem) {
       // brani diversi: un gruppo di doppioni conta una volta
       const gm = gemelli(), visti = new Set(); let tot = 0, sul = 0;
@@ -1459,6 +1471,76 @@ function searchResults() {
   if (tr.length) h += '<h2 class="h2">Brani</h2>' + trackRows(tr, {label:'Risultati'});
   return h || '<div class="empty"><h3>Nessun risultato</h3><p>Prova con un altro nome di brano, artista o album.</p></div>';
 }
+
+/* ---------- classifiche: ogni classifica letta dal Mac mini è una playlist (posizioni, ▲▼, nuovi, usciti) ---------- */
+// L'elenco arriva dal Mac (api/extra/classifiche, anche per gli invitati) e resta sul telefono: senza rete si vede l'ultima
+// versione ricevuta e suonano i brani salvati sull'iPhone. I brani sono quelli della libreria (si scaricano sull'iPhone come
+// gli altri); quelli che il Mac mini non ha ancora scaricato sono «in arrivo». Chi esce dalla classifica resta nella
+// libreria e, per 4 settimane, in «Usciti di recente».
+let CLS = ls.get('am-classifiche', []);
+if (!Array.isArray(CLS)) CLS = [];
+I.classifica = '<path d="M3.5 20.5v-9h4.2v9zm6.4 0v-17h4.2v17zm6.4 0v-12h4.2v12z"/>';
+async function clCarica() {
+  try {
+    const r = await fetchT(XAPI + 'classifiche', {cache:'no-store'}, 8000);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j || !Array.isArray(j.classifiche) || JSON.stringify(j.classifiche) === JSON.stringify(CLS)) return;
+    CLS = j.classifiche; ls.set('am-classifiche', CLS);
+    if (['home', 'lib', 'classifiche', 'classifica'].indexOf(curRoute().v) >= 0) render(true);
+  } catch (e) {}
+}
+const clTraccia = b => (b.brano && T.get('r' + b.brano)) || null;
+const clTracce = voci => voci.map(clTraccia).filter(Boolean);
+const clData = t => t ? new Date(t * 1000).toLocaleDateString('it-IT', {day:'numeric', month:'long'}) : '';
+function clScaffale() {   // Home
+  if (!CLS.length) return '';
+  return '<h2 class="h2"><button data-a="go" data-v="classifiche" style="display:flex;align-items:center;gap:4px">Classifiche<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' +
+    CLS.map(c => '<button class="tile" data-a="go" data-v="classifica" data-k="' + esc(c.id) + '">' + mosaic(clTracce(c.brani)) + '<div class="n">' + esc(c.nome) + '</div><div class="a">' +
+      (c.brani.length ? '1. ' + esc(c.brani[0].titolo) + ' · ' + esc(c.brani[0].artista) : '') + '</div></button>').join('') + '</div>';
+}
+function clSegno(b) {
+  if (b.segno === 'nuovo') return '<i class="cls nuovo">nuovo</i>';
+  if (b.segno === 'su') return '<i class="cls su" aria-label="sale di ' + b.di + '">▲' + b.di + '</i>';
+  if (b.segno === 'giu') return '<i class="cls giu" aria-label="scende di ' + b.di + '">▼' + b.di + '</i>';
+  if (b.segno === 'uguale') return '<i class="cls" aria-label="stessa posizione">=</i>';
+  return '';
+}
+// righe come quelle delle playlist, con la posizione davanti; i brani non ancora nella libreria non si toccano
+function clRighe(voci, l, pos) {
+  const q = new Set(DLQ); let k = 0;
+  return '<div class="trks">' + voci.map(b => {
+    const t = clTraccia(b), testa = '<span class="cllead"><span class="clpos">' + pos(b) + '</span>' + art(t ? t.cover : null) + '</span>';
+    if (!t) return '<div class="trk clno">' + testa + '<div class="rt"><div class="tx"><span class="t1">' + esc(b.titolo) + '</span><span class="t2">' + esc(b.artista) + ' · ' + (b.stato === 'non disponibile' ? 'non disponibile' : 'in arrivo') + '</span></div></div></div>';
+    const i = k++;
+    return '<div class="trk' + (t.id === curId ? ' cur' : '') + (t.remote && !SRV && !srvWait && !saved.has(t.id) ? ' off' : '') + '" data-id="' + t.id + '"><button class="tap" style="display:contents" data-a="play" data-l="' + l + '" data-i="' + i + '">' + testa +
+      '</button><div class="rt"><button class="tx" data-a="play" data-l="' + l + '" data-i="' + i + '" style="text-align:left"><span class="t1">' + t1(t) + '</span><span class="t2">' + esc(t.artist || UNK_ART) + '</span></button>' +
+      (t.remote ? '<span class="dl" aria-label="' + (saved.has(t.id) ? 'Sull\'iPhone' : 'Sul Mac') + '">' + dlSign(t.id, q) + '</span>' : '') + '<button class="more" data-a="more" data-id="' + t.id + '" aria-label="Altre azioni">' + ic('more') + '</button></div></div>';
+  }).join('') + '</div>';
+}
+pages.classifiche = function () {
+  return topBar() + '<h1 class="lt">Classifiche</h1>' + (CLS.length ? '<div>' + CLS.map(c => '<button class="trk" data-a="go" data-v="classifica" data-k="' + esc(c.id) + '">' + mosaic(clTracce(c.brani)) +
+    '<span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">' + c.brani.length + ' brani · aggiornata il ' + clData(c.cambiata || c.letta) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' +
+    '<p class="foot">Si aggiornano da sole: i nuovi ingressi entrano nella libreria, chi esce resta nella libreria.</p>' :
+    '<div class="empty"><div class="big">' + ic('classifica') + '</div><h3>Nessuna classifica, per ora</h3><p>Compaiono quando il Mac mini le ha lette.</p></div>');
+};
+pages.classifica = function (r) {
+  const c = CLS.find(x => x.id === r.k);
+  if (!c) return topBar() + '<div class="empty"><h3>Classifica non trovata</h3></div>';
+  const tr = clTracce(c.brani), l = regList(tr.map(t => t.id), c.nome);
+  const arrivo = c.brani.filter(b => !clTraccia(b) && b.stato !== 'non disponibile').length;
+  let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(c.nome) + '</div><div class="hm">' + c.brani.length + ' brani · aggiornata il ' + clData(c.cambiata || c.letta) + '</div>' +
+    (arrivo ? '<div class="hm" style="text-transform:none;letter-spacing:0;font-weight:400">' + arrivo + (arrivo === 1 ? ' brano in arrivo' : ' brani in arrivo') + ' nella libreria</div>' : '') + '</div></div>';
+  if (tr.length) h += pbtns(l);
+  h += clRighe(c.brani, l, b => '<b>' + b.pos + '</b>' + clSegno(b));
+  const us = c.usciti || [];
+  if (us.length) {
+    const lu = regList(clTracce(us).map(t => t.id), c.nome + ' · Usciti di recente');
+    h += '<h2 class="h2">Usciti di recente</h2>' + clRighe(us, lu, b => '<small>era ' + b.pos + '°</small>') +
+      '<p class="foot">Usciti dalla classifica nelle ultime 4 settimane: restano nella libreria e nelle tue playlist.</p>';
+  }
+  return h;
+};
 
 /* ---------- rendering e navigazione ---------- */
 function render(keepScroll) {

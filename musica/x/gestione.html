@@ -50,7 +50,7 @@
   <p class="small">Quelli entrati come Samuele (con Tailscale o con la password). Se ne vedi uno che non è tuo, revocalo.</p>
   <div class="list" id="tlist"></div>
   <h2 class="h2" id="classifiche">Classifiche e playlist</h2>
-  <p class="small">I brani delle classifiche più note (ogni settimana), poi delle playlist più seguite di Spotify e YouTube Music, sempre nella versione explicit, entrano da soli nella libreria.</p>
+  <p class="small">I brani delle classifiche più note (rilette ogni giorno: i nuovi ingressi passano davanti), poi delle playlist più seguite di Spotify e YouTube Music, sempre nella versione explicit, entrano da soli nella libreria. Ogni classifica è anche una playlist nell'app di tutti.</p>
   <div id="cl"><p class="small">Un momento…</p></div>
 </div>
 <script src="kit.js"></script>
@@ -233,7 +233,7 @@ disegna();
       h += '<h2 class="h2" style="font-size:17px">Ultimi aggiunti</h2>' + (j.ultimi.length ? '<div class="list">' + j.ultimi.map(u =>
         '<div class="row"><span class="tx"><b>' + esc(u.titolo) + (u.explicit ? ' <em class="esp" title="Explicit">E</em>' : '') + '</b><span>' + esc(u.artista) + ' · ' + esc(u.fonte) + ' · ' + quando(u.quando) + '</span></span></div>').join('') + '</div>' :
         '<p class="small">Ancora nessuno.</p>');
-      h += '<h2 class="h2" style="font-size:17px">Classifiche (ogni settimana)</h2><div class="list">' + j.classifiche.map(riga).join('') + '</div>';
+      h += '<h2 class="h2" style="font-size:17px">Classifiche (ogni giorno)</h2><div class="list">' + j.classifiche.map(riga).join('') + '</div>';
       if (j.playlist.length) h += '<h2 class="h2" style="font-size:17px">Playlist lette di recente</h2><div class="list">' + j.playlist.map(riga).join('') + '</div>';
       $('cl').innerHTML = h;
     }
