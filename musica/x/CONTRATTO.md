@@ -68,3 +68,17 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | `strumenti.html` | ricerca del prezzo migliore, negozi per categoria, risolutore di test (crocette e domande aperte), carte fedeltà e di pagamento, gestore dispositivo |
 | `idee.html` | «Idee»: l'invito a proporre miglioramenti dell'app, il modulo per mandarne una e «Le tue idee» con lo stato (aperto anche agli invitati); le idee di tutti sono in Gestione → Idee |
 | `studio.html` | Atlante UCI (accesso con le proprie credenziali), notizie di ciclismo, allenamenti creati dall'IA su qualsiasi argomento, Assistente Idee |
+
+## Rete: Tailscale (Gestione → Rete e modulo «Rete e VPN»)
+Un'app web non può accendere il VPN del telefono: si comanda Tailscale sul Mac mini e si guida il telefono.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `io` | `{ruolo, persona, nuove, via:'tailscale'\|'casa'\|'internet'}` — `via`: da dove arriva questo dispositivo (per tutti) |
+| GET | `gestione/rete` | solo Samuele: `{installato, collegato, stato, errore, versione, nome, dns, indirizzo, rete, dispositivi:[{nome,sistema,indirizzo,online,visto}], serve:[{porta,indirizzo,destino,funnel}], questo, pannello, funnel:{acceso,porta,indirizzo,destino,porte,predefiniti:{porta,destino},pubblico}, uscita:{annunciata,approvata}}` |
+| POST | `gestione/rete/funnel` `{acceso, porta?:443\|8443\|10000, destino?:'http://127.0.0.1:<porta>'}` | lo stato come sopra; se Tailscale dice di no 409 `{errore, dettaglio, link, pannello, rete}` (`pannello`: va permesso nel pannello di Tailscale) |
+| POST | `gestione/rete/uscita` `{acceso}` | uscita da casa (exit node): lo stato come sopra, o 409 come per Funnel |
+
+| File | Contenuto |
+|---|---|
+| `rete.html` | per tutti: se questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet; come accendere Tailscale (App Store, Google Play); agli invitati spiega che non serve. Resta nella copia offline |

@@ -126,6 +126,74 @@ with open(out, "wb") as f:
     f.write(scatola(b"ftyp", b"M4A \0\0\0\0M4A mp42isom") + scatola(b"moov", scatola(b"mvhd", mvhd)))
 '''
 
+# ----- tailscale finto (Gestione → Rete) -----
+# Le prove girano anche sul Mac mini prima di ogni aggiornamento: lì il tailscale vero non deve mai partire. Questo
+# finto sta in testa al PATH, risponde solo ai comandi che il server deve usare (con gli argomenti esatti) e tiene lo
+# stato in FINTO_DIR/tailscale-stato.json: {spento, funnel_vietato, attesa, uscita, approvata, serve}.
+FINTO_TAILSCALE = r'''
+import json, os, re, sys, time
+a = sys.argv[1:]
+cart = os.environ["FINTO_DIR"]
+fs = os.path.join(cart, "tailscale-stato.json")
+try:
+    with open(fs) as f:
+        st = json.load(f)
+except (OSError, ValueError):
+    st = {}
+with open(os.path.join(cart, "tailscale.log"), "a") as f:
+    f.write(json.dumps(a) + "\n")
+
+def salva():
+    with open(fs, "w") as f:
+        json.dump(st, f)
+
+DNS = "mac-mini.tail1234.ts.net"
+if st.get("spento"):
+    sys.stderr.write("failed to connect to local Tailscale daemon (tailscaled not running?)\n")
+    sys.exit(1)
+serve = st.setdefault("serve", {})
+if a == ["status", "--json"]:
+    print(json.dumps({"Version": "1.90.0-finto", "BackendState": "Running", "TailscaleIPs": ["100.100.1.1", "fd7a:115c:a1e0::1"],
+        "Self": {"HostName": "Mac-mini", "DNSName": DNS + ".", "OS": "macOS", "Online": True,
+                 "TailscaleIPs": ["100.100.1.1", "fd7a:115c:a1e0::1"], "ExitNodeOption": bool(st.get("uscita") and st.get("approvata"))},
+        "MagicDNSSuffix": "tail1234.ts.net", "CurrentTailnet": {"Name": "samuele@example.com", "MagicDNSSuffix": "tail1234.ts.net"},
+        "Peer": {"nodekey:2": {"HostName": "MacBook-Pro", "DNSName": "macbook.tail1234.ts.net.", "OS": "macOS", "Online": False,
+                               "TailscaleIPs": ["100.100.1.3"], "LastSeen": "2026-10-26T18:30:00.123456789Z"},
+                 "nodekey:1": {"HostName": "localhost", "DNSName": "iphone-di-samuele.tail1234.ts.net.", "OS": "iOS", "Online": True,
+                               "TailscaleIPs": ["100.100.1.2"], "LastSeen": "0001-01-01T00:00:00Z"}}}))
+elif a in (["funnel", "status", "--json"], ["serve", "status", "--json"]):
+    print(json.dumps(serve, indent=2))
+elif a == ["debug", "prefs"]:
+    print(json.dumps({"ControlURL": "https://controlplane.tailscale.com", "AdvertiseRoutes": ["0.0.0.0/0", "::/0"] if st.get("uscita") else None}))
+elif len(a) == 4 and a[:2] == ["funnel", "--bg"] and re.match(r"^--https=\d+$", a[2]) and re.match(r"^http://127\.0\.0\.1:\d+$", a[3]):
+    if st.get("funnel_vietato"):
+        print("Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         https://login.tailscale.com/f/funnel?node=nFINTO123\n", flush=True)
+        if st.get("attesa"):
+            time.sleep(60)
+        sys.exit(1)
+    porta = a[2].split("=")[1]
+    serve.setdefault("TCP", {})[porta] = {"HTTPS": True}
+    serve.setdefault("Web", {})["%s:%s" % (DNS, porta)] = {"Handlers": {"/": {"Proxy": a[3]}}}
+    serve.setdefault("AllowFunnel", {})["%s:%s" % (DNS, porta)] = True
+    salva()
+    print("Available on the internet:\n\nhttps://%s:%s/\n|-- proxy %s\n\nFunnel started and running in the background." % (DNS, porta, a[3]))
+elif len(a) == 3 and a[0] == "funnel" and re.match(r"^--https=\d+$", a[1]) and a[2] == "off":
+    porta = a[1].split("=")[1]
+    hp = "%s:%s" % (DNS, porta)
+    if hp not in serve.get("Web", {}):
+        sys.stderr.write("error: failed to remove web serve: handler does not exist\n")
+        sys.exit(1)
+    for k, sotto in (("TCP", porta), ("Web", hp), ("AllowFunnel", hp)):
+        serve.get(k, {}).pop(sotto, None)
+    salva()
+elif len(a) == 2 and a[0] == "set" and a[1] in ("--advertise-exit-node=true", "--advertise-exit-node=false"):
+    st["uscita"] = a[1].endswith("true")
+    salva()
+else:
+    sys.stderr.write("comando sconosciuto al finto: %r\n" % a)
+    sys.exit(2)
+'''
+
 
 def quote(s):
     return _quote(s, safe="")
@@ -303,6 +371,11 @@ def prepara_cartelle(base):
         with open(p, "w", encoding="utf-8") as f:
             f.write("#!%s\n%s" % (sys.executable, codice))
         os.chmod(p, 0o755)
+    # tailscale finto in ogni server delle prove: anche dove nessuna prova lo chiama, il vero non deve partire mai
+    p = os.path.join(c["bin"], "tailscale")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("#!%s\n%s" % (sys.executable, FINTO_TAILSCALE))
+    os.chmod(p, 0o755)
     c["porta_ollama"] = porta_libera()   # nessuno in ascolto: Ollama «assente»
     return c
 
@@ -1421,7 +1494,8 @@ class TestAccesso(unittest.TestCase):
             self.assertEqual(st, 403, (metodo, p))
             self.assertEqual(json.loads(b.decode("utf-8"))["errore"], "Non disponibile per gli invitati", p)
         st, h, b = self.da_fuori("GET", "/api/extra/io", biscotto=v)
-        self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "invitato", "persona": {"id": pid, "nome": "Elena"}})
+        self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "invitato", "persona": {"id": pid, "nome": "Elena"},
+                                                         "via": "internet"})
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io")
         io = json.loads(b.decode("utf-8"))
         self.assertEqual((io["ruolo"], io["persona"], sorted(io["nuove"])), ("proprietario", None, ["idee", "richieste"]))
@@ -3176,6 +3250,300 @@ class TestAscoltatiServer(unittest.TestCase):
         # anche Samuele i suoi
         self.assertGreater(self.samuele("DELETE", "/api/extra/ascoltati")["cancellati"], 0)
         self.assertEqual(self.samuele("GET", "/api/extra/ascoltati")["io"]["ascolti"], 0)
+
+
+# ----- Gestione → Rete: Tailscale sul Mac mini (sempre con il tailscale finto) -----
+
+class TestRete(unittest.TestCase):
+    """Gestione → Rete: stato di Tailscale, Funnel e uscita da casa, solo per Samuele; il campo «via» di api/extra/io."""
+
+    SAMUELE_TS = {"X-Forwarded-For": "100.100.1.2", "Tailscale-User-Login": "samuele@example.com"}
+    ALTRO_TS = {"X-Forwarded-For": "100.100.1.9", "Tailscale-User-Login": "anna@example.com"}   # rete Tailscale, non Samuele: «casa»
+    RETE = "/api/extra/gestione/rete"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-rete-")
+        cls.c = prepara_cartelle(cls.base)
+        with open(os.path.join(cls.c["app"], "x", "rete.html"), "w", encoding="utf-8") as f:
+            f.write("<!doctype html><title>Rete e VPN</title>")
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_PROPRIETARI": "samuele@example.com"}):
+            cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac-mini.tail1234.ts.net:10000"]).avvia()
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_rete", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def setUp(self):
+        self.stato({})   # ogni prova parte con Tailscale collegato, senza Funnel e senza uscita da casa
+        self.chiamate()
+
+    def stato(self, st):
+        with open(os.path.join(self.c["finto"], "tailscale-stato.json"), "w") as f:
+            json.dump(st, f)
+
+    def chiamate(self):
+        """I comandi arrivati al tailscale finto dall'ultima volta (poi l'elenco riparte da zero)."""
+        p = os.path.join(self.c["finto"], "tailscale.log")
+        try:
+            with open(p) as f:
+                righe = [json.loads(x) for x in f if x.strip()]
+            os.unlink(p)
+        except OSError:
+            righe = []
+        return righe
+
+    def samuele(self, metodo, p, corpo=None, codice=200, intest=None):
+        return self.s.json(metodo, p, corpo, codice, intest=intest)
+
+    def invitato(self, nome):
+        a = self.pers.crea(nome)
+        did = self.pers.usa_invito(self.pers.invito(a["id"])[0], "iphone")
+        return dict(FUNNEL, Cookie="am_accesso=" + self.pers.biscotto(did))
+
+    def test_1_stato(self):
+        import calendar
+        j = self.samuele("GET", self.RETE)
+        self.assertTrue(j["installato"])
+        self.assertTrue(j["collegato"])
+        self.assertEqual((j["nome"], j["dns"], j["indirizzo"], j["rete"], j["errore"]),
+                         ("mac-mini", "mac-mini.tail1234.ts.net", "100.100.1.1", "tail1234.ts.net", ""))
+        self.assertEqual([(d["nome"], d["sistema"], d["online"], d["indirizzo"]) for d in j["dispositivi"]],
+                         [("iphone-di-samuele", "iOS", True, "100.100.1.2"), ("macbook", "macOS", False, "100.100.1.3")])
+        self.assertIsNone(j["dispositivi"][0]["visto"])   # «0001-01-01»: online adesso
+        self.assertEqual(j["dispositivi"][1]["visto"], calendar.timegm((2026, 10, 26, 18, 30, 0)))
+        f = j["funnel"]
+        self.assertEqual((f["acceso"], f["porta"], f["porte"]), (False, None, [443, 8443, 10000]))
+        # la porta predefinita è quella dell'indirizzo pubblico dei link d'invito, l'indirizzo è questo server
+        self.assertEqual(f["predefiniti"], {"porta": 10000, "destino": "http://127.0.0.1:%d" % self.s.porta})
+        self.assertEqual(j["uscita"], {"annunciata": False, "approvata": False})
+        self.assertEqual(j["questo"], "casa")   # il Mac stesso
+        # solo comandi che leggono
+        self.assertEqual(sorted(map(tuple, self.chiamate())),
+                         [("debug", "prefs"), ("funnel", "status", "--json"), ("status", "--json")])
+
+    def test_2_funnel_acceso_e_spento(self):
+        j = self.samuele("POST", self.RETE + "/funnel", {"acceso": True})
+        self.assertEqual((j["funnel"]["acceso"], j["funnel"]["porta"], j["funnel"]["indirizzo"]),
+                         (True, 10000, "https://mac-mini.tail1234.ts.net:10000/"))
+        self.assertIn(["funnel", "--bg", "--https=10000", "http://127.0.0.1:%d" % self.s.porta], self.chiamate())
+        self.assertTrue(aspetta(lambda: "Funnel acceso" in self.s.leggi_log(), 5), self.s.leggi_log())
+        self.assertTrue(self.samuele("GET", self.RETE)["funnel"]["acceso"])
+        self.chiamate()
+        j = self.samuele("POST", self.RETE + "/funnel", {"acceso": False})
+        self.assertFalse(j["funnel"]["acceso"])
+        self.assertIn(["funnel", "--https=10000", "off"], self.chiamate())
+        self.assertTrue(aspetta(lambda: "Funnel spento" in self.s.leggi_log(), 5))
+        # già spento: nessun comando che cambia qualcosa
+        self.samuele("POST", self.RETE + "/funnel", {"acceso": False})
+        self.assertFalse([c for c in self.chiamate() if "off" in c or "--bg" in c])
+
+    def test_3_porta_e_indirizzo_scelti(self):
+        j = self.samuele("POST", self.RETE + "/funnel", {"acceso": True, "porta": 8443, "destino": "http://localhost:%d/" % self.s.porta})
+        self.assertEqual((j["funnel"]["acceso"], j["funnel"]["porta"]), (True, 8443))
+        self.assertIn(["funnel", "--bg", "--https=8443", "http://127.0.0.1:%d" % self.s.porta], self.chiamate())
+        # acceso: per cambiare porta prima si spegne
+        st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/funnel", {"acceso": True, "porta": 10000})
+        self.assertEqual(st, 409, b)
+        self.assertFalse([c for c in self.chiamate() if "--bg" in c])
+        # si spegne la porta dove è acceso, e la scelta resta per la prossima volta
+        self.samuele("POST", self.RETE + "/funnel", {"acceso": False})
+        self.assertIn(["funnel", "--https=8443", "off"], self.chiamate())
+        self.assertEqual(self.samuele("GET", self.RETE)["funnel"]["predefiniti"]["porta"], 8443)
+        self.samuele("POST", self.RETE + "/funnel", {"acceso": True, "porta": 10000})
+        self.samuele("POST", self.RETE + "/funnel", {"acceso": False})
+        self.chiamate()
+        # nessun testo dell'utente arriva al comando: porte e indirizzi solo tra quelli permessi
+        for corpo in ({"acceso": True, "porta": 1234}, {"acceso": True, "porta": "10000; ls"}, {"acceso": True, "porta": True},
+                      {"acceso": True, "destino": "http://127.0.0.1:8790/;rm -rf ~"}, {"acceso": True, "destino": "http://192.168.1.5:80"},
+                      {"acceso": True, "destino": "http://127.0.0.1:70000"}, {"acceso": True, "destino": "file:///etc/passwd"},
+                      {"acceso": True, "destino": "http://utente@127.0.0.1:8790"}, {"acceso": True, "destino": 8790},
+                      {"acceso": "sì"}, {}):
+            st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/funnel", corpo)
+            self.assertEqual(st, 400, (corpo, b))
+        self.assertEqual(self.chiamate(), [])
+
+    def test_4_porta_della_rete_tailscale_non_si_tocca(self):
+        # tailscale serve --bg 8790: l'indirizzo dell'app nella rete Tailscale (porta 443) non diventa pubblico per sbaglio
+        self.stato({"serve": {"TCP": {"443": {"HTTPS": True}},
+                              "Web": {"mac-mini.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8790"}}}}}})
+        j = self.samuele("GET", self.RETE)
+        self.assertEqual(j["serve"], [{"porta": 443, "indirizzo": "https://mac-mini.tail1234.ts.net/",
+                                       "destino": "http://127.0.0.1:8790", "funnel": False}])
+        self.chiamate()
+        st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/funnel", {"acceso": True, "porta": 443})
+        self.assertEqual(st, 409)
+        self.assertIn("443", json.loads(b.decode("utf-8"))["errore"])
+        self.assertFalse([c for c in self.chiamate() if "--bg" in c])
+
+    def test_5_funnel_non_permesso(self):
+        self.stato({"funnel_vietato": True})
+        st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/funnel", {"acceso": True})
+        self.assertEqual(st, 409, b)
+        j = json.loads(b.decode("utf-8"))
+        self.assertTrue(j["pannello"])
+        self.assertIn("pannello di Tailscale", j["errore"])
+        self.assertIn("Funnel is not enabled", j["dettaglio"])
+        self.assertEqual(j["link"], "https://login.tailscale.com/f/funnel?node=nFINTO123")
+        self.assertFalse(j["rete"]["funnel"]["acceso"])
+        self.assertTrue(aspetta(lambda: "Funnel non acceso" in self.s.leggi_log(), 5))
+
+    def test_6_uscita_da_casa(self):
+        j = self.samuele("POST", self.RETE + "/uscita", {"acceso": True})
+        self.assertEqual(j["uscita"], {"annunciata": True, "approvata": False})   # la prima volta va approvata nel pannello
+        self.assertIn(["set", "--advertise-exit-node=true"], self.chiamate())
+        self.assertTrue(aspetta(lambda: "Uscita da casa accesa" in self.s.leggi_log(), 5))
+        self.stato({"uscita": True, "approvata": True})
+        self.assertEqual(self.samuele("GET", self.RETE)["uscita"], {"annunciata": True, "approvata": True})
+        j = self.samuele("POST", self.RETE + "/uscita", {"acceso": False})
+        self.assertEqual(j["uscita"]["annunciata"], False)
+        self.assertIn(["set", "--advertise-exit-node=false"], self.chiamate())
+        self.assertTrue(aspetta(lambda: "Uscita da casa spenta" in self.s.leggi_log(), 5))
+        st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/uscita", {"acceso": 1})
+        self.assertEqual(st, 400)
+
+    def test_7_solo_samuele(self):
+        ospite = self.invitato("Ospite della rete")
+        for metodo, p, corpo in (("GET", self.RETE, None), ("POST", self.RETE + "/funnel", {"acceso": True}),
+                                 ("POST", self.RETE + "/uscita", {"acceso": True})):
+            st, h, b = richiesta(self.s.porta, metodo, p, corpo, intest=ospite)
+            self.assertEqual((st, json.loads(b.decode("utf-8"))["errore"]), (403, "Non disponibile per gli invitati"), p)
+            st, h, b = richiesta(self.s.porta, metodo, p, corpo, intest=self.ALTRO_TS)
+            self.assertEqual((st, json.loads(b.decode("utf-8"))["errore"]), (403, "Solo Samuele può usare la Gestione"), p)
+            if metodo == "POST":   # Samuele, ma la richiesta parte da un altro sito aperto nel browser
+                st, h, b = richiesta(self.s.porta, metodo, p, corpo, intest={"Origin": "https://altro.example"})
+                self.assertEqual(st, 403, p)
+        self.assertEqual(self.chiamate(), [])   # tailscale non è stato neanche chiamato
+        self.assertEqual(self.samuele("GET", self.RETE, intest=self.SAMUELE_TS)["questo"], "tailscale")
+        # la guida per il telefono la vedono tutti, anche gli invitati (spiega che a loro non serve)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/x/rete.html", intest=ospite)[0], 200)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/x/rete.html", intest=self.ALTRO_TS)[0], 200)
+
+    def test_8_tailscale_spento_sul_mac(self):
+        self.stato({"spento": True})
+        j = self.samuele("GET", self.RETE)
+        self.assertEqual((j["installato"], j["collegato"]), (True, False))
+        self.assertIn("failed to connect", j["errore"])
+        st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/funnel", {"acceso": True})
+        self.assertEqual(st, 409)
+        self.assertIn("failed to connect", json.loads(b.decode("utf-8"))["dettaglio"])
+        # per spegnere, se Tailscale non risponde si prova comunque sulla porta scelta (e si dice com'è andata)
+        self.chiamate()
+        st, h, b = richiesta(self.s.porta, "POST", self.RETE + "/funnel", {"acceso": False})
+        self.assertEqual(st, 409)
+        self.assertIn(["funnel", "--https=10000", "off"], self.chiamate())
+        # Tailscale collegato e niente Funnel: spegnere non chiama niente
+        self.stato({})
+        self.samuele("POST", self.RETE + "/funnel", {"acceso": False})
+        self.assertFalse([c for c in self.chiamate() if "off" in c])
+
+    def test_9_da_dove_arriva(self):
+        self.assertEqual(self.samuele("GET", "/api/extra/io")["via"], "casa")
+        self.assertEqual(self.samuele("GET", "/api/extra/io", intest=self.SAMUELE_TS)["via"], "tailscale")
+        io = self.samuele("GET", "/api/extra/io", intest=self.ALTRO_TS)
+        self.assertEqual((io["ruolo"], io["via"]), ("casa", "tailscale"))
+        io = self.samuele("GET", "/api/extra/io", intest=self.invitato("Ospite di passaggio"))
+        self.assertEqual((io["ruolo"], io["via"]), ("invitato", "internet"))
+
+    def test_9b_richieste_sbagliate(self):
+        self.assertEqual(richiesta(self.s.porta, "GET", self.RETE + "/funnel")[0], 405)
+        self.assertEqual(richiesta(self.s.porta, "DELETE", self.RETE)[0], 405)
+        self.assertEqual(richiesta(self.s.porta, "POST", self.RETE, {})[0], 405)
+        self.assertEqual(richiesta(self.s.porta, "GET", self.RETE + "/altro")[0], 404)
+        self.assertEqual(self.chiamate(), [])
+
+
+class TestReteInterna(unittest.TestCase):
+    """Le parti di Gestione → Rete senza server: da dove arriva una richiesta, lettura delle risposte di tailscale,
+    tempo massimo dei comandi. Il tailscale vero non si chiama mai: il programma è sempre quello finto (o nessuno)."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_rete_interna", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.base = tempfile.mkdtemp(prefix="atlante-rete-interna-")
+        cls.finto = os.path.join(cls.base, "tailscale")
+        with open(cls.finto, "w", encoding="utf-8") as f:
+            f.write("#!%s\n%s" % (sys.executable, FINTO_TAILSCALE))
+        os.chmod(cls.finto, 0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def con_finto(self, prog):
+        return unittest.mock.patch.object(self.m, "_tailscale_programma", return_value=prog)
+
+    def test_via(self):
+        for ip, intest, via in (("127.0.0.1", {}, "casa"), ("::1", {}, "casa"), ("192.168.1.20", {}, "casa"),
+                                ("100.100.1.2", {}, "tailscale"), ("8.8.8.8", {}, "internet"),
+                                ("127.0.0.1", FUNNEL, "internet"),
+                                ("127.0.0.1", {"X-Forwarded-For": "100.64.0.1"}, "tailscale"),
+                                ("127.0.0.1", {"X-Forwarded-For": "fd7a:115c:a1e0::5"}, "tailscale"),
+                                ("127.0.0.1", {"X-Forwarded-For": "203.0.113.5, 100.64.0.1", "Tailscale-User-Login": "s@e.com"}, "tailscale"),
+                                ("127.0.0.1", {"X-Forwarded-For": "100.64.0.1, 203.0.113.5"}, "internet"),
+                                ("192.168.1.3", {"X-Forwarded-For": "100.64.0.1"}, "internet")):
+            self.assertEqual(self.m._via(FintaRichiesta(ip, intest)), via, (ip, intest))
+
+    def test_ore_di_tailscale(self):
+        import calendar
+        t = calendar.timegm((2026, 10, 26, 18, 30, 0))
+        self.assertEqual(self.m._rete_ora("2026-10-26T18:30:00.123456789Z"), t)
+        self.assertEqual(self.m._rete_ora("2026-10-26T20:30:00+02:00"), t)
+        for x in ("0001-01-01T00:00:00Z", "", None, "ieri", 5):
+            self.assertIsNone(self.m._rete_ora(x), x)
+
+    def test_serve_e_funnel_letti(self):
+        conf = {"TCP": {"443": {"HTTPS": True}, "10000": {"HTTPS": True}},
+                "Web": {"mac.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8790"}}},
+                        "mac.ts.net:10000": {"Handlers": {"/": {"Proxy": "http://localhost:8790"}}}},
+                "AllowFunnel": {"mac.ts.net:10000": True},
+                "Foreground": {"sessione": {"Web": {"mac.ts.net:8443": {"Handlers": {"/doc": {"Path": "/Users/x/doc"}}}},
+                                            "AllowFunnel": {"mac.ts.net:8443": True}}}}
+        self.assertEqual(self.m._rete_serve(conf), [
+            {"porta": 443, "indirizzo": "https://mac.ts.net/", "destino": "http://127.0.0.1:8790", "funnel": False},
+            {"porta": 8443, "indirizzo": "https://mac.ts.net:8443/", "destino": "/Users/x/doc", "funnel": True},
+            {"porta": 10000, "indirizzo": "https://mac.ts.net:10000/", "destino": "http://localhost:8790", "funnel": True}])
+        for strano in ({}, None, [], {"Web": []}, {"Web": {"senza-porta": {}}}, {"Web": {"x:1": {"Handlers": []}}}):
+            self.assertIsInstance(self.m._rete_serve(strano), list)
+        self.assertEqual([self.m._rete_porta_locale(x) for x in ("http://127.0.0.1:8790", "http://localhost:8790/", "http://[::1]:9",
+                                                                  "https://127.0.0.1:8790", "http://127.0.0.1", "http://10.0.0.1:8790",
+                                                                  "http://127.0.0.1:8790/x", "http://127.0.0.1:8790?a")],
+                         [8790, 8790, 9, None, None, None, None, None])
+
+    def test_senza_tailscale(self):
+        with self.con_finto(None):
+            r = self.m._rete_stato(8790, "casa")
+            self.assertEqual((r["installato"], r["collegato"]), (False, False))
+            self.assertIn("non è installato", r["errore"])
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                self.m._tailscale(["status", "--json"], 5)
+            self.assertEqual(e.exception.codice, 503)
+
+    def test_tempo_massimo(self):
+        # Funnel non permesso: il tailscale vero scrive il link del pannello e aspetta che Samuele lo abiliti
+        finto = os.path.join(self.base, "finto")
+        os.makedirs(finto, exist_ok=True)
+        with open(os.path.join(finto, "tailscale-stato.json"), "w") as f:
+            json.dump({"funnel_vietato": True, "attesa": True}, f)
+        with self.con_finto(self.finto), unittest.mock.patch.dict(os.environ, {"FINTO_DIR": finto}), \
+                unittest.mock.patch.object(self.m, "TEMPO_TAILSCALE_CAMBIO", 1), \
+                unittest.mock.patch.dict(self.m.CONF, {"cache": os.path.join(self.base, "cache")}):
+            t = time.time()
+            with self.assertRaises(self.m.RifiutoTailscale) as e:
+                self.m._rete_funnel(True, None, None, 8790)
+            self.assertLess(time.time() - t, 15)
+        self.assertEqual(e.exception.link, "https://login.tailscale.com/f/funnel?node=nFINTO123")
+        self.assertTrue(e.exception.pannello)
+        self.assertFalse(os.path.exists(os.path.join(self.base, "cache", "rete.json")))   # niente salvato se non è acceso
 
 
 if __name__ == "__main__":
