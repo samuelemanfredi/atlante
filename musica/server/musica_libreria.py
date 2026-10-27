@@ -10988,6 +10988,8 @@ def _instrada(h, metodo, parti, corpo):
         if chi["ruolo"] == "proprietario" and BLOCCO is not None and BLOCCO.attivo():
             r.setdefault("nuove", {})["youtube_bloccato"] = 1   # il riquadro Gestione diventa rosso
         r["via"] = _via(h)   # «Rete e VPN»: questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet
+        if _stesso_mac(h):   # l'app aperta sul Mac stesso: «Scarica tutta la musica» non parte da solo
+            r["stesso_mac"] = True
         _json(h, r)
     elif cosa == "dispositivi" and not resto:
         solo("GET")
@@ -11978,6 +11980,42 @@ def _ip_cliente(h):
     if xff and vicino is not None and vicino.is_loopback:
         return xff.split(",")[-1].strip()[:64]
     return h.client_address[0]
+
+
+# ----- l'app aperta sul Mac stesso -----
+# Sul Mac mini la musica è già sul suo disco: l'app aperta lì non deve copiarsi tutta la libreria con «Scarica tutta
+# la musica» (il 27/10 ha riempito il disco interno in pochi minuti). api/extra/io dice all'app se la richiesta viene da
+# questo Mac: 127.0.0.1 o uno dei suoi indirizzi (anche quello di Tailscale, attraverso tailscale serve), letti da
+# ifconfig ogni 5 minuti. ATLANTE_IP_MAC ne aggiunge altri, separati da virgole (le prove lo usano).
+
+_IP_MAC = {"letti": 0.0, "ip": frozenset()}
+
+
+def _ip_del_mac():
+    ora = time.time()
+    if ora - _IP_MAC["letti"] > 300:
+        try:
+            uscita = subprocess.run(["/sbin/ifconfig"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=5).stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            uscita = ""
+        testi = re.findall(r"\binet6?\s+(\S+)", uscita) + (os.environ.get("ATLANTE_IP_MAC") or "").split(",")
+        _IP_MAC.update(letti=ora, ip=frozenset(a for a in map(_ip, testi) if a is not None))
+    return _IP_MAC["ip"]
+
+
+def _stesso_mac(h):
+    """La richiesta viene da questo Mac, direttamente o attraverso tailscale serve (che scrive l'ultimo X-Forwarded-For)."""
+    vicino = _ip(h.client_address[0])
+    if vicino is None:
+        return False
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:
+        return vicino.is_loopback or vicino in _ip_del_mac()
+    if not vicino.is_loopback:
+        return False   # un proxy che non è tailscaled sul Mac
+    ultimo = _ip(xff.split(",")[-1])   # quelli prima si possono inventare
+    return ultimo is not None and (ultimo.is_loopback or ultimo in _ip_del_mac())
 
 
 def _biscotto_valido(h):

@@ -7360,5 +7360,55 @@ class TestTestiApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+class TestStessoMac(unittest.TestCase):
+    """L'app aperta sul Mac mini stesso (la musica è già sul suo disco): api/extra/io lo dice, così l'app non si copia
+    tutta la libreria sul disco interno (il 27/10 lo ha riempito in pochi minuti). Gli indirizzi del Mac li legge il
+    server; qui li dà ATLANTE_IP_MAC."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-stessomac-")
+        cls.c = prepara_cartelle(cls.base)
+        os.environ["ATLANTE_IP_MAC"] = "100.71.110.38,fd7a:115c:a1e0::71"
+        try:
+            cls.s = Server(cls.base, cls.c).avvia()
+        finally:
+            del os.environ["ATLANTE_IP_MAC"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def io(self, intest=None):
+        st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io", intest=intest)
+        self.assertEqual(st, 200, b)
+        return json.loads(b.decode("utf-8"))
+
+    def test_1_dal_mac_stesso(self):
+        self.assertIs(self.io()["stesso_mac"], True)   # senza proxy davanti, da 127.0.0.1
+        for ip in ("100.71.110.38", "fd7a:115c:a1e0::71", "127.0.0.1"):   # attraverso tailscale serve
+            intest = {"X-Forwarded-For": ip, "Tailscale-User-Login": "samuele@example.com"}
+            self.assertIs(self.io(intest)["stesso_mac"], True, ip)
+
+    def test_2_da_un_altro_dispositivo(self):
+        for intest in ({"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"},   # l'iPhone
+                       # i primi indirizzi si possono inventare: conta l'ultimo, quello scritto da tailscaled
+                       {"X-Forwarded-For": "100.71.110.38, 100.127.102.35", "Tailscale-User-Login": "samuele@example.com"}):
+            self.assertNotIn("stesso_mac", self.io(intest), intest)   # per gli altri la risposta resta com'era
+
+    def test_3_app(self):
+        """L'app: sul Mac stesso «Scarica tutta la musica» non parte da solo (test_tutto.js, in JavaScriptCore)."""
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_tutto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
