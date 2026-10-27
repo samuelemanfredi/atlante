@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Chat</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.fisso{display:flex;gap:8px;align-items:flex-start;font-size:13px;line-height:1.35;color:var(--fg2);background:var(--fill);border-radius:12px;padding:9px 12px;margin:8px 0}
+.fisso::before{content:"🔒";flex:none}
+.av{width:44px;height:44px;border-radius:22px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:18px;text-transform:uppercase}
+.row .quando{font-size:13px;color:var(--fg2);flex:none;align-self:flex-start;margin-top:3px}
+.nl{min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--link);color:#fff;font-size:12px;font-weight:700;line-height:20px;text-align:center;flex:none}
+.btn.full{width:100%}
+.btn.danger{color:var(--bad)}
+#vista{position:fixed;inset:0;display:flex;flex-direction:column;background:var(--bg);z-index:5}
+.ch-top{display:flex;align-items:center;gap:6px;min-height:48px;padding:0 max(10px,env(safe-area-inset-right,0px)) 0 max(10px,env(safe-area-inset-left,0px));border-bottom:.5px solid var(--sep);background:var(--bg)}
+.ch-top .tit{flex:1;min-width:0;text-align:center;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:10px 0}
+.ch-top .tit small{display:block;font-weight:400;font-size:12px;color:var(--fg2)}
+.ch-top button{color:var(--link);font-size:16px;padding:8px 4px;flex:none}
+#msg{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px max(12px,env(safe-area-inset-right,0px)) 10px max(12px,env(safe-area-inset-left,0px));display:flex;flex-direction:column}
+.m{display:flex;flex-direction:column;max-width:82%;margin:3px 0}
+.m.mio{align-self:flex-end;align-items:flex-end}
+.m.suo{align-self:flex-start;align-items:flex-start}
+.m .aut{font-size:12px;color:var(--fg2);margin:0 0 2px 12px;font-weight:600}
+.b{border-radius:18px;padding:8px 12px;background:var(--bg2);color:var(--fg);word-wrap:break-word;overflow-wrap:anywhere;max-width:100%}
+.m.mio .b{background:var(--link);color:#fff}
+.b .tx{white-space:pre-wrap}
+.b .ora{display:block;text-align:right;font-size:11px;opacity:.7;margin-top:2px;white-space:nowrap}
+.sp.letto{font-weight:700}
+.sp.err{color:var(--bad);font-weight:700}
+.m.mio .sp.err{color:#ffd1d1}
+.sis{align-self:center;text-align:center;font-size:12px;color:var(--fg2);background:var(--fill);border-radius:10px;padding:5px 10px;margin:8px 10%}
+.sis.attento{color:var(--warn)}
+.giorno{align-self:center;font-size:12px;color:var(--fg2);margin:10px 0 4px}
+.nota-m{font-size:12px;color:var(--bad);margin:2px 6px}
+.nota-m button{color:var(--link);font-size:12px;font-weight:600;margin-left:4px}
+.media{position:relative;margin:-4px -8px 0;border-radius:14px;overflow:hidden;min-width:120px;width:fit-content;max-width:calc(100% + 16px);background:rgba(127,127,127,.2)}
+.media img,.media video{display:block;max-width:min(260px,100%);max-height:320px;width:auto;height:auto;border-radius:14px}
+.media .su{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px;color:#fff;background:rgba(0,0,0,.35);font-size:14px;font-weight:600;text-align:center;padding:6px}
+.media .su b{font-size:28px;line-height:1}
+.voce{display:flex;align-items:center;gap:8px;min-width:200px}
+.voce audio{width:220px;max-width:100%;height:36px}
+.brano{display:flex;align-items:center;gap:10px;min-width:210px}
+.brano img,.brano .ph{width:48px;height:48px;border-radius:8px;object-fit:cover;flex:none;background:rgba(127,127,127,.25)}
+.brano .tx2{flex:1;min-width:0}
+.brano .tx2 b,.brano .tx2 span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brano .tx2 span{font-size:13px;opacity:.8}
+.brano button{width:36px;height:36px;border-radius:18px;background:rgba(255,255,255,.25);color:inherit;font-size:16px;flex:none}
+.m.suo .brano button{background:var(--fill);color:var(--accent)}
+.azm{display:flex;gap:6px;margin:3px 4px}
+.azm button{font-size:12px;color:var(--link);font-weight:600;padding:3px 6px;background:var(--fill);border-radius:8px}
+.ch-scrivi{display:flex;align-items:flex-end;gap:8px;padding:8px max(10px,env(safe-area-inset-right,0px)) calc(8px + env(safe-area-inset-bottom,0px)) max(10px,env(safe-area-inset-left,0px));border-top:.5px solid var(--sep);background:var(--bg)}
+.ch-scrivi textarea{flex:1;min-height:38px;max-height:140px;resize:none;border-radius:19px;border:.5px solid var(--sep);background:var(--bg2);padding:8px 14px;outline:none;font-size:16px;line-height:1.3}
+.tondo{width:38px;height:38px;border-radius:19px;flex:none;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;background:var(--fill);color:var(--link)}
+.tondo.pri{background:var(--link);color:#fff}
+.reg{flex:1;display:flex;align-items:center;gap:10px;min-height:38px;color:var(--bad);font-weight:600}
+.reg i{width:10px;height:10px;border-radius:5px;background:var(--bad);animation:pulsa 1s infinite}
+@keyframes pulsa{50%{opacity:.2}}
+.bloccato{flex:1;text-align:center;font-size:14px;color:var(--fg2);padding:8px}
+#foglio{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.4);display:flex;align-items:flex-end;justify-content:center}
+#foglio .carta{background:var(--bg);width:100%;max-width:560px;max-height:88%;overflow-y:auto;border-radius:16px 16px 0 0;padding:14px max(16px,env(safe-area-inset-right,0px)) calc(18px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.carta h3{margin:4px 0 10px;font-size:19px}
+.carta .chiudi{float:right;color:var(--link);font-size:16px;padding:4px}
+.scegli{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:.5px solid var(--sep);width:100%;text-align:left;min-height:52px}
+.scegli:last-child{border-bottom:0}
+.scegli .tx{flex:1;min-width:0}
+.scegli .tx b,.scegli .tx span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scegli .tx span{font-size:13px;color:var(--fg2)}
+.scegli input[type=checkbox]{width:22px;height:22px;accent-color:var(--link);flex:none}
+.cod{font:600 30px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:2px;text-align:center;margin:12px 0}
+.qr{display:block;margin:10px auto;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:8px;padding:8px}
+.grande{display:block;max-width:100%;max-height:60vh;margin:0 auto;border-radius:10px}
+.barra{height:4px;border-radius:2px;background:rgba(255,255,255,.35);overflow:hidden;margin-top:6px}
+.barra i{display:block;height:100%;background:#fff;width:0}
+</style>
+</head>
+<body>
+<div class="wrap" id="lista">
+  <p class="fisso" id="fisso1"></p>
+  <div id="stato" hidden class="note"></div>
+  <div id="notifiche"></div>
+  <div id="miei"></div>
+  <div class="btns" id="tasti"><button class="btn pri" id="nuova">Nuova chat</button><button class="btn" id="gruppo">Nuovo gruppo</button></div>
+  <div class="list" id="elenco"></div>
+</div>
+<div id="vista" hidden>
+  <div class="ch-top"><button id="indietro">‹ Chat</button><button class="tit" id="titolo"></button><button id="verifica" hidden>Verifica</button></div>
+  <div id="msg"></div>
+  <div class="ch-scrivi" id="scrivi"></div>
+</div>
+<div id="foglio" hidden><div class="carta" id="carta"></div></div>
+<input type="file" id="sceltaMedia" accept="image/*,video/*" hidden>
+<input type="file" id="sceltaAudio" accept="audio/*" hidden>
+<script src="kit.js"></script>
+<script src="chat-cifra.js"></script>
+<script>
+'use strict';
+const {$, esc, toast} = AX;
+const C = window.ChatCifra;
+AX.header('Chat');
+// testo fisso della spec, in cima alla chat
+const FISSO = 'I messaggi e le chiamate sono cifrati da telefono a telefono: nemmeno il Mac mini di Samuele può leggerli. Su un telefono nuovo i messaggi vecchi non ci sono.';
+$('fisso1').textContent = FISSO;
+const MB = 1024 * 1024, MAX_ALLEGATO = 200 * MB, AUTO_SCARICA = 15 * MB, MAX_TESTO = 4000;
+const enc = encodeURIComponent, pausa = ms => new Promise(r => setTimeout(r, ms));
+// l'app sulla schermata Home (la pagina che ospita questo modulo): notifiche e service worker si chiedono a lei
+const TOP = (() => { try { return window.top !== window && window.top.location.origin === location.origin ? window.top : window; } catch (e) { return window; } })();
+const COLORI = ['#ff9500', '#34c759', '#007aff', '#af52de', '#ff2d55', '#5ac8fa', '#ffcc00', '#8e8e93', '#30b0c7', '#ff3b30'];
+const colore = id => COLORI[[...String(id)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORI.length];
+
+let DB = null, IO = null, ST = null;
+let RUB = {persone:[], bloccati:[]};           // persone di Atlante e le loro chiavi pubbliche (dal Mac mini)
+const CONV = new Map(), CONT = new Map();       // conversazioni; contatti con le chiavi già viste e il codice verificato
+let RIAS = {}, LETTI = {};                      // per conversazione: ultimo messaggio e quanti non letti; letto fino a
+let cursore = 0, ver = 0, aperta = '', MSGS = [], macOk = true;
+const URLS = new Map();                         // allegato -> indirizzo blob: già decifrato
+
+/* ---------- Mac mini ---------- */
+async function chiama(percorso, opt) {
+  opt = Object.assign({}, opt);
+  if (opt.body && typeof opt.body === 'object' && !(opt.body instanceof Uint8Array)) { opt.body = JSON.stringify(opt.body); opt.headers = Object.assign({'Content-Type':'application/json'}, opt.headers); }
+  const r = await AX.fetchT(AX.API + 'chat/' + percorso, opt, opt.timeout || 30000);
+  let j = null; try { j = await r.json(); } catch (e) {}
+  return {stato:r.status, j:j || {}};
+}
+async function api(percorso, opt) {
+  const r = await chiama(percorso, opt);
+  if (r.stato !== 200) { const e = new Error(r.j.errore || ('Il Mac mini ha risposto ' + r.stato)); e.stato = r.stato; e.j = r.j; throw e; }
+  return r.j;
+}
+
+/* ---------- archivio sul telefono (IndexedDB «ax-chat»): chiavi, messaggi decifrati, contatti, allegati ---------- */
+function apriDB() {
+  return new Promise((ok, ko) => {
+    const r = indexedDB.open('ax-chat', 1);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      d.createObjectStore('io');
+      d.createObjectStore('msg', {keyPath:'id'}).createIndex('conv', 'conv');
+      d.createObjectStore('contatti', {keyPath:'id'});
+      d.createObjectStore('conv', {keyPath:'id'});
+      d.createObjectStore('allegati');
+    };
+    r.onsuccess = () => ok(r.result);
+    r.onerror = () => ko(r.error || new Error('IndexedDB non disponibile'));
+  });
+}
+function rq(store, modo, fn) {
+  return new Promise((ok, ko) => {
+    const t = DB.transaction(store, modo); let out;
+    const q = fn(t.objectStore(store));
+    if (q) q.onsuccess = () => { out = q.result; };
+    t.oncomplete = () => ok(out); t.onerror = () => ko(t.error); t.onabort = () => ko(t.error || new Error('scrittura annullata'));
+  });
+}
+const db = {
+  get:(s, k) => rq(s, 'readonly', x => x.get(k)),
+  put:(s, v, k) => rq(s, 'readwrite', x => k === undefined ? x.put(v) : x.put(v, k)),
+  del:(s, k) => rq(s, 'readwrite', x => x.delete(k)),
+  tutti:s => rq(s, 'readonly', x => x.getAll()),
+  conv:c => rq('msg', 'readonly', x => x.index('conv').getAll(c)),
+  svuota:s => rq(s, 'readwrite', x => x.clear())
+};
+let salvaT = 0;
+function salvaRias() { clearTimeout(salvaT); salvaT = setTimeout(() => { db.put('io', RIAS, 'riassunti').catch(() => {}); db.put('io', LETTI, 'letti').catch(() => {}); }, 300); }
+
+// le chiavi di questo telefono: la privata non esportabile (WebCrypto), creata una volta e tenuta qui
+async function identita(nuova) {
+  let io = nuova ? null : await db.get('io', 'chiavi');
+  if (!io || !io.privata || !io.disp) {
+    const k = await C.nuoveChiavi();
+    io = {disp:C.nuovoId(), privata:k.privata, pubblica:k.pubblica, creato:Date.now()};
+    await db.put('io', io, 'chiavi');
+    await db.put('io', io.disp, 'disp');      // lo legge il service worker per il testo delle notifiche
+    await db.put('io', 0, 'cursore');
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+  }
+  return io;
+}
+async function svuotaTutto() {
+  for (const s of ['msg', 'contatti', 'conv', 'allegati', 'io']) await db.svuota(s);
+  CONV.clear(); CONT.clear(); RIAS = {}; LETTI = {}; cursore = 0;
+}
+async function registra() {
+  let r = await chiama('dispositivi', {method:'POST', body:{id:IO.disp, chiave:IO.pubblica}});
+  if (r.stato === 409) { IO = await identita(true); r = await chiama('dispositivi', {method:'POST', body:{id:IO.disp, chiave:IO.pubblica}}); }
+  if (r.stato !== 200) { const e = new Error(r.j.errore || ('Il Mac mini ha risposto ' + r.stato)); e.stato = r.stato; throw e; }
+  ST = r.j;
+  const prima = await db.get('io', 'persona');
+  if (prima && prima !== ST.io.id) {
+    // il Mac mini ora riconosce questo browser come un'altra persona (per esempio un invito provato e poi Tailscale
+    // acceso): i messaggi di qui non sono suoi. Niente si cancella da solo: decide chi ha il telefono
+    const e = new Error('cambio'); e.cambio = {prima, adesso:ST.io.id, nome:ST.io.nome}; throw e;
+  }
+  await db.put('io', ST.io.id, 'persona');
+  IO.persona = ST.io.id;
+}
+
+/* ---------- persone, chiavi e conversazioni ---------- */
+const nomeDi = pid => pid === IO.persona ? 'Tu' : ((RUB.persone.find(p => p.id === pid) || CONT.get(pid) || {}).nome || 'Persona non più in Atlante');
+const altroDi = c => c.membri.find(p => p !== IO.persona) || IO.persona;
+const titoloDi = c => c.tipo === 'gruppo' ? c.nome : nomeDi(altroDi(c));
+const inAtlante = pid => RUB.persone.some(p => p.id === pid);
+const haChat = pid => RUB.persone.some(p => p.id === pid && p.dispositivi.some(d => d.attivo));
+const ioHoBloccato = pid => (RUB.bloccati || []).indexOf(pid) >= 0;
+
+async function caricaRubrica() {
+  RUB = await api('persone');
+  await db.put('io', RUB, 'rubrica');
+  await controllaChiavi();
+}
+async function caricaConv() {
+  const r = await api('conversazioni');
+  const nuove = new Map(r.conversazioni.map(c => [c.id, c]));
+  for (const id of CONV.keys()) if (!nuove.has(id)) { const c = CONV.get(id); if (c.tipo === 'gruppo') { c.uscito = true; nuove.set(id, c); } }
+  CONV.clear(); nuove.forEach((c, k) => CONV.set(k, c));
+  for (const c of CONV.values()) await db.put('conv', c);
+  for (const c of CONV.values()) for (const e of c.eventi || []) await eventoGruppo(c, e);
+}
+// chiavi di una persona cambiate (telefono nuovo, app cancellata): lo si dice in chat e il codice verificato non vale più.
+// Per le proprie: un dispositivo nuovo della stessa persona riceve tutti i suoi messaggi da ora in poi
+async function controllaChiavi() {
+  for (const p of RUB.persone) {
+    const nuove = C.chiaviAttive(RUB.persone, p.id).filter(k => k !== IO.pubblica);
+    const c = CONT.get(p.id);
+    if (!c) { const x = {id:p.id, nome:p.nome, chiavi:nuove, verificato:''}; CONT.set(p.id, x); await db.put('contatti', x); continue; }
+    const d = C.confronta(c.chiavi, nuove);
+    if (d.aggiunte.length && c.chiavi.length) {
+      if (p.id === IO.persona) await sistema('', 'Un nuovo dispositivo è entrato nella tua chat: riceve i tuoi messaggi da ora in poi. Se non è tuo, dillo a Samuele.', true);
+      else for (const conv of CONV.values()) if (conv.membri.indexOf(p.id) >= 0) await sistema(conv.id, 'Le chiavi di ' + p.nome + ' sono cambiate' + (conv.tipo === 'due' ? ': se vuoi esserne sicuro, verificale di nuovo dal vivo.' : '.'), true);
+      c.verificato = '';
+    }
+    if (d.aggiunte.length || d.tolte.length || c.nome !== p.nome) { c.chiavi = nuove; c.nome = p.nome; await db.put('contatti', c); }
+  }
+}
+async function sistema(cid, testo, attento) {
+  if (!cid) { const box = $('miei'); box.innerHTML = '<div class="note">' + esc(testo) + '</div>'; return; }
+  const x = {id:'s-' + C.nuovoId(), conv:cid, da:'', t:Date.now() / 1000, contenuto:{tipo:'sistema', testo, attento:!!attento}, sistema:true};
+  await db.put('msg', x);
+  if (aperta === cid) { MSGS.push(x); disegnaMessaggi(); }
+}
+const chiE = L => L.map(p => p === IO.persona ? 'te' : nomeDi(p)).join(', ');
+const EVENTI = {
+  creato:(da) => (da === IO.persona ? 'Hai creato' : nomeDi(da) + ' ha creato') + ' il gruppo',
+  aggiunti:(da, chi) => (da === IO.persona ? 'Hai aggiunto ' : nomeDi(da) + ' ha aggiunto ') + chiE(chi),
+  tolto:(da, chi) => da ? (da === IO.persona ? 'Hai tolto ' : nomeDi(da) + ' ha tolto ') + chiE(chi) : chiE(chi) + (chi.length > 1 ? ' non sono più in Atlante' : ' non è più in Atlante'),
+  uscito:(da, chi) => chi[0] === IO.persona ? 'Hai lasciato il gruppo' : nomeDi(chi[0]) + ' ha lasciato il gruppo'};
+let EVT = {};   // per gruppo: l'ultimo evento già scritto in chat
+async function eventoGruppo(c, e) {
+  if (e.t <= (EVT[c.id] || 0)) return;
+  EVT[c.id] = e.t; db.put('io', EVT, 'eventi').catch(() => {});
+  const f = EVENTI[e.tipo]; if (!f) return;
+  const x = {id:'e-' + c.id + '-' + Math.round(e.t * 1000) + '-' + e.tipo, conv:c.id, da:'', t:e.t, contenuto:{tipo:'sistema', testo:f(e.da, e.chi || [])}, sistema:true};
+  await db.put('msg', x);
+  if (aperta === c.id) { MSGS.push(x); disegnaMessaggi(); }
+}
+
+/* ---------- ricevere ---------- */
+function riassunto(c) {
+  switch (c && c.tipo) {
+    case 'testo': return c.testo.slice(0, 120);
+    case 'foto': return '📷 Foto'; case 'video': return '🎬 Video'; case 'vocale': return '🎤 Messaggio vocale';
+    case 'audio': return '🎵 ' + ((c.allegato && c.allegato.nome) || 'Audio');
+    case 'brano': return '🎵 ' + ((c.brano && c.brano.titolo) || 'Brano');
+    case 'illeggibile': return 'Messaggio non leggibile'; default: return 'Messaggio';
+  }
+}
+// contenuto arrivato da un altro telefono: si tiene solo quello che la pagina sa mostrare, con forme controllate
+function pulisci(c) {
+  if (!c || typeof c !== 'object') return {tipo:'illeggibile'};
+  const s = (v, n) => typeof v === 'string' ? v.slice(0, n) : '';
+  const t = c.tipo;
+  if (t === 'testo') return {tipo:t, testo:s(c.testo, MAX_TESTO)};
+  if (t === 'brano' && c.brano) return {tipo:t, brano:{id:/^[0-9a-f]{16}$/.test(c.brano.id) ? c.brano.id : '', titolo:s(c.brano.titolo, 200), artista:s(c.brano.artista, 200), album:s(c.brano.album, 200), copertina:/^[\w.-]{1,80}$/.test(c.brano.copertina || '') ? c.brano.copertina : ''}};
+  if (['foto', 'video', 'vocale', 'audio'].indexOf(t) >= 0 && c.allegato) {
+    const a = c.allegato;
+    if (!/^[A-Za-z0-9_-]{22}$/.test(a.id) || !/^[A-Za-z0-9_-]{43}$/.test(a.chiave) || !(a.pezzi >= 1 && a.pezzi <= 25) || !(a.dimensione >= 1 && a.dimensione <= MAX_ALLEGATO)) return {tipo:'illeggibile'};
+    return {tipo:t, allegato:{id:a.id, chiave:a.chiave, pezzi:a.pezzi | 0, dimensione:a.dimensione | 0, mime:/^(image|video|audio)\/[a-z0-9.+-]{1,40}$/.test(a.mime) ? a.mime : '', nome:s(a.nome, 120)},
+      anteprima:/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]{1,60000}$/.test(c.anteprima || '') ? c.anteprima : '', durata:+c.durata > 0 ? Math.min(+c.durata, 36000) : 0};
+  }
+  return {tipo:'illeggibile'};
+}
+async function ricevi(m) {
+  if (await db.get('msg', m.id)) return null;
+  let chiave = C.chiaveDi(RUB.persone, m.da, m.disp);
+  if (!chiave) { try { await caricaRubrica(); } catch (e) {} chiave = C.chiaveDi(RUB.persone, m.da, m.disp); }
+  let contenuto = {tipo:'illeggibile'};
+  if (chiave) { try { contenuto = pulisci(await C.decifra(IO, m, chiave)); } catch (e) {} }
+  const x = {id:m.id, conv:m.conv, da:m.da, t:m.t, seq:m.seq, contenuto, mio:m.da === IO.persona};
+  await db.put('msg', x);
+  const r = RIAS[m.conv] || (RIAS[m.conv] = {t:0, testo:'', n:0});
+  if (x.t >= r.t) { r.t = x.t; r.testo = (x.mio ? 'Tu: ' : '') + riassunto(contenuto); r.da = m.da; }
+  if (!x.mio && !(aperta === m.conv && visibile())) r.n = (r.n || 0) + 1;
+  salvaRias();
+  if (aperta === m.conv) { MSGS.push(x); }
+  return x;
+}
+function visibile() {
+  if (document.visibilityState !== 'visible') return false;
+  try { const f = window.frameElement; return !f || !f.parentElement || !f.parentElement.hidden; } catch (e) { return true; }
+}
+let giroAttivo = false;
+async function giro() {
+  if (giroAttivo) return; giroAttivo = true;
+  let errori = 0;
+  while (true) {
+    try {
+      const r = await api('messaggi?disp=' + enc(IO.disp) + '&dopo=' + cursore + '&v=' + ver + '&attesa=25', {timeout:40000});
+      const nuovi = [];
+      for (const m of r.messaggi) { const x = await ricevi(m); if (x) nuovi.push(x); }
+      if (r.fino !== cursore) { cursore = r.fino; await db.put('io', cursore, 'cursore'); }
+      if (r.v !== ver) { ver = r.v; await aggiorna(); }
+      if (nuovi.length) {
+        if (aperta && nuovi.some(x => x.conv === aperta)) { disegnaMessaggi(); segnaLetto(); }
+        disegnaLista();
+        const altri = nuovi.filter(x => !x.mio && !(aperta === x.conv && visibile()));
+        if (altri.length && !visibile()) toast('Nuovo messaggio da ' + nomeDi(altri[altri.length - 1].da));
+      }
+      if (!macOk) { macOk = true; statoMac(); riprovaSospesi(); }
+      errori = 0;
+      if (r.altri) continue;
+    } catch (e) {
+      if (e.j && e.j.registra) { try { await registra(); continue; } catch (e2) { if (e2.cambio) { giroAttivo = false; return cambioPersona(e2.cambio); } } }
+      if (e.stato === 403 && !(e.j && e.j.registra)) { fermo(e.message); giroAttivo = false; return; }
+      errori++; if (macOk && errori > 1) { macOk = false; statoMac(); }
+      await pausa(Math.min(30000, 1000 * Math.pow(2, Math.min(errori, 5))));
+    }
+  }
+}
+async function aggiorna() {
+  try { await caricaRubrica(); await caricaConv(); } catch (e) { return; }
+  disegnaLista();
+  if (aperta) { MSGS = await messaggiDi(aperta); disegnaVista(); }
+  riprovaSospesi();
+}
+function statoMac() {
+  const s = $('stato'); s.hidden = macOk;
+  s.textContent = 'Il Mac mini non risponde: leggi i messaggi che hai già, quelli nuovi partono e arrivano quando torna.';
+}
+function cambioPersona(c) {
+  const prima = (CONT.get(c.prima) || {}).nome || (c.prima === 'p' ? 'Samuele' : 'un\'altra persona');
+  fermo('Su questo telefono c\'è la chat di ' + prima + ', ma adesso il Mac mini lo riconosce come ' + (c.nome || 'un\'altra persona') +
+    ' (succede, per esempio, accendendo o spegnendo Tailscale dopo aver provato un invito). Per non mescolare le due chat, qui resta quella di ' + prima + '.');
+  const b = document.createElement('button');
+  b.className = 'btn danger full'; b.textContent = 'Usa la chat di ' + (c.nome || 'questa persona') + ' (cancella da qui quella di ' + prima + ')';
+  b.onclick = async () => { b.disabled = true; await svuotaTutto(); location.reload(); };
+  $('stato').after(b);
+}
+function fermo(testo) {
+  $('tasti').hidden = true; $('notifiche').innerHTML = '';
+  const s = $('stato'); s.hidden = false; s.textContent = testo;
+}
+
+/* ---------- mandare ---------- */
+async function messaggiDi(cid) {
+  return (await db.conv(cid)).sort((a, b) => (a.t - b.t) || ((a.seq || 1e15) - (b.seq || 1e15)));
+}
+async function nuovoMessaggio(cid, contenuto, stato) {
+  const x = {id:C.nuovoId(), conv:cid, da:IO.persona, t:Date.now() / 1000, contenuto, mio:true, locale:true, stato:stato || 'invio'};
+  await db.put('msg', x);
+  const r = RIAS[cid] || (RIAS[cid] = {t:0, testo:'', n:0}); r.t = x.t; r.testo = 'Tu: ' + riassunto(contenuto); salvaRias();
+  if (aperta === cid) { MSGS.push(x); disegnaMessaggi(true); }
+  return x;
+}
+async function spedisci(x, allegati) {
+  const c = CONV.get(x.conv); if (!c) return;
+  for (let giro = 0; giro < 3; giro++) {
+    let r;
+    try {
+      const dest = C.destinatari(RUB.persone, c.membri, IO.disp);
+      const corpo = await C.cifra(IO, x.conv, x.id, x.contenuto, dest);
+      corpo.allegati = allegati || [];
+      r = await chiama('messaggi', {method:'POST', body:corpo});
+      if (r.stato === 200) {
+        Object.assign(x, {seq:r.j.seq, t:r.j.t, stato:'inviato', errore:'', per:[...new Set(dest.map(d => d.persona))].filter(p => p !== IO.persona)});
+        break;
+      }
+    } catch (e) { x.stato = 'invio'; x.errore = 'Il Mac mini non risponde: parte quando torna'; break; }
+    if (r.stato === 409 && r.j.mancano) { try { await caricaRubrica(); } catch (e) {} continue; }   // chiavi cambiate
+    if (r.stato === 409 && r.j.nessuno) { x.stato = 'attesa'; x.errore = r.j.errore; break; }
+    if (r.j.registra) { try { await registra(); } catch (e) {} continue; }
+    x.stato = 'errore'; x.errore = r.j.errore || ('Il Mac mini ha risposto ' + r.stato); break;
+  }
+  await db.put('msg', x);
+  await segnaSospeso(x);
+  if (aperta === x.conv) disegnaMessaggi();
+  disegnaLista();
+}
+let SOSPESI = [];   // messaggi non ancora partiti (Mac mini spento, persona senza chat): si riprovano da soli
+async function segnaSospeso(x) {
+  const prima = SOSPESI.length;
+  SOSPESI = SOSPESI.filter(id => id !== x.id);
+  if ((x.stato === 'invio' || x.stato === 'attesa') && !(x.contenuto.allegato && !x.caricato)) SOSPESI.push(x.id);
+  if (prima || SOSPESI.length) await db.put('io', SOSPESI, 'sospesi');
+}
+let riprovando = false;
+async function riprovaSospesi() {
+  if (riprovando || !SOSPESI.length) return; riprovando = true;
+  try { for (const id of SOSPESI.slice()) { const x = await db.get('msg', id); if (x && x.stato !== 'inviato') await spedisci(x, x.allegati); else await segnaSospeso({id, stato:'inviato', contenuto:{}}); } }
+  finally { riprovando = false; }
+}
+async function mandaTesto() {
+  const t = $('testo').value.replace(/\s+$/, '');
+  if (!t.trim() || !aperta) return;
+  if (t.length > MAX_TESTO) return toast('Al più ' + MAX_TESTO + ' caratteri per messaggio');
+  $('testo').value = ''; altezza(); tastoInvia();
+  const x = await nuovoMessaggio(aperta, {tipo:'testo', testo:t});
+  spedisci(x);
+}
+async function mandaBrano(b) {
+  chiudiFoglio();
+  const x = await nuovoMessaggio(aperta, {tipo:'brano', brano:{id:b.id, titolo:b.title || '', artista:b.artist || '', album:b.album || '', copertina:b.cover || ''}});
+  spedisci(x);
+}
+
+/* ---------- allegati: cifrati sul telefono prima di partire, a pezzi da 8 MB ---------- */
+async function anteprimaDi(file, tipo) {
+  if (tipo !== 'foto' && tipo !== 'video') return '';
+  const url = URL.createObjectURL(file);
+  try {
+    const el = await new Promise((ok, ko) => {
+      const tm = setTimeout(() => ko(new Error('tempo')), 6000);
+      if (tipo === 'foto') { const i = new Image(); i.onload = () => { clearTimeout(tm); ok(i); }; i.onerror = ko; i.src = url; }
+      else {
+        const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto';
+        v.onloadeddata = () => { v.currentTime = Math.min(0.5, (v.duration || 1) / 2); };
+        v.onseeked = () => { clearTimeout(tm); ok(v); }; v.onerror = ko; v.src = url;
+      }
+    });
+    const w = el.naturalWidth || el.videoWidth, h = el.naturalHeight || el.videoHeight;
+    if (!w || !h) return '';
+    const f = Math.min(1, 320 / Math.max(w, h)), cv = document.createElement('canvas');
+    cv.width = Math.round(w * f); cv.height = Math.round(h * f);
+    cv.getContext('2d').drawImage(el, 0, 0, cv.width, cv.height);
+    const d = cv.toDataURL('image/jpeg', 0.6);
+    return d.length < 60000 ? d : cv.toDataURL('image/jpeg', 0.35);
+  } catch (e) { return ''; } finally { URL.revokeObjectURL(url); }
+}
+function durataDi(file) {
+  return new Promise(ok => {
+    const a = document.createElement(file.type.startsWith('video') ? 'video' : 'audio'), url = URL.createObjectURL(file);
+    const fine = d => { URL.revokeObjectURL(url); ok(isFinite(d) && d > 0 ? Math.round(d) : 0); };
+    a.preload = 'metadata'; a.onloadedmetadata = () => fine(a.duration); a.onerror = () => fine(0); setTimeout(() => fine(0), 4000); a.src = url;
+  });
+}
+async function mandaFile(file, tipo, durata) {
+  if (!aperta) return;
+  if (!file.size) return toast('File vuoto');
+  if (file.size > MAX_ALLEGATO) return toast('Al più 200 MB per allegato');
+  const contenuto = {tipo, allegato:{id:'', chiave:'', pezzi:C.pezzi(file.size), dimensione:file.size, mime:file.type || '', nome:(file.name || tipo).slice(0, 120)},
+    anteprima:await anteprimaDi(file, tipo), durata:durata || (tipo !== 'foto' ? await durataDi(file) : 0)};
+  const x = await nuovoMessaggio(aperta, contenuto, 'carico');
+  await db.put('allegati', {blob:file, mime:file.type}, 'loc:' + x.id);   // per «Riprova» se il caricamento si ferma
+  carica(x);
+}
+async function carica(x) {
+  const a = x.contenuto.allegato;
+  x.stato = 'carico'; x.errore = ''; x.progresso = 0; await db.put('msg', x); if (aperta === x.conv) disegnaMessaggi();
+  try {
+    CARICHI.add(x.id); db.put('io', [...CARICHI], 'carichi').catch(() => {});
+    const loc = await db.get('allegati', 'loc:' + x.id); if (!loc) throw new Error('Il file non c\'è più su questo telefono');
+    const file = loc.blob, np = C.pezzi(file.size), ka = C.nuovaChiaveAllegato(), k = await C.chiaveAllegato(ka);
+    const al = await api('allegati', {method:'POST', body:{conv:x.conv, dimensione:C.dimensioneCifrata(file.size), pezzi:np}});
+    for (let n = 0; n < np; n++) {
+      const chiaro = new Uint8Array(await file.slice(n * C.PEZZO, (n + 1) * C.PEZZO).arrayBuffer());
+      const cif = await C.cifraPezzo(k, al.id, n, np, chiaro);
+      for (let prova = 0; ; prova++) {   // la rete del telefono cade: si riprova lo stesso pezzo
+        try { await api('allegati/' + al.id + '/' + n, {method:'POST', body:cif, headers:{'Content-Type':'application/octet-stream'}, timeout:180000}); break; }
+        catch (e) { if (prova >= 3 || (e.stato && e.stato < 500)) throw e; await pausa(2000 * (prova + 1)); }
+      }
+      x.progresso = (n + 1) / np; aggiornaProgresso(x);
+    }
+    Object.assign(a, {id:al.id, chiave:ka, pezzi:np});
+    x.caricato = true; x.allegati = [al.id];
+    await db.put('allegati', {blob:file, mime:file.type}, al.id);
+    await db.del('allegati', 'loc:' + x.id);
+    x.stato = 'invio';
+    await spedisci(x, [al.id]);
+  } catch (e) {
+    x.stato = 'errore'; x.errore = e.message || 'Caricamento non riuscito';
+    await db.put('msg', x); if (aperta === x.conv) disegnaMessaggi();
+  } finally { CARICHI.delete(x.id); db.put('io', [...CARICHI], 'carichi').catch(() => {}); }
+}
+const CARICHI = new Set();
+function aggiornaProgresso(x) {
+  const el = document.querySelector('.m[data-id="' + CSS.escape(x.id) + '"] .barra i');
+  if (el) el.style.width = Math.round(x.progresso * 100) + '%';
+}
+// allegato ricevuto (o mandato da un altro mio telefono): si scarica a pezzi, si decifra qui, si tiene sul telefono
+const SCARICHI = new Map();
+async function blobDi(a) {
+  const qui = await db.get('allegati', a.id);
+  if (qui) return qui.blob;
+  if (SCARICHI.has(a.id)) return SCARICHI.get(a.id);
+  const p = (async () => {
+    const k = await C.chiaveAllegato(a.chiave), parti = [];
+    for (let n = 0; n < a.pezzi; n++) {
+      const r = await AX.fetchT(AX.API + 'chat/allegati/' + a.id + '/' + n, {}, 180000);
+      if (!r.ok) throw new Error(r.status === 404 ? 'Non è più sul Mac mini (dopo 30 giorni si cancella)' : 'Il Mac mini ha risposto ' + r.status);
+      parti.push(await C.decifraPezzo(k, a.id, n, a.pezzi, new Uint8Array(await r.arrayBuffer())));
+    }
+    const b = new Blob(parti, {type:a.mime || 'application/octet-stream'});
+    await db.put('allegati', {blob:b, mime:a.mime}, a.id);
+    return b;
+  })();
+  SCARICHI.set(a.id, p);
+  try { return await p; } finally { SCARICHI.delete(a.id); }
+}
+async function urlDi(a) {
+  if (URLS.has(a.id)) return URLS.get(a.id);
+  const u = URL.createObjectURL(await blobDi(a)); URLS.set(a.id, u); return u;
+}
+async function mostraAllegato(id, el) {
+  const x = MSGS.find(m => m.id === id); if (!x) return;
+  const c = x.contenuto, a = c.allegato;
+  const box = el || document.querySelector('.m[data-id="' + CSS.escape(id) + '"] [data-al]'); if (!box || !a || !a.id) return;
+  const su = box.querySelector('.su'); if (su) su.innerHTML = '<span>Decifro…</span>';
+  try {
+    await urlDi(a);
+    const el = box.closest('.m'), cv = CONV.get(x.conv);
+    if (el && cv) { const h = bolla(x, cv); el.outerHTML = h; HTML.set(x.id, h); }
+  } catch (e) { if (su) su.innerHTML = '<span>' + esc(e.message) + '</span>'; else toast(e.message); }
+}
+// un vocale o un video che parte mette in pausa la musica dell'app (e la fa ripartire alla fine)
+let musicaFerma = false;
+$('msg').addEventListener('play', fermaMusica, true);
+function fermaMusica(ev) {
+  const n = AX.player.now();
+  if (n && n.playing) { AX.player.toggle(); musicaFerma = true; ev.target.addEventListener('ended', () => { if (musicaFerma) { musicaFerma = false; const m = AX.player.now(); if (m && !m.playing) AX.player.toggle(); } }, {once:true}); }
+}
+
+/* ---------- «Aggiungi ad Atlante» ----------
+   PUNTO DI UNIONE con il ramo «Caricamenti»: il contenuto, già decifrato qui, va in «Da controllare» con le rotte di
+   «Carica nella libreria» (api/extra/carica…; per un video, la richiesta di consenso per i film). Qui si chiama
+   POST carica {nome, dimensione, tipo, origine:'chat'} -> {id, pezzo} e poi POST carica/<id>/<n> a pezzi (byte). Finché
+   quelle rotte non ci sono (404, 405, 501) o non sono permesse (403), il tasto dice «Arriva presto». */
+async function aggiungiAdAtlante(id) {
+  const x = MSGS.find(m => m.id === id); if (!x || !x.contenuto.allegato) return;
+  const a = x.contenuto.allegato;
+  try {
+    const r = await AX.fetchT(AX.API + 'carica', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({nome:a.nome || x.contenuto.tipo, dimensione:a.dimensione, tipo:a.mime, origine:'chat', film:x.contenuto.tipo === 'video'})}, 30000);
+    if ([403, 404, 405, 501].indexOf(r.status) >= 0) return toast('Arriva presto');
+    let j = {}; try { j = await r.json(); } catch (e) {}
+    if (!r.ok) return toast(j.errore || 'Il Mac mini ha risposto ' + r.status);
+    if (j.consenso) return toast('Richiesta mandata a Samuele: il video si carica quando la consente');
+    const b = await blobDi(a), pezzo = j.pezzo || C.PEZZO;
+    toast('Carico in Atlante…');
+    for (let n = 0; n * pezzo < b.size; n++) {
+      const q = await AX.fetchT(AX.API + 'carica/' + enc(j.id) + '/' + n, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:b.slice(n * pezzo, (n + 1) * pezzo)}, 180000);
+      if (!q.ok) { let e = {}; try { e = await q.json(); } catch (er) {} throw new Error(e.errore || 'Il Mac mini ha risposto ' + q.status); }
+    }
+    toast('Aggiunto: lo trovi in «I miei caricamenti», Samuele lo controlla prima di metterlo in Atlante');
+  } catch (e) { toast(e.message); }
+}
+
+/* ---------- vocali ---------- */
+let REG = null;
+async function registraVoce() {
+  if (!window.MediaRecorder || !navigator.mediaDevices) return toast('Questo browser non registra l\'audio');
+  let s;
+  try { s = await navigator.mediaDevices.getUserMedia({audio:true}); } catch (e) { return toast('Serve il permesso del microfono'); }
+  const tipo = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  const r = new MediaRecorder(s, tipo ? {mimeType:tipo} : {}), pezzi = [], inizio = Date.now();
+  REG = {r, s, annulla:false, inizio};
+  r.ondataavailable = e => { if (e.data && e.data.size) pezzi.push(e.data); };
+  r.onstop = () => {
+    s.getTracks().forEach(t => t.stop());
+    const fine = REG; REG = null; disegnaScrivi();
+    if (fine.annulla || !pezzi.length) return;
+    const mime = (r.mimeType || tipo || 'audio/mp4').split(';')[0];
+    const f = new File(pezzi, 'vocale.' + (mime.indexOf('webm') >= 0 ? 'webm' : 'm4a'), {type:mime});
+    mandaFile(f, 'vocale', Math.round((Date.now() - inizio) / 1000));
+  };
+  r.start(1000);
+  disegnaScrivi();
+  REG.tm = setInterval(() => { const el = $('regt'); if (el) el.textContent = mmss((Date.now() - inizio) / 1000); if (Date.now() - inizio > 600000) fermaVoce(false); }, 500);
+}
+function fermaVoce(annulla) { if (!REG) return; clearInterval(REG.tm); REG.annulla = annulla; REG.r.stop(); }
+const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+
+/* ---------- disegno: elenco ---------- */
+function ora(t) {
+  const d = new Date(t * 1000), oggi = new Date();
+  const hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const g = Math.round((new Date(oggi.toDateString()) - new Date(d.toDateString())) / 86400000);
+  return g <= 0 ? hm : g === 1 ? 'ieri' : g < 7 ? d.toLocaleDateString('it-IT', {weekday:'short'}) : d.toLocaleDateString('it-IT', {day:'numeric', month:'numeric'});
+}
+const avatar = (id, nome, gruppo) => '<span class="av" style="background:' + (gruppo ? '#8e8e93' : colore(id)) + '">' + (gruppo ? '👥' : esc((nome || '?').slice(0, 1))) + '</span>';
+function disegnaLista() {
+  const L = [...CONV.values()].filter(c => !c.uscito || RIAS[c.id]).sort((a, b) => ((RIAS[b.id] || {}).t || b.ultimo || 0) - ((RIAS[a.id] || {}).t || a.ultimo || 0));
+  $('elenco').innerHTML = L.length ? L.map(c => {
+    const r = RIAS[c.id] || {}, n = r.n || 0, nome = titoloDi(c);
+    const sotto = c.uscito ? 'Non sei più nel gruppo' : r.testo || (c.tipo === 'gruppo' ? c.membri.length + ' persone' : 'Nessun messaggio, per ora');
+    return '<button class="row" data-c="' + esc(c.id) + '">' + avatar(altroDi(c), nome, c.tipo === 'gruppo') + '<span class="tx"><b>' + esc(nome) + '</b><span>' + esc(sotto) + '</span></span>' +
+      '<span class="quando">' + (r.t ? ora(r.t) : '') + '</span>' + (n ? '<span class="nl">' + n + '</span>' : '') + '</button>';
+  }).join('') : '<div class="row"><span class="tx"><span>Nessuna chat, per ora: tocca «Nuova chat» per scrivere a chi è in Atlante.</span></span></div>';
+  $('elenco').querySelectorAll('[data-c]').forEach(b => b.onclick = () => apriConv(b.dataset.c));
+}
+function disegnaNotifiche() {
+  const box = $('notifiche'), N = TOP.Notification;
+  const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const home = TOP.navigator.standalone || (TOP.matchMedia && TOP.matchMedia('(display-mode: standalone)').matches);
+  if (!ST || !ST.vapid) { box.innerHTML = ''; return; }
+  if (!N || !('PushManager' in TOP) || !TOP.navigator.serviceWorker) {
+    box.innerHTML = ios && !home ? '<p class="note">Per le notifiche dei messaggi aggiungi Atlante Musica alla schermata Home (Condividi › «Aggiungi alla schermata Home», iOS 16.4 o successivo) e apri la chat da lì.</p>' : '';
+    return;
+  }
+  if (N.permission === 'granted') { box.innerHTML = ''; attivaNotifiche(false); return; }
+  if (N.permission === 'denied') { box.innerHTML = '<p class="note">Le notifiche sono spente per Atlante Musica: si riaccendono da Impostazioni › Notifiche.</p>'; return; }
+  box.innerHTML = '<div class="card"><b>Notifiche</b><p class="small" style="margin:4px 0 8px">«Nuovo messaggio da…», senza il testo: il Mac mini non lo conosce.</p><button class="btn pri full" id="attiva">Attiva le notifiche</button></div>';
+  $('attiva').onclick = () => {
+    // la richiesta parte subito dal tocco (Safari la vuole così), alla pagina dell'app sulla schermata Home
+    let p; try { p = N.requestPermission(); } catch (e) { p = Promise.resolve(N.permission); }
+    Promise.resolve(p).then(() => { disegnaNotifiche(); if (N.permission === 'granted') toast('Notifiche attive su questo telefono'); });
+  };
+}
+async function attivaNotifiche() {
+  try {
+    const reg = await TOP.navigator.serviceWorker.ready, chiave = C.deb64u(ST.vapid);
+    let sub = await reg.pushManager.getSubscription();
+    const usata = sub && sub.options && sub.options.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+    if (sub && usata && (usata.length !== chiave.length || usata.some((v, i) => v !== chiave[i]))) { await sub.unsubscribe(); sub = null; }
+    if (!sub) sub = await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:chiave});
+    const mio = (ST.dispositivi || []).find(d => d.id === IO.disp);
+    if (!mio || !mio.notifiche || (await db.get('io', 'endpoint')) !== sub.endpoint) {
+      await api('push', {method:'POST', body:{disp:IO.disp, endpoint:sub.endpoint}});
+      await db.put('io', sub.endpoint, 'endpoint');
+    }
+  } catch (e) { $('notifiche').innerHTML = '<p class="note">Notifiche non attivate: ' + esc(e.message) + '</p>'; }
+}
+
+/* ---------- disegno: conversazione ---------- */
+async function apriConv(cid) {
+  const c = CONV.get(cid); if (!c) return;
+  chiudiFoglio();
+  aperta = cid;
+  MSGS = await messaggiDi(cid);
+  $('lista').hidden = true; $('vista').hidden = false;
+  ultimiDisegnati = 200; DISEGNATI = [];
+  disegnaVista();
+  segnaLetto();
+  const p = altroDi(c), cont = CONT.get(p);
+  if (c.tipo === 'due' && cont && cont.verificato && inAtlante(p)) codiceCon(p).then(() => { if (aperta === cid) disegnaVista(); }).catch(() => {});
+  try { history.replaceState(null, '', '?c=' + enc(cid)); } catch (e) {}
+}
+function chiudiConv() {
+  chiudiFoglio();
+  aperta = ''; MSGS = [];
+  $('vista').hidden = true; $('lista').hidden = false;
+  disegnaLista();
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}
+}
+function disegnaVista() {
+  const c = CONV.get(aperta); if (!c) return chiudiConv();
+  const due = c.tipo === 'due', altro = altroDi(c), cont = CONT.get(altro);
+  const verificato = due && cont && cont.verificato && cont.verificato === CODICI.get(altro);
+  $('titolo').innerHTML = esc(titoloDi(c)) + '<small>' + (due ? (verificato ? 'Verificato ✓' : inAtlante(altro) ? 'Tocca per le opzioni' : 'Non più in Atlante') : c.membri.length + ' persone') + '</small>';
+  $('verifica').hidden = !due || !inAtlante(altro);
+  disegnaMessaggi(!DISEGNATI.length);
+  disegnaScrivi();
+}
+let ultimiDisegnati = 200, DISEGNATI = [], GIORNO = '';
+const HTML = new Map();   // messaggio -> come è disegnato adesso
+const giornoDi = t => new Date(t * 1000).toLocaleDateString('it-IT', {weekday:'long', day:'numeric', month:'long'});
+const suona_ = el => [...el.querySelectorAll('audio,video')].some(a => !a.paused && !a.ended);
+function disegnaMessaggi(inFondo) {
+  const box = $('msg'), c = CONV.get(aperta); if (!c) return;
+  const giu = inFondo || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  const L = MSGS.slice(-ultimiDisegnati), ids = L.map(x => x.id);
+  const stessi = box.dataset.conv === aperta && DISEGNATI.length && DISEGNATI.length <= ids.length && DISEGNATI.every((id, i) => ids[i] === id) && box.dataset.n === String(MSGS.length > L.length);
+  if (!stessi) {
+    HTML.clear(); GIORNO = '';
+    let h = '<p class="fisso">' + esc(FISSO) + '</p>' + (MSGS.length > L.length ? '<button class="btn sm" id="prima" style="align-self:center">Messaggi precedenti</button>' : '');
+    for (const x of L) h += conGiorno(x, c);
+    box.innerHTML = h;
+    box.dataset.conv = aperta; box.dataset.n = String(MSGS.length > L.length);
+    if ($('prima')) $('prima').onclick = () => { ultimiDisegnati += 200; disegnaMessaggi(); };
+  } else {
+    for (const x of L.slice(0, DISEGNATI.length)) {
+      const h = bolla(x, c); if (HTML.get(x.id) === h) continue;
+      const el = box.querySelector('.m[data-id="' + CSS.escape(x.id) + '"]'); if (!el) continue;
+      if (suona_(el)) { const o = el.querySelector('.ora'); if (o) o.innerHTML = oraHtml(x, c); continue; }
+      el.outerHTML = h; HTML.set(x.id, h);
+    }
+    let h = '';
+    for (const x of L.slice(DISEGNATI.length)) h += conGiorno(x, c);
+    if (h) box.insertAdjacentHTML('beforeend', h);
+  }
+  DISEGNATI = ids;
+  box.querySelectorAll('[data-al]:not([data-pronto]):not([data-chiesto])').forEach(el => {
+    const x = MSGS.find(m => m.id === el.dataset.al), a = x && x.contenuto.allegato;
+    if (!a || !a.id) return;
+    if (a.dimensione <= AUTO_SCARICA || x.contenuto.tipo === 'vocale') { el.dataset.chiesto = '1'; mostraAllegato(x.id, el); }
+  });
+  if (giu) box.scrollTop = box.scrollHeight;
+}
+function conGiorno(x, c) {
+  const g = giornoDi(x.t), h = bolla(x, c);
+  HTML.set(x.id, h);
+  if (g === GIORNO) return h;
+  GIORNO = g; return '<div class="giorno">' + esc(g) + '</div>' + h;
+}
+function oraHtml(x, c) { return new Date(x.t * 1000).toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'}) + (x.mio ? spunte(x, c) : ''); }
+function spunte(x, c) {
+  if (x.stato === 'invio' || x.stato === 'carico') return ' 🕓';
+  if (x.stato === 'errore' || x.stato === 'attesa') return ' <span class="sp err">!</span>';
+  if (!x.seq) return '';
+  const per = (x.per && x.per.length ? x.per : c.membri.filter(p => p !== IO.persona)).filter(p => c.membri.indexOf(p) >= 0 || c.tipo === 'due');
+  const s = c.stati || {};
+  if (per.length && per.every(p => (s[p] || {}).l >= x.seq)) return ' <span class="sp letto">✓✓ letto</span>';
+  if (per.length && per.every(p => (s[p] || {}).c >= x.seq)) return ' <span class="sp">✓✓</span>';
+  return ' <span class="sp">✓</span>';
+}
+function bolla(x, c) {
+  const k = x.contenuto || {};
+  if (k.tipo === 'sistema') return '<div class="sis' + (k.attento ? ' attento' : '') + '">' + esc(k.testo) + '</div>';
+  let dentro = '', az = '';
+  const a = k.allegato;
+  switch (k.tipo) {
+    case 'testo': dentro = '<div class="tx">' + esc(k.testo) + '</div>'; break;
+    case 'foto': case 'video': {
+      const u = a && a.id && x.stato !== 'carico' ? URLS.get(a.id) : '';
+      if (u) { dentro = '<div class="media" data-al="' + esc(x.id) + '" data-pronto="1">' + (k.tipo === 'foto' ? '<img alt="Foto" src="' + u + '">' : '<video controls playsinline preload="metadata" src="' + u + '"></video>') + '</div>'; break; }
+      dentro = '<div class="media" data-al="' + esc(x.id) + '">' + (k.anteprima ? '<img alt="" src="' + esc(k.anteprima) + '">' : '<div style="width:200px;height:150px"></div>') +
+        (x.stato === 'carico' ? '<div class="su"><span>Cifro e carico…</span><div class="barra" style="width:70%"><i style="width:' + Math.round((x.progresso || 0) * 100) + '%"></i></div></div>' :
+          '<div class="su"' + (a && a.id ? ' data-scarica' : '') + '><b>' + (k.tipo === 'video' ? '▶︎' : '⬇︎') + '</b><span>' + (a && a.id ? (k.tipo === 'video' ? 'Video' : 'Foto') + ' · ' + mb(a.dimensione) : '') + '</span></div>') + '</div>';
+      break;
+    }
+    case 'vocale': case 'audio': {
+      const u = a && a.id && x.stato !== 'carico' ? URLS.get(a.id) : '', nome = k.tipo === 'vocale' ? '🎤 Vocale' : '🎵 ' + esc(a.nome || 'Audio');
+      dentro = '<div class="voce"><div data-al="' + esc(x.id) + '"' + (u ? ' data-pronto="1"' : '') + '>' + (k.tipo === 'audio' ? '<div class="small" style="color:inherit">' + nome + '</div>' : '') +
+        (u ? '<audio controls preload="metadata" src="' + u + '"></audio>' :
+          x.stato === 'carico' ? '<span class="small" style="color:inherit">Cifro e carico…</span><div class="barra"><i style="width:' + Math.round((x.progresso || 0) * 100) + '%"></i></div>' :
+          '<div class="su" data-scarica style="cursor:pointer">' + nome + (k.durata ? ' · ' + mmss(k.durata) : '') + (a && a.id ? ' · ' + mb(a.dimensione) + ' · tocca per ascoltare' : '') + '</div>') + '</div></div>';
+      break;
+    }
+    case 'brano': {
+      const b = k.brano || {};
+      dentro = '<div class="brano">' + (b.copertina ? '<img alt="" src="../api/musica/copertina/' + enc(b.copertina) + '" onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{className:\'ph\'}))">' : '<span class="ph"></span>') +
+        '<span class="tx2"><b>' + esc(b.titolo || 'Brano') + '</b><span>' + esc(b.artista || '') + '</span></span><button data-suona="' + esc(b.id || '') + '" aria-label="Ascolta">▶︎</button></div>';
+      break;
+    }
+    case 'illeggibile': dentro = '<i>Messaggio non leggibile su questo telefono (forse mandato prima che le sue chiavi ci fossero)</i>'; break;
+    default: dentro = '<i>Un tipo di messaggio che questa versione dell\'app non sa mostrare</i>';
+  }
+  if (!x.mio && a && a.id && (k.tipo === 'foto' || k.tipo === 'video' || k.tipo === 'audio')) az += '<button data-aggiungi="' + esc(x.id) + '">Aggiungi ad Atlante</button>';
+  if (a && a.id && x.stato !== 'carico' && navigator.share) az += '<button data-condividi="' + esc(x.id) + '">Condividi</button>';
+  const autore = c.tipo === 'gruppo' && !x.mio ? '<span class="aut">' + esc(nomeDi(x.da)) + '</span>' : '';
+  const nota = (x.stato === 'errore' || x.stato === 'attesa') ? '<div class="nota-m">' + esc(x.errore || 'Non inviato') + (x.stato === 'errore' ? '<button data-riprova="' + esc(x.id) + '">Riprova</button>' : '') + '</div>' : '';
+  return '<div class="m ' + (x.mio ? 'mio' : 'suo') + '" data-id="' + esc(x.id) + '">' + autore + '<div class="b">' + dentro + '<span class="ora">' + oraHtml(x, c) + '</span></div>' +
+    nota + (az ? '<div class="azm">' + az + '</div>' : '') + '</div>';
+}
+const mb = n => n >= MB ? (n / MB).toFixed(n >= 10 * MB ? 0 : 1).replace('.', ',') + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+$('msg').addEventListener('click', e => {
+  const t = e.target.closest('button,[data-scarica],.media img');
+  if (!t) return;
+  if (t.dataset.suona !== undefined) return suona(t.dataset.suona);
+  if (t.dataset.aggiungi) return aggiungiAdAtlante(t.dataset.aggiungi);
+  if (t.dataset.condividi) return condividi(t.dataset.condividi);
+  if (t.dataset.riprova) return riprova(t.dataset.riprova);
+  const box = t.closest('[data-al]');
+  if (box && box.dataset.pronto && t.tagName === 'IMG') return vediFoto(box.dataset.al);
+  if (box && box.dataset.pronto) return;
+  if (box && !box.dataset.pronto && (t.dataset.scarica !== undefined || t.closest('[data-scarica]'))) mostraAllegato(box.dataset.al, box);
+});
+function suona(id) {
+  if (!id) return toast('Questo brano non è nella libreria');
+  if (AX.host && AX.host.suona) { if (!AX.host.suona([id], 0, 'Chat')) toast('Questo brano non è (più) nella libreria'); return; }
+  const x = MSGS.find(m => m.contenuto.brano && m.contenuto.brano.id === id), b = (x && x.contenuto.brano) || {};
+  AX.player.play([{id, title:b.titolo || 'Brano', artist:b.artista || '', album:b.album || '', url:'../api/musica/file/' + enc(id), cover:b.copertina ? '../api/musica/copertina/' + enc(b.copertina) : ''}], 0, 'Chat');
+}
+async function condividi(id) {
+  const x = MSGS.find(m => m.id === id), a = x && x.contenuto.allegato; if (!a) return;
+  try {
+    const f = new File([await blobDi(a)], a.nome || 'allegato', {type:a.mime || 'application/octet-stream'});
+    if (navigator.canShare && !navigator.canShare({files:[f]})) return toast('Questo file non si può condividere da qui');
+    await navigator.share({files:[f]});
+  } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
+}
+async function riprova(id) {
+  const x = MSGS.find(m => m.id === id); if (!x) return;
+  if (x.contenuto.allegato && !x.caricato) return carica(x);
+  x.stato = 'invio'; await db.put('msg', x); disegnaMessaggi(); spedisci(x, x.allegati);
+}
+function vediFoto(id) {
+  const x = MSGS.find(m => m.id === id), a = x && x.contenuto.allegato; if (!a || !URLS.has(a.id)) return;
+  apriFoglio('<button class="chiudi" data-chiudi>Fine</button><h3>Foto</h3><img class="grande" alt="Foto" src="' + URLS.get(a.id) + '">' +
+    '<div class="btns">' + (!x.mio ? '<button class="btn pri" id="fAgg">Aggiungi ad Atlante</button>' : '') + (navigator.share ? '<button class="btn" id="fCond">Condividi o salva</button>' : '') + '</div>');
+  if ($('fAgg')) $('fAgg').onclick = () => aggiungiAdAtlante(id);
+  if ($('fCond')) $('fCond').onclick = () => condividi(id);
+}
+let ultimoLetto = {};
+async function segnaLetto() {
+  if (!aperta || !visibile()) return;
+  const r = RIAS[aperta]; if (r && r.n) { r.n = 0; salvaRias(); }
+  const seq = Math.max(0, ...MSGS.filter(m => !m.mio && m.seq).map(m => m.seq));
+  if (seq && seq > (LETTI[aperta] || 0)) {
+    LETTI[aperta] = seq; salvaRias();
+    try { await api('conversazioni/' + enc(aperta) + '/letto', {method:'POST', body:{seq}}); } catch (e) { LETTI[aperta] = 0; }
+  }
+}
+setInterval(() => { if (aperta && visibile()) segnaLetto(); }, 2000);
+
+function disegnaScrivi() {
+  const box = $('scrivi'), c = CONV.get(aperta); if (!c) return;
+  const altro = altroDi(c);
+  if (c.uscito) { box.innerHTML = '<div class="bloccato">Non sei più in questo gruppo.</div>'; return; }
+  if (c.tipo === 'due' && !inAtlante(altro)) { box.innerHTML = '<div class="bloccato">Questa persona non è più in Atlante.</div>'; return; }
+  if (c.tipo === 'due' && ioHoBloccato(altro)) {
+    box.innerHTML = '<div class="bloccato">Hai bloccato ' + esc(nomeDi(altro)) + '. <button class="btn sm" id="sblocca">Sblocca</button></div>';
+    $('sblocca').onclick = () => blocca(altro, false);
+    return;
+  }
+  if (REG) {
+    box.innerHTML = '<button class="tondo" id="annullaReg" aria-label="Annulla">✕</button><div class="reg"><i></i><span id="regt">0:00</span> Registro…</div><button class="tondo pri" id="inviaReg" aria-label="Invia">↑</button>';
+    $('annullaReg').onclick = () => fermaVoce(true); $('inviaReg').onclick = () => fermaVoce(false);
+    return;
+  }
+  const bozza = $('testo') ? $('testo').value : '';
+  box.innerHTML = '<button class="tondo" id="piu" aria-label="Allegati">+</button><textarea id="testo" rows="1" placeholder="Messaggio" maxlength="' + MAX_TESTO + '" enterkeyhint="send"></textarea><button class="tondo pri" id="invia" aria-label="Invia"></button>';
+  $('testo').value = bozza;
+  $('testo').addEventListener('input', () => { altezza(); tastoInvia(); });
+  $('testo').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !/iP(hone|ad|od)|Android/.test(navigator.userAgent)) { e.preventDefault(); mandaTesto(); } });
+  $('piu').onclick = menuAllegati;
+  $('invia').onclick = () => $('testo').value.trim() ? mandaTesto() : registraVoce();
+  altezza(); tastoInvia();
+}
+function altezza() { const t = $('testo'); if (!t) return; t.style.height = 'auto'; t.style.height = Math.min(140, t.scrollHeight + 2) + 'px'; }
+function tastoInvia() { const t = $('testo'), b = $('invia'); if (t && b) { b.textContent = t.value.trim() ? '↑' : '🎤'; b.setAttribute('aria-label', t.value.trim() ? 'Invia' : 'Registra un vocale'); } }
+
+/* ---------- fogli: allegati, nuova chat, gruppo, verifica ---------- */
+function apriFoglio(h) {
+  $('carta').innerHTML = h; $('foglio').hidden = false;
+  $('carta').querySelectorAll('[data-chiudi]').forEach(b => b.onclick = chiudiFoglio);
+}
+function chiudiFoglio() { $('foglio').hidden = true; $('carta').innerHTML = ''; }
+$('foglio').addEventListener('click', e => { if (e.target === $('foglio')) chiudiFoglio(); });
+function menuAllegati() {
+  apriFoglio('<button class="chiudi" data-chiudi>Annulla</button><h3>Manda</h3>' +
+    '<button class="scegli" id="aMedia"><span class="av" style="background:#007aff">📷</span><span class="tx"><b>Foto o video</b><span>Dalla libreria o dalla fotocamera, al più 200 MB</span></span></button>' +
+    '<button class="scegli" id="aBrano"><span class="av" style="background:#fa2d48">🎵</span><span class="tx"><b>Brano della libreria</b><span>Si ascolta con un tocco</span></span></button>' +
+    '<button class="scegli" id="aAudio"><span class="av" style="background:#ff9500">🎧</span><span class="tx"><b>File audio</b><span>Un brano o una registrazione dai File</span></span></button>' +
+    '<p class="small">Tutto si cifra su questo telefono prima di partire.</p>');
+  $('aMedia').onclick = () => { chiudiFoglio(); $('sceltaMedia').click(); };
+  $('aAudio').onclick = () => { chiudiFoglio(); $('sceltaAudio').click(); };
+  $('aBrano').onclick = scegliBrano;
+}
+$('sceltaMedia').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) mandaFile(f, (f.type || '').startsWith('video') ? 'video' : 'foto'); };
+$('sceltaAudio').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) mandaFile(f, 'audio'); };
+let CATALOGO = null;
+async function scegliBrano() {
+  apriFoglio('<button class="chiudi" data-chiudi>Annulla</button><h3>Brano della libreria</h3><input class="in" id="cb" type="search" placeholder="Titolo, artista, album" autocomplete="off"><div id="cbl" style="margin-top:8px"><p class="small">Leggo la libreria…</p></div>');
+  try { if (!CATALOGO) CATALOGO = (await (await AX.fetchT('../api/musica/catalogo', {}, 30000)).json()).brani || []; }
+  catch (e) { $('cbl').innerHTML = '<p class="small">Non riesco a leggere la libreria dal Mac mini.</p>'; return; }
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const giu = () => {
+    const q = norm($('cb').value).split(/\s+/).filter(Boolean);
+    const L = CATALOGO.filter(b => { const t = norm(b.title + ' ' + b.artist + ' ' + b.album); return q.every(w => t.indexOf(w) >= 0); }).slice(0, 60);
+    $('cbl').innerHTML = L.map(b => '<button class="scegli" data-b="' + esc(b.id) + '">' + (b.cover ? '<img alt="" style="width:44px;height:44px;border-radius:6px;object-fit:cover" src="../api/musica/copertina/' + enc(b.cover) + '">' : '<span class="av" style="background:#fa2d48">🎵</span>') +
+      '<span class="tx"><b>' + esc(b.title) + '</b><span>' + esc(b.artist || '') + (b.album ? ' · ' + esc(b.album) : '') + '</span></span></button>').join('') || '<p class="small">Nessun brano trovato.</p>';
+    $('cbl').querySelectorAll('[data-b]').forEach(x => x.onclick = () => mandaBrano(CATALOGO.find(b => b.id === x.dataset.b)));
+  };
+  $('cb').oninput = giu; giu();
+}
+function elencoPersone(sel) {
+  return RUB.persone.filter(p => p.id !== IO.persona).map(p => '<' + (sel ? 'label' : 'button') + ' class="scegli" data-p="' + esc(p.id) + '">' + avatar(p.id, p.nome) +
+    '<span class="tx"><b>' + esc(p.nome) + '</b><span>' + (haChat(p.id) ? (ioHoBloccato(p.id) ? 'Bloccato' : 'Nella chat') : 'Non ha ancora aperto la chat') + '</span></span>' +
+    (sel ? '<input type="checkbox" value="' + esc(p.id) + '">' : '') + '</' + (sel ? 'label' : 'button') + '>').join('') || '<p class="small">Non c\'è ancora nessun altro in Atlante.</p>';
+}
+$('nuova').onclick = () => {
+  apriFoglio('<button class="chiudi" data-chiudi>Annulla</button><h3>Nuova chat</h3><div>' + elencoPersone(false) + '</div>');
+  $('carta').querySelectorAll('[data-p]').forEach(b => b.onclick = async () => {
+    try { const c = (await api('conversazioni', {method:'POST', body:{con:b.dataset.p}})).conversazione; CONV.set(c.id, c); await db.put('conv', c); chiudiFoglio(); apriConv(c.id); }
+    catch (e) { toast(e.message); }
+  });
+};
+$('gruppo').onclick = () => {
+  apriFoglio('<button class="chiudi" data-chiudi>Annulla</button><h3>Nuovo gruppo</h3><div class="field"><input class="in" id="gn" maxlength="40" placeholder="Nome del gruppo"></div>' +
+    '<p class="small">Al più 32 persone, tu compreso. Chi crea il gruppo aggiunge e toglie le persone; ognuno può uscire.</p><div>' + elencoPersone(true) + '</div><button class="btn pri full" id="gc" style="margin-top:10px">Crea il gruppo</button>');
+  $('gc').onclick = async () => {
+    const nome = $('gn').value.trim(), membri = [...$('carta').querySelectorAll('input[type=checkbox]:checked')].map(x => x.value);
+    if (!nome) return $('gn').focus();
+    if (!membri.length) return toast('Scegli almeno una persona');
+    if (membri.length > 31) return toast('Al più 32 persone, tu compreso');
+    try { const c = (await api('conversazioni', {method:'POST', body:{nome, membri}})).conversazione; CONV.set(c.id, c); await db.put('conv', c); chiudiFoglio(); await caricaConv(); apriConv(c.id); }
+    catch (e) { toast(e.message); }
+  };
+};
+$('indietro').onclick = chiudiConv;
+$('titolo').onclick = () => { const c = CONV.get(aperta); if (!c) return; c.tipo === 'gruppo' ? infoGruppo(c) : infoPersona(c); };
+$('verifica').onclick = () => verifica(altroDi(CONV.get(aperta)));
+function infoPersona(c) {
+  const p = altroDi(c); if (!inAtlante(p)) return;
+  const b = ioHoBloccato(p);
+  apriFoglio('<button class="chiudi" data-chiudi>Fine</button><h3>' + esc(nomeDi(p)) + '</h3>' +
+    '<button class="btn full" id="iv">Verifica il codice di sicurezza</button><div style="height:8px"></div>' +
+    '<button class="btn full danger" id="ib">' + (b ? 'Sblocca ' : 'Blocca ') + esc(nomeDi(p)) + '</button>' +
+    '<p class="small">' + (b ? 'Ora non ti può scrivere né chiamare.' : 'Bloccata, questa persona non ti potrà più scrivere né chiamare (non lo saprà).') + '</p>');
+  $('iv').onclick = () => verifica(p);
+  $('ib').onclick = () => blocca(p, !b);
+}
+async function blocca(p, si) {
+  try {
+    const r = si ? await api('blocchi', {method:'POST', body:{persona:p}}) : await api('blocchi/' + enc(p), {method:'DELETE'});
+    RUB.bloccati = r.bloccati; chiudiFoglio(); disegnaVista(); toast(si ? nomeDi(p) + ' è bloccato' : nomeDi(p) + ' non è più bloccato');
+  } catch (e) { toast(e.message); }
+}
+function infoGruppo(c) {
+  const capo = c.creatore === IO.persona;
+  apriFoglio('<button class="chiudi" data-chiudi>Fine</button><h3>' + esc(c.nome) + '</h3><p class="small">' + c.membri.length + ' persone · ha creato il gruppo ' + esc(nomeDi(c.creatore)) + '</p>' +
+    c.membri.map(p => '<div class="scegli">' + avatar(p, nomeDi(p)) + '<span class="tx"><b>' + esc(nomeDi(p)) + '</b><span>' + (p === c.creatore ? 'Ha creato il gruppo' : '') + '</span></span>' +
+      (capo && p !== IO.persona ? '<button class="btn sm danger" data-togli="' + esc(p) + '">Togli</button>' : '') + '</div>').join('') +
+    (capo && !c.uscito ? '<button class="btn full" id="ga" style="margin-top:10px">Aggiungi persone</button>' : '') +
+    (!c.uscito ? '<button class="btn full danger" id="ge" style="margin-top:8px">Esci dal gruppo</button>' : ''));
+  $('carta').querySelectorAll('[data-togli]').forEach(b => b.onclick = () => togli(c, b.dataset.togli));
+  if ($('ge')) $('ge').onclick = () => togli(c, IO.persona);
+  if ($('ga')) $('ga').onclick = () => {
+    const fuori = RUB.persone.filter(p => p.id !== IO.persona && c.membri.indexOf(p.id) < 0);
+    apriFoglio('<button class="chiudi" data-chiudi>Annulla</button><h3>Aggiungi a «' + esc(c.nome) + '»</h3>' +
+      (fuori.map(p => '<label class="scegli">' + avatar(p.id, p.nome) + '<span class="tx"><b>' + esc(p.nome) + '</b></span><input type="checkbox" value="' + esc(p.id) + '"></label>').join('') || '<p class="small">Ci sono già tutti.</p>') +
+      '<button class="btn pri full" id="gok" style="margin-top:10px">Aggiungi</button>');
+    $('gok').onclick = async () => {
+      const persone = [...$('carta').querySelectorAll('input:checked')].map(x => x.value); if (!persone.length) return chiudiFoglio();
+      try { await api('conversazioni/' + enc(c.id) + '/membri', {method:'POST', body:{persone}}); chiudiFoglio(); await aggiorna(); } catch (e) { toast(e.message); }
+    };
+  };
+}
+async function togli(c, p) {
+  try { await api('conversazioni/' + enc(c.id) + '/membri/' + enc(p), {method:'DELETE'}); chiudiFoglio(); await aggiorna(); if (p === IO.persona) chiudiConv(); }
+  catch (e) { toast(e.message); }
+}
+// codice di sicurezza: 12 cifre e un QR da confrontare dal vivo. Uguali sui due telefoni = il Mac mini non ha messo
+// chiavi sue in mezzo. Le chiavi di questo telefono devono esserci: se mancano, il Mac mini non dice il vero
+const CODICI = new Map();
+async function codiceCon(p) {
+  const mie = C.chiaviAttive(RUB.persone, IO.persona);
+  if (mie.indexOf(IO.pubblica) < 0) throw new Error('Il Mac mini non elenca la chiave di questo telefono: non fidarti di questa chat e dillo a Samuele');
+  const x = await C.codice({id:IO.persona, chiavi:mie}, {id:p, chiavi:C.chiaviAttive(RUB.persone, p)});
+  CODICI.set(p, x); return x;
+}
+async function verifica(p) {
+  let cod;
+  try { cod = await codiceCon(p); } catch (e) { return toast(e.message); }
+  const cont = CONT.get(p) || {id:p, nome:nomeDi(p), chiavi:[]}, gia = cont.verificato === cod;
+  apriFoglio('<button class="chiudi" data-chiudi>Fine</button><h3>Codice di sicurezza con ' + esc(nomeDi(p)) + '</h3>' +
+    '<div class="cod">' + cod.replace(/(\d{4})(?=\d)/g, '$1 ') + '</div><canvas class="qr" id="vq" width="220" height="220"></canvas>' +
+    '<p class="small">Confrontalo dal vivo con quello sul telefono di ' + esc(nomeDi(p)) + ' (o inquadrate il QR). Se è uguale, nessuno si è messo in mezzo, nemmeno il Mac mini. Cambia quando cambia un suo telefono o uno dei tuoi.</p>' +
+    (gia ? '<p class="pill ok">Verificato</p>' : '<button class="btn pri full" id="vok">È uguale: segna come verificato</button>') +
+    ('BarcodeDetector' in window ? '<button class="btn full" id="vscan" style="margin-top:8px">Inquadra il suo QR</button><video id="vv" playsinline muted hidden style="width:100%;border-radius:10px;margin-top:8px"></video>' : ''));
+  disegnaQR($('vq'), 'ATLANTE-CHAT:' + cod);
+  const segna = async () => { cont.verificato = cod; CONT.set(p, cont); await db.put('contatti', cont); chiudiFoglio(); disegnaVista(); toast('Verificato: le chiavi di ' + nomeDi(p) + ' sono quelle giuste'); };
+  if ($('vok')) $('vok').onclick = segna;
+  if ($('vscan')) $('vscan').onclick = () => inquadra(cod, segna);
+}
+async function inquadra(cod, segna) {
+  const v = $('vv');
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    v.srcObject = s; v.hidden = false; await v.play();
+    const det = new BarcodeDetector({formats:['qr_code']}), fine = Date.now() + 60000;
+    while (!$('foglio').hidden && Date.now() < fine) {
+      const L = await det.detect(v).catch(() => []);
+      const t = L.map(x => x.rawValue).find(x => /^ATLANTE-CHAT:\d{12}$/.test(x));
+      if (t) { s.getTracks().forEach(x => x.stop()); if (t === 'ATLANTE-CHAT:' + cod) return segna(); return toast('Il codice NON è uguale: non fidarti di questa chat e dillo a Samuele'); }
+      await pausa(300);
+    }
+    s.getTracks().forEach(x => x.stop());
+  } catch (e) { toast('Fotocamera non disponibile: confronta le cifre'); }
+}
+let QRLIB = null;
+async function disegnaQR(cv, testo) {
+  try {
+    if (!QRLIB) { await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = 'qrcode.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); }); QRLIB = window.qrcode; }
+    const q = QRLIB(0, 'M'); q.addData(testo); q.make();
+    const n = q.getModuleCount(), g = cv.getContext('2d'), k = Math.floor(cv.width / (n + 2)), o = Math.floor((cv.width - k * n) / 2);
+    g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.fillStyle = '#000';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) g.fillRect(o + c * k, o + r * k, k, k);
+  } catch (e) { cv.hidden = true; }
+}
+
+/* ---------- avvio ---------- */
+(async () => {
+  if (!window.isSecureContext || !C || !crypto.subtle || !window.indexedDB) return fermo('La chat cifrata funziona solo dall\'indirizzo https dell\'app (con Tailscale o dal link d\'invito).');
+  try { DB = await apriDB(); IO = await identita(); }
+  catch (e) { return fermo('Questo browser non può tenere le chiavi della chat (' + e.message + '): prova da Safari o dall\'app sulla schermata Home.'); }
+  cursore = (await db.get('io', 'cursore')) || 0;
+  RIAS = (await db.get('io', 'riassunti')) || {}; LETTI = (await db.get('io', 'letti')) || {};
+  SOSPESI = (await db.get('io', 'sospesi')) || [];
+  RUB = (await db.get('io', 'rubrica')) || RUB;
+  IO.persona = (await db.get('io', 'persona')) || '';
+  (await db.tutti('contatti')).forEach(c => CONT.set(c.id, c));
+  (await db.tutti('conv')).forEach(c => CONV.set(c.id, c));
+  EVT = (await db.get('io', 'eventi')) || {};
+  // caricamenti fermati a metà (app chiusa): si riprendono con «Riprova»
+  for (const id of (await db.get('io', 'carichi')) || []) { const x = await db.get('msg', id); if (x && x.stato === 'carico') { x.stato = 'errore'; x.errore = 'Caricamento interrotto'; await db.put('msg', x); } }
+  await db.put('io', [], 'carichi');
+  if (IO.persona) disegnaLista();
+  for (let prova = 0; ; prova++) {
+    try { await registra(); await caricaRubrica(); await caricaConv(); ver = RUB.v || 0; break; }
+    catch (e) {
+      if (e.cambio) return cambioPersona(e.cambio);
+      if (e.stato === 403 || e.stato === 401) return fermo(e.message);
+      macOk = false; statoMac();
+      await pausa(Math.min(30000, 3000 * (prova + 1)));
+    }
+  }
+  macOk = true; statoMac();
+  disegnaLista(); disegnaNotifiche();
+  const q = new URLSearchParams(location.search).get('c');
+  if (q && CONV.has(q)) apriConv(q);
+  riprovaSospesi();
+  giro();
+  setInterval(() => { if (macOk) caricaRubrica().then(() => { if (aperta) disegnaVista(); }).catch(() => {}); }, 600000);
+})();
+</script>
+</body>
+</html>

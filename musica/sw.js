@@ -55,3 +55,51 @@ self.addEventListener('fetch', e => {
     return res;
   })));
 });
+
+/* ---------- chat (fase 5a): notifiche senza contenuto ----------
+   La notifica arriva vuota (il Mac mini non conosce i testi): qui si chiede al Mac mini chi ha scritto, con il biscotto
+   di questo telefono e l'id del suo dispositivo della chat (in IndexedDB, «ax-chat»), e si mostra «Nuovo messaggio da
+   …». Safari vuole una notifica per ogni push: se il Mac mini non risponde, se ne mostra una generica.
+   Sull'iPhone le notifiche ci sono solo con l'app sulla schermata Home (iOS 16.4 o successivo). */
+function chatDispositivo() {
+  return new Promise(ok => {
+    let r;
+    try { r = indexedDB.open('ax-chat'); } catch (e) { return ok(''); }
+    r.onupgradeneeded = () => { try { r.transaction.abort(); } catch (e) {} };   // la chat qui non è mai stata aperta: non la si crea vuota
+    r.onerror = () => ok('');
+    r.onsuccess = () => {
+      const db = r.result;
+      try {
+        const q = db.transaction('io').objectStore('io').get('disp');
+        q.onsuccess = () => { db.close(); ok(typeof q.result === 'string' ? q.result : ''); };
+        q.onerror = () => { db.close(); ok(''); };
+      } catch (e) { db.close(); ok(''); }
+    };
+  });
+}
+self.addEventListener('push', e => {
+  e.waitUntil((async () => {
+    let avvisi = [];
+    try {
+      const disp = await chatDispositivo();
+      if (disp) {
+        const r = await fetch(new URL('api/extra/chat/avvisi?disp=' + encodeURIComponent(disp), self.registration.scope), {credentials:'same-origin', cache:'no-store'});
+        if (r.ok) avvisi = ((await r.json()).avvisi || []).filter(a => a && typeof a.nome === 'string');
+      }
+    } catch (err) {}
+    const icona = new URL('icon-192.png?v=2', self.registration.scope).href;
+    if (!avvisi.length) return self.registration.showNotification('Atlante Musica', {body:'Nuovo messaggio', tag:'chat', icon:icona, data:{conv:''}});
+    return Promise.all(avvisi.slice(0, 4).map(a => self.registration.showNotification('Nuovo messaggio da ' + a.nome, {
+      body:a.gruppo ? 'Nel gruppo «' + a.gruppo + '»' : (a.n > 1 ? a.n + ' messaggi nuovi' : 'Tocca per leggerlo'), tag:'chat-' + a.conv, icon:icona, data:{conv:a.conv}})));
+  })());
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const conv = (e.notification.data || {}).conv || '';
+  const base = new URL('./', self.registration.scope);
+  e.waitUntil(self.clients.matchAll({type:'window', includeUncontrolled:true}).then(L => {
+    const w = L.find(c => c.frameType !== 'nested' && new URL(c.url).pathname.startsWith(base.pathname));
+    if (w) { w.postMessage({tipo:'apri-chat', conv}); return w.focus(); }
+    return self.clients.openWindow(new URL('./?x=chat' + (conv ? '&c=' + encodeURIComponent(conv) : ''), base).href);
+  }));
+});
