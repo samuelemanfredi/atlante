@@ -978,6 +978,7 @@ function scaricaTutto() {
   // finché non si sa chi è questo telefono (prima apertura, il Mac non ha ancora risposto a «chi sono»), niente
   // download di tutta la libreria: se fosse un invitato si riempirebbe il telefono senza averlo chiesto
   if (!IO.ruolo && !tuttoScelto()) return;
+  if (IO.stessoMac && !tuttoScelto()) return;   // sul Mac mini stesso (saputo dall'ultima volta) nemmeno in attesa del Mac
   const q = new Set(DLQ), inPl = new Set(); P.forEach(p => p.ids.forEach(x => inPl.add(x)));
   for (const x of AUTO) if (!q.has(x)) AUTO.delete(x);
   const tr = [...T.values()].filter(t => t.remote && !saved.has(t.id) && !TOLTI.has(t.id) && !q.has(t.id) && dlCur !== t.id && !grabbing.has(t.id));
@@ -1498,7 +1499,8 @@ const pages = {
         tot++; if (g ? g.some(x => saved.has(x) || !(T.get(x) || {}).remote) : saved.has(t.id)) sul++;
       }
       h += '<div class="lrows" style="margin-top:14px"><button class="lrow" data-a="tutto" role="switch" aria-checked="' + TUTTO + '"><span class="ic">' + ic('down') + '</span><span class="t">Scarica tutta la musica<small>' +
-        sul + ' di ' + tot + ' brani sull\'iPhone</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button></div>';
+        (IO.stessoMac && !TUTTO ? 'Su questo Mac non serve: la musica è già sul suo disco' : sul + ' di ' + tot + ' brani sull\'iPhone') +
+        '</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button></div>';
     }
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
     h += ritScaffale() + atlSezione();   // «Per ritmo», Playlist di Atlante (dal Mac mini) e «Crea con l'IA»
@@ -3153,9 +3155,10 @@ async function ioCarica() {
     const r = await fetchT(XAPI + 'io', {cache:'no-store'}, 6000);
     if (!r.ok) return;
     const j = await r.json(), prima = JSON.stringify(IO);
-    IO = {ruolo:j.ruolo || '', persona:j.persona || null, nuove:j.nuove || null}; ls.set('am-io', IO);
-    // un invitato non si ritrova migliaia di brani sul telefono senza averlo chiesto: «Scarica tutto» lo accende lui
-    if (IO.ruolo === 'invitato' && !tuttoScelto()) tuttoSpento();
+    IO = {ruolo:j.ruolo || '', persona:j.persona || null, nuove:j.nuove || null, stessoMac:!!j.stesso_mac}; ls.set('am-io', IO);
+    // un invitato non si ritrova migliaia di brani sul telefono senza averlo chiesto: «Scarica tutto» lo accende lui;
+    // sul Mac mini stesso la musica è già sul suo disco: copiarla tutta riempie il disco interno (27/10)
+    if ((IO.ruolo === 'invitato' || IO.stessoMac) && !tuttoScelto()) tuttoSpento();
     if (prima !== JSON.stringify(IO)) render(true);
     if (IO.ruolo === 'invitato') copieScaricati();
   } catch (e) {}
