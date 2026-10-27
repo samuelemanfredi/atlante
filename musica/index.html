@@ -1678,7 +1678,7 @@ function next(auto) {
   else if (auto) { au.pause(); au.currentTime = 0; load(0, false); }
   else load(0, true);
 }
-function prev() { if (au.currentTime > 3 || S.qi <= 0) { au.currentTime = 0; if (au.paused && S.qi <= 0) au.play().catch(() => {}); return; } load(S.qi - 1, true); }
+function prev() { saltoAnnulla(); if (au.currentTime > 3 || S.qi <= 0) { au.currentTime = 0; if (au.paused && S.qi <= 0) au.play().catch(() => {}); return; } load(S.qi - 1, true); }
 function setShuffle(on) {
   if (on === S.shuffle) return;
   S.shuffle = on;
@@ -1776,7 +1776,7 @@ function checkHeard() {
 }
 auOn('timeupdate', checkHeard);
 auOn('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
-auOn('ended', () => { checkHeard(); if (MIX.on && !MIX.act) diario('fine senza mix', {unSolo:MIX.unSolo, piano:MIX.plan ? MIX.plan.st : ''}); next(true); });
+auOn('ended', () => { checkHeard(); if (MIX.on && !MIX.act) diario('fine senza mix', {piano:MIX.plan ? MIX.plan.st : ''}); next(true); });
 let countFor = null, errRun = 0;
 auOn('playing', () => {
   errRun = 0;
@@ -1812,7 +1812,10 @@ auOn('error', async () => {
    I BPM si misurano sui 30 s finali del brano in corso e sui 30 s iniziali del successivo (dal file sull'iPhone, o dal Mac
    che manda il pezzo già decodificato), una volta sola per brano. Se i ritmi non si riconoscono o sono troppo lontani,
    resta una dissolvenza normale. */
-const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, unSolo:ls.get('am-mix-unlettore', false), prepT:0};
+const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0};
+// «un lettore solo» non c'è più (vedi la pausa del lettore, più sotto): chi l'aveva salvato lo perde, una volta sola. Se
+// era acceso (il mix fermo per sempre per un falso allarme) lo si scrive nel diario
+(function () { const era = ls.get('am-mix-unlettore', null); if (era == null) return; try { localStorage.removeItem('am-mix-unlettore'); } catch (e) {} if (era) setTimeout(() => diario('un lettore solo: tolto'), 0); })();
 let userVol = 1;
 function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iPhone il volume dei lettori non si cambia: lo fa il mixer)
   const g = el._g == null ? 1 : el._g;
@@ -1823,8 +1826,24 @@ function setGain(el, g) { el._g = g; if (MIX.gains.has(el)) { const n = MIX.gain
 // iPhone e iPad: il volume dei lettori è fisso, la dissolvenza passa da un piccolo mixer (Web Audio). Si prepara al primo
 // tocco (serve un gesto) e con la sessione audio «playback», che lo lascia suonare anche a schermo bloccato.
 const NEEDS_MIXER = isIOS;
+// iOS prima del 27: un lettore collegato al mixer non cambia davvero velocità (bug WebKit 240405, corretto in Safari 27:
+// l'accelerazione non si sente, il brano va a scatti e scivola rispetto a currentTime). Lì il mixer resta spento, come
+// con am-mix-noweb: la velocità cambia davvero e il passaggio è una rampa a tempo con un taglio sul battito, senza
+// dissolvenza (con il mixer non si avrebbe né l'una né l'altra).
+// Quale iOS: dal 26 Safari scrive per sempre «OS 18_6» nello User-Agent (WebKit 298260) e la versione vera è quella di
+// Safari, «Version/NN»; le app sulla schermata Home non hanno neanche quella: lì decidono due novità di Safari 27.
+function iosDa27(ua, novita) {
+  const os = /(?:iPhone|CPU) OS (\d+)_(\d+)/.exec(ua), ver = /Version\/(\d+)/.exec(ua);
+  if (os && !(+os[1] === 18 && +os[2] >= 6)) return +os[1] >= 27;   // prima del blocco, o un browser che dice il vero
+  if (ver) return +ver[1] >= 27;   // Safari: la sua versione è quella di iOS
+  return !!novita;
+}
+function novita27() {   // in Safari 27: «width: stretch» e i ReadableStream da scorrere con for await
+  try { return CSS.supports('width', 'stretch') && typeof ReadableStream === 'function' && Symbol.asyncIterator in ReadableStream.prototype; } catch (e) { return false; }
+}
+const IOS_PRIMA_27 = isIOS && !iosDa27(navigator.userAgent, novita27());
 function mixerInit() {
-  if (MIX.ctx || !NEEDS_MIXER || !MIX.on || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
+  if (MIX.ctx || !NEEDS_MIXER || IOS_PRIMA_27 || !MIX.on || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
   try {
     if (navigator.audioSession) navigator.audioSession.type = 'playback';
     else return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
@@ -1832,6 +1851,7 @@ function mixerInit() {
     DECKS.forEach(el => { const g = ctx.createGain(); ctx.createMediaElementSource(el).connect(g); g.connect(ctx.destination); MIX.gains.set(el, g); applyVol(el); });
     MIX.ctx = ctx; ctx.resume().catch(() => {});
     ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && !au.paused && au !== AUX) ctx.resume().catch(() => {}); });
+    ctx.addEventListener('statechange', () => diario('mixer', {stato:ctx.state, nascosta:document.hidden}));   // ogni cambio nel diario
   } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
 }
 addEventListener('pointerdown', () => { mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {}); }, {capture:true, passive:true});
@@ -1888,12 +1908,44 @@ document.addEventListener('visibilitychange', () => {
 const DIARIO = ls.get('am-mix-diario', []);
 function diario(esito, extra) {
   DIARIO.push(Object.assign({q:new Date().toISOString().slice(5, 19), e:esito, b:(TT(curId) || {}).title || ''}, extra || {}));
-  while (DIARIO.length > 8) DIARIO.shift();
+  while (DIARIO.length > 30) DIARIO.shift();   // al Mac vanno le ultime 15 (devStato)
   ls.set('am-mix-diario', DIARIO);
   if (typeof devInvia === 'function') devInvia(true);
 }
+// ----- diario dei passaggi: più voci per capire da lontano perché il mix si blocca sull'iPhone -----
+// all'apertura: che cosa è (browser o app sulla schermata Home), come si è aperta e se il mixer si accenderà
+function diarioAvvio() {
+  let nav = '', app = false;
+  try { nav = ((performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {}).type || ''; } catch (e) {}
+  try { app = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; } catch (e) {}
+  diario('avvio', {ua:String(navigator.userAgent || '').slice(0, 200), app, nav,
+    mixer:!NEEDS_MIXER ? '' : IOS_PRIMA_27 ? 'no: iOS prima del 27' : ls.get('am-mix-noweb', false) ? 'no: spento' : 'sì'});
+}
+setTimeout(diarioAvvio, 0);   // dopo tutto lo script (diario usa cose definite più avanti)
+// com'è il brano nuovo quando parte il mix: pagina nascosta, mixer, quanto è caricato, da dove arriva, lettore sbloccato
+function mixInfo(el, P) {
+  let buf = 0; try { const b = el.buffered; for (let i = 0; i < b.length; i++) buf += b.end(i) - b.start(i); } catch (e) {}
+  return {nascosta:!!document.hidden, ctx:MIX.ctx ? MIX.ctx.state : 'no', rs:el.readyState, buf:Math.round(buf * 10) / 10, da:P.url ? 'file' : 'rete', sbl:!!el._sbloccato};
+}
+// attese e ripartenze del brano nuovo durante il passaggio, con i ms dalla partenza (al più 6 voci per passaggio)
+function osservaNuovo(el, W) {
+  const t0 = performance.now(); let n = 0;
+  const f = e => { if (n++ < 6) diario('nuovo ' + e.type, {ms:Math.round(performance.now() - t0)}); };
+  el.addEventListener('waiting', f); el.addEventListener('playing', f);
+  setTimeout(() => { el.removeEventListener('waiting', f); el.removeEventListener('playing', f); }, (W + 10) * 1000);
+}
+// una pausa che nessuno ha chiesto (non il tasto, la schermata di blocco, le cuffie con il loro tasto o un comando):
+// cuffie staccate, chiamate, l'iPhone che ferma l'audio… con lo stato del mix in quel momento
+function diarioPausa() {
+  if (au.ended || Date.now() - pausaVoluta < 1000 || !au.getAttribute('src')) return;
+  diario('pausa', {t:Math.round(au.currentTime || 0), nascosta:!!document.hidden, ctx:MIX.ctx ? MIX.ctx.state : 'no',
+    piano:MIX.plan ? MIX.plan.st : '', prep:MIX.plan && MIX.prepT ? Date.now() - MIX.prepT : undefined, salto:!!MIX.salto, dissolvenza:!!MIX.act});
+}
+auOn('pause', diarioPausa);
+function diarioPagina() { diario('pagina', {nascosta:!!document.hidden, suona:!au.paused}); }   // schermo bloccato o app in secondo piano
+document.addEventListener('visibilitychange', diarioPagina);
 function setMix(on) {
-  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else { mixerInit(); MIX.unSolo = false; ls.set('am-mix-unlettore', false); }
+  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else mixerInit();
   updateNow(); toast(on ? 'Mix a tempo: gli ultimi ' + MIX.X + ' secondi si adattano ai BPM del brano successivo' : 'Mix a tempo disattivato');
 }
 
@@ -1969,25 +2021,27 @@ async function decodeMono(buf) {   // file intero dall'iPhone → mono a 11025 H
   for (let i = 0; i < n; i++) { let s2 = 0; for (const d of cs) s2 += d[2 * i] + d[2 * i + 1]; x[i] = s2 / (2 * cs.length); }
   return {x, sr:ab.sampleRate / 2, dur:ab.duration};
 }
-// griglia dei battiti di un pezzo del brano: part 'i' = primi 30 s, 'f' = ultimi 30 s. b0 è in secondi del brano.
+// griglia dei battiti di un pezzo del brano: part 'i' = primi 30 s, 'f' = ultimi 30 s, un numero = 20 s da quel punto
+// (mix al salto: questi non restano in memoria, ogni salto cade in un punto diverso). b0 è in secondi del brano.
+function gridPezzo(part, dur) { return typeof part === 'number' ? {da:Math.max(0, part), lung:20} : {da:part === 'i' ? 0 : Math.max(0, (dur || 0) - 30), lung:30}; }
 const gridWait = new Map();
 function grid(id, part) {
   const k = id + '|' + part; if (BPMC.has(k)) return Promise.resolve(BPMC.get(k));
   if (gridWait.has(k)) return gridWait.get(k);
   const pr = (async () => {
     const t = T.get(id); if (!t) return null;
-    let seg = null, da = 0;
+    let seg = null, da = 0, lung = 30;
     const f = await getFile(id);
     if (f) {
       if (f.size > 60e6) return null;
       const d = await decodeMono(await f.arrayBuffer());
-      da = part === 'i' ? 0 : Math.max(0, d.dur - 30);
-      const a = Math.floor(da * d.sr), b = part === 'i' ? Math.min(d.x.length, Math.floor(30 * d.sr)) : d.x.length;
+      ({da, lung} = gridPezzo(part, d.dur));
+      const a = Math.floor(da * d.sr), b = Math.min(d.x.length, Math.floor((da + lung) * d.sr));
       seg = {x:d.x.subarray(a, b), sr:d.sr};
     } else if (t.remote && SRV && t.sid) {
       const dur = t.duration || 0; if (part === 'f' && !dur) return null;
-      da = part === 'i' ? 0 : Math.max(0, dur - 30);
-      const r = await fetchT(API + 'pezzo/' + encodeURIComponent(t.sid) + '?da=' + da.toFixed(3) + '&durata=30', {}, 20000);
+      ({da, lung} = gridPezzo(part, dur));
+      const r = await fetchT(API + 'pezzo/' + encodeURIComponent(t.sid) + '?da=' + da.toFixed(3) + '&durata=' + lung, {}, 20000);
       if (!r.ok) return null;
       seg = wavPCM(await r.arrayBuffer());
     }
@@ -1995,7 +2049,8 @@ function grid(id, part) {
     await new Promise(ok => setTimeout(ok, 0));
     const g = beatGrid(seg.x, seg.sr); if (!g) return null;
     const v = {bpm:g.bpm, b0:Math.round((da + g.b0) * 1000) / 1000, c:g.c};
-    bpmPut(k, v); return v;
+    if (typeof part !== 'number') bpmPut(k, v);
+    return v;
   })().catch(() => null).finally(() => gridWait.delete(k));
   gridWait.set(k, pr); return pr;
 }
@@ -2012,11 +2067,8 @@ async function xfPrepare(P) {
   const [ga, gb] = await Promise.all([grid(P.idA, 'f'), grid(P.idB, 'i')]);
   if (MIX.plan !== P) return;
   const d = au.duration, X = MIX.X;
-  P.ga = ga; P.gb = gb; P.r = 1; P.f = 1; P.match = false;
-  if (ga && gb && ga.c >= 1.15 && gb.c >= 1.15) {
-    let bf = 1, be = 9; for (const f of [0.5, 1, 2]) { const e = Math.abs(gb.bpm * f / ga.bpm - 1); if (e < be) { be = e; bf = f; } }
-    if (be <= 0.12) { P.match = true; P.f = bf; P.r = gb.bpm * bf / ga.bpm; }
-  }
+  P.ga = ga; P.gb = gb;
+  const m = mixFattore(ga, gb); P.match = m.match; P.f = m.f; P.r = m.r;
   const TA = 60 / (P.ga ? P.ga.bpm : 120);
   let tS = d - X * P.r;
   if (P.match) { const k = Math.round((tS - ga.b0) / TA); tS = ga.b0 + k * TA; if (d - tS < X * P.r * 0.7) tS -= TA * Math.ceil((X * P.r * 0.7 - (d - tS)) / TA); }
@@ -2026,39 +2078,44 @@ async function xfPrepare(P) {
   if (MIX.plan !== P || !tb) return;
   if (P.url) URL.revokeObjectURL(P.url);
   P.url = f ? URL.createObjectURL(f) : null;
-  el.playbackRate = 1; setGain(el, 0); P.el = el;
-  // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito
+  velocita(el, 1); setGain(el, 0); P.el = el;
+  // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito.
+  // Se quel play() viene interrotto l'ascoltatore resta attaccato: agisce solo per questo piano, e si stacca quando finisce
   el.muted = true;
-  el.addEventListener('playing', () => { el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; if (MIX.plan === P) P.st = 'ready'; }, {once:true});
+  P.suona = () => { if (MIX.plan !== P) return; el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; P.st = 'ready'; diario('pronto', {ms:Date.now() - MIX.prepT}); };
+  el.addEventListener('playing', P.suona, {once:true});
   el.src = P.url || API + 'file/' + encodeURIComponent(tb.sid);
-  MIX.prepT = Date.now();
-  const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
+  MIX.prepT = Date.now(); diario('preparo', {da:P.url ? 'file' : 'rete'});
+  const pr = el.play(); if (pr && pr.catch) pr.catch(e => { diario('prep rifiutata', {err:(e && e.name) || String(e)}); el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
 }
 function xfAbort() {
+  saltoAnnulla();   // anche il salto a mano in attesa (si è scelto un altro brano, mix spento…)
   const A = MIX.act; if (A) xfEnd();
   const P = MIX.plan; MIX.plan = null;
   if (P) {
+    if (P.el && P.suona) P.el.removeEventListener('playing', P.suona);
     if (P.el && P.el !== au) { P.el.muted = false; P.el.pause(); P.el.removeAttribute('src'); try { P.el.load(); } catch (e) {} setGain(P.el, 1); }
     if (P.url && (!P.el || P.el !== au)) URL.revokeObjectURL(P.url);
-    if (P.idA === curId) au.playbackRate = 1;
+    if (P.idA === curId) velocita(au, 1);
   }
-  setGain(au, 1); au.playbackRate = 1;
+  setGain(au, 1); velocita(au, 1);
 }
 function xfStart(P) {
   const out = au, inn = P.el;
   checkHeard();   // il brano che finisce ha suonato: si salva come sempre
-  inn.playbackRate = 1;
-  try { inn.preservesPitch = true; inn.webkitPreservesPitch = true; } catch (e) {}
+  if (P.suona) inn.removeEventListener('playing', P.suona);   // preparazione interrotta: niente pausa alla partenza
+  velocita(inn, 1); conPitch(inn);
   au = inn;
   const qiA = S.qi;
-  diario('mix', {match:!!P.match, r:Math.round((P.r || 1) * 1000) / 1000, mixer:MIX.gains.size > 0});
+  diario(P.salto ? 'mix al salto' : 'mix', Object.assign({match:!!P.match, r:Math.round((P.r || 1) * 1000) / 1000, mixer:MIX.gains.size > 0}, mixInfo(inn, P), P.salto));
   const p = inn.play(); if (p && p.catch) p.catch(() => { const A = MIX.act; if (A && A.inn === inn) xfRifiutato(A); });
   // da qui il brano in corso è il nuovo (titolo, schermata di blocco, coda), come in Apple Music durante la dissolvenza
   S.qi = P.j; curId = P.idB; keptFor = null; countFor = P.idB;
   const outUrl = curUrl; curUrl = P.url; P.url = null;
   if (typeof dropOrph === 'function') dropOrph(); updateNow(); saveState(); markCur();
-  const W = Math.max(2, (out.duration - out.currentTime) / Math.max(0.5, out.playbackRate));
-  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P, qiA};
+  const W = P.W || Math.max(2, (out.duration - out.currentTime) / Math.max(0.5, out.playbackRate));   // al salto: MIX.XS secondi
+  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P, qiA, innDa:inn.currentTime || 0};
+  osservaNuovo(inn, W);
   controllaPassaggio();
   MIX.plan = null;
   if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); xfEnd(); return; }   // iPhone senza mixer: niente dissolvenza, taglio sul battito
@@ -2078,17 +2135,20 @@ function xfRifiutato(A) {
   diario('rifiutato');
   const {out, inn, P} = A;
   inn._sbloccato = false; inn._rifiuta = true;
-  inn.pause(); inn.playbackRate = 1; inn.removeAttribute('src'); try { inn.load(); } catch (e) {}
+  inn.pause(); velocita(inn, 1); inn.removeAttribute('src'); try { inn.load(); } catch (e) {}
   if (curUrl) URL.revokeObjectURL(curUrl);
   au = out; curUrl = A.outUrl; S.qi = A.qiA; curId = P.idA; keptFor = curId; countFor = null;
-  setGain(inn, 1); setGain(out, 1); out.playbackRate = 1;
+  setGain(inn, 1); setGain(out, 1); velocita(out, 1);
   if (out.paused && !out.ended) out.play().catch(() => {});
   updateNow(); saveState(); markCur();
+  if (P.salto) { const j = S.queue[P.j] === P.idB ? P.j : S.queue.indexOf(P.idB); if (j >= 0) load(j, true); }   // salto a mano: si cambia subito, sul lettore che suona
 }
 function xfEnd() {
   const A = MIX.act; if (!A) return; MIX.act = null;
-  const out = A.out;
-  out.pause(); out.playbackRate = 1; out.removeAttribute('src'); try { out.load(); } catch (e) {}
+  const out = A.out, s = (performance.now() - A.t0) / 1000;
+  // quanto è andato avanti il brano nuovo durante la dissolvenza (se molto meno del tempo passato, era fermo o a scatti)
+  if (s >= 0.5) diario('fine mix', {avanzato:Math.round(((A.inn.currentTime || 0) - A.innDa) * 10) / 10, s:Math.round(s * 10) / 10});
+  out.pause(); velocita(out, 1); out.removeAttribute('src'); try { out.load(); } catch (e) {}
   setGain(out, 1); setGain(A.inn, 1);
   if (A.outUrl) URL.revokeObjectURL(A.outUrl);
 }
@@ -2102,47 +2162,245 @@ function xfRun() {
     // i battiti del brano che finisce inseguono quelli del nuovo: piccola correzione di velocità (al più ±5%)
     const TA = 60 / P.ga.bpm, TBe = 60 / (P.gb.bpm * P.f);
     const e = wrap((out.currentTime - P.ga.b0) / TA - (inn.currentTime - P.gb.b0) / TBe);
-    const k = Math.max(-0.05, Math.min(0.05, -e * TBe / 1.5));
-    out.playbackRate = P.r * (1 + k);
+    if (!MIX.gains.size) out.playbackRate = P.r * (1 + correzioneFase(e, TBe, false));
+    else {   // con il mixer: al più una correzione ogni 2 s (la prima mezzo secondo dopo la partenza)
+      const ora = performance.now(); if (A.corr == null) A.corr = A.t0 - 1500;
+      if (ora - A.corr >= 2000) { A.corr = ora; velocita(out, P.r * (1 + correzioneFase(e, TBe, true))); }
+    }
   }
 }
 function xfLoop() { clearInterval(MIX.loop); MIX.loop = setInterval(() => { if (MIX.act) xfRun(); else if (MIX.plan) xfTick(); else clearInterval(MIX.loop); }, 40); }
 function xfTick() {
   if (MIX.act) { xfRun(); return; }
-  if (!MIX.on || MIX.unSolo || au === AUX || au.paused || castUnLettore()) return;   // AirPlay del Mac, Chromecast: l'altro lettore suonerebbe qui
+  if (MIX.salto) return;   // un salto a mano in preparazione: il mix a fine brano aspetta
+  if (!MIX.on || au === AUX || au.paused || castUnLettore()) return;   // AirPlay del Mac, Chromecast: l'altro lettore suonerebbe qui
   const t = T.get(curId), d = au.duration, c = au.currentTime;
   if (!t || !isFinite(d) || d < 45) return;
   const j = nextIdx(), idB = j >= 0 ? S.queue[j] : null, tb = idB && T.get(idB);
   if (!tb || idB === curId || !canPlay(idB) || tb.duration && tb.duration < 30) { if (MIX.plan) xfAbort(); return; }
   let P = MIX.plan;
   if (P && (P.idA !== curId || P.idB !== idB)) { xfAbort(); P = null; }
-  if (!P) { if (d - c > 40 || d - c < MIX.X + 2 || otherDeck()._rifiuta) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(() => { if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
+  if (!P) { if (d - c > 40 || d - c < MIX.X + 2 || otherDeck()._rifiuta) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(e => { diario('prep errore', {err:(e && e.name) || String(e)}); if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
   if (P.st !== 'ready') return;
   if (c < P.tR) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
-  if (c < P.tS) {   // accelera o rallenta piano verso i BPM del successivo (forma a S)
-    const q = Math.min(1, (c - P.tR) / Math.max(0.1, P.tS - P.tR)), sq = q * q * (3 - 2 * q);
-    au.playbackRate = 1 + (P.r - 1) * sq;
-    try { au.preservesPitch = true; au.webkitPreservesPitch = true; } catch (e) {}
+  if (c < P.tS) {   // accelera o rallenta piano verso i BPM del successivo (forma a S; con il mixer a gradini)
+    const q = Math.min(1, (c - P.tR) / Math.max(0.1, P.tS - P.tR));
+    velocita(au, rampaGradini(q, P.r, gradini(P.tS - P.tR)));
+    conPitch(au);
     return;
   }
   if (P.el.readyState < 3) { if (d - c < 3) { diario('successivo non pronto', {rs:P.el.readyState}); xfAbort(); } return; }   // il successivo non è ancora pronto: si aspetta il battito dopo
-  if (P.match) {   // si parte sul battito: se questo è già passato da più di un decimo, si aspetta il prossimo
-    const TA = 60 / P.ga.bpm, ph = wrap((c - P.ga.b0) / TA);
-    if (ph > 0.1 && ph < 0.45) return;
+  if (P.match) {   // si parte sul battito, a tempo: il nuovo avanti di quanto è passato dall'ultimo battito (al più 0,9), se
+    // no si aspetta il prossimo. Con il mixer i battiti si correggono di rado: la partenza deve essere già giusta
+    const p = partenzaBattito(c, au.playbackRate, P.ga, P.gb, true);
+    if (p.attesa) return;
+    if (Math.abs((P.el.currentTime || 0) - p.pos) > 0.02) { try { P.el.currentTime = p.pos; } catch (e) {} }
   }
   xfStart(P);
 }
 auOn('timeupdate', xfTick);
-auOn('pause', () => {
+auOn('pause', xfPausa);
+function xfPausa() {
   if (MIX.act) xfEnd();
-  // il brano in corso si è fermato da solo proprio mentre si preparava il successivo sull'altro lettore: questo iPhone
-  // non lascia suonare due lettori insieme. Si riprende subito e da qui i passaggi restano su un lettore solo.
-  if (MIX.plan && !au.ended && Date.now() - (MIX.prepT || 0) < 3000 && pausaVoluta < MIX.prepT) {
-    xfAbort(); MIX.unSolo = true; ls.set('am-mix-unlettore', true); diario('un lettore solo: mix spento');
-    au.play().catch(() => {});
+  // Prima qui una pausa arrivata da sola mentre si preparava il successivo spegneva il mix per sempre («un lettore solo»:
+  // l'iPhone non farebbe suonare due lettori insieme). Nel sorgente di WebKit su iOS due <audio> non si fermano a vicenda
+  // (ConcurrentPlaybackNotPermitted vale solo per i video): erano falsi allarmi (cuffie staccate, chiamate). Ora resta
+  // solo nel diario (voce «pausa», con lo stato della preparazione).
+}
+auOn('seeking', () => { const P = MIX.plan; if (P && P.st === 'ready' && au.currentTime < P.tR) velocita(au, 1); });
+
+/* ---------- mix al salto: lo stesso passaggio a tempo quando si passa avanti a mano ----------
+   «Successivo» (lettore, mini lettore, schermata di blocco e cuffie, telecomando da un altro dispositivo, Cmd+→) e il
+   tocco su un brano di «In coda»: il brano in corso non si ferma. Si misurano i suoi battiti da dove è arrivato (20 s da
+   lì) e quelli dell'inizio del brano scelto; in circa 2 s accelera o rallenta fino ai BPM del nuovo (come a fine brano:
+   al più ±12%, con la metà o il doppio), il nuovo parte sul battito sull'altro lettore e i volumi si incrociano in
+   MIX.XS secondi a battiti agganciati. Dalla pressione al brano nuovo di solito passano 3–5 s.
+   Una seconda pressione mentre si aspetta fa cambiare subito; durante la dissolvenza fa un nuovo salto dal brano nuovo.
+   Ritmi non riconosciuti o troppo lontani: dissolvenza normale. Brano nuovo non pronto in tempo: si cambia subito.
+   «Precedente», i brani scelti dalla libreria, la pausa, il mix spento e i podcast restano come prima. */
+MIX.XS = 6;   // durata della dissolvenza al salto, in secondi
+MIX.salto = null;   // il salto in preparazione
+// attese massime (secondi): misura dei battiti (poi dissolvenza normale), brano nuovo pronto (poi cambio subito); rampa
+const SALTO = {MISURA:4, PRONTO:6, RAMPA:2};
+// quanto deve mancare alla fine del brano in corso perché il salto faccia in tempo (se no si cambia subito, come prima)
+function saltoResto() { return SALTO.PRONTO + 1 + MIX.XS * 1.12; }
+// fattore tra i BPM dei due brani (la metà, gli stessi o il doppio) e velocità del brano che esce per raggiungerli
+// (al più ±12%): la stessa scelta per il mix a fine brano e per quello al salto
+function mixFattore(ga, gb) {
+  if (!(ga && gb && ga.c >= 1.15 && gb.c >= 1.15)) return {match:false, f:1, r:1, perche:'ritmi non riconosciuti'};
+  let bf = 1, be = 9; for (const f of [0.5, 1, 2]) { const e = Math.abs(gb.bpm * f / ga.bpm - 1); if (e < be) { be = e; bf = f; } }
+  if (be > 0.12) return {match:false, f:1, r:1, perche:'ritmi troppo lontani'};
+  return {match:true, f:bf, r:gb.bpm * bf / ga.bpm, perche:''};
+}
+// velocità durante la rampa (q da 0 a 1): da 1 a r con una forma a S, come negli ultimi secondi a fine brano
+function rampaVel(q, r) { const s = q <= 0 ? 0 : q >= 1 ? 1 : q * q * (3 - 2 * q); return 1 + (r - 1) * s; }
+// iPhone con il mixer (Web Audio): da iOS 27 ogni cambio di velocità smonta e rifà il collegamento audio (setPlaybackRate
+// in AudioSourceProviderAVFObjC.mm di WebKit) e i circa 29 cambi al secondo di prima facevano buchi nel suono. Con il
+// mixer quindi la rampa va a gradini (al più 4, circa uno al secondo) e i battiti si correggono al più ogni 2 s, solo
+// quando serve; senza mixer resta tutto continuo come prima.
+function velocita(el, v) { if (Math.abs((el.playbackRate || 1) - v) > 1e-4) el.playbackRate = v; }   // solo se cambia davvero
+function conPitch(el) { try { if (el.preservesPitch !== true) el.preservesPitch = true; if (el.webkitPreservesPitch === false) el.webkitPreservesPitch = true; } catch (e) {} }
+// quanti gradini per una rampa di «sec» secondi: con il mixer uno al secondo (da 1 a 4), senza mixer 0 = continua
+function gradini(sec) { return MIX.gains.size ? Math.max(1, Math.min(4, Math.round(sec))) : 0; }
+// rampa (q da 0 a 1) verso r: continua con n = 0, altrimenti n gradini, ognuno al valore della forma a S alla sua fine
+function rampaGradini(q, r, n) { if (!n) return rampaVel(q, r); return q <= 0 ? 1 : rampaVel(Math.min(n, Math.floor(q * n) + 1) / n, r); }
+// correzione (frazione della velocità, al più ±5%) del brano che esce per uno scarto e (in battiti; TBe secondi a battito):
+// senza mixer continua, come prima; con il mixer (una ogni 2 s) solo oltre 0,08 battito, tale da recuperarlo in quei 2 s
+function correzioneFase(e, TBe, mixer) {
+  const k = mixer ? (Math.abs(e) > 0.08 ? -e * TBe / 2 : 0) : -e * TBe / 1.5;
+  return Math.max(-0.05, Math.min(0.05, k));
+}
+// che cosa misurare nel punto c del brano (durata d): vicino all'inizio o alla fine bastano le misure di sempre (restano
+// in memoria e valgono per tutti i 30 s), altrimenti i 20 s da lì in avanti
+function pezzoQui(c, d) { return c <= 10 ? 'i' : d && c >= d - 28 ? 'f' : Math.round(c * 1000) / 1000; }
+// quando far partire il brano nuovo: sul prossimo battito del brano in corso (al punto c, a velocità rate), con il nuovo
+// fermo sul suo primo battito. Appena dopo un battito, o se il timer è arrivato tardi, si parte subito con il nuovo
+// avanti del tempo passato dal battito: i battiti coincidono comunque. → {attesa in secondi (0 = subito), pos del nuovo}
+function partenzaBattito(c, rate, ga, gb, tardi) {
+  const TA = 60 / ga.bpm, x = (c - ga.b0) / TA, ph = x - Math.floor(x);
+  if (ph <= 0.1 || tardi && ph < 0.9) return {attesa:0, pos:gb.b0 + ph * TA / rate};
+  return {attesa:(1 - ph) * TA / rate, pos:gb.b0};
+}
+// la dissolvenza in corso, al punto q (da 0 a 1), finisce in s secondi: la nuova durata totale
+function accorciaW(q, s) { return s / Math.max(1e-3, 1 - q); }
+function xfAccorcia(s) {
+  const A = MIX.act; if (!A) return;
+  const ora = performance.now(), q = Math.min(1, (ora - A.t0) / 1000 / A.W);
+  if (A.W * (1 - q) <= s) return;   // finisce già prima
+  A.W = accorciaW(q, s); A.t0 = ora - q * A.W * 1000;
+  if (MIX.gains.size) {   // iPhone: le curve di volume, da dove sono ora alla fine in s secondi
+    const t = MIX.ctx.currentTime;
+    try {
+      const gi = MIX.gains.get(A.inn).gain, go = MIX.gains.get(A.out).gain;
+      gi.cancelScheduledValues(t); go.cancelScheduledValues(t);
+      gi.setValueAtTime(Math.sin(q * Math.PI / 2), t); go.setValueAtTime(Math.cos(q * Math.PI / 2), t);
+      gi.linearRampToValueAtTime(1, t + s); go.linearRampToValueAtTime(0, t + s);
+    } catch (e) {}
   }
-});
-auOn('seeking', () => { const P = MIX.plan; if (P && P.st === 'ready' && au.currentTime < P.tR) au.playbackRate = 1; });
+}
+// «Successivo» a mano: verso il brano che verrebbe dopo, col mix
+function avanti() {
+  if (!S.queue.length || S.qi < 0) return next(false);
+  saltaA(S.qi < S.queue.length - 1 ? S.qi + 1 : 0, () => next(false));
+}
+// salto verso il brano j della coda; subito() è il cambio immediato di prima. daCoda: tocco su un brano di «In coda»
+function saltaA(j, subito, daCoda) {
+  const X0 = MIX.salto;
+  if (X0) {   // seconda pressione mentre si aspetta: si cambia subito (verso il brano già scelto, o quello appena toccato)
+    const k = daCoda ? j : saltoIdx(X0);
+    diario('mix al salto', {esito:'seconda pressione: cambio subito'});
+    saltoAnnulla();
+    return k >= 0 ? load(k, true) : subito();
+  }
+  const id = S.queue[j], tb = id && TT(id), d = au.duration, c = au.currentTime;
+  if (!MIX.on || !curId || au === AUX || au.paused || !tb || tb.ext || id === curId || !canPlay(id) || tb.duration && tb.duration < 20 ||
+    otherDeck()._rifiuta || !isFinite(d) || d - c < saltoResto()) return subito();
+  if (MIX.plan) xfAbort();   // il mix a fine brano che si stava preparando lascia il posto al salto
+  if (MIX.act) xfAccorcia(1);   // durante una dissolvenza: quella finisce in 1 s e si salta dal brano nuovo
+  const X = MIX.salto = {j, idA:curId, idB:id, t0:performance.now(), el:null, url:null, carica:false, pronto:false, posto:false, misurato:false,
+    spostato:false, match:false, r:1, f:1, ga:null, gb:null, startB:0, st:'misura', esito:'', via:false, prepT:0, loop:0, tm:0, suona:null};
+  toast('Mix verso «' + tb.title + '»…');
+  Promise.all([gridQui(curId, c, d), grid(id, 'i')]).then(([ga, gb]) => { if (MIX.salto === X && !X.misurato) saltoMisurato(X, ga, gb, ''); }, () => {});
+  X.loop = setInterval(saltoTick, 40);
+  saltoTick();
+}
+function saltoIdx(X) { return S.queue[X.j] === X.idB ? X.j : S.queue.indexOf(X.idB); }   // la coda può cambiare intanto
+function gridQui(id, c, d) { return grid(id, pezzoQui(c, d)); }
+function saltoMisurato(X, ga, gb, perche) {
+  X.misurato = true; X.ga = ga; X.gb = gb;
+  const m = perche || X.spostato ? {match:false, f:1, r:1, perche:perche || 'brano spostato'} : mixFattore(ga, gb);
+  X.match = m.match; X.f = m.f; X.r = m.r; X.startB = m.match ? gb.b0 : 0;
+  X.esito = m.match ? 'a tempo' : 'dissolvenza: ' + m.perche;
+  if (m.match && Math.abs(m.r - 1) > 0.001) {
+    X.st = 'rampa'; X.tR = performance.now(); conPitch(au);
+  } else X.st = 'parti';
+}
+// passo del salto (ogni 40 ms e a ogni timeupdate, così va avanti anche a schermo bloccato)
+function saltoTick() {
+  const X = MIX.salto; if (!X || X.via || au.paused) return;
+  const ora = performance.now(), dt = (ora - X.t0) / 1000;
+  if (!X.carica && !MIX.act) saltoCarica(X);   // l'altro lettore è libero (finita l'eventuale dissolvenza di prima)
+  if (!X.misurato && dt > SALTO.MISURA) saltoMisurato(X, null, null, 'misura lenta');
+  const el = X.el, pronto = X.pronto && el && el.readyState >= 3;
+  if (pronto && X.misurato && !X.posto) { X.posto = true; try { el.currentTime = X.startB; } catch (e) {} }   // il nuovo fermo sul suo primo battito
+  if (X.st === 'rampa') {
+    const q = (ora - X.tR) / 1000 / SALTO.RAMPA;
+    velocita(au, rampaGradini(q, X.r, gradini(SALTO.RAMPA)));
+    if (q < 1) return;
+    X.st = 'parti';
+  }
+  if (!pronto || el.seeking) { if (dt > SALTO.PRONTO) saltoSubito(X, 'non pronto: cambio subito (' + (el ? el.readyState : -1) + ')'); return; }
+  if (X.st !== 'parti') return;
+  if (!X.match) { saltoVia(X, 0); return; }
+  saltoParti(X, false);
+}
+function saltoParti(X, tardi) {   // sul battito: subito o con un timer fino al prossimo
+  if (MIX.salto !== X) return;
+  X.via = false;
+  const p = partenzaBattito(au.currentTime, au.playbackRate, X.ga, X.gb, tardi);
+  if (!p.attesa) { saltoVia(X, p.pos); return; }
+  X.via = true; X.tm = setTimeout(() => saltoParti(X, true), p.attesa * 1000);
+}
+// il brano scelto sull'altro lettore: parte muto per caricarsi davvero (l'iPhone non carica un brano fermo) e si ferma
+// appena suona, come per il mix a fine brano
+function saltoCarica(X) {
+  X.carica = true;
+  const tb = T.get(X.idB);
+  getFile(X.idB).then(f => {
+    if (MIX.salto !== X) return;
+    if (!tb || !f && !tb.sid) { saltoSubito(X, 'brano non disponibile: cambio subito'); return; }
+    const el = X.el = otherDeck();
+    X.url = f ? URL.createObjectURL(f) : null;
+    velocita(el, 1); setGain(el, 0); el.muted = true;
+    X.suona = () => { if (MIX.salto !== X) return; el.pause(); el.muted = false; X.pronto = true; diario('pronto', {ms:Date.now() - X.prepT, salto:true}); };
+    el.addEventListener('playing', X.suona, {once:true});
+    el.src = X.url || API + 'file/' + encodeURIComponent(tb.sid);
+    X.prepT = Date.now(); diario('preparo', {da:X.url ? 'file' : 'rete', salto:true});
+    const pr = el.play(); if (pr && pr.catch) pr.catch(e => { diario('prep rifiutata', {err:(e && e.name) || String(e), salto:true}); el.muted = false; if (MIX.salto === X) X.pronto = true; });
+  }, () => { if (MIX.salto === X) saltoSubito(X, 'brano non disponibile: cambio subito'); });
+}
+// si parte: il resto è il passaggio del mix a fine brano (xfStart / xfRun), con la dissolvenza lunga MIX.XS secondi
+function saltoVia(X, pos) {
+  if (MIX.salto !== X) return;
+  const j = saltoIdx(X), el = X.el;
+  if (j < 0) { saltoAnnulla(); return; }   // il brano scelto non è più in coda: resta quello in corso
+  MIX.salto = null; clearInterval(X.loop); clearTimeout(X.tm);
+  el.removeEventListener('playing', X.suona);
+  if (Math.abs((el.currentTime || 0) - pos) > 0.02) { try { el.currentTime = pos; } catch (e) {} }
+  xfStart({el, j, idA:X.idA, idB:X.idB, url:X.url, match:X.match, r:X.r, f:X.f, ga:X.ga, gb:X.gb, W:MIX.XS,
+    salto:{esito:X.esito, s:Math.round((performance.now() - X.t0) / 100) / 10, verso:(TT(X.idB) || {}).title || ''}});
+}
+// niente mix: il cambio immediato di prima verso il brano scelto (play = false: pronto ma fermo)
+function saltoSubito(X, esito, play) {
+  const j = saltoIdx(X);
+  diario('mix al salto', {esito});
+  saltoAnnulla();
+  if (j >= 0) load(j, play !== false);
+}
+function saltoAnnulla() {
+  const X = MIX.salto; if (!X) return;
+  MIX.salto = null; clearInterval(X.loop); clearTimeout(X.tm);
+  const el = X.el;
+  if (el && el !== au) { if (X.suona) el.removeEventListener('playing', X.suona); el.muted = false; el.pause(); el.removeAttribute('src'); try { el.load(); } catch (e) {} setGain(el, 1); }
+  if (X.url) URL.revokeObjectURL(X.url);
+  if (X.idA === curId) velocita(au, 1);
+}
+// il brano in corso si ferma mentre si aspetta (a mano, cuffie staccate, una chiamata…): si passa al brano scelto, fermo
+function saltoPausa() {
+  const X = MIX.salto; if (!X || au.ended) return;
+  saltoSubito(X, pausaVoluta >= X.t0 ? 'pausa: brano nuovo pronto, fermo' : 'pausa non chiesta: brano nuovo pronto, fermo', false);
+}
+// il brano in corso spostato a mano mentre si aspetta: i battiti misurati non valgono più, resta una dissolvenza normale
+function saltoSpostato() {
+  const X = MIX.salto; if (!X || X.idA !== curId) return;
+  X.spostato = true; velocita(au, 1);
+  if (X.match) { X.match = false; X.esito = 'dissolvenza: brano spostato'; X.startB = 0; X.posto = false; }
+  if (X.st === 'rampa') X.st = 'parti';
+  if (X.via) { clearTimeout(X.tm); X.via = false; }
+}
+auOn('timeupdate', saltoTick);
+auOn('pause', saltoPausa);
+auOn('seeking', saltoSpostato);
 
 const seek = $('seek');
 const seekDur = () => RC.id ? ((RC.dev && RC.dev.stato.brano) || {}).durata || 0 : au.duration || 0;
@@ -2651,7 +2909,7 @@ document.addEventListener('click', e => {
     case 'shufall': { const L = lists[+d.l]; if (L) playList(L.ids, null, true, L.label); break; }
     case 'more': trackMenu(d.id, d.pl); break;
     case 'toggle': toggle(); break;
-    case 'next': next(false); break;
+    case 'next': avanti(); break;
     case 'prev': prev(); break;
     case 'opennp': openNP(); break;
     case 'closenp': closeNP(); break;
@@ -2660,7 +2918,7 @@ document.addEventListener('click', e => {
     case 'mix': setMix(!MIX.on); break;
     case 'tutto': setTutto(!TUTTO); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
-    case 'qjump': load(+d.i, true); break;
+    case 'qjump': saltaA(+d.i, () => load(+d.i, true), true); break;   // col mix al salto, come «Successivo»
     case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
@@ -2736,8 +2994,8 @@ document.addEventListener('keydown', e => {
   if (e.target.closest('input,textarea')) return;
   if (e.key === 'Escape') { if (sh.classList.contains('open')) closeSheet(); else closeNP(); }
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
-  if (e.key === 'ArrowRight' && e.metaKey) next(false);
-  if (e.key === 'ArrowLeft' && e.metaKey) prev();
+  if (e.key === 'ArrowRight' && e.metaKey) { if (RC.id) rcInvia('next'); else avanti(); }   // telecomando: come i tasti del lettore
+  if (e.key === 'ArrowLeft' && e.metaKey) { if (RC.id) rcInvia('prev'); else prev(); }
 });
 $('fileIn').addEventListener('change', e => { const fl = e.target.files; if (fl && fl.length) importFiles(fl).finally(() => { e.target.value = ''; }); });
 $('plIn').addEventListener('change', e => { const fl = e.target.files; if (fl && fl.length) importPlaylists(fl).finally(() => { e.target.value = ''; }); });
@@ -2841,7 +3099,7 @@ window.AM = {
     const ids = items.map(it => { const id = 'x:' + (it.id || it.url); EXT.set(id, {id, ext:true, url:it.url, title:it.title || 'Senza titolo', artist:it.artist || '', album:it.album || '', cover:it.cover ? 'u:' + it.cover : null}); return id; });
     errRun = 0; S.orig = ids.slice(); S.queue = ids.slice(); S.shuffle = false; S.from = from || ''; load(Math.max(0, Math.min(start || 0, ids.length - 1)), true);
   },
-  toggle() { toggle(); }, next() { next(false); }, prev() { prev(); },
+  toggle() { toggle(); }, next() { avanti(); }, prev() { prev(); },
   seek(t) { try { au.currentTime = t; } catch (e) {} },
   now() { const t = curId && TT(curId); return t ? {id:t.ext ? t.id.slice(2) : t.id, title:t.title, artist:t.artist || '', album:t.album || '', cover:coverUrl(t.cover) ? new URL(coverUrl(t.cover), location.href).href : '', playing:!au.paused, ext:!!t.ext, t:au.currentTime || 0, d:isFinite(au.duration) ? au.duration : 0} : null; },
   onChange(cb) { xSubs.add(cb); return () => xSubs.delete(cb); },
@@ -2883,7 +3141,7 @@ const inLib = t => t && t.remote && t.sid;
 
 function devStato() {   // quello che gli altri vedono di questo dispositivo
   const t = curId && TT(curId);
-  const mix = {on:MIX.on, unSolo:MIX.unSolo, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-5)};
+  const mix = {on:MIX.on, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-15)};
   if (!t) return {suona:false, vol:userVol, bloccato:DEV.bloccato, mix};
   const coda = [];   // dal brano in corso in avanti, solo quelli della libreria (gli altri non si possono spostare)
   for (let k = Math.max(0, S.qi); k < S.queue.length && coda.length < 300; k++) { const x = TT(S.queue[k]); if (inLib(x)) coda.push(x.sid); }
@@ -2921,7 +3179,7 @@ function devEsegui(c) {
     case 'toggle': toggle(); break;
     case 'play': if (au.paused) toggle(); break;
     case 'pause': if (!au.paused) { pausaVoluta = Date.now(); au.pause(); } break;
-    case 'next': next(false); break;
+    case 'next': avanti(); break;
     case 'prev': prev(); break;
     case 'seek': if (isFinite(c.t)) { try { au.currentTime = Math.max(0, +c.t); } catch (e) {} } break;
     case 'volume': if (isFinite(c.v)) { userVol = Math.max(0, Math.min(1, +c.v)); ALLAU.forEach(applyVol); vol.value = Math.round(userVol * 100); vol.style.setProperty('--p', vol.value + '%'); ls.set('am-vol', userVol); } break;
@@ -3204,7 +3462,7 @@ function fuoriTasto(a, e) {
   switch (a) {
     case 'play': if (!curId) toggle(); else if (au.paused) au.play().catch(() => {}); break;
     case 'pause': case 'stop': if (!au.paused) { pausaVoluta = Date.now(); au.pause(); } break;   // «stop» non svuota la coda
-    case 'next': next(false); break;
+    case 'next': avanti(); break;   // con il mix acceso: il passaggio a tempo anche dalla schermata di blocco
     case 'prev': prev(); break;
     case 'seekto': if (e && isFinite(e.seekTime)) vai(Math.max(0, isFinite(d) ? Math.min(+e.seekTime, d) : +e.seekTime)); break;
     case 'indietro': vai(Math.max(0, c - ((e && e.seekOffset) || 15))); break;
