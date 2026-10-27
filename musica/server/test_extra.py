@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from urllib.parse import quote as _quote
 
 QUI =os.path.dirname(os.path.abspath(__file__))
@@ -1289,6 +1290,147 @@ class TestAccesso(unittest.TestCase):
         self.assertGreater(int(h["Retry-After"]), 0)
         self.assertIsNone(self.biscotto(h))
         self.assertEqual(self.entra("password per i tentativi", "198.51.100.10")[0], 303)   # un altro indirizzo sì
+
+
+class TestPersone(unittest.TestCase):
+    """Archivio delle persone invitate: inviti usabili una volta, codici per l'app sulla Home, revoche, richieste."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_persone", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-persone-")
+        self.file = os.path.join(self.base, "cache", "persone.json")
+        self.p = self.m.Persone(self.file)
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def piu_tardi(self, secondi):
+        """time.time spostato in avanti (il modulo usa lo stesso time di queste prove)."""
+        return unittest.mock.patch.object(self.m.time, "time", return_value=time.time() + secondi)
+
+    def entrata(self, nome="Anna"):
+        a = self.p.crea(nome)
+        codice, _ = self.p.invito(a["id"])
+        return a["id"], self.p.usa_invito(codice, "iphone")
+
+    def test_invito_una_volta(self):
+        a = self.p.crea("Anna")
+        codice, scade = self.p.invito(a["id"])
+        self.assertAlmostEqual(scade, time.time() + 7 * 86400, delta=5)
+        atteso = {"persona": a["id"], "nome": "Anna"}
+        self.assertEqual(self.p.leggi_invito(codice), atteso)   # un'anteprima del link non lo consuma
+        self.assertEqual(self.p.leggi_invito(codice), atteso)
+        did = self.p.usa_invito(codice, "iphone")
+        self.assertRegex(did, r"^[0-9a-f]{16}$")
+        self.assertIsNone(self.p.usa_invito(codice, "iphone"))
+        self.assertIsNone(self.p.leggi_invito(codice))
+        self.assertEqual(self.p.chi(self.p.biscotto(did))[0:2], (a["id"], did))
+        with open(self.file, encoding="utf-8") as f:
+            self.assertNotIn(codice, f.read())   # del codice resta solo l'impronta
+
+    def test_invito_scaduto(self):
+        a = self.p.crea("Anna")
+        codice, _ = self.p.invito(a["id"])
+        with self.piu_tardi(7 * 86400 + 1):
+            self.assertIsNone(self.p.leggi_invito(codice))
+            self.assertIsNone(self.p.usa_invito(codice, "iphone"))
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.p.invito("nessuno")
+        self.assertEqual(e.exception.codice, 404)
+
+    def test_collegamento(self):
+        pid, did = self.entrata()
+        codice, scade = self.p.collegamento(pid)
+        self.assertEqual(len(codice), 6)
+        self.assertTrue(set(codice) <= set("ACDEFGHJKMNPQRTUVWXY3479"), codice)
+        self.assertAlmostEqual(scade, time.time() + 15 * 60, delta=5)
+        d2 = self.p.usa_collegamento(codice.lower()[:3] + "-" + codice.lower()[3:], "iphone")
+        self.assertIsNotNone(d2)
+        self.assertNotEqual(d2, did)
+        self.assertEqual(self.p.chi(self.p.biscotto(d2))[0], pid)
+        self.assertIsNone(self.p.usa_collegamento(codice, "iphone"))   # una volta sola
+        codice, _ = self.p.collegamento(pid)
+        with self.piu_tardi(15 * 60 + 1):
+            self.assertIsNone(self.p.usa_collegamento(codice, "iphone"))
+
+    def test_revoca(self):
+        pid, d1 = self.entrata()
+        d2 = self.p.usa_collegamento(self.p.collegamento(pid)[0], "mac")
+        b1, b2 = self.p.biscotto(d1), self.p.biscotto(d2)
+        self.assertTrue(self.p.revoca_dispositivo(d1))
+        self.assertIsNone(self.p.chi(b1))
+        self.assertEqual(self.p.chi(b2)[0:2], (pid, d2))
+        falso = b2[:-1] + ("0" if b2[-1] != "0" else "1")
+        self.assertIsNone(self.p.chi(falso))
+        self.assertTrue(self.p.revoca_persona(pid))
+        self.assertIsNone(self.p.chi(b2))
+        self.assertIsNone(self.p.chi("o.1.2.3"))
+        # i dispositivi di Samuele (biscotto della password): si vedono e si revocano con la loro chiave «p:…»
+        self.p.visto("p:00112233aabbccdd", "mac")
+        self.assertEqual([x["id"] for x in self.p.elenco()["tuoi"]], ["p:00112233aabbccdd"])
+        self.assertFalse(self.p.revocato("p:00112233aabbccdd"))
+        self.assertTrue(self.p.revoca_dispositivo("p:00112233aabbccdd"))
+        self.assertTrue(self.p.revocato("p:00112233aabbccdd"))
+        self.assertEqual(self.p.elenco()["tuoi"], [])
+
+    def test_file_e_limiti(self):
+        pid, did = self.entrata("  <b>Anna</b>  " * 10)
+        self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
+        nome = self.m.Persone(self.file).nome(pid)   # un altro processo legge le stesse persone
+        self.assertTrue(nome.startswith("<b>Anna</b> <b>Anna</b>"), nome)
+        self.assertLessEqual(len(nome), 40)
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.p.crea("   ")
+        self.assertEqual(e.exception.codice, 400)
+        # al più 10 dispositivi per persona: l'undicesimo fa uscire quello visto meno di recente
+        biscotti = [self.p.biscotto(did)]
+        for i in range(10):
+            with self.piu_tardi(i + 1):
+                biscotti.append(self.p.biscotto(self.p.usa_collegamento(self.p.collegamento(pid)[0], "iphone")))
+        self.assertIsNone(self.p.chi(biscotti[0]))
+        self.assertTrue(all(self.p.chi(b) for b in biscotti[1:]))
+        for i in range(199):
+            self.p.crea("Persona %d" % i)
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.p.crea("Una di troppo")
+        self.assertEqual(e.exception.codice, 409)
+
+    def test_richieste(self):
+        anna, _ = self.entrata()
+        r = self.p.richiedi(anna, "Marco")
+        self.assertEqual((r["nome"], r["da"], r["stato"]), ("Marco", anna, "attesa"))
+        self.assertNotIn("codice", self.p.richieste_di(anna)[0])
+        self.assertEqual([x["id"] for x in self.p.richieste()], [r["id"]])
+        marco, codice, scade = self.p.consenti(r["id"])
+        self.assertEqual((marco["nome"], marco["da"]), ("Marco", anna))
+        self.assertEqual(self.p.richieste_di(anna)[0]["codice"], codice)   # Anna rivede il link da mandare
+        self.assertEqual([x.get("da") for x in self.p.elenco()["persone"] if x["id"] == marco["id"]], [anna])
+        self.assertIsNotNone(self.p.usa_invito(codice, "iphone"))
+        self.assertNotIn("codice", self.p.richieste_di(anna)[0])
+        with open(self.file, encoding="utf-8") as f:
+            self.assertNotIn(codice, f.read())
+        attesa = [self.p.richiedi(anna, "Amico %d" % i) for i in range(5)]
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.p.richiedi(anna, "Uno di troppo")
+        self.assertEqual(e.exception.codice, 409)
+        prima = len(self.p.elenco()["persone"])
+        self.assertTrue(self.p.rifiuta(attesa[0]["id"]))
+        self.assertEqual([x["stato"] for x in self.p.richieste_di(anna) if x["id"] == attesa[0]["id"]], ["rifiutata"])
+        self.assertEqual(len(self.p.elenco()["persone"]), prima)
+
+    def test_tipo_da_agente(self):
+        for ua, tipo in (("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", "iphone"),
+                         ("Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X)", "ipad"),
+                         ("Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/130.0", "android"),
+                         ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15", "mac"),
+                         ("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "pc"), ("", "pc")):
+            self.assertEqual(self.m.tipo_da_agente(ua), tipo, ua)
 
 
 if __name__ == "__main__":

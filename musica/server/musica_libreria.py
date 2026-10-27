@@ -3308,6 +3308,16 @@ ACCESSO_FINESTRA = 15 * 60
 LIBERI = re.compile(r"^/(accesso|manifest\.webmanifest|icon-(?:maskable-)?\d+\.png|apple-touch-icon(?:-precomposed)?\.png"
                     r"|favicon\.ico)$")
 RETI_TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+# persone invitate da Samuele: ognuna entra con il suo link (vedi Persone)
+PERS = None                       # Persone, preparato da main()
+INVITO_DURATA = 7 * 86400         # un link d'invito non usato scade dopo una settimana
+COLLEGAMENTO_DURATA = 15 * 60     # codice per l'app sulla schermata Home dell'iPhone (biscotti separati da Safari)
+COLLEGAMENTO_ALFABETO = "ACDEFGHJKMNPQRTUVWXY3479"   # niente lettere e cifre che si confondono (0/O, 1/I, 5/S…)
+PERSONE_MAX = 200
+DISPOSITIVI_PERSONA = 10          # oltre, esce quello visto meno di recente
+RICHIESTE_ATTESA_MAX = 5          # inviti chiesti da un invitato e non ancora decisi da Samuele
+NOME_PERSONA_MAX = 40
+VISTO_OGNI = 60                   # l'ultimo accesso dei dispositivi va su disco al più ogni minuto
 
 
 class Accesso:
@@ -3426,6 +3436,326 @@ class Accesso:
     def riuscita(self, ip):
         with self.blocco:
             self.errori.pop(ip, None)
+
+
+def _impronta(codice):
+    return hashlib.sha256(codice.encode("utf-8")).hexdigest()
+
+
+def _nome_persona(nome):
+    n = " ".join(str(nome or "").split())[:NOME_PERSONA_MAX].strip()
+    if not n:
+        raise ErroreExtra(400, "Serve il nome della persona")
+    return n
+
+
+def tipo_da_agente(ua):
+    """Tipo di dispositivo dallo User-Agent, con i nomi di TIPI_DISP (per l'elenco della Gestione)."""
+    ua = ua or ""
+    if "iPad" in ua:
+        return "ipad"
+    if "iPhone" in ua or "iPod" in ua:
+        return "iphone"
+    if "Android" in ua:
+        return "android"
+    return "mac" if "Macintosh" in ua else "pc"
+
+
+class Persone:
+    """Persone invitate, in <cache>/persone.json (lo legge solo il proprietario), con un segreto suo per firmare i loro
+    biscotti: cambiare la password di Samuele non fa uscire gli invitati. Dei link d'invito e dei codici di collegamento
+    resta solo l'impronta; il codice in chiaro di un invito chiesto da un invitato resta nella richiesta finché non è
+    usato o scaduto, perché chi l'ha chiesto deve poterlo rivedere per mandarlo."""
+
+    def __init__(self, file):
+        self.file = file
+        self.blocco = threading.Lock()
+        self.dati, self.mtime = {}, None
+        self.visti = {}      # chiave -> (tipo, istante): l'ultimo accesso, su disco al più ogni VISTO_OGNI
+        self.salvato = 0.0
+
+    def _aggiorna(self):
+        try:
+            m = os.stat(self.file).st_mtime_ns
+        except OSError:
+            m = None
+        if m != self.mtime:
+            d = {}
+            if m is not None:
+                try:
+                    with open(self.file, encoding="utf-8") as f:
+                        d = json.load(f)
+                except (OSError, ValueError):
+                    d = {}
+            self.dati, self.mtime = (d if isinstance(d, dict) else {}), m
+        d = self.dati
+        for k in ("persone", "inviti", "collegamenti", "dispositivi", "tuoi", "richieste"):
+            if not isinstance(d.get(k), dict):
+                d[k] = {}
+        if not isinstance(d.get("revocati"), list):
+            d["revocati"] = []
+        return d
+
+    def _scrivi(self, d):
+        ora = time.time()
+        for k in ("inviti", "collegamenti"):
+            d[k] = {h: x for h, x in d[k].items() if x.get("scade", 0) > ora}
+        for r in d["richieste"].values():   # invito scaduto: il codice in chiaro non serve più
+            if r.get("invito") and r["invito"] not in d["inviti"]:
+                r.pop("codice", None)
+        for c, (tipo, t) in self.visti.items():
+            x = d["dispositivi"].get(c) or (d["tuoi"].setdefault(c, {}) if c.startswith("p:") and c not in d["revocati"] else None)
+            if x is not None:
+                x.update(tipo=tipo, visto=t)
+        self.salvato = ora
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, self.file)
+        self.dati, self.mtime = d, os.stat(self.file).st_mtime_ns
+
+    def _segreto(self, d):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(d.get("segreto", ""))):
+            d["segreto"] = secrets.token_hex(32)
+            self._scrivi(d)
+        return bytes.fromhex(d["segreto"])
+
+    def _crea(self, d, nome, da=None):
+        if len(d["persone"]) >= PERSONE_MAX:
+            raise ErroreExtra(409, "Ci sono già %d persone: revocane qualcuna" % PERSONE_MAX)
+        pid = secrets.token_hex(8)
+        d["persone"][pid] = dict({"nome": _nome_persona(nome), "creato": time.time()}, **({"da": da} if da else {}))
+        return pid
+
+    def _invito(self, d, pid):
+        if pid not in d["persone"]:
+            raise ErroreExtra(404, "Persona sconosciuta")
+        codice, scade = secrets.token_urlsafe(16), time.time() + INVITO_DURATA
+        d["inviti"][_impronta(codice)] = {"persona": pid, "scade": scade}
+        return codice, scade
+
+    def _dispositivo(self, d, pid, tipo):
+        """Nuovo dispositivo di una persona; oltre DISPOSITIVI_PERSONA esce quello visto meno di recente."""
+        ora = time.time()
+        suoi = [k for k, x in d["dispositivi"].items() if x.get("persona") == pid]
+        if len(suoi) >= DISPOSITIVI_PERSONA:
+            vecchio = min(suoi, key=lambda k: self.visti.get(k, (0, d["dispositivi"][k].get("visto", 0)))[1])
+            del d["dispositivi"][vecchio]
+            self.visti.pop(vecchio, None)
+        did = secrets.token_hex(8)
+        d["dispositivi"][did] = {"persona": pid, "tipo": tipo if tipo in TIPI_DISP else "pc", "creato": ora, "visto": ora}
+        return did
+
+    def crea(self, nome):
+        with self.blocco:
+            d = self._aggiorna()
+            pid = self._crea(d, nome)
+            self._scrivi(d)
+            x = d["persone"][pid]
+            return {"id": pid, "nome": x["nome"], "creato": x["creato"]}
+
+    def invito(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            r = self._invito(d, pid)
+            self._scrivi(d)
+            return r
+
+    def leggi_invito(self, codice):
+        with self.blocco:
+            d = self._aggiorna()
+            x = d["inviti"].get(_impronta(str(codice or "")))
+            if not x or x["scade"] <= time.time() or x["persona"] not in d["persone"]:
+                return None
+            return {"persona": x["persona"], "nome": d["persone"][x["persona"]]["nome"]}
+
+    def usa_invito(self, codice, tipo):
+        h = _impronta(str(codice or ""))
+        with self.blocco:
+            d = self._aggiorna()
+            x = d["inviti"].get(h)
+            if not x or x["scade"] <= time.time() or x["persona"] not in d["persone"]:
+                return None
+            del d["inviti"][h]
+            for r in d["richieste"].values():
+                if r.get("invito") == h:
+                    r.pop("codice", None)
+                    r["stato"] = "usata"
+            did = self._dispositivo(d, x["persona"], tipo)
+            self._scrivi(d)
+            return did
+
+    def collegamento(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            if pid not in d["persone"]:
+                raise ErroreExtra(404, "Persona sconosciuta")
+            codice = "".join(secrets.choice(COLLEGAMENTO_ALFABETO) for _ in range(6))
+            scade = time.time() + COLLEGAMENTO_DURATA
+            d["collegamenti"][_impronta(codice)] = {"persona": pid, "scade": scade}
+            self._scrivi(d)
+            return codice, scade
+
+    def usa_collegamento(self, codice, tipo):
+        h = _impronta(re.sub(r"[^A-Z0-9]", "", str(codice or "").upper()))
+        with self.blocco:
+            d = self._aggiorna()
+            x = d["collegamenti"].get(h)
+            if not x or x["scade"] <= time.time() or x["persona"] not in d["persone"]:
+                return None
+            del d["collegamenti"][h]
+            did = self._dispositivo(d, x["persona"], tipo)
+            self._scrivi(d)
+            return did
+
+    def biscotto(self, did):
+        corpo = "o.%d.%s" % (int(time.time()) + ACCESSO_DURATA, did)
+        with self.blocco:
+            k = self._segreto(self._aggiorna())
+        return corpo + "." + hmac.new(k, corpo.encode("ascii"), hashlib.sha256).hexdigest()
+
+    def chi(self, valore):
+        """(persona, dispositivo, scadenza) di un biscotto valido; None se è falso, scaduto o revocato."""
+        m = re.fullmatch(r"o\.([0-9]{1,12})\.([0-9a-f]{16})\.([0-9a-f]{64})", valore or "")
+        if not m:
+            return None
+        with self.blocco:
+            d = self._aggiorna()
+            s, x = str(d.get("segreto", "")), d["dispositivi"].get(m.group(2))
+            if not re.fullmatch(r"[0-9a-f]{64}", s) or not x or x.get("persona") not in d["persone"]:
+                return None
+            pid = x["persona"]
+        firma = hmac.new(bytes.fromhex(s), ("o.%s.%s" % (m.group(1), m.group(2))).encode("ascii"), hashlib.sha256).hexdigest()
+        scad, ora = int(m.group(1)), time.time()
+        if not hmac.compare_digest(firma, m.group(3)) or not ora < scad <= ora + ACCESSO_DURATA + 60:
+            return None
+        return pid, m.group(2), scad
+
+    def visto(self, chiave, tipo):
+        with self.blocco:
+            self.visti[chiave] = (tipo if tipo in TIPI_DISP else "pc", time.time())
+            if len(self.visti) > 5000:   # moltissime chiavi diverse (biscotti falsi non arrivano qui): si salva e si riparte
+                self.visti = dict(list(self.visti.items())[-1000:])
+            if time.time() - self.salvato >= VISTO_OGNI:
+                self._scrivi(self._aggiorna())
+
+    def revoca_persona(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            if d["persone"].pop(pid, None) is None:
+                return False
+            for k in ("dispositivi", "inviti", "collegamenti"):
+                d[k] = {h: x for h, x in d[k].items() if x.get("persona") != pid}
+            self._scrivi(d)
+            return True
+
+    def revoca_dispositivo(self, chiave):
+        with self.blocco:
+            d = self._aggiorna()
+            self.visti.pop(chiave, None)
+            if chiave.startswith("p:"):
+                if chiave in d["revocati"]:
+                    return False
+                d["revocati"] = (d["revocati"] + [chiave])[-1000:]
+                d["tuoi"].pop(chiave, None)
+            elif d["dispositivi"].pop(chiave, None) is None:
+                return False
+            self._scrivi(d)
+            return True
+
+    def revocato(self, chiave):
+        with self.blocco:
+            return chiave in self._aggiorna()["revocati"]
+
+    def nome(self, pid):
+        with self.blocco:
+            return (self._aggiorna()["persone"].get(pid) or {}).get("nome", "")
+
+    def elenco(self):
+        with self.blocco:
+            d = self._aggiorna()
+
+            def visto(k, x):
+                return self.visti.get(k, (x.get("tipo", "pc"), x.get("visto", 0)))
+
+            disp = {}
+            for k, x in d["dispositivi"].items():
+                tipo, t = visto(k, x)
+                disp.setdefault(x.get("persona"), []).append({"id": k, "tipo": tipo, "visto": t})
+            tuoi = {k: dict(x) for k, x in d["tuoi"].items()}
+            for k in self.visti:
+                if k.startswith("p:"):
+                    tuoi.setdefault(k, {})
+            persone = [dict({"id": p, "nome": x["nome"], "creato": x["creato"],
+                             "dispositivi": sorted(disp.get(p, []), key=lambda y: -y["visto"])},
+                            **({"da": x["da"]} if x.get("da") else {}))
+                       for p, x in sorted(d["persone"].items(), key=lambda kv: kv[1]["creato"])]
+            return {"persone": persone,
+                    "tuoi": sorted(({"id": k, "tipo": visto(k, x)[0], "visto": visto(k, x)[1]}
+                                    for k, x in tuoi.items() if k not in d["revocati"]), key=lambda y: -y["visto"])}
+
+    def richiedi(self, da_pid, nome):
+        with self.blocco:
+            d = self._aggiorna()
+            if da_pid not in d["persone"]:
+                raise ErroreExtra(404, "Persona sconosciuta")
+            if sum(1 for r in d["richieste"].values() if r["da"] == da_pid and r["stato"] == "attesa") >= RICHIESTE_ATTESA_MAX:
+                raise ErroreExtra(409, "Hai già %d inviti in attesa" % RICHIESTE_ATTESA_MAX)
+            rid = secrets.token_hex(8)
+            r = d["richieste"][rid] = {"nome": _nome_persona(nome), "da": da_pid, "creato": time.time(), "stato": "attesa"}
+            if len(d["richieste"]) > 1000:   # le più vecchie già decise escono
+                decise = sorted((k for k, x in d["richieste"].items() if x["stato"] != "attesa"),
+                                key=lambda k: d["richieste"][k]["creato"])
+                for k in decise[:len(d["richieste"]) - 1000]:
+                    del d["richieste"][k]
+            self._scrivi(d)
+            return dict(r, id=rid)
+
+    def _richiesta(self, d, rid, r):
+        x = {"id": rid, "nome": r["nome"], "da": r["da"], "creato": r["creato"], "stato": r["stato"]}
+        if r.get("persona"):
+            x["persona"] = r["persona"]
+        if r.get("codice") and r.get("invito") in d["inviti"] and d["inviti"][r["invito"]]["scade"] > time.time():
+            x.update(codice=r["codice"], scade=d["inviti"][r["invito"]]["scade"])
+        return x
+
+    def richieste(self):
+        with self.blocco:
+            d = self._aggiorna()
+            return [self._richiesta(d, k, r) for k, r in sorted(d["richieste"].items(), key=lambda kv: -kv[1]["creato"])]
+
+    def richieste_di(self, pid):
+        with self.blocco:
+            d = self._aggiorna()
+            return [self._richiesta(d, k, r) for k, r in sorted(d["richieste"].items(), key=lambda kv: -kv[1]["creato"])
+                    if r["da"] == pid]
+
+    def consenti(self, rid):
+        with self.blocco:
+            d = self._aggiorna()
+            r = d["richieste"].get(rid)
+            if not r:
+                raise ErroreExtra(404, "Richiesta sconosciuta")
+            if r["stato"] != "attesa":
+                raise ErroreExtra(409, "Richiesta già decisa")
+            pid = self._crea(d, r["nome"], da=r["da"])
+            codice, scade = self._invito(d, pid)
+            r.update(stato="consentita", persona=pid, codice=codice, invito=_impronta(codice))
+            self._scrivi(d)
+            x = d["persone"][pid]
+            return {"id": pid, "nome": x["nome"], "creato": x["creato"], "da": r["da"]}, codice, scade
+
+    def rifiuta(self, rid):
+        with self.blocco:
+            d = self._aggiorna()
+            r = d["richieste"].get(rid)
+            if not r or r["stato"] != "attesa":
+                return False
+            r["stato"] = "rifiutata"
+            self._scrivi(d)
+            return True
 
 
 def _ip(testo):
@@ -3708,7 +4038,7 @@ def _imposta_password(file):
 
 
 def main():
-    global ACC, CLIP
+    global ACC, CLIP, PERS
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -3745,6 +4075,7 @@ def main():
     if not a.cartelle:
         ap.error("serve almeno una cartella di musica")
     ACC = Accesso(file_accesso)
+    PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"
