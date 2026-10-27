@@ -910,7 +910,12 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 #   GET    video                       elenco dei lavori (il più recente per primo)
 #   GET    video/file/<id>             il file scaricato (con Range)
 #   POST   video/<id>/annulla          ferma lo scaricamento; un lavoro già finito esce dall'elenco (il file resta)
-#   GET    voci                        voci di sintesi del Mac, prima le italiane
+#   GET    musica/cerca?q=&fonte=ytm|yt  brani da YouTube Music (predefinita) o YouTube -> {risultati:[...]}
+#   GET    musica/ascolta/<id YouTube>   audio del brano per ascoltarlo prima (m4a, con Range)
+#   POST   musica {id,...} o {url}     scarica il brano nella cartella della musica scaricata (MP3, tag) -> {id}
+#   GET    musica                      elenco degli scaricamenti (`brano` = id nel catalogo quando è in libreria)
+#   POST   musica/<id>/annulla         ferma lo scaricamento; uno finito esce dall'elenco (il brano resta)
+#   GET    voci                       voci di sintesi del Mac, prima le italiane
 #   POST   audiolibro {...}            ogni capitolo diventa un m4a con `say` -> {id}
 #   GET    audiolibro                  elenco
 #   GET    audiolibro/file/<id>/<n>    capitolo n (da 0), con Range
@@ -922,7 +927,7 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 
 EXTRA = re.compile(r"^(?:.*/)?api/extra/(.*)$")
 CONF = {"cache": "~/.atlante-musica", "video_dir": "~/Movies/Atlante", "libri_dir": "~/Music/Atlante Audiolibri",
-        "ia_modello": "", "ia_indirizzo": "http://127.0.0.1:11434"}
+        "musica_dir": "~/Music/Atlante Scaricati", "ia_modello": "", "ia_indirizzo": "http://127.0.0.1:11434"}
 # avviato da launchd o da un'altra app il PATH è minimo: Homebrew sta in /opt/homebrew/bin (Apple Silicon) o /usr/local/bin
 CARTELLE_PROGRAMMI = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/usr/sbin", "/bin", "/sbin")
 MAX_CORPO = 20 * 1024 * 1024    # corpo delle richieste (testo di un audiolibro)
@@ -960,9 +965,9 @@ class Annullato(Exception):
     pass
 
 
-def avvia_extra(cache=None, video_dir=None, libri_dir=None, ia_modello=None, ia_indirizzo=None):
+def avvia_extra(cache=None, video_dir=None, libri_dir=None, ia_modello=None, ia_indirizzo=None, musica_dir=None):
     """Cartelle e IA dei moduli extra (senza chiamarla valgono quelle predefinite). Le code partono alla prima richiesta."""
-    for k, v in (("cache", cache), ("video_dir", video_dir), ("libri_dir", libri_dir),
+    for k, v in (("cache", cache), ("video_dir", video_dir), ("libri_dir", libri_dir), ("musica_dir", musica_dir),
                  ("ia_modello", ia_modello), ("ia_indirizzo", ia_indirizzo)):
         if v is not None:
             CONF[k] = v
@@ -1233,6 +1238,8 @@ def _coda(nome):
             base = os.path.join(_cart("cache"), "extra")
             if nome == "video":
                 _CODE[nome] = Coda(os.path.join(base, "video.json"), 2, _scarica_video)
+            elif nome == "musica":
+                _CODE[nome] = Coda(os.path.join(base, "musica.json"), 2, _scarica_musica)
             else:   # say usa tutto il processore: un audiolibro alla volta
                 _CODE[nome] = Coda(os.path.join(base, "audiolibri.json"), 1, _crea_audiolibro)
         return _CODE[nome]
@@ -1369,6 +1376,476 @@ def _file_video(h, id_):
         raise ErroreExtra(404, "File non trovato: non ancora scaricato, oppure spostato dalla cartella")
     tipo = TIPI_VIDEO.get(os.path.splitext(p)[1].lower()) or mimetypes.guess_type(p)[0] or "application/octet-stream"
     _invia_file(h, p, tipo, {"Content-Disposition": _disposizione(os.path.basename(p)), "X-Content-Type-Options": "nosniff"})
+
+
+# ----- musica da internet: ricerca, ascolto e scaricamento nella libreria -----
+#
+# La ricerca fa la stessa richiesta delle pagine web di YouTube Music e YouTube (youtubei/v1/search): risponde in un
+# secondo con titolo, artisti, album, durata, copertina e «E» degli explicit (yt-dlp `ytsearch` impiega 14 secondi e
+# da YouTube Music dà solo i titoli). Se YouTube cambia formato o non risponde si ripiega su yt-dlp.
+# Ascolto e scaricamento usano lo stesso audio originale (m4a), preparato una volta sola nella cache degli ascolti;
+# il brano scaricato diventa un MP3 alla qualità massima (come quelli del Cloud) con tag, copertina quadrata e
+# indirizzo d'origine (purl), nella cartella della musica scaricata, che fa parte della libreria.
+
+YOUTUBEI = {"ytm": ("https://music.youtube.com", {"clientName": "WEB_REMIX", "clientVersion": "1.20251020.01.00"},
+                    "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"),   # filtro «Brani»
+            "yt": ("https://www.youtube.com", {"clientName": "WEB", "clientVersion": "2.20251020.01.00"}, None)}
+ID_YT = re.compile(r"^[A-Za-z0-9_-]{11}$")
+CENSURATA = re.compile(r"\b(clean|censored|censurat[ao]|edited|radio edit)\b", re.I)
+# pezzi dei titoli dei video che non fanno parte del nome del brano
+RUMORE = re.compile(r"\s*[(\[][^()\[\]]*\b(official|video|audio|lyrics?|testo|visuali[sz]er|videoclip|ufficiale|hd|4k|mv)\b"
+                    r"[^()\[\]]*[)\]]", re.I)
+HOST_COPERTINE = ("googleusercontent.com", "ggpht.com", "ytimg.com", "sndcdn.com", "bcbits.com")
+MAX_COPERTINA = 5 * 1024 * 1024
+ASCOLTI_MAX = 40       # brani pronti per l'ascolto tenuti nella cache (i più vecchi si cancellano)
+TEMPO_YTDLP = 300      # secondi massimi per un audio da YouTube
+# righe che yt-dlp stampa per noi (lette da _esegui_ytdlp): i campi giusti per i brani di YouTube Music e degli altri siti
+_STAMPE_INFO = ["--print", "before_dl:[atlante] titolo %(track,title)s",
+                "--print", "before_dl:[atlante] artista %(artist,creator,uploader,channel)s",
+                "--print", "before_dl:[atlante] album %(album)s",
+                "--print", "before_dl:[atlante] copertina %(thumbnail)s",
+                "--print", "after_move:[atlante] file %(filepath)s"]
+
+
+def _trova(o, chiave):
+    """Tutti i valori di `chiave` dentro una risposta JSON, a qualsiasi profondità, nell'ordine in cui compaiono."""
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == chiave:
+                yield v
+            yield from _trova(v, chiave)
+    elif isinstance(o, list):
+        for v in o:
+            yield from _trova(v, chiave)
+
+
+def _secondi(s):
+    m = re.match(r"^(?:(\d+):)?(\d+):(\d\d)$", (s or "").strip())
+    return (int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3))) if m else 0
+
+
+def _corse(runs):
+    return "".join(r.get("text", "") for r in runs or [] if isinstance(r, dict))
+
+
+def _youtubei(fonte, q):
+    base, client, params = YOUTUBEI[fonte]
+    base = os.environ.get("ATLANTE_YOUTUBEI") or base   # le prove usano un YouTube finto
+    corpo = {"context": {"client": dict(client, hl="it", gl="IT")}, "query": q}
+    if params:
+        corpo["params"] = params
+    r = urllib.request.Request(base + "/youtubei/v1/search?prettyPrint=false", data=json.dumps(corpo).encode("utf-8"),
+                               headers={"Content-Type": "application/json", "Origin": base, "User-Agent": BROWSER})
+    with urllib.request.urlopen(r, timeout=15) as f:
+        return json.loads(f.read(16 * 1024 * 1024).decode("utf-8"))
+
+
+def _brano_ytm(it):
+    """Un brano della ricerca di YouTube Music: colonne «titolo» e «artisti • album • durata»."""
+    cols = [((c.get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text") or {}).get("runs") or []
+            for c in it.get("flexColumns") or [] if isinstance(c, dict)]
+    if not cols:
+        return None
+    vid = next(_trova(cols[0], "videoId"), None) or next(_trova(it.get("overlay"), "videoId"), None)
+    if not isinstance(vid, str) or not ID_YT.match(vid):
+        return None
+    parti, pezzo = [], []
+    for r in (cols[1] if len(cols) > 1 else []):
+        if r.get("text", "").strip() == "•":
+            parti.append(pezzo)
+            pezzo = []
+        else:
+            pezzo.append(r.get("text", ""))
+    parti = [x for x in ("".join(p).strip() for p in parti + [pezzo]) if x]
+    if parti and parti[0] in ("Brano", "Song", "Video", "Episodio", "Episode"):
+        parti = parti[1:]
+    durata = _secondi(parti[-1]) if parti else 0
+    if durata:
+        parti = parti[:-1]
+    miniature = next(_trova(it.get("thumbnail"), "thumbnails"), None) or []
+    copertina = (miniature[-1].get("url") or "") if miniature and isinstance(miniature[-1], dict) else ""
+    return {"id": vid, "titolo": _corse(cols[0]).strip(), "artista": parti[0] if parti else "",
+            "album": parti[1] if len(parti) > 1 else "", "durata": durata,
+            "copertina": re.sub(r"=w\d+-h\d+", "=w544-h544", copertina),
+            "explicit": "MUSIC_EXPLICIT_BADGE" in json.dumps(it.get("badges") or [])}
+
+
+def _da_titolo_video(titolo, canale):
+    """(artista, titolo) dal titolo di un video («Artista - Titolo (Official Video)») e dal nome del canale."""
+    t = RUMORE.sub("", titolo or "").strip()
+    if " - " in t:
+        a, t = t.split(" - ", 1)
+        return a.strip(), t.strip()
+    canale = re.sub(r"\s*(?:- Topic|VEVO)$", "", canale or "").strip()
+    return canale, t
+
+
+def _brano_yt(v):
+    vid = v.get("videoId")
+    if not isinstance(vid, str) or not ID_YT.match(vid) or not v.get("lengthText"):
+        return None   # dirette e annunci non hanno durata
+    canale = _corse((v.get("ownerText") or {}).get("runs"))
+    artista, titolo = _da_titolo_video(_corse((v.get("title") or {}).get("runs")), canale)
+    return {"id": vid, "titolo": titolo, "artista": artista, "album": "",
+            "durata": _secondi((v.get("lengthText") or {}).get("simpleText")),
+            "copertina": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid, "explicit": False}
+
+
+def _cerca_ytdlp(q):
+    yt = _programma("yt-dlp")
+    uscita = _comando([yt, "--flat-playlist", "-J", "--", "ytsearch15:" + q], 60) if yt else ""
+    try:
+        voci = json.loads(uscita).get("entries") or []
+    except ValueError:
+        return []
+    fuori = []
+    for e in voci:
+        if isinstance(e, dict) and ID_YT.match(str(e.get("id") or "")) and e.get("duration"):
+            artista, titolo = _da_titolo_video(e.get("title"), e.get("channel") or e.get("uploader"))
+            fuori.append({"id": e["id"], "titolo": titolo, "artista": artista, "album": "", "durata": int(e["duration"]),
+                          "copertina": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % e["id"], "explicit": False})
+    return fuori
+
+
+def _ordina(risultati):
+    """Samuele vuole sempre la versione explicit: le censurate (clean, censored, edited, radio edit, oppure la copia
+    senza «E» di un brano che c'è anche explicit) vanno in fondo, segnate. Per il resto resta l'ordine di YouTube."""
+    norma = lambda s: re.sub(r"\W+", " ", (s or "").lower()).strip()   # noqa: E731
+    con_e = {(norma(r["titolo"]), norma(r["artista"])) for r in risultati if r["explicit"]}
+    for r in risultati:
+        r["censurata"] = bool(CENSURATA.search(r["titolo"] + " " + r["album"])) or (
+            not r["explicit"] and (norma(r["titolo"]), norma(r["artista"])) in con_e)
+    return sorted(risultati, key=lambda r: r["censurata"])
+
+
+def cerca_musica(q, fonte):
+    q = " ".join(str(q or "").split())[:200]
+    if not q:
+        raise ErroreExtra(400, "Scrivi cosa cercare")
+    if fonte not in YOUTUBEI:
+        raise ErroreExtra(400, "Fonte non valida: ytm (YouTube Music) o yt (YouTube)")
+    risultati, voci, errore = [], None, ""
+    try:
+        d = _youtubei(fonte, q)
+        voci = list(_trova(d, "musicResponsiveListItemRenderer" if fonte == "ytm" else "videoRenderer"))
+        risultati = [b for b in ((_brano_ytm if fonte == "ytm" else _brano_yt)(x) for x in voci if isinstance(x, dict)) if b]
+    except (OSError, ValueError) as e:   # anche urllib.error.URLError e HTTPError
+        errore = str(e)
+    if not voci:   # nessuna risposta o formato cambiato (una ricerca senza risultati ha comunque la sua struttura)
+        risultati = _cerca_ytdlp(q)
+        if not risultati and errore:
+            raise ErroreExtra(502, "YouTube non risponde: %s" % errore)
+    visti, unici = set(), []
+    for r in risultati:
+        if r["id"] not in visti:
+            visti.add(r["id"])
+            unici.append(r)
+    return {"risultati": _ordina(unici[:30]), "fonte": fonte}
+
+
+def _id_da_link(url):
+    m = re.match(r"^https?://(?:www\.|m\.|music\.)?(?:youtube\.com/(?:watch\?(?:.*&)?v=|shorts/|live/)|youtu\.be/)"
+                 r"([A-Za-z0-9_-]{11})(?:[&?#/].*)?$", url)
+    return m.group(1) if m else ""
+
+
+def _cartella_ascolti():
+    p = os.path.join(_cart("cache"), "extra", "ascolta")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _audio_pronto(vid):
+    c = _cartella_ascolti()
+    for n in os.listdir(c):
+        if n.startswith(vid + ".") and not n.endswith((".part", ".tmp", ".info")):
+            return os.path.join(c, n)
+    return ""
+
+
+def _info_ascolto(vid):
+    """Titolo, artista, album e copertina letti da yt-dlp quando ha preparato l'audio (servono per i link incollati)."""
+    try:
+        with open(os.path.join(_cartella_ascolti(), vid + ".info"), encoding="utf-8") as f:
+            o = json.load(f)
+        return o if isinstance(o, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _pulisci_ascolti():
+    c = _cartella_ascolti()
+    try:
+        audio = sorted((e for e in os.scandir(c) if e.is_file() and not e.name.endswith(".info")),
+                       key=lambda e: e.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for e in audio[ASCOLTI_MAX:]:
+        _cancella(e.path)
+        _cancella(os.path.join(c, e.name.split(".", 1)[0] + ".info"))
+
+
+def _esegui_ytdlp(args, coda=None, id_=None, progresso=None):
+    """yt-dlp con il registro letto riga per riga: {file, errore, e le righe «[atlante] chiave valore»}."""
+    if coda is not None:
+        p = coda.processo(id_, args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    else:
+        p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=_ambiente(), start_new_session=os.name == "posix")
+    tempo = threading.Timer(TEMPO_YTDLP, _termina, (p,))   # YouTube che non risponde non tiene fermo il lavoro
+    tempo.daemon = True
+    tempo.start()
+    info = {"file": "", "errore": ""}
+    try:
+        for riga in p.stdout:
+            r = riga.decode("utf-8", "replace").strip()
+            m = re.match(r"\[download\]\s+(\d+(?:\.\d+)?)%", r)
+            if m:
+                if progresso:
+                    progresso(float(m.group(1)))
+            elif r.startswith("[atlante] "):
+                k, _, v = r[10:].partition(" ")
+                if v.strip() and v.strip() != "NA" and "%(" not in v:
+                    info[k] = v.strip()
+            elif r.startswith("ERROR:"):
+                info["errore"] = r[6:].strip()
+        p.wait()
+    finally:
+        tempo.cancel()
+    if coda is not None:
+        coda.controlla(id_)
+    if info["file"] and not os.path.isfile(info["file"]):
+        info["file"] = ""
+    return info
+
+
+_PREPARAZIONI = {}
+_blocco_preparazioni = threading.Lock()
+
+
+def _prepara_audio(vid, coda=None, id_=None, progresso=None):
+    """L'audio originale del brano (m4a se c'è) nella cache degli ascolti, scaricato una volta sola: lo usano ▶︎ e ⬇︎.
+    Due richieste insieme per lo stesso brano (l'iPhone ne fa più d'una, a pezzi) aspettano lo stesso scaricamento."""
+    with _blocco_preparazioni:
+        b = _PREPARAZIONI.setdefault(vid, threading.Lock())
+    with b:
+        p = _audio_pronto(vid)
+        if p:
+            os.utime(p)   # usato adesso: nella cache resta tra i più recenti
+            return p
+        yt = _programma("yt-dlp")
+        if not yt:
+            raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
+        tmp = tempfile.mkdtemp(prefix="ascolto-", dir=_cartella_tmp())
+        try:
+            info = {}
+            # il client predefinito; se YouTube lo blocca (403), quello del telefono, come per il Cloud
+            for client in ("", "mweb"):
+                args = [yt, "--newline", "--progress", "--no-playlist", "--no-mtime", "-f", "ba[ext=m4a]/ba/b",
+                        "-P", "home:" + tmp, "-P", "temp:" + tmp, "-o", "%(id)s.%(ext)s"] + _STAMPE_INFO
+                if client:
+                    args += ["--extractor-args", "youtube:player_client=" + client]
+                info = _esegui_ytdlp(args + ["--", "https://music.youtube.com/watch?v=" + vid], coda, id_, progresso)
+                if info["file"]:
+                    break
+            if not info["file"]:
+                raise RuntimeError(info.get("errore") or "YouTube non ha dato l'audio del brano")
+            dest = os.path.join(_cartella_ascolti(), vid + (os.path.splitext(info["file"])[1].lower() or ".m4a"))
+            shutil.move(info["file"], dest)
+            with open(os.path.join(_cartella_ascolti(), vid + ".info"), "w", encoding="utf-8") as f:
+                json.dump({k: v for k, v in info.items() if k in ("titolo", "artista", "album", "copertina")}, f,
+                          ensure_ascii=False)
+            _pulisci_ascolti()
+            return dest
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _ascolta(h, vid):
+    if not ID_YT.match(vid or ""):
+        raise ErroreExtra(400, "Brano non valido")
+    try:
+        p = _prepara_audio(vid)
+    except RuntimeError as e:
+        raise ErroreExtra(502, "Ascolto non riuscito: %s" % e)
+    tipo = TIPI_VIDEO.get(os.path.splitext(p)[1].lower()) or "application/octet-stream"
+    _invia_file(h, p, tipo, {"X-Content-Type-Options": "nosniff"})
+
+
+def _cartella_musica():
+    """Cartella della musica scaricata; si crea solo se esiste quella che la contiene: un disco scollegato non deve
+    diventare una cartella vuota sul disco interno."""
+    p = _cart("musica_dir")
+    if not os.path.isdir(p):
+        if not os.path.isdir(os.path.dirname(p)):
+            raise ErroreExtra(503, "Cartella della musica scaricata non raggiungibile (il disco è collegato?): %s" % p)
+        os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _scarica_immagine(url, dest):
+    s = urlsplit(url)
+    host = (s.hostname or "").lower()
+    if s.scheme != "https" or not any(host == d or host.endswith("." + d) for d in HOST_COPERTINE):
+        return False   # solo dai siti delle copertine: un indirizzo qualsiasi farebbe del Mac un proxy
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": BROWSER}), timeout=10)
+        with r:
+            if not (r.headers.get("Content-Type") or "").startswith("image/"):
+                return False
+            dati = r.read(MAX_COPERTINA + 1)
+    except (OSError, ValueError):
+        return False
+    if not dati or len(dati) > MAX_COPERTINA:
+        return False
+    with open(dest, "wb") as f:
+        f.write(dati)
+    return True
+
+
+def _copertina(l, info, tmp):
+    """Prima la copertina quadrata di YouTube Music; se no le immagini grandi del video (16:9 senza bande nere,
+    ritagliate al centro da ffmpeg), poi quella piccola data dalla ricerca o dalla pagina."""
+    date = [u for u in (l.get("copertina"), info.get("copertina")) if u]
+    quadrate = [u for u in date if "googleusercontent.com" in u]
+    video = ["https://i.ytimg.com/vi/%s/%s.jpg" % (l["yt"], n) for n in ("maxresdefault", "hq720")] if l.get("yt") else []
+    dest = os.path.join(tmp, "copertina.img")
+    for u in quadrate + video + [u for u in date if u not in quadrate]:
+        if _scarica_immagine(u, dest):
+            return dest
+    return ""
+
+
+def _libero(p):
+    base, est = os.path.splitext(p)
+    n = 2
+    while os.path.exists(p):   # il disco del Mac non distingue maiuscole e accenti: exists lo sa
+        p = "%s (%d)%s" % (base, n, est)
+        n += 1
+    return p
+
+
+def _in_libreria(percorso):
+    """Id del brano nel catalogo, dopo una rilettura (la prima può essere una lettura già in corso, cominciata
+    prima che il file ci fosse: allora se ne fa un'altra)."""
+    if LIB is None:
+        return ""
+    for _ in range(2):
+        LIB.scansiona()
+        with LIB.blocco:
+            for i, p in LIB.percorsi.items():
+                if p == percorso:
+                    return i
+    return ""
+
+
+def _mp3(ff, sorgente, copertina, tag, uscita):
+    args = [ff, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", sorgente]
+    if copertina:
+        args += ["-i", copertina, "-map", "0:a:0", "-map", "1:v:0", "-c:v", "mjpeg",
+                 "-filter:v", "crop='min(iw,ih)':'min(iw,ih)',scale='min(800,iw)':-2",
+                 "-disposition:v:0", "attached_pic", "-metadata:s:v", "title=Album cover",
+                 "-metadata:s:v", "comment=Cover (front)"]
+    else:
+        args += ["-map", "0:a:0"]
+    args += ["-c:a", "libmp3lame", "-q:a", "0", "-map_metadata", "-1", "-id3v2_version", "3"]
+    for k, v in tag.items():
+        if v:
+            args += ["-metadata", "%s=%s" % (k, v)]
+    r = subprocess.run(args + ["-f", "mp3", uscita], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, env=_ambiente(), timeout=TEMPO_YTDLP)
+    if r.returncode != 0:
+        _cancella(uscita)
+        raise RuntimeError("conversione non riuscita: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
+
+
+def _scarica_musica(coda, l, _dati):
+    dest_dir = _cartella_musica()
+    ff = _programma("ffmpeg")
+    tmp = tempfile.mkdtemp(prefix="musica-", dir=_cartella_tmp())
+    avanza = lambda pct: coda.aggiorna(l["id"], progresso=round(min(pct, 100) * 0.8, 1))   # noqa: E731
+    try:
+        if l.get("yt"):
+            sorgente = _prepara_audio(l["yt"], coda, l["id"], avanza)
+            info = _info_ascolto(l["yt"])
+        else:   # link di un altro sito (SoundCloud, Bandcamp…): titolo, artista e copertina dalla sua pagina
+            info = _esegui_ytdlp([_programma("yt-dlp"), "--newline", "--progress", "--no-playlist", "--no-mtime",
+                                  "-f", "ba/b", "-P", "home:" + tmp, "-P", "temp:" + tmp, "-o", "%(id).80B.%(ext)s"] +
+                                 _STAMPE_INFO + ["--", l["url"]], coda, l["id"], avanza)
+            if not info["file"]:
+                raise RuntimeError(info["errore"] or "yt-dlp non è riuscito a scaricare l'audio")
+            sorgente = info["file"]
+        coda.controlla(l["id"])
+        # dalla ricerca arrivano già titolo e artista giusti; per i link si usano quelli della pagina
+        titolo, artista = l.get("titolo") or "", l.get("artista") or ""
+        if not titolo or titolo == l.get("url"):
+            titolo = info.get("titolo") or re.sub(r"\s*\[[^\[\]]*\]$", "", os.path.splitext(os.path.basename(sorgente))[0])
+            if not artista:
+                artista, titolo = _da_titolo_video(titolo, info.get("artista", ""))
+        album = l.get("album") or info.get("album", "")
+        coda.aggiorna(l["id"], progresso=82, titolo=titolo, artista=artista, album=album)
+        nome = _nome_file("%s - %s" % (artista, titolo) if artista else titolo, 180) or l["id"]
+        if ff:
+            finale = _libero(os.path.join(dest_dir, nome + ".mp3"))
+            parziale = os.path.join(dest_dir, "." + l["id"] + ".tmp")   # col punto davanti la libreria non lo legge
+            tag = {"title": titolo, "artist": artista, "album": album, "purl": l["url"],
+                   "ITUNESADVISORY": "1" if l.get("explicit") else ""}
+            copertina = _copertina(l, info, tmp)
+            try:
+                _mp3(ff, sorgente, copertina, tag, parziale)
+            except RuntimeError:
+                if not copertina:
+                    raise
+                _mp3(ff, sorgente, "", tag, parziale)   # immagine che ffmpeg non legge: senza copertina
+        else:   # senza ffmpeg niente conversione: il file com'è (m4a), senza tag
+            finale = _libero(os.path.join(dest_dir, nome + (os.path.splitext(sorgente)[1] or ".m4a")))
+            parziale = os.path.join(dest_dir, "." + l["id"] + ".tmp")
+            shutil.copyfile(sorgente, parziale)
+        coda.controlla(l["id"])
+        os.replace(parziale, finale)
+        coda.aggiorna(l["id"], progresso=95, nome=os.path.basename(finale), dimensione=os.path.getsize(finale),
+                      _percorso=finale)
+        coda.aggiorna(l["id"], brano=_in_libreria(finale))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        _cancella(os.path.join(dest_dir, "." + l["id"] + ".tmp"))   # annullato o non riuscito a metà
+
+
+def _nuova_musica(corpo):
+    vid = str(corpo.get("id") or "").strip()
+    url = str(corpo.get("url") or "").strip()
+    if not vid and url:
+        vid = _id_da_link(url)   # un link di YouTube vale come un risultato della ricerca
+    if vid and not ID_YT.match(vid):
+        raise ErroreExtra(400, "Brano non valido")
+    if not vid and not re.match(r"^https?://[^\s/]+\S*$", url, re.I):
+        raise ErroreExtra(400, "Serve un brano della ricerca o il link (http o https) della sua pagina")
+    if not _programma("yt-dlp"):
+        raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
+    _cartella_musica()
+    coda = _coda("musica")
+    if vid:   # lo stesso brano chiesto di nuovo (due tocchi, due dispositivi): lo stesso lavoro, nessun doppione
+        with coda.blocco:
+            for l in reversed(list(coda.lavori.values())):
+                if l.get("yt") == vid and (l.get("stato") in ("in coda", "in corso") or
+                                           (l.get("stato") == "fatto" and os.path.isfile(l.get("_percorso") or ""))):
+                    return l["id"]
+    testo = lambda k, n: str(corpo.get(k) or "").strip()[:n]   # noqa: E731
+    return coda.aggiungi({"yt": vid, "url": "https://music.youtube.com/watch?v=" + vid if vid else url,
+                          "titolo": testo("titolo", 300) or ("" if vid else url), "artista": testo("artista", 300),
+                          "album": testo("album", 300), "copertina": testo("copertina", 1000),
+                          "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": ""})
+
+
+def _annulla_musica(id_):
+    coda = _coda("musica")
+    l = coda.lavori.get(id_)
+    if not l:
+        raise ErroreExtra(404, "Scaricamento non trovato")
+    if l.get("stato") in ("in coda", "in corso"):
+        coda.annulla(id_)
+    else:
+        coda.rimuovi(id_)   # esce dall'elenco: il brano resta nella libreria
 
 
 # ----- voci e audiolibri con `say` -----
@@ -1602,7 +2079,8 @@ def stato():
     yt = _programma("yt-dlp")
     return {"ytdlp": bool(yt), "ffmpeg": bool(_programma("ffmpeg")), "say": bool(_programma("say")),
             "ollama": attiva, "modelli": modelli, "modello": _scegli_modello("", modelli),
-            "video_dir": _cart("video_dir"), "libri_dir": _cart("libri_dir"), "sistema": _sistema(),
+            "video_dir": _cart("video_dir"), "libri_dir": _cart("libri_dir"), "musica_dir": _cart("musica_dir"),
+            "sistema": _sistema(),
             "ytdlp_versione": _versione(yt) if yt else "",
             "ollama_installato": attiva or bool(_programma("ollama")) or os.path.isdir("/Applications/Ollama.app")}
 
@@ -2044,6 +2522,23 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "video" and len(resto) == 2 and resto[1] == "annulla":
         solo("POST")
         _annulla_video(resto[0])
+        _json(h, {"ok": True})
+    elif cosa == "musica" and resto == ["cerca"]:
+        solo("GET")
+        q = parse_qs(urlsplit(h.path).query)
+        _json(h, cerca_musica((q.get("q") or [""])[0], (q.get("fonte") or ["ytm"])[0]))
+    elif cosa == "musica" and len(resto) == 2 and resto[0] == "ascolta":
+        solo("GET")
+        _ascolta(h, resto[1])
+    elif cosa == "musica" and not resto:
+        solo("GET", "POST")
+        if metodo == "GET":
+            _json(h, {"lavori": _coda("musica").elenco()})
+        else:
+            _json(h, {"id": _nuova_musica(corpo)})
+    elif cosa == "musica" and len(resto) == 2 and resto[1] == "annulla":
+        solo("POST")
+        _annulla_musica(resto[0])
         _json(h, {"ok": True})
     elif cosa == "voci" and not resto:
         solo("GET")
@@ -2550,6 +3045,8 @@ def main():
     ap.add_argument("--chiave", help="chiave privata del certificato")
     ap.add_argument("--video-dir", default=CONF["video_dir"], help="dove salvare video e audio scaricati con yt-dlp")
     ap.add_argument("--libri-dir", default=CONF["libri_dir"], help="dove salvare gli audiolibri creati con la voce del Mac")
+    ap.add_argument("--musica-dir", default=CONF["musica_dir"], help="dove salvare i brani scaricati da internet "
+                    "(fa parte della libreria)")
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
@@ -2565,9 +3062,14 @@ def main():
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"
-    avvia(a.cartelle, a.cache, indirizzo=indirizzo)
+    # i brani scaricati da internet entrano nella libreria (se la cartella non è già dentro una delle altre)
+    scaricati = os.path.abspath(os.path.expanduser(a.musica_dir))
+    cartelle = list(a.cartelle)
+    if not any(scaricati == c or _dentro(scaricati, c) for c in (os.path.abspath(os.path.expanduser(x)) for x in cartelle)):
+        cartelle.append(scaricati)
+    avvia(cartelle, a.cache, indirizzo=indirizzo)
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
-                ia_indirizzo=a.ia_indirizzo.strip())
+                ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
     app = os.path.abspath(a.app)
     https = bool(a.cert)
     host_sicuro = urlsplit(indirizzo).netloc.lower()
