@@ -1,0 +1,142 @@
+{
+ "versione": 1,
+ "come_si_ritocca": [
+  "Playlist di Atlante: ogni playlist è una regola sui dati dei brani. Un brano sta in tutte le playlist di cui rispetta la regola; una playlist senza brani non compare.",
+  "Per cambiare una regola non toccare questo file (un aggiornamento lo sostituisce): scrivi solo le playlist da cambiare in ~/.atlante-musica/tematiche/regole.json, con lo stesso formato e lo stesso id. Il Mac mini le rilegge da solo.",
+  "Una playlist con lo stesso id prende il posto di questa; una con un id nuovo si aggiunge al suo gruppo; \"nascosta\": true la toglie.",
+  "Dati di ogni brano: generi (gli id di \"generi\" qui sotto), italiano (true/false), bpm, energia (da 0 a 1), regolarita (da 0 a 1: battito costante e uguale in tutto il brano), anni (anno di uscita), anni_fa (quanti anni fa è uscito), durata (secondi), etichette (le etichette di MusicBrainz, es. \"christmas\"), parole (parole del titolo o dell'album, anche solo l'inizio: \"innamorat\"), modo (\"maggiore\" o \"minore\", misurato sull'audio: è una stima, sbaglia spesso tra una tonalità maggiore e la sua relativa minore).",
+  "Una regola chiede tutte le sue condizioni insieme. \"una_di\": [regola, regola…] basta una; \"nessuna_di\": nessuna. bpm, energia, regolarita, anni, anni_fa e durata sono [minimo, massimo]. \"ordine\": aggiunti (predefinito), bpm, -bpm, energia, -energia, anno, -anno, titolo, artista."
+ ],
+ "generi": {
+  "pop": "Pop", "rap": "Rap e hip hop", "trap": "Trap", "rock": "Rock", "alternative": "Alternative",
+  "indie": "Indie", "punk": "Punk", "metal": "Metal", "dance": "Dance", "house": "House", "techno": "Techno",
+  "edm": "EDM", "elettronica": "Elettronica", "rnb": "R&B", "soul": "Soul", "funk": "Funk", "disco": "Disco",
+  "latino": "Reggaeton e latino", "reggae": "Reggae", "jazz": "Jazz", "blues": "Blues", "country": "Country",
+  "cantautori": "Cantautori", "classica": "Classica e colonne sonore", "lofi": "Lo-fi", "kpop": "K-pop",
+  "afrobeat": "Afrobeat"
+ },
+ "gruppi": [
+  {"id": "generi", "nome": "Generi", "playlist": [
+   {"id": "genere-pop", "nome": "Pop", "regola": {"generi": ["pop"]}},
+   {"id": "genere-pop-italiano", "nome": "Pop italiano", "regola": {"generi": ["pop"], "italiano": true}},
+   {"id": "genere-rap", "nome": "Rap e hip hop", "regola": {"generi": ["rap"]}},
+   {"id": "genere-rap-italiano", "nome": "Rap italiano", "regola": {"generi": ["rap", "trap"], "italiano": true}},
+   {"id": "genere-trap", "nome": "Trap", "regola": {"generi": ["trap"]}},
+   {"id": "genere-rock", "nome": "Rock", "regola": {"generi": ["rock"]}},
+   {"id": "genere-rock-italiano", "nome": "Rock italiano", "regola": {"generi": ["rock"], "italiano": true}},
+   {"id": "genere-alternative", "nome": "Alternative", "regola": {"generi": ["alternative"]}},
+   {"id": "genere-indie", "nome": "Indie", "regola": {"generi": ["indie"]}},
+   {"id": "genere-punk", "nome": "Punk", "regola": {"generi": ["punk"]}},
+   {"id": "genere-metal", "nome": "Metal", "regola": {"generi": ["metal"]}},
+   {"id": "genere-dance", "nome": "Dance", "regola": {"generi": ["dance"]}},
+   {"id": "genere-house", "nome": "House", "regola": {"generi": ["house"]}},
+   {"id": "genere-techno", "nome": "Techno", "regola": {"generi": ["techno"]}},
+   {"id": "genere-edm", "nome": "EDM", "regola": {"generi": ["edm"]}},
+   {"id": "genere-elettronica", "nome": "Elettronica", "regola": {"generi": ["elettronica"]}},
+   {"id": "genere-rnb", "nome": "R&B", "regola": {"generi": ["rnb"]}},
+   {"id": "genere-soul", "nome": "Soul", "regola": {"generi": ["soul"]}},
+   {"id": "genere-funk", "nome": "Funk", "regola": {"generi": ["funk"]}},
+   {"id": "genere-disco", "nome": "Disco", "regola": {"generi": ["disco"]}},
+   {"id": "genere-latino", "nome": "Reggaeton e latino", "regola": {"generi": ["latino"]}},
+   {"id": "genere-reggae", "nome": "Reggae", "regola": {"generi": ["reggae"]}},
+   {"id": "genere-jazz", "nome": "Jazz", "regola": {"generi": ["jazz"]}},
+   {"id": "genere-blues", "nome": "Blues", "regola": {"generi": ["blues"]}},
+   {"id": "genere-country", "nome": "Country", "regola": {"generi": ["country"]}},
+   {"id": "genere-cantautori", "nome": "Cantautori italiani", "regola": {"generi": ["cantautori"], "italiano": true}},
+   {"id": "genere-classica", "nome": "Classica e colonne sonore", "regola": {"generi": ["classica"]}},
+   {"id": "genere-lofi", "nome": "Lo-fi", "regola": {"generi": ["lofi"]}},
+   {"id": "genere-kpop", "nome": "K-pop", "regola": {"generi": ["kpop"]}},
+   {"id": "genere-afrobeat", "nome": "Afrobeat", "regola": {"generi": ["afrobeat"]}}
+  ]},
+  {"id": "umore", "nome": "Umore", "playlist": [
+   {"id": "umore-energia", "nome": "Energia", "ordine": "-energia", "regola": {"energia": [0.75, 1]}},
+   {"id": "umore-buonumore", "nome": "Buonumore", "regola": {"una_di": [
+    {"etichette": ["happy", "feel good", "uplifting", "fun", "upbeat", "cheerful", "joyful", "good mood"]},
+    {"generi": ["pop", "dance", "disco", "funk", "reggae", "latino", "afrobeat", "kpop"], "energia": [0.5, 0.95], "bpm": [95, 135]}]}},
+   {"id": "umore-festa", "nome": "Festa", "regola": {"una_di": [
+    {"etichette": ["party", "club", "dancefloor"]},
+    {"generi": ["dance", "house", "edm", "latino", "disco", "kpop", "afrobeat", "techno"], "energia": [0.6, 1], "bpm": [95, 135]}]}},
+   {"id": "umore-relax", "nome": "Relax", "regola": {"una_di": [
+    {"etichette": ["chill", "chillout", "relaxing", "relax", "mellow", "easy listening", "smooth"]},
+    {"generi": ["lofi"]},
+    {"energia": [0, 0.45], "bpm": [0, 115], "nessuna_di": [{"generi": ["metal", "punk", "techno"]}]}]}},
+   {"id": "umore-calma", "nome": "Calma", "ordine": "energia", "regola": {"una_di": [
+    {"etichette": ["calm", "peaceful", "meditation", "soft"]},
+    {"energia": [0, 0.3]},
+    {"generi": ["classica"], "energia": [0, 0.5]}]}},
+   {"id": "umore-malinconia", "nome": "Malinconia", "regola": {"una_di": [
+    {"etichette": ["sad", "melancholic", "melancholy", "malinconia", "heartbreak", "sadcore"]},
+    {"generi": ["cantautori", "indie", "alternative", "soul", "blues", "pop", "rnb"], "energia": [0, 0.45], "bpm": [0, 100]}]}},
+   {"id": "umore-romantica", "nome": "Romantica", "regola": {"una_di": [
+    {"etichette": ["love", "romantic", "love song", "ballad", "romance"]},
+    {"parole": ["amore", "amor", "love", "cuore", "heart", "bacio", "baci", "kiss", "ti amo", "innamorat", "te quiero", "je t aime"]},
+    {"generi": ["rnb", "soul"], "energia": [0, 0.55]}]}},
+   {"id": "umore-motivazione", "nome": "Motivazione", "regola": {"una_di": [
+    {"etichette": ["motivational", "inspirational", "epic", "empowering", "anthem"]},
+    {"generi": ["rap", "rock", "pop", "edm", "trap", "dance"], "energia": [0.65, 1], "bpm": [110, 160]}]}},
+   {"id": "umore-grinta", "nome": "Grinta", "ordine": "-energia", "regola": {"una_di": [
+    {"etichette": ["aggressive", "angry", "hard", "heavy", "intense"]},
+    {"generi": ["metal", "punk", "rock", "rap", "trap", "alternative"], "energia": [0.7, 1]}]}},
+   {"id": "umore-sognante", "nome": "Sognante", "regola": {"una_di": [
+    {"etichette": ["dreamy", "dream pop", "shoegaze", "ethereal", "atmospheric", "psychedelic", "ambient", "chillwave"]},
+    {"generi": ["lofi", "elettronica", "indie"], "energia": [0, 0.5]}]}},
+   {"id": "umore-nostalgia", "nome": "Nostalgia", "ordine": "anno", "regola": {"una_di": [
+    {"etichette": ["nostalgic", "nostalgia", "oldies", "retro"]},
+    {"anni_fa": [20, 100]}]}},
+   {"id": "umore-serata", "nome": "Serata", "regola": {"generi": ["jazz", "soul", "rnb", "lofi", "house", "funk", "elettronica", "disco"], "energia": [0.3, 0.7], "bpm": [80, 125]}}
+  ]},
+  {"id": "attivita", "nome": "Attività", "playlist": [
+   {"id": "attivita-allenamento", "nome": "Allenamento", "ordine": "bpm", "regola": {"energia": [0.65, 1], "bpm": [115, 180], "nessuna_di": [{"generi": ["classica", "lofi"]}]}},
+   {"id": "attivita-handbike-ritmo", "nome": "Handbike: ritmo costante", "descrizione": "Battito regolare per tenere la cadenza", "ordine": "bpm", "regola": {"bpm": [115, 150], "regolarita": [0.65, 1], "energia": [0.45, 1]}},
+   {"id": "attivita-handbike-salita", "nome": "Handbike: salita e scatti", "descrizione": "BPM 140–180 ed energia alta", "ordine": "-energia", "regola": {"bpm": [140, 180], "energia": [0.7, 1]}},
+   {"id": "attivita-riscaldamento", "nome": "Riscaldamento", "ordine": "bpm", "regola": {"bpm": [95, 125], "energia": [0.45, 0.75]}},
+   {"id": "attivita-defaticamento", "nome": "Defaticamento", "ordine": "-bpm", "regola": {"bpm": [60, 105], "energia": [0, 0.5]}},
+   {"id": "attivita-corsa", "nome": "Corsa", "ordine": "bpm", "regola": {"bpm": [150, 185], "energia": [0.55, 1], "regolarita": [0.5, 1]}},
+   {"id": "attivita-studio", "nome": "Concentrazione e studio", "regola": {"una_di": [
+    {"generi": ["lofi", "classica"]},
+    {"etichette": ["instrumental", "ambient", "piano", "study"]},
+    {"generi": ["jazz", "elettronica"], "energia": [0, 0.5]}],
+    "nessuna_di": [{"generi": ["rap", "trap", "metal", "punk"]}]}},
+   {"id": "attivita-lavoro", "nome": "Lavoro", "regola": {"energia": [0.35, 0.7], "bpm": [90, 130], "nessuna_di": [{"generi": ["metal", "punk", "classica"]}]}},
+   {"id": "attivita-auto", "nome": "Viaggio in auto", "regola": {"energia": [0.5, 1], "bpm": [90, 140], "generi": ["pop", "rock", "rap", "dance", "indie", "alternative", "latino", "country", "cantautori", "funk", "disco", "edm"]}},
+   {"id": "attivita-cucina", "nome": "Cucina", "regola": {"generi": ["soul", "funk", "jazz", "pop", "latino", "reggae", "disco", "cantautori", "afrobeat"], "energia": [0.4, 0.8], "bpm": [90, 130]}},
+   {"id": "attivita-doccia", "nome": "Doccia", "regola": {"generi": ["pop", "rock", "dance", "disco", "kpop", "latino", "funk"], "energia": [0.6, 1], "bpm": [100, 135]}},
+   {"id": "attivita-sonno", "nome": "Sonno", "ordine": "energia", "regola": {"bpm": [0, 110], "una_di": [
+    {"energia": [0, 0.25]},
+    {"generi": ["classica", "lofi"], "energia": [0, 0.35]},
+    {"etichette": ["sleep", "lullaby", "ambient"], "energia": [0, 0.45]}]}}
+  ]},
+  {"id": "epoche", "nome": "Epoche", "playlist": [
+   {"id": "epoca-anno", "nome": "Successi di quest'anno", "regola": {"anni_fa": [0, 0]}},
+   {"id": "epoca-2020", "nome": "Anni 2020", "regola": {"anni": [2020, 2029]}},
+   {"id": "epoca-2010", "nome": "Anni 2010", "regola": {"anni": [2010, 2019]}},
+   {"id": "epoca-2000", "nome": "Anni 2000", "regola": {"anni": [2000, 2009]}},
+   {"id": "epoca-90", "nome": "Anni '90", "regola": {"anni": [1990, 1999]}},
+   {"id": "epoca-80", "nome": "Anni '80", "regola": {"anni": [1980, 1989]}},
+   {"id": "epoca-70", "nome": "Anni '70", "regola": {"anni": [1970, 1979]}},
+   {"id": "epoca-60", "nome": "Anni '60", "regola": {"anni": [1960, 1969]}}
+  ]},
+  {"id": "momenti", "nome": "Momenti e stagioni", "playlist": [
+   {"id": "momento-estate", "nome": "Estate", "regola": {"una_di": [
+    {"etichette": ["summer", "beach", "tropical"]},
+    {"parole": ["estate", "estiv", "summer", "sole", "mare", "spiaggia", "beach", "sunshine", "verano", "playa", "tropical", "luglio", "agosto", "vacanz", "ombrellone"]},
+    {"generi": ["latino", "reggae", "afrobeat"], "energia": [0.55, 1], "bpm": [90, 135]}]}},
+   {"id": "momento-inverno", "nome": "Inverno", "regola": {"una_di": [
+    {"etichette": ["winter", "snow", "christmas"]},
+    {"parole": ["inverno", "winter", "neve", "snow", "freddo", "cold", "dicembre", "december", "gennaio", "january", "gelo", "frozen", "ghiaccio", "natale", "christmas", "xmas"]}]}},
+   {"id": "momento-natale", "nome": "Natale", "regola": {"una_di": [
+    {"etichette": ["christmas", "christmas music", "christmas song", "xmas", "holiday"]},
+    {"parole": ["natale", "natalizi", "christmas", "xmas", "santa claus", "jingle", "navidad", "noel", "babbo", "mistletoe", "rudolph", "sleigh", "silent night", "let it snow", "tu scendi dalle stelle", "astro del ciel"]}]}},
+   {"id": "momento-mattina", "nome": "Mattina", "regola": {"una_di": [
+    {"parole": ["morning", "mattina", "mattino", "buongiorno", "sunrise", "alba", "wake up", "sveglia", "risveglio"]},
+    {"generi": ["pop", "indie", "soul", "funk", "jazz", "reggae", "cantautori", "country"], "energia": [0.35, 0.7], "bpm": [90, 125]}]}},
+   {"id": "momento-domenica", "nome": "Domenica", "regola": {"una_di": [
+    {"parole": ["domenica", "sunday", "weekend", "lazy"]},
+    {"generi": ["soul", "jazz", "cantautori", "indie", "funk", "reggae", "country", "blues"], "energia": [0.2, 0.6], "bpm": [70, 120]}]}},
+   {"id": "momento-notte", "nome": "Notte", "regola": {"una_di": [
+    {"parole": ["notte", "night", "midnight", "mezzanotte", "luna", "moon", "stelle", "stars", "buio", "nightcall"]},
+    {"etichette": ["night", "nocturnal", "late night"]},
+    {"generi": ["elettronica", "rnb", "lofi", "trap", "house", "techno"], "energia": [0.3, 0.75]}]}}
+  ]}
+ ]
+}

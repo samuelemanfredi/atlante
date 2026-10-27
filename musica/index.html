@@ -154,6 +154,29 @@ img{max-width:100%;display:block}
 .banner .bt{flex:1;min-width:0}
 .banner .bx{color:var(--fg2);font-size:20px;width:28px;height:28px;display:grid;place-items:center}
 .banner .ba{color:var(--accent);font-weight:600;text-decoration:none}
+/* Playlist di Atlante e «Crea con l'IA» */
+.atlg{font-size:13px;font-weight:600;color:var(--fg2);text-transform:uppercase;letter-spacing:.04em;margin:18px 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:-4px 0 14px}
+.chip{background:var(--fill);border-radius:99px;padding:5px 11px;font-size:13px;color:var(--fg2)}
+.sform textarea{font:inherit;color:var(--fg);background:var(--fill);border:0;border-radius:10px;padding:10px 12px;outline:none;resize:none;min-height:88px}
+/* «Per ritmo» e «Mettimi di buonumore» */
+.ritart{display:flex!important;flex-direction:column;align-items:center;justify-content:center;color:#fff}
+.ritart .rn{font-size:28px;font-weight:800;line-height:1.1;display:flex}.ritart .rn svg{font-size:40px}
+.ritart .ru{font-size:13px;font-weight:600;opacity:.85;margin-top:2px}
+.ritg{display:flex;flex-wrap:wrap;gap:10px}
+.ritb{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 14px;border-radius:12px;background:var(--c,var(--fill));color:#fff;min-width:96px;text-align:left}
+.ritb b{font-size:18px}.ritb span{font-size:13px;opacity:.9}
+.ritb.mio{flex-direction:row;align-items:center;background:var(--fill);color:var(--fg);padding:0 4px 0 0}
+.ritb.mio>button:first-child{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 6px 10px 14px;text-align:left}
+.ritb.mio .x{width:32px;height:32px;display:grid;place-items:center;color:var(--fg2)}
+.ritbox{display:flex;flex-direction:column;gap:10px}.ritl{font-weight:600}.ritr{width:100%;accent-color:var(--accent)}
+.ritrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ritrow input{font:inherit;color:var(--fg);background:var(--fill);border:0;border-radius:10px;height:40px;width:84px;padding:0 10px;outline:none}
+.ritrow button{height:40px;padding:0 14px;border-radius:10px;background:var(--fill);color:var(--accent);font-weight:600}
+.chip.on{background:var(--accent);color:#fff;display:inline-flex;align-items:center;gap:4px}.chip button{color:inherit;display:grid;place-items:center;font-size:12px}
+.ritconta{font-size:17px;font-weight:600;margin:4px 0}.bpmb{color:var(--accent);font-weight:600}
+.npbpm{margin:-4px auto 10px;padding:5px 12px;border-radius:99px;background:rgba(255,255,255,.16);font-size:13px;font-weight:600;color:#fff}
+.bncard .mi{background:#ff9f0a}
 
 /* cerca */
 .sbox{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding:4px 0 10px;display:flex;align-items:center;gap:8px}
@@ -1300,7 +1323,7 @@ function trackRows(tr, opt) {
   const l = regList(tr.map(t => t.id), opt.label || ''), q = tr.length > CHUNK ? {has:id => DLQ.indexOf(id) >= 0} : new Set(DLQ);
   return '<div class="trks">' + chunk(tr, (t, i) => {
     const lead = opt.num ? '<span class="num"><span class="nn">' + (t.track || i + 1) + '</span><span class="eq"><i></i><i></i><i></i></span></span>' : art(t.cover);
-    const sub = opt.num ? (t.artist && t.artist !== opt.albumArtist ? esc(t.artist) : '') : esc((t.artist || UNK_ART) + (opt.noAlbum || !t.album ? '' : ' · ' + t.album));
+    const sub = (opt.num ? (t.artist && t.artist !== opt.albumArtist ? esc(t.artist) : '') : esc((t.artist || UNK_ART) + (opt.noAlbum || !t.album ? '' : ' · ' + t.album))) + (opt.extra ? opt.extra(t) : '');
     return '<div class="trk' + (t.id === curId ? ' cur' : '') + (t.remote && !SRV && !srvWait && !saved.has(t.id) ? ' off' : '') + '" data-id="' + t.id + '"><button class="tap" style="display:contents" data-a="play" data-l="' + l + '" data-i="' + i + '">' + lead +
       '</button><div class="rt"><button class="tx" data-a="play" data-l="' + l + '" data-i="' + i + '" style="text-align:left"><span class="t1">' + t1(t) + '</span>' + (sub ? '<span class="t2">' + sub + '</span>' : '') +
       '</button>' + (t.remote ? '<span class="dl" aria-label="' + (saved.has(t.id) ? 'Sull\'iPhone' : 'Sul Mac') + '">' + dlSign(t.id, q) + '</span>' : '') + '<button class="more" data-a="more" data-id="' + t.id + '"' + (opt.pl ? ' data-pl="' + opt.pl + '"' : '') + ' aria-label="Altre azioni">' + ic('more') + '</button></div></div>';
@@ -1322,8 +1345,8 @@ function topBar(right) {
   return '<div class="top">' + (prev ? '<button class="back" data-a="back">' + ic('chevL') + '<span>' + esc(routeTitle(prev)) + '</span></button>' : '<span></span>') + (right || '') + '</div>';
 }
 function routeTitle(r) {
-  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche'}[r.v] || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
-    (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : '');
+  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche', atl:'Playlist di Atlante', iaprev:'Anteprima', ritmo:'Per ritmo'}[r.v] || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
+    (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : r.v === 'atlpl' ? ((atlPl(r.k) || {}).nome || 'Playlist') : '');
 }
 function emptyState() {
   if (SRV && SRVSCAN) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Il Mac sta leggendo il disco…</h3><p>La prima volta ci vuole qualche minuto: i brani compaiono man mano.</p></div>';
@@ -1354,6 +1377,7 @@ const pages = {
     const al = albums();
     const all = regList(songs().map(t => t.id), 'Tutti i brani');
     h += '<button class="mixcard" data-a="shufall" data-l="' + all + '"><span class="mi">' + ic('shuf') + '</span><span><b>Riproduzione casuale</b><span>' + T.size + ' brani della tua libreria</span></span></button>';
+    h += bnCard() + ritScaffale();   // «Mettimi di buonumore» in evidenza e i tasti «Per ritmo»
     const rec = al.filter(a => a.last).sort((a, b) => b.last - a.last).slice(0, 12);
     if (rec.length) h += '<h2 class="h2">Ascoltati di recente</h2><div class="shelf">' + rec.map(tile).join('') + '</div>';
     h += '<h2 class="h2"><button data-a="go" data-v="albums" style="display:flex;align-items:center;gap:4px">Aggiunti di recente<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' + al.sort((a, b) => b.added - a.added).slice(0, 12).map(tile).join('') + '</div>';
@@ -1385,6 +1409,7 @@ const pages = {
         sul + ' di ' + tot + ' brani sull\'iPhone</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button></div>';
     }
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
+    h += ritScaffale() + atlSezione();   // «Per ritmo», Playlist di Atlante (dal Mac mini) e «Crea con l'IA»
     h += '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + albums().sort((a, b) => b.added - a.added).slice(0, 24).map(tile).join('') + '</div>';
     return h;
   },
@@ -2143,6 +2168,374 @@ function closeNP() { np.classList.remove('open'); np.style.transform = ''; docum
   np.addEventListener('touchend', () => { if (y0 == null) return; np.classList.remove('drag'); const fast = dy > 60 && Date.now() - t0 < 250; if (dy > 140 || fast) closeNP(); else np.style.transform = ''; y0 = null; });
 })();
 
+/* ---------- Playlist di Atlante (fatte dal Mac mini) e «Crea con l'IA» ---------- */
+// Le playlist tematiche le calcola il Mac mini (api/extra/tematiche): qui l'elenco (salvato per quando il Mac non
+// risponde) e i brani di quelle aperte. «Crea con l'IA» chiede al Mac un'anteprima scelta dalla libreria; salvata
+// diventa una playlist di questo telefono come le altre, e «Condividi in Atlante» la fa vedere a tutti.
+I.ia = '<path d="M10 2.5l1.9 5.6 5.6 1.9-5.6 1.9L10 17.5l-1.9-5.6L2.5 10l5.6-1.9zM18 13l1 2.9 2.9 1-2.9 1-1 2.9-1-2.9-2.9-1 2.9-1z"/>';
+let ATL = ls.get('am-atl', null), atlT = 0, IAPREV = null, iaBusy = false;
+const ATLB = new Map(Object.entries(ls.get('am-atlb', {})));   // id → {ids, t}: brani delle playlist aperte
+const atlWait = new Set();
+const atlPl = id => { for (const g of (ATL && ATL.gruppi) || []) for (const p of g.playlist) if (p.id === id) return p; return null; };
+const atlTr = ids => (ids || []).map(i => T.get('r' + i)).filter(Boolean);
+const atlTile = p => '<button class="tile" data-a="go" data-v="atlpl" data-k="' + esc(p.id) + '">' + mosaic((p.copertine || []).map(k => ({cover:'s:' + k}))) +
+  '<div class="n">' + esc(p.nome) + '</div><div class="a">' + (p.n === 1 ? '1 brano' : p.n + ' brani') + '</div></button>';
+async function atlCarica(force) {
+  if (!force && Date.now() - atlT < 120000) return;
+  atlT = Date.now();
+  try {
+    const r = await fetchT(XAPI + 'tematiche', {cache:'no-store'}, 15000);
+    if (!r.ok) { atlT -= 90000; return; }
+    const j = await r.json(), prima = JSON.stringify(ATL);
+    ATL = j; ls.set('am-atl', j);
+    if (prima !== JSON.stringify(j) && ['lib', 'atl', 'atlpl'].indexOf(curRoute().v) >= 0) render(true);
+  } catch (e) { atlT -= 90000; }   // il Mac non risponde: si riprova tra mezzo minuto
+}
+async function atlBrani(pid) {
+  if (atlWait.has(pid)) return; atlWait.add(pid);
+  try {
+    const r = await fetchT(XAPI + 'tematiche/' + encodeURIComponent(pid), {cache:'no-store'}, 15000);
+    if (r.ok) ATLB.set(pid, {ids:(await r.json()).brani || [], t:Date.now()});
+    else if (r.status === 404) ATLB.set(pid, {ids:[], t:Date.now()});
+    let e = [...ATLB.entries()]; if (e.length > 40) e = e.slice(-40);
+    ls.set('am-atlb', Object.fromEntries(e));
+  } catch (e) {}
+  atlWait.delete(pid);
+  const r = curRoute(); if (r.v === 'atlpl' && r.k === pid) render(true);
+}
+async function atlChiama(path, corpo, metodo, ms) {
+  let r;
+  try { r = await fetchT(XAPI + path, {method:metodo || 'POST', headers:{'Content-Type':'application/json'}, body:corpo ? JSON.stringify(corpo) : undefined, cache:'no-store'}, ms || 15000); }
+  catch (e) { throw new Error(e && e.name === 'AbortError' ? 'Il Mac mini non ha risposto in tempo: riprova tra poco' : 'Il Mac mini non risponde'); }
+  let j = null; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error((j && j.errore) || 'Il Mac mini non è riuscito (' + r.status + ')');
+  return j;
+}
+function atlStato() {
+  const s = ATL && ATL.stato;
+  return s && s.attivo && s.totale && s.fatti < s.totale ? '<p class="dlbar">Il Mac mini sta ascoltando la musica per le playlist: ' + s.fatti.toLocaleString('it') + ' di ' + s.totale.toLocaleString('it') + ' brani. Intanto le playlist si riempiono da sole.</p>' : '';
+}
+const iaCard = () => '<button class="mixcard" data-a="ia-apri"><span class="mi">' + ic('ia') + '</span><span><b>Crea con l\'IA</b><span>Scrivi che musica vuoi, oppure «Su misura per me»</span></span></button>';
+function atlSezione() {   // in Libreria
+  atlCarica();
+  if (!ATL && !SRV) return '';
+  let h = '<h2 class="h2"><button data-a="go" data-v="atl" style="display:flex;align-items:center;gap:4px">Playlist di Atlante<span class="chev">' + ic('chevR') + '</span></button></h2>' + iaCard() + atlStato();
+  for (const g of (ATL && ATL.gruppi) || []) h += '<h3 class="atlg">' + esc(g.nome) + '</h3><div class="shelf">' + g.playlist.map(atlTile).join('') + '</div>';
+  return h;
+}
+Object.assign(pages, {
+  atl() {
+    atlCarica();
+    let h = topBar() + '<h1 class="lt">Playlist di Atlante</h1>' + iaCard() + atlStato();
+    const gr = (ATL && ATL.gruppi) || [];
+    if (!gr.length) return h + '<div class="empty"><div class="big">' + ic('plist') + '</div><h3>' + (ATL ? 'Ancora nessuna playlist' : 'Il Mac mini non risponde') + '</h3><p>Le playlist di Atlante le prepara il Mac mini dalla musica della libreria: compaiono da sole.</p></div>';
+    for (const g of gr) h += '<h2 class="h2">' + esc(g.nome) + '</h2><div class="grid">' + g.playlist.map(atlTile).join('') + '</div>';
+    return h;
+  },
+  atlpl(r) {
+    const p = atlPl(r.k) || {id:r.k, nome:'Playlist', n:0}, b = ATLB.get(r.k);
+    if (!b || Date.now() - b.t > 300000) atlBrani(r.k);   // la copia salvata intanto si vede (anche senza Mac)
+    const menu = '<button class="round" data-a="atl-menu" data-k="' + esc(r.k) + '" aria-label="Opzioni playlist">' + ic('more') + '</button>';
+    if (!b) return topBar(menu) + '<div class="empty"><div class="big">' + ic('plist') + '</div><h3>' + esc(p.nome) + '</h3><p>' + (SRV || srvWait ? 'Carico i brani dal Mac mini…' : 'Il Mac mini non risponde: riprova tra poco.') + '</p></div>';
+    const tr = atlTr(b.ids), l = regList(tr.map(t => t.id), p.nome);
+    const tot = tr.reduce((s, t) => s + (t.duration || 0), 0);
+    let h = topBar(menu) + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(p.nome) + '</div>' + (p.descrizione ? '<div class="sub">' + esc(p.descrizione) + '</div>' : '') +
+      '<div class="hm">Playlist di Atlante · ' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + (tot ? ' · ' + Math.round(tot / 60) + ' min' : '') + '</div></div></div>';
+    if (!tr.length) return h + '<div class="empty"><h3>Per ora è vuota</h3><p>Si riempie da sola quando nella libreria arrivano brani così.</p></div>';
+    return h + pbtns(l) + trackRows(tr, {label:p.nome});
+  },
+  iaprev() {
+    const x = IAPREV;
+    if (!x) return topBar() + '<div class="empty"><h3>Nessuna anteprima</h3></div>';
+    const tr = atlTr(x.brani), l = regList(tr.map(t => t.id), x.nome);
+    const tot = tr.reduce((s, t) => s + (t.duration || 0), 0);
+    let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(x.nome) + '</div><div class="hm">Anteprima · ' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + (tot ? ' · ' + Math.round(tot / 60) + ' min' : '') + '</div></div></div>';
+    if ((x.riassunto || []).length) h += '<div class="chips">' + x.riassunto.map(c => '<span class="chip">' + esc(c) + '</span>').join('') + '</div>';
+    h += (x.note || []).map(n => '<p class="dlbar">' + esc(n) + '</p>').join('');
+    if (!tr.length) return h + '<div class="empty"><h3>Nessun brano così nella libreria</h3><p>Prova a chiederla in un altro modo.</p><button class="cta" data-a="ia-apri">' + ic('ia') + 'Chiedi di nuovo</button></div>';
+    return h + '<div class="pbtns"><button data-a="ia-salva">' + ic('plus') + 'Salva</button><button data-a="ia-apri">' + ic('ia') + 'Un\'altra</button></div>' + pbtns(l) + trackRows(tr, {label:x.nome}) +
+      '<p class="foot">I brani li ha scelti il Mac mini dalla libreria. Salvata, la playlist resta tua su questo dispositivo.</p>';
+  }
+});
+function iaSheet() {
+  const rim = ATL && ATL.ia ? ATL.ia.rimaste : null;
+  openSheet('<div class="grp"><form class="sform" data-ia="1"><label for="iaq">Crea con l\'IA</label>' +
+    '<textarea id="iaq" rows="3" maxlength="400" placeholder="Per esempio: «rap italiano carico per la salita, 40 minuti» o «musica calma per cena con amici, niente inglese»"></textarea>' +
+    '<div class="nota">L\'IA del Mac mini capisce cosa chiedi, poi il Mac sceglie i brani dalla libreria.' + (rim != null ? ' Oggi ne puoi chiedere ancora ' + rim + '.' : '') + '</div>' +
+    '<div class="row2"><button type="button" data-a="ia-misura">Su misura per me</button><button class="pri" type="submit">Crea</button></div></form></div>' + cancel);
+  setTimeout(() => { const i = $('iaq'); if (i) i.focus(); }, 320);
+}
+async function iaChiedi(corpo) {
+  if (iaBusy) return; iaBusy = true;
+  openSheet('<div class="grp"><div class="smsg"><b>' + (corpo.su_misura ? 'Su misura per te…' : 'L\'IA sta pensando…') + '</b>Il Mac mini sceglie i brani dalla libreria: può volerci un minuto.</div></div>');
+  try {
+    const j = await atlChiama('tematiche/ia', corpo, 'POST', 260000);
+    if (ATL && ATL.ia && j.rimaste != null) { ATL.ia.rimaste = j.rimaste; ls.set('am-atl', ATL); }
+    IAPREV = j; closeSheet();
+    if (tab !== 'lib') setTab('lib');
+    if (curRoute().v === 'iaprev') render(); else go('iaprev');
+  } catch (e) { closeSheet(); toast(e.message, true); }
+  iaBusy = false;
+}
+function iaMisura() {   // dai propri ascolti su questo dispositivo (brani del Mac)
+  const a = [...T.values()].filter(t => t.remote && t.sid && (t.plays || t.fav)).sort((x, y) => (y.plays || 0) - (x.plays || 0)).slice(0, 2000)
+    .map(t => ({id:t.sid, n:t.plays || 0, fav:!!t.fav}));
+  if (!a.length) { closeSheet(); toast('Ascolta qualche brano (o mettine tra i preferiti): «Su misura» parte da quello che ascolti', true); return; }
+  iaChiedi({su_misura:true, ascolti:a});
+}
+// voci in più nel menu di una playlist del telefono (vedi «plmenu»)
+function atlVoci(k) {
+  const p = P.find(x => x.id === k); if (!p) return '';
+  return '<button data-a="atl-condividi" data-k="' + k + '"><span class="l">' + (p.atl ? 'Aggiorna in Atlante' : 'Condividi in Atlante') + '</span>' + ic('share') + '</button>' +
+    (p.atl ? '<button data-a="atl-nonpiu" data-k="' + k + '"><span class="l">Togli da Atlante</span>' + ic('close') + '</button>' : '');
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const a = b.dataset.a, k = b.dataset.k;
+  if (a === 'ia-apri') iaSheet();
+  else if (a === 'ia-misura') iaMisura();
+  else if (a === 'ia-salva') {
+    const x = IAPREV; if (!x) return;
+    const p = {id:uid(), name:x.nome, ids:atlTr(x.brani).map(t => t.id), created:Date.now(), ia:true};
+    P.push(p); await savePl(p); IAPREV = null;
+    tabs[tab].pop(); go('playlist', p.id); toast('Salvata nelle tue playlist: «Condividi in Atlante» dal menu ⋯ per farla vedere a tutti', true);
+  } else if (a === 'atl-menu') {
+    const p = atlPl(k) || {}, mia = p.condivisa && (p.mia || IO.ruolo === 'proprietario');
+    openSheet('<div class="grp"><button data-a="atl-salva" data-k="' + esc(k) + '"><span class="l">Salva nelle mie playlist</span>' + ic('plus') + '</button>' +
+      (mia ? '<button class="red" data-a="atl-togli" data-k="' + esc(k) + '"><span class="l">Togli da Atlante</span>' + ic('trash') + '</button>' : '') + '</div>' + cancel);
+  } else if (a === 'atl-salva') {
+    const p = atlPl(k), b2 = ATLB.get(k); closeSheet();
+    if (!b2 || !b2.ids.length) { toast('Brani non ancora caricati: riprova tra poco'); return; }
+    const n = {id:uid(), name:(p && p.nome) || 'Playlist', ids:atlTr(b2.ids).map(t => t.id), created:Date.now()};
+    P.push(n); await savePl(n); toast('Salvata in «Playlist»: «' + n.name + '»');
+  } else if (a === 'atl-togli') {
+    const p = atlPl(k); closeSheet(); if (!p || !p.condivisa) return;
+    try { await atlChiama('tematiche/condivise/' + encodeURIComponent(p.condivisa), null, 'DELETE'); toast('Tolta da Atlante'); back(); atlCarica(true); }
+    catch (err) { toast(err.message, true); }
+  } else if (a === 'atl-condividi') {
+    const p = P.find(x => x.id === k); closeSheet(); if (!p) return;
+    const ids = plTracks(p).filter(t => t.remote && t.sid).map(t => t.sid);
+    if (!ids.length) { toast('Si condividono solo i brani della libreria del Mac: in questa playlist non ce ne sono', true); return; }
+    try {
+      const j = await atlChiama('tematiche/condivise', {nome:p.name, brani:ids, locale:p.id});
+      p.atl = j.id; await savePl(p); atlCarica(true);
+      toast(ids.length < p.ids.length ? 'In Atlante: ' + j.n + ' brani (quelli del Mac). La vedono tutti in «Playlist di Atlante»' : 'Ora la vedono tutti in «Playlist di Atlante»', true);
+    } catch (err) { toast(err.message, true); }
+  } else if (a === 'atl-nonpiu') {
+    const p = P.find(x => x.id === k); closeSheet(); if (!p || !p.atl) return;
+    try { await atlChiama('tematiche/condivise/' + encodeURIComponent(p.atl), null, 'DELETE'); }
+    catch (err) { if (!/non trovata/.test(err.message)) { toast(err.message, true); return; } }
+    delete p.atl; await savePl(p); atlCarica(true); toast('Tolta da Atlante: resta tra le tue playlist');
+  }
+});
+document.addEventListener('submit', e => {
+  const f = e.target.closest('form[data-ia]'); if (!f) return; e.preventDefault();
+  const v = ($('iaq').value || '').trim(); if (v.length < 3) { $('iaq').focus(); return; }
+  iaChiedi({richiesta:v});
+});
+
+/* ---------- «Per ritmo» e «Mettimi di buonumore» ---------- */
+// I BPM (con regolarità, energia e modo) li misura il Mac mini e qui si tengono anche senza rete (am-ritmi): la scelta
+// dei brani si fa sul telefono, così funziona anche sui brani salvati quando il Mac non risponde. Per i brani solo sul
+// telefono vale il BPM misurato dal mix a tempo (BPMC). Un brano vale anche a mezzo tempo e a doppio tempo (85 vale per 170).
+I.sole = '<circle cx="12" cy="12" r="4.6"/><g stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.5 1.5M17.2 17.2l1.5 1.5M5.3 18.7l1.5-1.5M17.2 6.8l1.5-1.5"/></g>';
+I.batt = '<path d="M9 3.5h6l3.5 17h-13zM12 15.5l4.5-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+const RIT_PRONTI = [{nome:'Calmo', da:60, a:80, c:'#5e5ce6'}, {nome:'Camminata', da:90, a:110, c:'#30b0c7'}, {nome:'Ritmo costante', da:120, a:130, c:'#34c759'},
+  {nome:'Handbike in salita', da:140, a:160, c:'#ff9f0a'}, {nome:'Scatti', da:170, a:190, c:'#ff375f'}];
+const RIT_REGOLARE = 0.65;   // «solo ritmo regolare»: la stessa soglia di «Handbike: ritmo costante»
+let RITMI = ls.get('am-ritmi', null), ritT = 0, AMATI = ls.get('am-amati', []), amaT = 0;
+let RITMIEI = ls.get('am-ritmi-miei', []);   // ritmi preferiti salvati: [{nome, sc}]
+const RSC = Object.assign({valori:[], intervalli:[], tol:3, regolare:false, mezzo:true, cursore:128}, ls.get('am-ritmo', {}));
+let RIT_CORSO = ls.get('am-ritmo-corso', null);   // la scelta che sta suonando (per il segno ×2 / ÷2 nel lettore)
+async function ritCarica(force) {
+  if (!force && Date.now() - ritT < 300000) return;
+  ritT = Date.now();
+  try {
+    const r = await fetchT(XAPI + 'tematiche/ritmi', {cache:'no-store'}, 20000);
+    if (r.ok) { const j = await r.json(), prima = RITMI ? Object.keys(RITMI.ritmi || {}).length : -1; RITMI = j; ls.set('am-ritmi', j); if (Object.keys(j.ritmi || {}).length !== prima && ['home', 'lib', 'ritmo'].indexOf(curRoute().v) >= 0) render(true); }
+    else ritT -= 240000;
+  } catch (e) { ritT -= 240000; }
+  if (Date.now() - amaT > 1800000) {   // i più amati in Atlante (classifiche d'ascolto), se il Mac le ha
+    amaT = Date.now();
+    try { const r = await fetchT(XAPI + 'ascoltati', {cache:'no-store'}, 15000); if (r.ok) { const j = await r.json(); AMATI = [...new Set([].concat(j.mese || [], j.settimana || []).map(x => x && x.brano).filter(Boolean))]; ls.set('am-amati', AMATI); } } catch (e) {}
+  }
+}
+function bpmDi(t) {
+  const r = RITMI && RITMI.ritmi && t.sid ? RITMI.ritmi[t.sid] : null;
+  if (r && r[0]) return {bpm:r[0], reg:r[1], en:r[2], modo:r[3]};
+  const g = BPMC.get(t.id + '|i') || BPMC.get(t.id + '|f');   // misurato dal mix a tempo su questo telefono
+  return g && g.bpm ? {bpm:g.bpm, reg:null, en:null, modo:0} : null;
+}
+const ritObiettivi = sc => sc.valori.length || sc.intervalli.length ? sc : {valori:[sc.cursore], intervalli:[]};
+function ritFattore(bpm, sc) {   // 1 = quel ritmo, 2 = a mezzo tempo (vale il doppio), 0.5 = a doppio tempo, 0 = no
+  const o = ritObiettivi(sc);
+  for (const f of (sc.mezzo !== false ? [1, 2, 0.5] : [1])) {
+    const v = bpm * f;
+    if (o.valori.some(x => Math.abs(v - x) <= sc.tol) || o.intervalli.some(i => v >= i[0] && v <= i[1])) return f;
+  }
+  return 0;
+}
+function ritBrani(sc) {
+  const out = [];
+  for (const t of T.values()) {
+    const b = bpmDi(t); if (!b || !canPlay(t.id)) continue;
+    if (sc.regolare && !(b.reg >= RIT_REGOLARE)) continue;
+    const f = ritFattore(b.bpm, sc); if (f) out.push({t, f, v:b.bpm * f});
+  }
+  return out;
+}
+const ritSegno = f => f === 2 ? '×2' : f === 0.5 ? '÷2' : '';
+function ritNome(sc) {
+  const o = ritObiettivi(sc);
+  return o.valori.map(v => v + (sc.tol ? ' ±' + sc.tol : '')).concat(o.intervalli.map(i => i[0] + '–' + i[1])).join(', ') + ' BPM';
+}
+function ritSuona(sc, nome) {
+  const L = ritBrani(sc);
+  if (!L.length) { toast(RITMI ? 'Nessun brano con questo ritmo' + (sc.regolare ? ' regolare' : '') + (SRV ? '' : ' tra quelli sull\'iPhone') : 'I BPM dei brani arrivano dal Mac mini: per ora non ci sono', true); return; }
+  let ord = shuffleArr(L);
+  if (MIX.on) {   // mix a tempo: dopo ogni brano il più vicino come ritmo, così i passaggi restano dentro lo stesso ritmo
+    const resto = ord.slice(1); ord = [ord[0]];
+    while (resto.length) { const u = ord[ord.length - 1].v; let k = 0; resto.forEach((x, i) => { if (Math.abs(x.v - u) < Math.abs(resto[k].v - u)) k = i; }); ord.push(resto.splice(k, 1)[0]); }
+  }
+  RIT_CORSO = JSON.parse(JSON.stringify(sc)); ls.set('am-ritmo-corso', RIT_CORSO);
+  playList(ord.map(x => x.t.id), 0, false, 'Per ritmo · ' + (nome || ritNome(sc)));
+  toast((nome ? nome + ': ' : '') + L.length + (L.length === 1 ? ' brano' : ' brani') + ' a ' + ritNome(sc));
+}
+function ritNp() {   // nel lettore: il BPM del brano in corso, quando suona «Per ritmo»
+  let el = $('npBpm');
+  if (!el) { el = document.createElement('div'); el.id = 'npBpm'; el.className = 'npbpm'; el.hidden = true; const d = $('npDev'); if (!d) return; d.parentNode.insertBefore(el, d); }
+  const t = curId && T.get(curId), b = t && (S.from || '').indexOf('Per ritmo') === 0 ? bpmDi(t) : null;
+  let txt = '';
+  if (b) { const f = RIT_CORSO ? ritFattore(b.bpm, RIT_CORSO) : 1; txt = '♩ ' + Math.round(b.bpm) + ' BPM' + (f === 2 ? ' ×2 = ' + Math.round(b.bpm * 2) : f === 0.5 ? ' ÷2 = ' + Math.round(b.bpm / 2) : ''); }
+  if (el.textContent !== txt) el.textContent = txt;
+  el.hidden = !txt;
+  const n = $('ritNow'); if (n) n.innerHTML = txt && t ? '<p class="dlbar">In riproduzione: <b>' + esc(t.title) + '</b> · ' + esc(txt.slice(2)) + '</p>' : '';
+}
+['play', 'loadedmetadata'].forEach(n => auOn(n, ritNp));
+setInterval(ritNp, 2000);
+function ritTile(nome, sotto, sc, k, colore, a) {
+  return '<button class="tile" data-a="' + a + '" data-k="' + k + '"><span class="art ritart" style="background:' + colore + '"><span class="rn">' + esc(sotto) + '</span><span class="ru">BPM</span></span>' +
+    '<div class="n">' + esc(nome) + '</div><div class="a">' + (RITMI || BPMC.size ? (n => n === 1 ? '1 brano' : n + ' brani')(ritBrani(sc).length) : 'BPM in arrivo') + '</div></button>';
+}
+const ritPronto = p => ({valori:[], intervalli:[[p.da, p.a]], tol:0, regolare:RSC.regolare, mezzo:RSC.mezzo});
+function ritScaffale() {   // in Home e in Libreria
+  ritCarica();
+  if (!RITMI && !BPMC.size && !SRV) return '';
+  return '<h2 class="h2"><button data-a="go" data-v="ritmo" style="display:flex;align-items:center;gap:4px">Per ritmo<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' +
+    RIT_PRONTI.map((p, i) => ritTile(p.nome, p.da + '–' + p.a, ritPronto(p), i, p.c, 'rit-pronto')).join('') +
+    RITMIEI.map((p, i) => ritTile(p.nome, ritNome(p.sc).replace(' BPM', ''), p.sc, i, '#636366', 'rit-mio')).join('') +
+    '<button class="tile" data-a="go" data-v="ritmo"><span class="art ritart" style="background:var(--fill);color:var(--accent)"><span class="rn">' + ic('batt') + '</span><span class="ru">Scegli tu</span></span><div class="n">I tuoi BPM</div><div class="a">Esatti, più ritmi, tolleranza</div></button></div>';
+}
+function bnPool() {   // brani per «Mettimi di buonumore»: Buonumore ed Energia del Mac mini, più i più amati in Atlante
+  const p = new Map();
+  for (const [sid, w] of (RITMI && RITMI.buonumore) || []) { const id = 'r' + sid; if (T.has(id) && canPlay(id)) p.set(id, w); }
+  for (const sid of AMATI || []) {
+    const id = 'r' + sid, t = T.get(id); if (!t || !canPlay(id)) continue;
+    const b = bpmDi(t); if (b && ((b.en != null && b.en < 0.45) || b.modo === -1)) continue;   // gli amati, ma non quelli tristi
+    p.set(id, (p.get(id) || 0) + 1);
+  }
+  return [...p.entries()];
+}
+function bnVia() {
+  const pool = bnPool(), N = 30;
+  if (!pool.length) { toast(RITMI ? 'Per ora non ci sono brani di buonumore' + (SRV ? '' : ' sull\'iPhone') : 'I brani di buonumore li trova il Mac mini mentre ascolta la musica: riprova più tardi', true); return; }
+  // sempre diversa: a caso con i pesi, e i brani dell'ultima volta molto meno probabili
+  const ultimi = new Set(ls.get('am-bn-ultimi', []));
+  const scelti = pool.map(([id, w]) => ({id, k:Math.pow(Math.random(), 1 / (w * (ultimi.has(id) && pool.length > N ? 0.15 : 1)))}))
+    .sort((a, b) => b.k - a.k).slice(0, N).map(x => x.id);
+  ls.set('am-bn-ultimi', scelti);
+  playList(shuffleArr(scelti), 0, false, 'Buonumore');
+  toast('Buonumore: ' + scelti.length + ' brani');
+}
+function bnCard() {   // in evidenza nella Home
+  const n = bnPool().length;
+  return '<button class="mixcard bncard" data-a="bn-via"><span class="mi">' + ic('sole') + '</span><span><b>Mettimi di buonumore</b><span>' +
+    (n ? n + ' brani allegri e carichi, ogni volta una scelta nuova' : 'Brani allegri e carichi: li trova il Mac mini ascoltando la musica') + '</span></span></button>';
+}
+pages.ritmo = function () {
+  ritCarica();
+  const sw = (a, on, t) => '<button class="lrow" data-a="' + a + '" role="switch" aria-checked="' + !!on + '"><span class="t">' + t + '</span><span class="sw' + (on ? ' on' : '') + '"></span></button>';
+  let h = topBar() + '<h1 class="lt">Per ritmo</h1><p class="dlbar">Scegli un ritmo: parte subito una riproduzione casuale dei brani con quei BPM. Contano anche il mezzo e il doppio tempo (segno ×2 e ÷2: un brano a 85 vale per 170).</p>';
+  if (!RITMI && SRV) h += '<p class="dlbar">I BPM dei brani li sta misurando il Mac mini: le scelte si riempiono man mano.</p>';
+  h += '<div id="ritNow"></div><h2 class="h2">Pronti</h2><div class="ritg">' +
+    RIT_PRONTI.map((p, i) => '<button class="ritb" data-a="rit-pronto" data-k="' + i + '" style="--c:' + p.c + '"><b>' + p.da + '–' + p.a + '</b><span>' + p.nome + '</span></button>').join('') +
+    RITMIEI.map((p, i) => '<span class="ritb mio"><button data-a="rit-mio" data-k="' + i + '"><b>' + esc(ritNome(p.sc).replace(' BPM', '')) + '</b><span>' + esc(p.nome) + '</span></button><button class="x" data-a="rit-mio-x" data-k="' + i + '" aria-label="Togli ' + esc(p.nome) + '">' + ic('close') + '</button></span>').join('') + '</div>';
+  h += '<h2 class="h2">Scegli tu</h2><div class="ritbox">' +
+    '<label class="ritl" for="ritCur">BPM <b id="ritCurV">' + RSC.cursore + '</b></label><input type="range" class="ritr" id="ritCur" min="50" max="200" step="1" value="' + RSC.cursore + '">' +
+    '<div class="ritrow"><input type="number" id="ritNum" min="40" max="220" inputmode="numeric" value="' + RSC.cursore + '" aria-label="BPM esatti"><span>BPM</span><button data-a="rit-agg">Aggiungi</button></div>' +
+    '<div class="ritrow"><span>da</span><input type="number" id="ritDa" min="40" max="220" inputmode="numeric" placeholder="150" aria-label="Da BPM"><span>a</span><input type="number" id="ritA" min="40" max="220" inputmode="numeric" placeholder="160" aria-label="A BPM"><button data-a="rit-int">Aggiungi</button></div>' +
+    '<div class="chips" id="ritChips"></div>' +
+    '<label class="ritl" for="ritTol">Tolleranza ±<b id="ritTolV">' + RSC.tol + '</b> BPM</label><input type="range" class="ritr" id="ritTol" min="1" max="10" step="1" value="' + RSC.tol + '">' +
+    '<div class="lrows">' + sw('rit-reg', RSC.regolare, 'Solo ritmo regolare') + sw('rit-mezzo', RSC.mezzo, 'Anche mezzo e doppio tempo') + '</div>' +
+    '<p class="ritconta" id="ritConta"></p>' +
+    '<div class="pbtns"><button data-a="rit-suona">' + ic('shuf') + 'Riproduci</button><button data-a="rit-salva">' + ic('plus') + 'Salva ritmo</button></div></div>' +
+    '<div id="ritLista"><button class="foot" data-a="rit-lista" style="color:var(--accent)">Mostra i brani</button></div>';
+  setTimeout(() => { ritAggiorna(); ritNp(); }, 0);
+  return h;
+};
+let ritSalvaT = 0, ritListaT = 0;
+function ritAggiorna() {   // conteggio e scelte, senza ridisegnare la pagina (il cursore non deve saltare)
+  const c = $('ritConta'); if (!c) return;
+  const o = ritObiettivi(RSC), L = ritBrani(RSC), mz = L.filter(x => x.f !== 1).length;
+  $('ritChips').innerHTML = RSC.valori.map((v, i) => '<span class="chip on">' + v + ' ±' + RSC.tol + '<button data-a="rit-x" data-t="v" data-k="' + i + '" aria-label="Togli">' + ic('close') + '</button></span>').join('') +
+    RSC.intervalli.map((x, i) => '<span class="chip on">' + x[0] + '–' + x[1] + '<button data-a="rit-x" data-t="i" data-k="' + i + '" aria-label="Togli">' + ic('close') + '</button></span>').join('') +
+    (o === RSC ? '' : '<span class="chip">' + RSC.cursore + ' ±' + RSC.tol + ' (dal cursore)</span>');
+  c.textContent = (L.length === 1 ? '1 brano' : L.length + ' brani') + ' a ' + ritNome(RSC) + (mz ? ' (' + mz + ' a mezzo o doppio tempo)' : '') + (SRV ? '' : ' sull\'iPhone');
+  const l = $('ritLista'); if (l && l.dataset.aperta) { clearTimeout(ritListaT); ritListaT = setTimeout(ritLista, 350); }
+  clearTimeout(ritSalvaT); ritSalvaT = setTimeout(() => ls.set('am-ritmo', RSC), 400);
+}
+function ritLista() {
+  const l = $('ritLista'); if (!l) return;
+  const L = ritBrani(RSC).sort((a, b) => a.v - b.v), m = new Map(L.map(x => [x.t.id, x]));
+  l.dataset.aperta = '1';
+  l.innerHTML = '<h2 class="h2">I brani</h2>' + (L.length ? trackRows(L.map(x => x.t), {label:'Per ritmo · ' + ritNome(RSC), extra:t => { const x = m.get(t.id); return x ? ' · <b class="bpmb">' + Math.round(bpmDi(t).bpm) + ' ' + ritSegno(x.f) + '</b>' : ''; }}) : '<p class="foot">Nessun brano con questa scelta.</p>');
+  vlInit(scrollY); watchMore();
+}
+document.addEventListener('input', e => {
+  const id = e.target.id, v = parseInt(e.target.value, 10);
+  if (id === 'ritCur') { RSC.cursore = v; $('ritCurV').textContent = v; $('ritNum').value = v; ritAggiorna(); }
+  else if (id === 'ritNum' && v >= 40 && v <= 220) { RSC.cursore = v; $('ritCurV').textContent = v; $('ritCur').value = Math.max(50, Math.min(200, v)); ritAggiorna(); }
+  else if (id === 'ritTol') { RSC.tol = v; $('ritTolV').textContent = v; ritAggiorna(); }
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const a = b.dataset.a, k = +b.dataset.k;
+  if (a === 'bn-via') bnVia();
+  else if (a === 'rit-pronto') { const p = RIT_PRONTI[k]; if (p) ritSuona(ritPronto(p), p.nome); }
+  else if (a === 'rit-mio') { const p = RITMIEI[k]; if (p) ritSuona(p.sc, p.nome); }
+  else if (a === 'rit-mio-x') { const p = RITMIEI[k]; RITMIEI.splice(k, 1); ls.set('am-ritmi-miei', RITMIEI); render(true); if (p) toast('Tolto «' + p.nome + '»'); }
+  else if (a === 'rit-agg') {
+    const v = parseInt(($('ritNum') || {}).value, 10);
+    if (!(v >= 40 && v <= 220)) { toast('Scrivi un numero di BPM tra 40 e 220'); return; }
+    if (RSC.valori.indexOf(v) < 0 && RSC.valori.length < 12) RSC.valori.push(v);
+    ritAggiorna();
+  } else if (a === 'rit-int') {
+    let x = parseInt($('ritDa').value, 10), y = parseInt($('ritA').value, 10);
+    if (!(x >= 40 && x <= 220 && y >= 40 && y <= 220)) { toast('Scrivi da quanti a quanti BPM (tra 40 e 220)'); return; }
+    if (x > y) [x, y] = [y, x];
+    if (RSC.intervalli.length < 8) RSC.intervalli.push([x, y]);
+    $('ritDa').value = ''; $('ritA').value = ''; ritAggiorna();
+  } else if (a === 'rit-x') { (b.dataset.t === 'i' ? RSC.intervalli : RSC.valori).splice(k, 1); ritAggiorna(); }
+  else if (a === 'rit-reg' || a === 'rit-mezzo') {
+    const c = a === 'rit-reg' ? 'regolare' : 'mezzo'; RSC[c] = !RSC[c];
+    b.setAttribute('aria-checked', RSC[c]); b.querySelector('.sw').classList.toggle('on', RSC[c]); ritAggiorna();
+  } else if (a === 'rit-suona') ritSuona(RSC);
+  else if (a === 'rit-lista') ritLista();
+  else if (a === 'rit-salva') {
+    openSheet('<div class="grp"><form class="sform" data-rit="1"><label for="ritnm">Nome del ritmo</label><input id="ritnm" maxlength="30" placeholder="Per esempio: Salita" autocomplete="off">' +
+      '<div class="nota">' + esc(ritNome(RSC)) + (RSC.regolare ? ', solo ritmo regolare' : '') + '. Torna tra i tasti pronti su questo telefono.</div>' +
+      '<div class="row2"><button type="button" data-a="closesheet">Annulla</button><button class="pri" type="submit">Salva</button></div></form></div>');
+    setTimeout(() => { const i = $('ritnm'); if (i) i.focus(); }, 320);
+  }
+});
+document.addEventListener('submit', e => {
+  const f = e.target.closest('form[data-rit]'); if (!f) return; e.preventDefault();
+  const nome = ($('ritnm').value || '').trim().slice(0, 30); if (!nome) { $('ritnm').focus(); return; }
+  const o = ritObiettivi(RSC);
+  RITMIEI = RITMIEI.filter(p => p.nome !== nome).concat([{nome, sc:{valori:o.valori.slice(), intervalli:o.intervalli.map(x => x.slice()), tol:RSC.tol, regolare:RSC.regolare, mezzo:RSC.mezzo}}]).slice(-12);
+  ls.set('am-ritmi-miei', RITMIEI); closeSheet(); render(true); toast('Salvato «' + nome + '»: ora è tra i tasti pronti');
+});
+
 /* ---------- schede d'azione ---------- */
 const sh = $('sh');
 function openSheet(html) { $('sheet').innerHTML = html; sh.classList.add('open'); }
@@ -2300,7 +2693,7 @@ document.addEventListener('click', e => {
     case 'm-del': { const t = T.get(d.id); openSheet('<div class="grp"><div class="smsg"><b>Eliminare «' + esc(t.title) + '»?</b>Il brano verrà tolto dalla libreria e da tutte le playlist su questo dispositivo.</div><button class="red cancel" data-a="m-del2" data-id="' + d.id + '">Elimina brano</button></div>' + cancel); break; }
     case 'm-del2': closeSheet(); delTrack(d.id); break;
     case 'newpl': nameSheet('Nuova playlist', '', 'newpl'); break;
-    case 'plmenu': openSheet('<div class="grp"><button data-a="plren" data-k="' + d.k + '"><span class="l">Rinomina</span>' + ic('edit') + '</button><button data-a="go-pick" data-k="' + d.k + '"><span class="l">Aggiungi brani</span>' + ic('plus') + '</button><button class="red" data-a="pldel" data-k="' + d.k + '"><span class="l">Elimina playlist</span>' + ic('trash') + '</button></div>' + cancel); break;
+    case 'plmenu': openSheet('<div class="grp"><button data-a="plren" data-k="' + d.k + '"><span class="l">Rinomina</span>' + ic('edit') + '</button><button data-a="go-pick" data-k="' + d.k + '"><span class="l">Aggiungi brani</span>' + ic('plus') + '</button>' + atlVoci(d.k) + '<button class="red" data-a="pldel" data-k="' + d.k + '"><span class="l">Elimina playlist</span>' + ic('trash') + '</button></div>' + cancel); break;
     case 'go-pick': closeSheet(); go('pick', d.k); break;
     case 'plmiss': {
       const p = P.find(x => x.id === d.k); if (!p || !(p.miss || []).length) break;

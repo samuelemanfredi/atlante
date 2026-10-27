@@ -7,6 +7,7 @@ Avvia il server su una porta libera con una cartella di musica vuota, cartelle t
 (yt-dlp, say) in testa al PATH; l'IA è cercata su una porta dove non risponde nessuno (quindi «Ollama assente»
 anche su un Mac dove Ollama c'è). Il proxy verso un sito pubblico si prova solo se la rete c'è.
 """
+import collections
 import http.client
 import http.server
 import importlib.util
@@ -4140,6 +4141,793 @@ class TestQuote(unittest.TestCase):
                                 ("wav", ("flac", ".flac", "flac")), ("aiff", ("flac", ".flac", "flac")),
                                 ("ogg", ("mp3", ".mp3", "mp3")), ("", ("mp3", ".mp3", "mp3"))):
             self.assertEqual(self.m._uscita(formato), atteso, formato)
+
+
+# ----- playlist di Atlante (tematiche) e playlist con l'IA -----
+
+# audio finto come quello di un brano: un colpo forte su ogni battito e uno più debole a metà (le crome), su un fruscio.
+# Lo usano sia queste prove sia l'ffmpeg finto qui sotto.
+SINTESI = r'''
+import array, math, random, struct, sys
+
+def sintesi(bpm, ampiezza, rumore, secondi, da=0.0, hz=11025, seme=1):
+    n = max(0, int(secondi * hz))
+    x = array.array("h", bytes(2 * n))
+    r = random.Random(seme)
+    if bpm:
+        passo = 30.0 / bpm
+        k = int(math.ceil(da / passo))
+        while k * passo - da < secondi:
+            j = int((k * passo - da) * hz)
+            a = ampiezza if k % 2 == 0 else ampiezza * 0.5
+            for m in range(min(400, n - j)):
+                x[j + m] = max(-32767, min(32767, x[j + m] + int(a * 32767 * (1 - m / 400.0) * r.uniform(-1, 1))))
+            k += 1
+    if rumore:
+        for j in range(n):
+            x[j] = max(-32767, min(32767, x[j] + int(rumore * 32767 * r.uniform(-1, 1))))
+    return x
+
+def wav(x, hz=11025):
+    if sys.byteorder == "big":
+        x = array.array("h", x)
+        x.byteswap()
+    d = x.tobytes()
+    return (b"RIFF" + struct.pack("<I", 36 + len(d)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, hz, hz * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(d)) + d)
+'''
+exec(SINTESI)
+
+# ffmpeg finto per le misure dell'audio: al posto del brano decodificato (WAV mono su pipe:1) l'audio di SINTESI con
+# i valori scritti accanto al file (<brano>.finto.json: bpm, ampiezza, rumore, durata)
+FINTO_FFMPEG_AUDIO = SINTESI + r'''
+import json, os
+a = sys.argv[1:]
+if a[-1:] != ["pipe:1"] or "-i" not in a:
+    sys.stderr.write("solo audio su pipe:1 in queste prove\n")
+    sys.exit(1)
+ingresso = a[a.index("-i") + 1]
+da = float(a[a.index("-ss") + 1]) if "-ss" in a else 0.0
+t = float(a[a.index("-t") + 1]) if "-t" in a else 30.0
+with open(os.path.join(os.environ["FINTO_DIR"], "ffmpeg-audio.log"), "a") as f:
+    f.write(json.dumps({"i": os.path.basename(ingresso), "da": da}) + "\n")
+try:
+    with open(ingresso + ".finto.json") as f:
+        c = json.load(f)
+except (OSError, ValueError):
+    c = {}
+t = min(t, c.get("durata", 600) - da)
+if t <= 0:
+    sys.exit(0)
+sys.stdout.buffer.write(wav(sintesi(c.get("bpm", 0), c.get("ampiezza", 0.3), c.get("rumore", 0.01), t, da)))
+'''
+
+
+def mp3_finto_tematiche(percorso, titolo, artista, secondi, anno="", genere="", album=""):
+    """MP3 minimo con i tag ID3 e un'intestazione Xing che dice la durata (la libreria la legge da lì)."""
+    import struct
+
+    def frame(fid, testo):
+        d = b"\x01" + testo.encode("utf-16")
+        return fid.encode() + struct.pack(">I", len(d)) + b"\x00\x00" + d
+    corpo = b"".join(frame(f, v) for f, v in (("TIT2", titolo), ("TPE1", artista), ("TALB", album), ("TYER", anno),
+                                               ("TCON", genere)) if v)
+    n = len(corpo)
+    testa = b"ID3\x03\x00\x00" + bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo
+    xing = b"\xff\xfb\x90\x00" + bytes(32) + b"Xing" + struct.pack(">II", 1, int(secondi * 44100 / 1152))
+    with open(percorso, "wb") as f:
+        f.write(testa + xing + bytes(417 - len(xing)) + (b"\xff\xfb\x90\x00" + bytes(413)) * 3)
+
+
+def _mb_reg(rid, titolo, artista, aid, data, tag, score=100):
+    return {"id": rid, "score": score, "title": titolo, "first-release-date": data,
+            "artist-credit": [{"name": artista, "artist": {"id": aid, "name": artista}}],
+            "tags": [{"name": t, "count": 2} for t in tag], "releases": [{"id": "rel-" + rid, "title": "Album",
+                                                                          "release-group": {"id": "rg-" + rid}}]}
+
+
+class FintoMusicBrainz(http.server.BaseHTTPRequestHandler):
+    """MusicBrainz finto: ricerca delle registrazioni e schede degli artisti, con l'ora e lo User-Agent di ogni richiesta."""
+    richieste = []
+    REGISTRAZIONI = {
+        ("vasco rossi", "albachiara"): [
+            _mb_reg("rec-vasco", "Albachiara", "Vasco Rossi", "art-vasco", "1979-04-10", ["rock"]),
+            _mb_reg("rec-vasco-live", "Albachiara (live)", "Vasco Rossi", "art-vasco", "1990", [], 90),
+            _mb_reg("rec-altro", "Albachiara", "Cover Band", "art-cover", "1975", ["metal"], 95)],
+        ("vasco rossi", "vita spericolata"): [
+            _mb_reg("rec-vasco2", "Vita spericolata", "Vasco Rossi", "art-vasco", "1983", ["rock"])],
+        ("zara larsson", "ain't my fault"): [
+            _mb_reg("rec-zara", "Ain't My Fault", "Zara Larsson", "art-zara", "2016-10-14", ["dance-pop", "electropop"])],
+        ("mariah carey", "all i want for christmas is you"): [
+            _mb_reg("rec-mariah", "All I Want for Christmas Is You", "Mariah Carey", "art-mariah", "1994-10-29",
+                    ["christmas", "pop"])],
+        ("nuovo artista", "brano nuovo"): [
+            _mb_reg("rec-nuovo", "Brano nuovo", "Nuovo Artista", "art-nuovo", "2021", ["heavy metal"])],
+        ("senza genere", "brano spoglio"): [
+            _mb_reg("rec-spoglio", "Brano spoglio", "Senza Genere", "art-spoglio", "2001", [])]}
+    ARTISTI = {"art-vasco": {"country": "IT", "genres": [{"name": "rock", "count": 3}, {"name": "pop rock", "count": 1}],
+                             "tags": [{"name": "italian", "count": 2}]},
+               "art-zara": {"country": "SE", "genres": [{"name": "pop", "count": 4}]},
+               "art-mariah": {"country": "US", "genres": [{"name": "pop", "count": 4}, {"name": "r&b", "count": 3}]},
+               "art-nuovo": {"area": {"iso-3166-1-codes": ["DE"]}},
+               "art-spoglio": {"country": "FR"}}
+    GRUPPI = {"rg-rec-spoglio": {"genres": [{"name": "synth-pop", "count": 2}]}}
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        FintoMusicBrainz.richieste.append((time.time(), self.path, self.headers.get("User-Agent") or ""))
+        q = {k: v[0] for k, v in __import__("urllib.parse").parse.parse_qs(u.query).items()}
+        dati = None
+        if u.path == "/ws/2/recording":
+            m = re.match(r'^recording:"((?:[^"\\]|\\.)*)" AND artist:"((?:[^"\\]|\\.)*)"$', q.get("query", ""))
+            if m and q.get("fmt") == "json":
+                su = lambda s: re.sub(r"\\(.)", r"\1", s).lower()   # noqa: E731
+                dati = {"recordings": self.REGISTRAZIONI.get((su(m.group(2)), su(m.group(1))), [])}
+        elif u.path.startswith("/ws/2/artist/"):
+            dati = self.ARTISTI.get(u.path.rsplit("/", 1)[1])
+        elif u.path.startswith("/ws/2/release-group/"):
+            dati = self.GRUPPI.get(u.path.rsplit("/", 1)[1], {})
+        corpo = json.dumps(dati if dati is not None else {"error": "Not Found"}).encode("utf-8")
+        self.send_response(200 if dati is not None else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def log_message(self, *x):
+        pass
+
+
+class FintaOllama(http.server.BaseHTTPRequestHandler):
+    """Ollama finto che risponde (quello delle altre prove è una porta dove non ascolta nessuno): genere dei brani che
+    MusicBrainz non conosce e criteri delle playlist, scelti dalle parole della richiesta."""
+    richieste, insieme, massimo = [], 0, 0
+    blocco = threading.Lock()
+
+    def do_GET(self):
+        self._rispondi({"models": [{"name": "llama3.2:latest"}]} if self.path == "/api/tags" else {"error": "?"})
+
+    def do_POST(self):
+        d = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        p = d.get("prompt", "")
+        with FintaOllama.blocco:
+            FintaOllama.richieste.append(p)
+            FintaOllama.insieme += 1
+            FintaOllama.massimo = max(FintaOllama.massimo, FintaOllama.insieme)
+        try:
+            if p.startswith("Brano:"):
+                r = {"generi": ["pop", "genere inventato"], "italiano": True}
+            else:
+                richiesta = re.match(r"Richiesta: «(.*)»", p).group(1)
+                if "lento" in richiesta:
+                    time.sleep(1.5)
+                if "rotto" in richiesta:
+                    r = "Ecco a te una bella playlist!"
+                elif "assurdo" in richiesta:
+                    r = {"nome": "<b>x</b>" * 40, "generi": ["rap", "zzz", "Hip Hop"], "bpm": [0, 1000],
+                         "anni": [3000, 1200], "durata_minuti": 99999, "italiano": "sì", "energia": "altissima",
+                         "brani": ["Brano inventato - Nessuno"], "artisti": "Vasco Rossi"}
+                elif "salita" in richiesta:
+                    r = {"nome": "Salita pop", "generi": ["pop"], "bpm": [140, 180], "energia": "alta",
+                         "attivita": ["handbike: salita e scatti"], "durata_minuti": 40}
+                else:
+                    r = {"nome": "Prova", "generi": ["pop"]}
+            self._rispondi({"response": r if isinstance(r, str) else json.dumps(r), "done": True})
+        finally:
+            with FintaOllama.blocco:
+                FintaOllama.insieme -= 1
+
+    def _rispondi(self, o):
+        corpo = json.dumps(o).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def log_message(self, *x):
+        pass
+
+
+def carica_modulo(nome):
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location(nome, SERVER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class FintaLibreria:
+    """Quanto basta di Libreria per le playlist: brani del catalogo (con le chiavi interne _p e _f)."""
+
+    def __init__(self, brani):
+        self.brani = {b["id"]: b for b in brani}
+        self.blocco = threading.Lock()
+        self.ultima, self.letture = 1.0, 1
+
+
+def voce(i, titolo, artista, anno="", genere="", durata=200, added=0, album="", cover=None):
+    return {"id": i, "title": titolo, "artist": artista, "album": album, "year": anno, "genre": genere,
+            "duration": durata, "added": added, "cover": cover, "_p": "/x/" + i + ".mp3", "_f": "1:1"}
+
+
+def scheda(m, **k):
+    s = {"v": m.TEM_VERSIONE, "mb": "fatto", "audio": "fatto", "ia": "fatto", "f": "1:1", "generi": [], "etichette": [],
+         "italiano": None, "anno": None, "bpm": None, "energia": None, "regolarita": None}
+    s.update(k)
+    return s
+
+
+class TestRegoleAtlante(unittest.TestCase):
+    """Le regole delle playlist di Atlante su brani con dati finti, le modifiche di Samuele e i criteri dell'IA."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_tematiche")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-tematiche-")
+        m = self.m
+        anno = time.localtime().tm_year
+        m.LIB = FintaLibreria([
+            voce("a", "Ain't My Fault", "Zara Larsson", added=5, cover="z.jpg"),
+            voce("b", "Albachiara", "Vasco Rossi", anno="2004", added=4, cover="v.jpg"),
+            voce("c", "Last Christmas", "Wham!", anno="1984", added=3),   # senza scheda: solo catalogo
+            voce("d", "Brano di quest'anno", "Qualcuno", anno=str(anno), added=2, genere="Hip-Hop/Rap"),
+            voce("e", "Lento", "Calmo", added=1)])
+        self.t = m.Tematiche(os.path.join(self.base, "tematiche"))
+        self.t.schede = {
+            "a": scheda(m, generi=["pop", "dance"], italiano=False, anno=2016, bpm=150.2, energia=0.85, regolarita=0.9),
+            "b": scheda(m, generi=["rock"], italiano=True, anno=1979, bpm=120.0, energia=0.55, regolarita=0.7),
+            "e": scheda(m, mb="sconosciuto", generi_ia=["classica"], italiano_ia=False, bpm=70.0, energia=0.12,
+                        regolarita=0.3)}
+
+    def tearDown(self):
+        self.m.LIB = None
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def playlist(self):
+        el = self.t.elenco("p")
+        return {p["id"]: p for g in el["gruppi"] for p in g["playlist"]}, [g["id"] for g in el["gruppi"]]
+
+    def test_regole_predefinite(self):
+        gruppi, nomi, errori = self.m.regole_atlante()
+        self.assertEqual(errori, [])
+        self.assertEqual([g["id"] for g in gruppi], ["generi", "umore", "attivita", "epoche", "momenti"])
+        conta = {g["id"]: len(g["playlist"]) for g in gruppi}
+        self.assertEqual((conta["generi"], conta["umore"], conta["attivita"]), (30, 12, 12))
+        self.assertEqual(set(nomi), set(self.m.GENERI))   # i generi del file sono quelli del programma
+        pl = {p["id"]: p for g in gruppi for p in g["playlist"]}
+        self.assertEqual(pl["attivita-handbike-salita"]["nome"], "Handbike: salita e scatti")
+        self.assertEqual(pl["attivita-handbike-salita"]["regola"]["bpm"], [140, 180])
+        self.assertGreaterEqual(pl["attivita-handbike-salita"]["regola"]["energia"][0], 0.7)
+        self.assertEqual(pl["attivita-handbike-ritmo"]["nome"], "Handbike: ritmo costante")
+        self.assertIn("regolarita", pl["attivita-handbike-ritmo"]["regola"])
+        self.assertEqual(len([p for p in pl if p.startswith("epoca-")]), 8)
+        self.assertEqual(len([p for p in pl if p.startswith("momento-")]), 6)
+
+    def test_un_brano_in_piu_playlist_e_vuote_nascoste(self):
+        pl, gruppi = self.playlist()
+        dove = lambda i: {p for p in pl if i in self.t.playlist(p, "p")["brani"]}   # noqa: E731
+        self.assertTrue({"genere-pop", "genere-dance", "attivita-handbike-salita", "epoca-2010", "umore-energia"}
+                        <= dove("a"), dove("a"))
+        self.assertNotIn("genere-pop-italiano", dove("a"))
+        self.assertTrue({"genere-rock", "genere-rock-italiano", "epoca-70", "umore-nostalgia"} <= dove("b"), dove("b"))
+        self.assertNotIn("epoca-2000", dove("b"))   # 2004 è l'anno della raccolta: conta l'uscita originale
+        # senza scheda (MusicBrainz e audio non ancora fatti) valgono già titolo e anno dei tag
+        self.assertEqual(dove("c"), {"epoca-80", "momento-natale", "momento-inverno", "umore-nostalgia"})
+        self.assertTrue({"genere-rap", "epoca-anno", "epoca-2020"} <= dove("d"), dove("d"))
+        self.assertTrue({"genere-classica", "umore-calma", "attivita-sonno"} <= dove("e"), dove("e"))   # genere dall'IA
+        # le playlist vuote non compaiono, e neanche un gruppo tutto vuoto
+        for vuota in ("genere-metal", "genere-kpop", "epoca-60", "momento-estate"):
+            self.assertNotIn(vuota, pl)
+            self.assertIsNone(self.t.playlist(vuota, "p"))
+        self.assertEqual(pl["attivita-handbike-salita"]["n"], 1)   # anche con un brano solo
+        self.assertEqual(pl["genere-pop"]["copertine"], ["z.jpg"])
+        self.t.schede = {}
+        self.t.versione += 1
+        self.t._cache = None
+        pl, gruppi = self.playlist()
+        self.assertNotIn("attivita", gruppi)   # senza misure dell'audio nessuna attività
+
+    def test_regole_ritoccate(self):
+        with open(os.path.join(self.base, "tematiche", "regole.json"), "w", encoding="utf-8") as f:
+            json.dump({"gruppi": [
+                {"id": "attivita", "playlist": [
+                    {"id": "attivita-handbike-salita", "regola": {"bpm": [100, 125]}},
+                    {"id": "attivita-mia", "nome": "La mia salita", "regola": {"bpm": [149, 151]}},
+                    {"id": "attivita-rotta", "nome": "Rotta", "regola": {"bpm": [100], "colore": "blu"}}]},
+                {"id": "generi", "playlist": [{"id": "genere-pop", "nascosta": True}]}]}, f)
+        pl, _ = self.playlist()
+        self.assertEqual(self.t.playlist("attivita-handbike-salita", "p")["brani"], ["b"])
+        self.assertEqual(pl["attivita-handbike-salita"]["nome"], "Handbike: salita e scatti")   # il nome resta
+        self.assertEqual(self.t.playlist("attivita-mia", "p")["brani"], ["a"])
+        self.assertNotIn("genere-pop", pl)
+        self.assertNotIn("attivita-rotta", pl)   # una regola sbagliata si salta, le altre restano
+        errori = self.t.elenco("p")["stato"]["errori_regole"]
+        self.assertTrue(any("Rotta" in e and "colore" in e for e in errori), errori)
+        self.assertIn("genere-rock", pl)
+
+    def test_prova_su_un_campione(self):
+        # ATLANTE_TEMATICHE_PROVA=2: il lavoro in sottofondo fa solo due brani (sempre gli stessi), da controllare a mano
+        self.t.prova = 2
+        x = self.t._prossimo()
+        self.assertIn(x[0], ("a", "b"))
+        for i in ("a", "b"):
+            self.t.schede[i].update(t=self.m.LIB.brani[i]["title"], a=self.m.LIB.brani[i]["artist"])
+        self.assertIsNone(self.t._prossimo())   # c, d, e restano da fare, ma sono fuori dalla prova
+        self.assertEqual(self.t.stato()["totale"], 2)
+        righe = {r["titolo"]: r for r in self.t.campione()}
+        self.assertEqual(set(righe), {"Ain't My Fault", "Albachiara"})
+        z = righe["Ain't My Fault"]
+        self.assertEqual((z["artista"], z["bpm"], z["energia"], z["italiano"], z["fonte"]),
+                         ("Zara Larsson", 150.2, 0.85, False, "musicbrainz"))
+        self.assertIn("Handbike: salita e scatti", z["playlist"])
+
+    def test_niente_giri_a_vuoto(self):
+        # senza ffmpeg, con l'IA spenta o con un errore imprevisto il lavoro non riprova subito lo stesso brano
+        m, t = self.m, self.t
+        t.schede = {}
+        with unittest.mock.patch.object(t.mb, "brano", lambda *a: None), \
+                unittest.mock.patch.object(m, "_misura_in_processo", lambda p, d: {"senza_ffmpeg": True}), \
+                unittest.mock.patch.object(m, "_chiedi_ia", side_effect=m.ErroreExtra(503, "IA spenta")):
+            for _ in range(5):
+                t.un_brano(*t._prossimo())
+            self.assertIsNone(t._prossimo())
+        self.assertEqual({s["audio"] for s in t.schede.values()}, {"attesa"})
+        self.assertEqual({s.get("ia") for i, s in t.schede.items() if i != "c"}, {"attesa"})
+        t.schede = {}
+        with unittest.mock.patch.object(t.mb, "brano", side_effect=KeyError("imprevisto")):
+            for _ in range(5):
+                t.un_brano(*t._prossimo())
+            self.assertIsNone(t._prossimo())
+            with unittest.mock.patch.object(m.time, "time", return_value=time.time() + m.TEM_RIPROVA + 1):
+                self.assertIsNotNone(t._prossimo())   # dopo qualche ora si riprova
+
+    def test_ritmi_e_buonumore(self):
+        # per «Per ritmo» (anche senza rete, nell'app) e «Mettimi di buonumore»: i dati dell'audio di ogni brano misurato
+        self.t.schede["a"]["modo"] = 1
+        r = self.t.ritmi()
+        self.assertEqual(r["ritmi"]["a"], [150.2, 0.9, 0.85, 1])
+        self.assertEqual(set(r["ritmi"]), {"a", "b", "e"})   # c e d non hanno ancora l'audio misurato
+        self.assertEqual(dict((i, p) for i, p in r["buonumore"]), {"a": 2})   # Energia e Buonumore; modo maggiore pesa di più
+        self.t.schede["e"]["modo"] = -1
+        self.t.versione += 1
+        pl = {p["id"] for g in self.t.elenco("p")["gruppi"] for p in g["playlist"]}
+        with open(os.path.join(self.base, "tematiche", "regole.json"), "w", encoding="utf-8") as f:
+            json.dump({"gruppi": [{"id": "umore", "playlist": [{"id": "umore-minore", "nome": "In minore",
+                                                                 "regola": {"modo": "minore"}}]}]}, f)
+        self.assertEqual(self.t.playlist("umore-minore", "p")["brani"], ["e"])
+        self.assertTrue(pl)
+
+    def test_generi_dalle_etichette(self):
+        g = self.m._generi_da_testo
+        self.assertEqual(g("Hip-Hop/Rap"), {"rap"})
+        self.assertEqual(g("trap italiana"), {"trap", "rap"})
+        self.assertEqual(g("dance-pop"), {"dance", "pop"})
+        self.assertEqual(g("R&B"), {"rnb"})
+        self.assertEqual(g("K-Pop"), {"kpop", "pop"})
+        self.assertEqual(g("Deep House"), {"house", "elettronica"})
+        self.assertEqual(g("Colonne sonore"), {"classica"})
+        self.assertEqual(g("dancehall"), {"reggae"})
+        self.assertEqual(g("christmas"), set())
+
+    def test_criteri_ia_e_valori_assurdi(self):
+        m = self.m
+        gruppi, nomi, _ = m.regole_atlante()
+        c = m.criteri_da_ia(json.dumps({"nome": "<b>x</b>" * 40, "generi": ["rap", "zzz", "Hip Hop", "Reggaeton e latino"],
+                                        "bpm": [0, 1000], "anni": [3000, 1200], "durata_minuti": 99999,
+                                        "italiano": "sì", "energia": "altissima", "brani": ["Brano inventato"],
+                                        "attivita": ["handbike: salita e scatti", "volare"], "artisti": "Vasco Rossi"}),
+                            "x", gruppi, nomi)
+        self.assertEqual(c["generi"], ["rap", "latino"])
+        self.assertIsNone(c["bpm"])      # da 0 a 1000: nessun limite vero
+        self.assertIsNone(c["anni"])
+        self.assertEqual(c["durata_minuti"], 240)
+        self.assertIs(c["italiano"], True)
+        self.assertIsNone(c["energia"])
+        self.assertEqual(c["temi"], ["attivita-handbike-salita"])
+        self.assertEqual(c["artisti"], ["Vasco Rossi"])
+        self.assertLessEqual(len(c["nome"]), 60)
+        self.assertNotIn("brani", c)     # l'IA non sceglie brani
+        c = m.criteri_da_ia('Ecco: {"bpm": [180, 140], "anni": [1985, 2999], "durata_minuti": -5, "energia": "Bassa"} ok',
+                            "musica calma per cena", gruppi, nomi)
+        self.assertEqual((c["bpm"], c["anni"], c["durata_minuti"], c["energia"]),
+                         ([140, 180], [1985, time.localtime().tm_year], 60, [0.0, 0.45]))
+        self.assertEqual(c["nome"], "Musica calma per cena")
+        with self.assertRaises(m.ErroreExtra) as e:
+            m.criteri_da_ia("non so", "x", gruppi, nomi)
+        self.assertEqual(e.exception.codice, 502)
+
+    def test_scelta_dei_brani(self):
+        import random
+        m = self.m
+        anno = time.localtime().tm_year
+        dati = []
+        for i in range(60):
+            d = m._dati_brano("r%02d" % i, voce("r%02d" % i, "Rap %d" % i, "Rapper %d" % (i % 10), durata=180),
+                              scheda(m, generi=["rap"], italiano=i % 2 == 0, bpm=100.0 + i, energia=0.5 + i / 200), anno)
+            dati.append(d)
+        c = {"nome": "x", "generi": ["rap"], "escludi_generi": [], "temi": [], "bpm": [140, 180], "anni": None,
+             "artisti": [], "italiano": True, "energia": None, "durata_minuti": 20}
+        r = m.scegli_brani(c, dati, [], random.Random(1))
+        scelti = [d for d in dati if d["id"] in r["brani"]]
+        self.assertTrue(scelti)
+        self.assertTrue(all(d["italiano"] and 140 <= d["bpm"] <= 180 for d in scelti))
+        self.assertGreaterEqual(r["durata"], 9 * 60)   # 10 brani italiani tra 140 e 159 BPM: tutti
+        self.assertLessEqual(max(collections.Counter(d["artista"] for d in scelti).values()), 3)
+        c.update(bpm=[170, 175], durata_minuti=60)   # nessuno: si allarga con misura e lo si dice
+        r = m.scegli_brani(c, dati, [], random.Random(1))
+        self.assertEqual(sorted(r["brani"]), ["r56", "r58"])
+        self.assertIn("Pochi brani con questi BPM: ho allargato a 155–190", r["note"])
+        self.assertTrue(any("minuti" in n for n in r["note"]), r["note"])
+        c.update(bpm=[195, 200])   # più veloci di tutti: niente brani lenti al loro posto
+        self.assertEqual(m.scegli_brani(c, dati, [], random.Random(1))["brani"], [])
+        senza = [dict(d, bpm=None, energia=None) for d in dati]   # audio non ancora misurato: BPM ignorati
+        r = m.scegli_brani(c, senza, [], random.Random(1))
+        self.assertTrue(r["brani"])
+        self.assertTrue(any("non hanno ancora BPM" in n for n in r["note"]), r["note"])
+        c.update(generi=["metal"], bpm=None)
+        r = m.scegli_brani(c, dati, [], random.Random(1))
+        self.assertEqual(r["brani"], [])
+        self.assertIn("Nella libreria non ho trovato brani così", r["note"])
+        c.update(generi=[], artisti=["Rapper 3", "Nessuno Mai"], italiano=None)
+        r = m.scegli_brani(c, dati, [], random.Random(1))
+        self.assertTrue(r["brani"] and all(d["artista"] == "rapper 3" for d in dati if d["id"] in r["brani"]))
+        self.assertTrue(any("Nessuno Mai" in n for n in r["note"]), r["note"])
+
+    def test_su_misura(self):
+        import random
+        m = self.m
+        anno = time.localtime().tm_year
+        dati = [m._dati_brano("p%d" % i, voce("p%d" % i, "Pop %d" % i, "Pop %d" % (i % 8)),
+                              scheda(m, generi=["pop"], energia=0.7), anno) for i in range(30)]
+        dati += [m._dati_brano("j%d" % i, voce("j%d" % i, "Jazz %d" % i, "Jazz %d" % i),
+                               scheda(m, generi=["jazz"], energia=0.2), anno) for i in range(30)]
+        r = m.su_misura([{"id": "p1", "n": 30}, {"id": "p2", "n": 5, "fav": True}, {"id": "inventato", "n": 99}],
+                        dati, random.Random(2))
+        scelti = set(r["brani"])
+        self.assertTrue(scelti and all(i.startswith("p") for i in scelti), scelti)
+        self.assertTrue(scelti - {"p1", "p2"})   # anche brani che non ha ancora ascoltato
+        self.assertEqual(r["generi"], ["pop"])
+        with self.assertRaises(m.ErroreExtra) as e:
+            m.su_misura([], dati, random.Random(2))
+        self.assertEqual(e.exception.codice, 409)
+
+
+class TestMisuraAudio(unittest.TestCase):
+    """BPM, energia e regolarità misurati sull'audio (beatGrid dell'app portato in Python), su audio finto."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_audio")
+
+    def misura(self, bpm, ampiezza, rumore, secondi=30.0, da=0.0):
+        x = [v / 32768.0 for v in sintesi(bpm, ampiezza, rumore, secondi, da)]
+        return self.m.griglia_battiti(x, 11025)
+
+    def test_griglia_battiti(self):
+        for bpm in (150, 128, 95):
+            g = self.misura(bpm, 0.8, 0.05)
+            self.assertAlmostEqual(g["bpm"], bpm, delta=1.0, msg=g)
+            self.assertGreater(g["c"], 3, g)
+        self.assertIsNone(self.misura(120, 0.8, 0.05, secondi=7))   # meno di 8 s: niente
+        self.assertLess(self.misura(0, 0, 0.3)["c"], 1.5)          # solo fruscio: nessun battito sicuro
+
+    def test_tonalita(self):
+        import math
+
+        def accordi(seq, secondi=16, hz=11025):   # accordi tenuti, uno ogni pochi secondi, con un piccolo battito
+            x, n = [], int(secondi / len(seq) * hz)
+            for note in seq:
+                fr = [440 * 2 ** ((p - 69) / 12.0) for p in note]
+                x += [sum(0.2 * math.sin(2 * math.pi * f * i / hz) for f in fr) * (1 - (i % 5512) / 11024.0) for i in range(n)]
+            return x
+        m = self.m
+        do, fa, sol = [60, 64, 67, 72], [65, 69, 72, 77], [67, 71, 74, 79]
+        la_m, re_m, mi = [57, 60, 64, 69], [62, 65, 69, 74], [64, 68, 71, 76]
+        self.assertEqual(m.tonalita(m.griglia_battiti(accordi([do, fa, sol, do]), 11025)["spettro"], 11025), (1, "Do maggiore"))
+        self.assertEqual(m.tonalita(m.griglia_battiti(accordi([la_m, re_m, mi, la_m]), 11025)["spettro"], 11025),
+                         (-1, "La minore"))
+        self.assertEqual(m.tonalita([0.0] * 464, 11025), (0, ""))
+
+    def test_misura_brano(self):
+        m = self.m
+        chiesti = []
+
+        def pezzo(percorso, da, durata, finto):
+            chiesti.append(da)
+            if da > finto.get("durata", 600):
+                raise RuntimeError("ffmpeg: nessun audio")
+            return wav(sintesi(finto["bpm"], finto["ampiezza"], finto["rumore"], min(durata, finto.get("durata", 600) - da), da))
+        prove = {"forte": {"bpm": 150, "ampiezza": 0.9, "rumore": 0.3}, "piano": {"bpm": 80, "ampiezza": 0.15, "rumore": 0.005},
+                 "fruscio": {"bpm": 0, "ampiezza": 0, "rumore": 0.3}}
+        r = {}
+        for (nome, finto), durata in zip(prove.items(), (200, 25, 70)):   # tre pezzi, uno, due
+            with unittest.mock.patch.object(m, "_pezzo_wav", lambda p, da, d, f=finto: pezzo(p, da, d, f)):
+                r[nome] = m.misura_audio("/x/" + nome + ".mp3", durata)
+        self.assertEqual(chiesti, [35.0, 85.0, 135.0, 0.0, 9.5, 34.0])   # lontani da introduzione e finale
+        self.assertEqual([r[x]["pezzi"] for x in prove], [3, 1, 2])
+        self.assertAlmostEqual(r["forte"]["bpm"], 150, delta=1.0)
+        self.assertGreaterEqual(r["forte"]["energia"], 0.7)
+        self.assertGreaterEqual(r["forte"]["regolarita"], 0.8)
+        self.assertLessEqual(r["piano"]["energia"], 0.45)
+        self.assertLess(r["fruscio"]["regolarita"], 0.4)
+        self.assertEqual(m._finestre(70), [9.5, 34.0])
+        self.assertEqual(m._finestre(25), [0.0])
+        self.assertEqual(m._finestre(5), [])
+        with unittest.mock.patch.object(m, "_pezzo_wav", lambda p, da, d: None):
+            self.assertEqual(m.misura_audio("/x/y.mp3", 200), {"senza_ffmpeg": True})
+
+
+class TestMusicBrainz(unittest.TestCase):
+    """Generi, paese e anno da un MusicBrainz finto: al più una richiesta al secondo, con il contatto nello User-Agent."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_mb")
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoMusicBrainz)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_brani(self):
+        m = self.m
+        self.assertGreaterEqual(m.MB_INTERVALLO, 1.0)
+        mb = m.MusicBrainz()
+        FintoMusicBrainz.richieste = []
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_MUSICBRAINZ": "http://127.0.0.1:%d" % self.srv.server_address[1],
+                                                   "ATLANTE_CONTATTO": "prove@atlante.example"}):
+            with unittest.mock.patch.object(m, "MB_INTERVALLO", 0.3):
+                v = mb.brano("Albachiara (Official Video)", "Vasco Rossi feat. Nessuno", "")
+                v2 = mb.brano("Vita spericolata", "Vasco Rossi")
+                z = mb.brano("Ain't My Fault", "Zara Larsson")
+                self.assertIsNone(mb.brano("Brano misterioso", "Sconosciuto"))
+                s = mb.brano("Brano spoglio", "Senza Genere")
+        self.assertEqual((v["generi"], v["italiano"], v["anno"], v["paese"]), (["pop", "rock"], True, 1979, "IT"))
+        self.assertEqual(v2["anno"], 1983)
+        self.assertEqual((z["generi"], z["italiano"], z["anno"]), (["dance", "elettronica", "pop"], False, 2016))
+        self.assertIn("dance pop", z["etichette"])
+        self.assertEqual(s["generi"], ["elettronica", "pop"])   # dall'album, quando registrazione e artista non dicono niente
+        percorsi = [p for _, p, _ in FintoMusicBrainz.richieste]
+        self.assertEqual(len([p for p in percorsi if p.startswith("/ws/2/artist/art-vasco")]), 1)   # artista in memoria
+        self.assertTrue(all(ua == "AtlanteMusica/1.0 ( prove@atlante.example )" for _, _, ua in FintoMusicBrainz.richieste))
+        tempi = [t for t, _, _ in FintoMusicBrainz.richieste]
+        self.assertTrue(all(b - a >= 0.29 for a, b in zip(tempi, tempi[1:])), tempi)
+        # MusicBrainz che non risponde: un errore da riprovare, non «brano sconosciuto»
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_MUSICBRAINZ": "http://127.0.0.1:%d" % porta_libera()}):
+            with self.assertRaises(m.ErroreMB):
+                mb.brano("Albachiara", "Vasco Rossi")
+
+
+class TestTematicheServer(unittest.TestCase):
+    """Il lavoro in sottofondo sul server vero (MusicBrainz, IA e ffmpeg finti), la ripresa dopo un riavvio, «Crea con
+    l'IA» (una richiesta alla volta, limite al giorno), le condivise e gli invitati."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-tematiche-srv-")
+        cls.c = prepara_cartelle(cls.base)
+        p = os.path.join(cls.c["bin"], "ffmpeg")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("#!%s\n%s" % (sys.executable, FINTO_FFMPEG_AUDIO))
+        os.chmod(p, 0o755)
+        cls.mb = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoMusicBrainz)
+        cls.ia = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintaOllama)
+        for s in (cls.mb, cls.ia):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        cls.c["porta_ollama"] = cls.ia.server_address[1]
+        FintoMusicBrainz.richieste = []
+        for nome, (titolo, artista, secondi, anno, audio) in {
+                "Vasco Rossi - Albachiara.mp3": ("Albachiara", "Vasco Rossi", 70, "", (120, 0.4, 0.05)),
+                "Zara Larsson - Ain't My Fault.mp3": ("Ain't My Fault", "Zara Larsson", 200, "", (150, 0.9, 0.3)),
+                "Sconosciuto - Brano misterioso.mp3": ("Brano misterioso", "Sconosciuto", 70, "2019", (95, 0.3, 0.02)),
+                "Mariah Carey - All I Want for Christmas Is You.mp3":
+                    ("All I Want for Christmas Is You", "Mariah Carey", 70, "2010", (128, 0.6, 0.15))}.items():
+            cls.brano(nome, titolo, artista, secondi, anno, audio)
+        cls.ambiente = {"ATLANTE_MUSICBRAINZ": "http://127.0.0.1:%d" % cls.mb.server_address[1],
+                        "ATLANTE_CONTATTO": "prove@atlante.example"}
+        cls.s = cls.avvia()
+        cls.m = carica_modulo("musica_libreria_tematiche_srv")
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def brano(cls, nome, titolo, artista, secondi, anno, audio):
+        p = os.path.join(cls.c["musica"], nome)
+        mp3_finto_tematiche(p, titolo, artista, secondi, anno)
+        with open(p + ".finto.json", "w") as f:
+            json.dump({"bpm": audio[0], "ampiezza": audio[1], "rumore": audio[2], "durata": secondi}, f)
+
+    @classmethod
+    def avvia(cls):
+        with unittest.mock.patch.dict(os.environ, cls.ambiente):
+            return Server(cls.base, cls.c, ["--tematiche", "--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.mb.shutdown()
+        cls.ia.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def finito(self, quanti, tempo=120):
+        st = aspetta(lambda: (lambda j: j["stato"] if j["stato"]["totale"] == quanti and
+                              j["stato"]["fatti"] == quanti else None)(self.s.json("GET", "/api/extra/tematiche")), tempo, 0.5)
+        self.assertIsNotNone(st, "classificazione non finita: %r\n%s" % (self.s.json("GET", "/api/extra/tematiche")["stato"],
+                                                                       self.s.leggi_log()))
+        return st
+
+    def id_di(self, titolo):
+        return [b["id"] for b in self.s.json("GET", "/api/musica/catalogo")["brani"] if b["title"] == titolo][0]
+
+    def dove(self, titolo):
+        i, el = self.id_di(titolo), self.s.json("GET", "/api/extra/tematiche")
+        return {p["id"] for g in el["gruppi"] for p in g["playlist"]
+                if i in self.s.json("GET", "/api/extra/tematiche/" + p["id"])["brani"]}
+
+    def audio_misurati(self):
+        try:
+            with open(os.path.join(self.c["finto"], "ffmpeg-audio.log")) as f:
+                return [json.loads(r)["i"] for r in f]
+        except OSError:
+            return []
+
+    def test_1_classificazione(self):
+        self.finito(4)
+        self.assertTrue({"genere-rock", "genere-rock-italiano", "epoca-70"} <= self.dove("Albachiara"))
+        zara = self.dove("Ain't My Fault")
+        self.assertTrue({"genere-pop", "genere-dance", "epoca-2010", "attivita-handbike-salita", "umore-energia"} <= zara, zara)
+        self.assertNotIn("genere-pop-italiano", zara)
+        # MusicBrainz non lo conosce: il genere lo propone l'IA (i generi inventati si scartano)
+        self.assertTrue({"genere-pop", "genere-pop-italiano", "epoca-2010"} <= self.dove("Brano misterioso"))
+        mariah = self.dove("All I Want for Christmas Is You")
+        self.assertTrue({"momento-natale", "epoca-90", "genere-rnb"} <= mariah, mariah)   # 1994 (MusicBrainz), non 2010
+        el = self.s.json("GET", "/api/extra/tematiche")
+        self.assertNotIn("genere-metal", {p["id"] for g in el["gruppi"] for p in g["playlist"]})
+        self.s.json("GET", "/api/extra/tematiche/genere-metal", codice=404)
+        self.assertEqual(el["ia"]["rimaste"], 20)
+        # MusicBrainz: al più una richiesta al secondo, sempre con il contatto
+        r = FintoMusicBrainz.richieste
+        self.assertTrue(all(ua == "AtlanteMusica/1.0 ( prove@atlante.example )" for _, _, ua in r), r)
+        self.assertTrue(all(b - a >= 1.0 for (a, _, _), (b, _, _) in zip(r, r[1:])), [t for t, _, _ in r])
+        misurati = collections.Counter(self.audio_misurati())
+        self.assertEqual(misurati["Zara Larsson - Ain't My Fault.mp3"], 3)   # tre pezzi di un brano di 200 s
+        self.assertEqual(misurati["Vasco Rossi - Albachiara.mp3"], 2)
+        with open(os.path.join(self.c["cache"], "tematiche", "schede.json"), encoding="utf-8") as f:
+            schede = json.load(f)["brani"]
+        zs = schede[self.id_di("Ain't My Fault")]
+        self.assertAlmostEqual(zs["bpm"], 150, delta=1.5)
+        self.assertGreaterEqual(zs["energia"], 0.7)
+
+    def test_2_ripresa_dopo_riavvio(self):
+        self.finito(4)
+        type(self).s.ferma()
+        # come un riavvio a metà lavoro: Albachiara ha già MusicBrainz ma non l'audio; un brano nuovo arriva intanto
+        file_schede = os.path.join(self.c["cache"], "tematiche", "schede.json")
+        with open(file_schede, encoding="utf-8") as f:
+            d = json.load(f)
+        vasco = [k for k, s in d["brani"].items() if s.get("t") == "Albachiara"][0]
+        for k in ("audio", "bpm", "energia", "regolarita", "f"):
+            d["brani"][vasco].pop(k, None)
+        with open(file_schede, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        self.brano("Nuovo Artista - Brano nuovo.mp3", "Brano nuovo", "Nuovo Artista", 70, "", (170, 0.8, 0.2))
+        prima_mb, prima_audio = len(FintoMusicBrainz.richieste), len(self.audio_misurati())
+        type(self).s = self.avvia()
+        self.assertIn("genere-rock", {p["id"] for g in self.s.json("GET", "/api/extra/tematiche")["gruppi"]
+                                      for p in g["playlist"]})   # le schede fatte ci sono subito
+        self.finito(5)
+        nuove = [p for _, p, _ in FintoMusicBrainz.richieste[prima_mb:]]
+        self.assertTrue(nuove and all("Albachiara" not in unquote_(p) for p in nuove), nuove)
+        self.assertTrue(any("Brano nuovo" in unquote_(p) for p in nuove), nuove)
+        self.assertEqual(sorted(set(self.audio_misurati()[prima_audio:])),
+                         ["Nuovo Artista - Brano nuovo.mp3", "Vasco Rossi - Albachiara.mp3"])
+        self.assertIn("genere-metal", self.dove("Brano nuovo"))
+
+    def test_3_crea_con_ia(self):
+        self.finito(5)
+        r = self.s.json("POST", "/api/extra/tematiche/ia", {"richiesta": "pop carico per la salita, 40 minuti"})
+        self.assertEqual(r["nome"], "Salita pop")
+        self.assertEqual(r["criteri"]["bpm"], [140, 180])
+        # scelti dalla libreria con le regole: Zara (150 BPM) e, allargando un po', Mariah (128); i lenti no
+        self.assertEqual(set(r["brani"]), {self.id_di("Ain't My Fault"), self.id_di("All I Want for Christmas Is You")})
+        self.assertIn("Pochi brani con questi BPM: ho allargato a 125–195", r["note"])
+        self.assertIn("BPM 140–180", r["riassunto"])
+        self.assertEqual(r["rimaste"], 19)
+        r = self.s.json("POST", "/api/extra/tematiche/ia", {"richiesta": "qualcosa di assurdo"})
+        self.assertEqual((r["criteri"]["bpm"], r["criteri"]["anni"], r["criteri"]["durata_minuti"]), (None, None, 240))
+        self.assertEqual(r["criteri"]["generi"], ["rap"])
+        catalogo = {b["id"] for b in self.s.json("GET", "/api/musica/catalogo")["brani"]}
+        self.assertTrue(set(r["brani"]) <= catalogo)
+        j = self.s.json("POST", "/api/extra/tematiche/ia", {"richiesta": "una playlist rotto"}, codice=502)
+        self.assertIn("non ha capito", j["errore"])
+        self.s.json("POST", "/api/extra/tematiche/ia", {"richiesta": ""}, codice=400)
+        # «Su misura per me»: dai propri ascolti, senza IA (non conta nel limite)
+        r = self.s.json("POST", "/api/extra/tematiche/ia",
+                        {"su_misura": True, "ascolti": [{"id": self.id_di("Ain't My Fault"), "n": 12}]})
+        self.assertEqual(r["nome"], "Su misura per Samuele")
+        self.assertIn(self.id_di("Brano misterioso"), r["brani"])   # pop anche lui
+        self.assertEqual(r["rimaste"], 17)
+
+    def test_4_una_richiesta_alla_volta(self):
+        FintaOllama.massimo = 0
+        esiti = []
+
+        def chiedi():
+            esiti.append(richiesta(self.s.porta, "POST", "/api/extra/tematiche/ia", {"richiesta": "pop lento"}, tempo=60)[0])
+        fili = [threading.Thread(target=chiedi) for _ in range(3)]
+        for f in fili:
+            f.start()
+        for f in fili:
+            f.join()
+        self.assertEqual(esiti, [200, 200, 200])
+        self.assertEqual(FintaOllama.massimo, 1)
+
+    def invitato(self, nome, ip):
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso/invito/" + codice, b"",
+                             intest=dict(FUNNEL, **{"X-Forwarded-For": ip}, **TestAccesso.ORIGINE))
+        self.assertEqual(st, 200, b[:200])
+        v = [x for x in h.get_all("Set-Cookie") if x.startswith("am_accesso=")][0].split(";")[0].split("=", 1)[1]
+
+        def chiedi(metodo, p, corpo=None):
+            st, h, b = richiesta(self.s.porta, metodo, p, corpo, intest=dict(
+                FUNNEL, **{"X-Forwarded-For": ip, "Cookie": "am_accesso=" + v, "Origin": TestAccesso.ORIGINE["Origin"]}))
+            return st, json.loads(b.decode("utf-8")) if b else None
+        return a["id"], chiedi
+
+    def test_5_invitati_condivise_e_limite(self):
+        self.finito(5)
+        pid, anna = self.invitato("Anna", "203.0.113.150")
+        _, bruno = self.invitato("Bruno", "203.0.113.151")
+        st, el = anna("GET", "/api/extra/tematiche")
+        self.assertEqual(st, 200)
+        self.assertEqual(anna("GET", "/api/extra/tematiche/genere-pop")[0], 200)
+        self.assertEqual(anna("POST", "/api/extra/ia", {"prompt": "x"})[0], 403)   # il resto dell'IA resta di Samuele
+        self.assertEqual(anna("GET", "/api/extra/tematiche/campione")[0], 403)   # il controllo a campione è di Samuele
+        st, j = anna("GET", "/api/extra/tematiche/ritmi")   # «Per ritmo» e «Buonumore» anche per gli invitati
+        self.assertEqual(st, 200)
+        self.assertAlmostEqual(j["ritmi"][self.id_di("Ain't My Fault")][0], 150, delta=1.5)
+        self.assertIn(self.id_di("Ain't My Fault"), [i for i, _ in j["buonumore"]])
+        self.assertEqual(len(self.s.json("GET", "/api/extra/tematiche/campione")["brani"]), 5)
+        zara, vasco = self.id_di("Ain't My Fault"), self.id_di("Albachiara")
+        st, j = anna("POST", "/api/extra/tematiche/condivise", {"nome": "Le mie salite", "brani": [zara, "inventato", vasco],
+                                                                 "locale": "pl-1"})
+        self.assertEqual(st, 200, j)
+        self.assertEqual(j["n"], 2)
+        cid = j["id"]
+        # la vedono tutti tra le Playlist di Atlante; chi l'ha condivisa può toglierla, gli altri no (Samuele sì)
+        el = self.s.json("GET", "/api/extra/tematiche")
+        self.assertEqual(el["gruppi"][0]["id"], "condivise")
+        cond = el["gruppi"][0]["playlist"][0]
+        self.assertEqual((cond["nome"], cond["da_nome"], cond["mia"], cond["n"]), ("Le mie salite", "Anna", False, 2))
+        self.assertEqual(anna("GET", "/api/extra/tematiche")[1]["gruppi"][0]["playlist"][0]["mia"], True)
+        self.assertEqual(bruno("GET", "/api/extra/tematiche/c-" + cid)[1]["brani"], [zara, vasco])
+        st, j = anna("POST", "/api/extra/tematiche/condivise", {"nome": "Le mie salite 2", "brani": [zara], "locale": "pl-1"})
+        self.assertEqual(j["id"], cid)   # la stessa playlist condivisa di nuovo si aggiorna
+        self.assertEqual(bruno("DELETE", "/api/extra/tematiche/condivise/" + cid)[0], 403)
+        self.assertEqual(self.s.json("DELETE", "/api/extra/tematiche/condivise/" + cid), {"ok": True})
+        self.assertNotEqual(self.s.json("GET", "/api/extra/tematiche")["gruppi"][0]["id"], "condivise")
+        # al più 20 richieste all'IA al giorno per persona: quelle di Anna non toccano quelle di Bruno
+        for i in range(20):
+            st, j = anna("POST", "/api/extra/tematiche/ia", {"richiesta": "pop numero %d" % i})
+            self.assertEqual(st, 200, j)
+        self.assertEqual(j["rimaste"], 0)
+        st, j = anna("POST", "/api/extra/tematiche/ia", {"richiesta": "ancora pop"})
+        self.assertEqual(st, 429)
+        self.assertIn("domani", j["errore"])
+        st, j = bruno("POST", "/api/extra/tematiche/ia", {"richiesta": "pop per Bruno"})
+        self.assertEqual((st, j["rimaste"]), (200, 19))
+        with open(os.path.join(self.c["cache"], "tematiche", "limiti.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["conti"][pid], 20)   # il limite resta anche dopo un riavvio
+
+
+def unquote_(s):
+    from urllib.parse import unquote
+    return unquote(s).replace("+", " ")
 
 
 if __name__ == "__main__":

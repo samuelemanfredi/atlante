@@ -37,9 +37,14 @@ Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale fun
     tailscale funnel --bg --https=10000 8790             # oppure dall'app: Gestione → Rete
 
 Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
+
+Playlist di Atlante (playlist tematiche per tutti) e «Crea con l'IA»: con --tematiche (o ATLANTE_TEMATICHE=1) il Mac
+prepara in sottofondo, un brano alla volta, generi (MusicBrainz), BPM ed energia (dall'audio) di ogni brano. Le regole
+delle playlist sono in playlist-atlante.json; le proprie modifiche in <cache>/tematiche/regole.json.
 """
 import argparse
 import array
+import cmath
 import collections
 import getpass
 import hashlib
@@ -66,6 +71,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -945,6 +951,7 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 #   DELETE audiolibro/<id>             toglie l'audiolibro dall'elenco e cancella i suoi file
 #   GET    ia / POST ia                IA locale (Ollama)
 #   GET    dispositivo                 nome, sistema, memoria, dischi, cartelle che si possono svuotare (solo lettura)
+#   GET    tematiche[/<id>] …          playlist di Atlante e playlist con l'IA (vedi la loro sezione)
 #
 # Errori: {errore: "testo"} con codice >= 400.
 
@@ -6109,6 +6116,1454 @@ def _chiedi_ia(corpo):
     return {"testo": j.get("response", "") if isinstance(j, dict) else "", "modello": modello}
 
 
+# ----- playlist di Atlante: playlist tematiche fatte dal Mac mini e playlist con l'IA -----
+#
+# Ogni brano della libreria riceve una volta sola una «scheda» (<cache>/tematiche/schede.json): generi ed etichette da
+# MusicBrainz (al più una richiesta al secondo, con un User-Agent che dice chi siamo, come chiedono loro), il genere
+# proposto dall'IA locale quando MusicBrainz non lo conosce, BPM, energia e regolarità del ritmo misurati sull'audio
+# (lo stesso metodo del mix a tempo dell'app, beatGrid, in un processo a parte per non rallentare il server) e l'anno.
+# Il lavoro gira in sottofondo un brano alla volta (--tematiche o ATLANTE_TEMATICHE=1) e dopo un riavvio riprende da
+# dove era: le schede fatte restano. Le playlist sono regole su questi dati scritte in playlist-atlante.json (accanto al
+# server); le modifiche di Samuele vanno in <cache>/tematiche/regole.json, che un aggiornamento non tocca. Un brano sta
+# in tutte le playlist a cui appartiene; una playlist vuota non compare.
+#
+#   GET    tematiche                    gruppi e playlist (nome, numero di brani, copertine) e avanzamento del lavoro
+#   GET    tematiche/<id>               i brani di una playlist (id del catalogo)
+#   POST   tematiche/ia {richiesta} o {su_misura:true, ascolti:[{id,n,fav}]}   anteprima di una playlist con l'IA
+#   POST   tematiche/condivise {nome, brani, locale}   «Condividi in Atlante»: la vedono tutti tra le Playlist di Atlante
+#   DELETE tematiche/condivise/<id>     la toglie chi l'ha condivisa (o Samuele)
+#
+# Con l'IA il Mac mini traduce la richiesta in criteri (generi, umore, BPM, anni, artisti, durata) e sceglie lui i brani
+# dalla libreria: l'IA non inventa brani. Una richiesta all'IA alla volta (l'IA è una sola), al più IA_AL_GIORNO al
+# giorno per persona. La playlist resta di chi la crea (salvata sul telefono come le altre).
+
+TEM_VERSIONE = 1          # versione delle schede: quelle più vecchie si rifanno
+TEM_FINESTRA = 30.0       # secondi di audio per ogni misura (come il mix a tempo dell'app)
+TEM_RIPOSO = 120          # secondi di pausa quando non c'è niente da fare
+TEM_RIPROVA = 6 * 3600    # brano non riuscito per un motivo passeggero (rete, IA spenta, ffmpeg mancante): si riprova dopo
+TEM_PAUSA_MB = 600        # MusicBrainz non risponde: per dieci minuti si misura solo l'audio
+TEM_RICALCOLO = 30        # mentre arrivano schede nuove le playlist si ricalcolano al più ogni 30 s
+MB_BASE = "https://musicbrainz.org"
+MB_INTERVALLO = 1.1       # secondi tra due richieste: MusicBrainz ne chiede al più una al secondo
+MB_TEMPO = 20
+MB_CONTATTO = "https://github.com/samuelemanfredi/atlante"   # ATLANTE_CONTATTO per un indirizzo email
+IA_ATTESA = 90            # secondi che una richiesta aspetta il suo turno con l'IA
+IA_AL_GIORNO = 20
+CONDIVISE_MAX, CONDIVISE_PERSONA, CONDIVISA_BRANI = 300, 30, 1000
+REGOLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playlist-atlante.json")
+# i generi delle schede: gli stessi id di "generi" in playlist-atlante.json
+GENERI = ("pop", "rap", "trap", "rock", "alternative", "indie", "punk", "metal", "dance", "house", "techno", "edm",
+          "elettronica", "rnb", "soul", "funk", "disco", "latino", "reggae", "jazz", "blues", "country", "cantautori",
+          "classica", "lofi", "kpop", "afrobeat")
+# etichette di MusicBrainz (e generi scritti nei file) → generi di Atlante; un'etichetta può darne più di uno
+_TAG_GENERI = [(re.compile(r), g) for r, g in (
+    (r"\bk ?pop\b", ("kpop", "pop")),
+    (r"\blo ?fi\b|\bchillhop\b", ("lofi",)),
+    (r"\btrap\b", ("trap", "rap")),
+    (r"\bhip ?hop\b|\brap\b|\bdrill\b|\bgrime\b|\bboom bap\b", ("rap",)),
+    (r"\breggaeton\b|\blatin\w*\b|\bbachata\b|\bsalsa\b|\bcumbia\b|\bdembow\b|\bmerengue\b|\burbano\b|\bflamenco\b",
+     ("latino",)),
+    (r"\breggae\b|\bdancehall\b|\bdub\b|\bska\b|\brocksteady\b", ("reggae",)),
+    (r"\bafro ?beats?\b|\bafropop\b|\bamapiano\b|\bafro house\b|\bafroswing\b|\bhighlife\b", ("afrobeat",)),
+    (r"\bdisco\b|\bhi nrg\b", ("disco",)),
+    (r"\bfunk\w*\b|\bboogie\b", ("funk",)),
+    (r"\bsoul\b|\bmotown\b|\bgospel\b", ("soul",)),
+    (r"\brnb\b|\brhythm and blues\b|\bnew jack swing\b", ("rnb",)),
+    (r"\bhouse\b", ("house", "elettronica")),
+    (r"\btechno\b", ("techno", "elettronica")),
+    (r"\bedm\b|\bbig room\b|\bdubstep\b|\bdrum and bass\b|\bdnb\b|\btrance\b|\bhardstyle\b|\bfuture bass\b"
+     r"|\belectronic dance\b|\bbrostep\b", ("edm", "elettronica")),
+    (r"\bdance\b|\beurodance\b|\bclub\b", ("dance",)),
+    (r"\belectronic\w*\b|\belettronica\b|\bsynth ?wave\b|\bambient\b|\bidm\b|\bdowntempo\b|\btrip hop\b|\bchillwave\b"
+     r"|\belectro\w*\b|\bsynth ?pop\b", ("elettronica",)),
+    (r"\bmetal\w*\b|\bdeathcore\b", ("metal",)),
+    (r"\bpunk\b", ("punk",)),
+    (r"\balternative\b|\balt rock\b|\bgrunge\b|\bemo\b", ("alternative",)),
+    (r"\bindie\b|\bbedroom pop\b", ("indie",)),
+    (r"\brock\b|\brock and roll\b|\brock n roll\b|\brockabilly\b", ("rock",)),
+    (r"\bblues\b", ("blues",)),
+    (r"\bcountry\b|\bamericana\b|\bbluegrass\b", ("country",)),
+    (r"\bjazz\b|\bbebop\b|\bswing\b|\bbossa nova\b|\bbig band\b", ("jazz",)),
+    (r"\bcantautor\w*\b|\bsinger songwriter\b|\bcanzone d autore\b", ("cantautori",)),
+    (r"\bclassical\b|\bclassica\b|\borchestral\b|\bopera\b|\bbaroque\b|\bsymphon\w*\b|\bsoundtrack\b|\bfilm score\b"
+     r"|\bvideo game music\b|\bcolonn[ae] sonor[ae]\b|\bneoclassical\b|\bchamber music\b", ("classica",)),
+    (r"\bpop\b|\bteen pop\b|\beuropop\b|\belectropop\b", ("pop",)))]
+_TAG_ITALIANO = re.compile(r"\bital(?:ian|iano|iana|iani|iane|ia|o|ien)\b|\bcantautor")
+_MB_SOLO_ITALIANI = ("cantautori",)   # i cantautori di MusicBrainz sono quasi sempre italiani: lo dice anche il paese
+
+
+def _norm(s):
+    """Testo per i confronti: minuscolo, senza accenti, solo lettere e cifre separate da uno spazio."""
+    s = unicodedata.normalize("NFD", str(s or "").lower().replace("r&b", "rnb").replace("&", " and "))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[\W_]+", " ", s).split())
+
+
+def _generi_da_testo(s):
+    """Generi di Atlante per un'etichetta o un genere scritto nel file («Pop Rock» → pop, rock)."""
+    t = _norm(s)
+    if not t:
+        return set()
+    if t in GENERI:
+        return {t}
+    o = set()
+    for r, g in _TAG_GENERI:
+        if r.search(t):
+            o.update(g)
+    return o
+
+
+def _numero(x):
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)) and math.isfinite(x):
+        return float(x)
+    if isinstance(x, str):
+        try:
+            v = float(x.strip().replace(",", "."))
+        except ValueError:
+            return None
+        return v if math.isfinite(v) else None
+    return None
+
+
+# ----- misura dell'audio: BPM, energia, regolarità (porta in Python di beatGrid dell'app) -----
+
+FFTN = 1024
+_FFT_META = FFTN // 2
+_FFT_TW = {}
+_n = 2
+while _n <= _FFT_META:
+    _FFT_TW[_n] = [cmath.exp(-2j * math.pi * k / _n) for k in range(_n // 2)]
+    _n *= 2
+_FFT_POST = [cmath.exp(-2j * math.pi * k / FFTN) for k in range(_FFT_META)]
+_HANN = [0.5 - 0.5 * math.cos(2 * math.pi * i / (FFTN - 1)) for i in range(FFTN)]
+
+
+def _fft(x):
+    """FFT complessa (radice 2) con le liste: in Python puro le comprensioni sono molto più veloci dei cicli a indice."""
+    n = len(x)
+    if n == 2:
+        a, b = x
+        return [a + b, a - b]
+    e, o = _fft(x[0::2]), _fft(x[1::2])
+    t = [w * v for w, v in zip(_FFT_TW[n], o)]
+    return [a + b for a, b in zip(e, t)] + [a - b for a, b in zip(e, t)]
+
+
+def _moduli(fin, k):
+    """Modulo dei primi k canali della FFT reale di 1024 campioni, da una FFT complessa di 512 (metà del lavoro)."""
+    z = _fft([complex(a, b) for a, b in zip(fin[0::2], fin[1::2])])
+    z.append(z[0])
+    zc = [z[_FFT_META - i].conjugate() for i in range(k)]
+    return [abs((a + b) * 0.5 - 0.5j * w * (a - b)) for a, b, w in zip(z, zc, _FFT_POST)]
+
+
+def griglia_battiti(x, sr):
+    """Come beatGrid dell'app: flusso spettrale (FFT 1024, passo 128), autocorrelazione con le armoniche e preferenza
+    per i tempi tra 90 e 160, poi la fase del primo battito. In più: flusso medio per canale e volume (dB),
+    che servono all'energia. None con meno di 8 s di audio."""
+    passo = 128
+    fps = sr / passo
+    nf = (len(x) - FFTN) // passo
+    if nf < fps * 8:
+        return None
+    k = min(FFTN // 2, int(round(5000 / (sr / FFTN))))
+    prec, on, log1p, pot = [0.0] * k, [0.0] * nf, math.log1p, [0.0] * k
+    for f in range(nf):
+        o = f * passo
+        mag = _moduli([a * w for a, w in zip(x[o:o + FFTN], _HANN)], k)
+        pot = [a + v * v for a, v in zip(pot, mag)]   # spettro di potenza di tutto il pezzo: serve alla tonalità
+        l = [log1p(100 * m) for m in mag]
+        s = 0.0
+        for a, b in zip(l[1:], prec[1:]):
+            if a > b:
+                s += a - b
+        prec = l
+        on[f] = s if f else 0.0
+    # via la tendenza lenta (media mobile di ~1 s), restano i colpi
+    w = int(round(fps))
+    env, acc = [0.0] * nf, 0.0
+    for f in range(nf):
+        acc += on[f]
+        if f >= w:
+            acc -= on[f - w]
+        env[f] = max(0.0, on[f] - acc / min(f + 1, w))
+    max_lag = int(math.ceil(4 * 60 * fps / 70)) + 2
+    ac = [sum(a * b for a, b in zip(env[lag:], env)) / (nf - lag) for lag in range(max_lag + 1)]
+    if not ac[0] > 0:
+        return None
+
+    def aci(v):
+        a = int(math.floor(v))
+        b = v - a
+        return ac[a] * (1 - b) + ac[a + 1] * b if a + 1 <= max_lag else 0.0
+    best, bs, tot = 0.0, -1.0, 0.0
+    for i in range(1201):
+        bpm = 70 + i * 0.1
+        lag = 60 * fps / bpm
+        # armoniche del battito più il mezzo battito (le crome): così 172 non diventa 115 (i 2/3) né 86 (la metà)
+        sc = aci(lag / 2) + sum(aci(j * lag) / math.sqrt(j) for j in range(1, 5))
+        sc *= math.exp(-0.5 * math.log2(bpm / 122) ** 2)
+        tot += sc
+        if sc > bs:
+            bs, best = sc, bpm
+    lag = 60 * fps / best
+
+    def oni(v):
+        a = int(math.floor(v))
+        b = v - a
+        return env[a] * (1 - b) + env[a + 1] * b if a + 1 < nf else 0.0
+    fase, ps, p = 0.0, -1.0, 0.0
+    while p < lag:
+        sc, t = 0.0, p
+        while t < nf - 1:
+            sc += oni(t)
+            t += lag
+        if sc > ps:
+            ps, fase = sc, p
+        p += 0.25
+    rms = math.sqrt(sum(v * v for v in x) / len(x))
+    return {"bpm": round(best, 1), "b0": (fase * passo + FFTN / 2) / sr, "c": round(bs / (tot / 1201), 2),
+            "flusso": sum(on) / nf / k, "db": 20 * math.log10(max(rms, 1e-9)), "spettro": pot}
+
+
+# profili di Krumhansl e Kessler: quanto pesa ogni grado della scala in un brano in modo maggiore e minore
+_PROFILO_MAGGIORE = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+_PROFILO_MINORE = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+_NOTE = ("Do", "Do#", "Re", "Mi♭", "Mi", "Fa", "Fa#", "Sol", "La♭", "La", "Si♭", "Si")
+
+
+def _correlazione(a, b):
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    n = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    d = math.sqrt(sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b))
+    return n / d if d else 0.0
+
+
+def tonalita(spettro, sr):
+    """(modo, nome) dallo spettro di potenza: le note (da 180 Hz a 2,5 kHz: sotto i canali della FFT sono più larghi
+    di un semitono) confrontate con i profili maggiore e minore in tutte le dodici tonalità. modo 1 maggiore, -1 minore,
+    0 incerto (per esempio quando la relativa maggiore e la minore si somigliano troppo)."""
+    croma = [0.0] * 12
+    for i, v in enumerate(spettro):
+        f = i * sr / FFTN
+        if 180 <= f <= 2500 and v > 0:
+            croma[int(round(12 * math.log2(f / 440.0) + 69)) % 12] += v
+    if sum(croma) <= 0:
+        return 0, ""
+    ruota = lambda p, k: p[-k:] + p[:-k] if k else p   # noqa: E731
+    mag = max((_correlazione(croma, ruota(_PROFILO_MAGGIORE, k)), k) for k in range(12))
+    mi = max((_correlazione(croma, ruota(_PROFILO_MINORE, k)), k) for k in range(12))
+    if max(mag[0], mi[0]) < 0.5 or abs(mag[0] - mi[0]) < 0.05:
+        return 0, ""
+    return (1, _NOTE[mag[1]] + " maggiore") if mag[0] > mi[0] else (-1, _NOTE[mi[1]] + " minore")
+
+
+def _campioni_wav(b):
+    """Campioni (da -1 a 1) di un WAV mono a 16 bit come quello di _pezzo_wav (anche con le lunghezze di una pipe)."""
+    p = 12
+    while p + 8 <= len(b):
+        cid, sz = b[p:p + 4], struct.unpack("<I", b[p + 4:p + 8])[0]
+        if cid == b"data":
+            d = b[p + 8:] if sz in (0, 0xFFFFFFFF) else b[p + 8:p + 8 + sz]
+            a = array.array("h")
+            a.frombytes(d[:len(d) // 2 * 2])
+            if sys.byteorder == "big":
+                a.byteswap()
+            return [v / 32768.0 for v in a]
+        p += 8 + sz + (sz & 1)
+    return []
+
+
+def _finestre(durata):
+    """Da dove cominciano i pezzi di 30 s da misurare: tre in un brano normale, lontani da introduzione e finale."""
+    d = durata if durata and durata > 0 else 180.0   # durata sconosciuta: un brano qualsiasi
+    if d < 10:
+        return []
+    centri = (0.25, 0.5, 0.75) if d >= 100 else (0.35, 0.7) if d >= 60 else (0.5,)
+    return sorted({round(min(max(0.0, d * c - TEM_FINESTRA / 2), max(0.0, d - TEM_FINESTRA)), 3) for c in centri})
+
+
+def misura_audio(percorso, durata):
+    """BPM, energia (0–1), regolarità del ritmo (0–1) e volume del brano, dai pezzi di _finestre."""
+    misure = []
+    for da in _finestre(durata):
+        try:
+            wav = _pezzo_wav(percorso, da, TEM_FINESTRA)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            print("Playlist di Atlante: pezzo da %.0f s di %s non letto: %s" % (da, percorso, e), flush=True)
+            continue
+        if wav is None:
+            return {"senza_ffmpeg": True}
+        g = griglia_battiti(_campioni_wav(wav), PEZZO_HZ)
+        if g:
+            misure.append(g)
+    o = {"bpm": None, "energia": None, "regolarita": None, "db": None, "modo": 0, "tonalita": "", "pezzi": len(misure)}
+    if not misure:
+        return o
+    o["modo"], o["tonalita"] = tonalita([sum(v) for v in zip(*(g["spettro"] for g in misure))], PEZZO_HZ)
+    med = lambda v: sorted(v)[len(v) // 2] if len(v) % 2 else sum(sorted(v)[len(v) // 2 - 1:len(v) // 2 + 1]) / 2   # noqa: E731
+    # un pezzo misurato al doppio o alla metà degli altri è lo stesso tempo (raddoppiato o dimezzato)
+    rif = max(misure, key=lambda g: g["c"])["bpm"]
+    battiti, piegati = [], False
+    for g in misure:
+        v = g["bpm"]
+        for f in (2.0, 0.5):
+            if abs(v * f / rif - 1) < 0.06:
+                v, piegati = v * f, True
+        battiti.append(v)
+    bpm = med(battiti)
+    # regolarità: un battito netto (c: quanto il tempo migliore spicca sugli altri) e lo stesso in tutti i pezzi
+    forza = min(1.0, max(0.0, (med([g["c"] for g in misure]) - 1.2) / 1.3))
+    if len(battiti) > 1:
+        scarto = (max(battiti) - min(battiti)) / bpm
+        accordo = min(1.0, max(0.0, 1 - (scarto - 0.015) / 0.06)) * (0.8 if piegati else 1.0)
+        regolarita = forza * (0.5 + 0.5 * accordo)
+    else:
+        regolarita = 0.75 * forza   # un pezzo solo: non si sa se il tempo resta quello
+    db = med([g["db"] for g in misure])
+    # energia: quanto cambia lo spettro da un istante all'altro (colpi, chitarre, voce piena) e quanto è forte
+    flusso = min(1.0, max(0.0, (med([g["flusso"] for g in misure]) - 0.06) / 0.14))
+    forte = min(1.0, max(0.0, (db + 30) / 20))
+    o.update(bpm=round(bpm, 1), energia=round(0.5 * flusso + 0.5 * forte, 2), regolarita=round(regolarita, 2),
+             db=round(db, 1))
+    return o
+
+
+def _misura_da_riga(args):
+    """python3 musica_libreria.py --misura-audio <file> <durata>: la misura in un processo a parte (stampa un JSON)."""
+    try:
+        os.nice(10)   # il server e l'app hanno la precedenza
+    except (OSError, AttributeError):
+        pass
+    if len(args) != 2:
+        print("uso: --misura-audio <file> <durata in secondi>", file=sys.stderr)
+        return 2
+    print(json.dumps(misura_audio(args[0], _numero(args[1]) or 0.0)), flush=True)
+    return 0
+
+
+def _misura_in_processo(percorso, durata):
+    r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), "--misura-audio", percorso, "%.3f" % (durata or 0)],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900,
+                       env=_ambiente())
+    righe = r.stdout.decode("utf-8", "replace").strip().splitlines()
+    if r.returncode != 0 or not righe:
+        raise RuntimeError("misura non riuscita: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
+    return json.loads(righe[-1])
+
+
+# ----- MusicBrainz -----
+
+class ErroreMB(Exception):
+    """MusicBrainz non raggiungibile o occupato: il brano si riprova più tardi."""
+
+
+class MusicBrainz:
+    """Richieste all'archivio di MusicBrainz, al più una ogni MB_INTERVALLO secondi; artisti e album in memoria."""
+
+    def __init__(self, artisti=None, gruppi=None):
+        self.blocco = threading.Lock()
+        self.ultima = 0.0
+        self.artisti = artisti if isinstance(artisti, dict) else {}   # id → {paese, etichette}
+        self.gruppi = gruppi if isinstance(gruppi, dict) else {}      # id del gruppo di uscite (album) → {etichette}
+
+    @staticmethod
+    def agente():
+        return "AtlanteMusica/1.0 ( %s )" % (os.environ.get("ATLANTE_CONTATTO") or MB_CONTATTO)
+
+    def chiedi(self, percorso, parametri):
+        base = (os.environ.get("ATLANTE_MUSICBRAINZ") or MB_BASE).rstrip("/")   # le prove usano un MusicBrainz finto
+        url = base + percorso + "?" + "&".join("%s=%s" % (k, quote(v, safe="")) for k, v in parametri.items())
+        with self.blocco:
+            attesa = self.ultima + MB_INTERVALLO - time.time()
+            if attesa > 0:
+                time.sleep(attesa)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": self.agente(), "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=MB_TEMPO) as r:
+                    return json.loads(r.read(8 * 1024 * 1024).decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code in (400, 404):
+                    return None
+                raise ErroreMB("MusicBrainz: errore %d" % e.code)
+            except (OSError, ValueError, http.client.HTTPException) as e:
+                raise ErroreMB("MusicBrainz non raggiungibile: %s" % e)
+            finally:
+                self.ultima = time.time()
+
+    @staticmethod
+    def _etichette(o):
+        """Nomi dei generi e delle etichette di un oggetto di MusicBrainz, i più votati prima."""
+        v = [x for x in (o.get("genres") or []) + (o.get("tags") or []) if isinstance(x, dict) and x.get("name")]
+        v.sort(key=lambda x: -(x.get("count") or 0))
+        out = []
+        for x in v:
+            n = _norm(x["name"])
+            if n and n not in out and x.get("count", 1) >= 1:
+                out.append(n)
+        return out[:25]
+
+    def artista(self, aid):
+        if aid not in self.artisti:
+            j = self.chiedi("/ws/2/artist/" + quote(aid, safe=""), {"inc": "genres+tags", "fmt": "json"}) or {}
+            area = j.get("area") or {}
+            paese = j.get("country") or "".join((area.get("iso-3166-1-codes") or [])[:1])
+            self.artisti[aid] = {"paese": paese or "", "etichette": self._etichette(j)}
+        return self.artisti[aid]
+
+    def gruppo(self, gid):
+        if gid not in self.gruppi:
+            j = self.chiedi("/ws/2/release-group/" + quote(gid, safe=""), {"inc": "genres+tags", "fmt": "json"}) or {}
+            self.gruppi[gid] = {"etichette": self._etichette(j)}
+        return self.gruppi[gid]
+
+    def brano(self, titolo, artista, album=""):
+        """{rec, generi, etichette, paese, italiano, anno} della registrazione che corrisponde, None se non c'è."""
+        t, a = _titolo_pulito(titolo), _primo_artista(artista)
+        nt, na = _norm(t), _norm(a)
+        if not nt or not na:
+            return None
+        esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')   # noqa: E731
+        j = self.chiedi("/ws/2/recording", {"query": 'recording:"%s" AND artist:"%s"' % (esc(t), esc(a)),
+                                             "limit": "10", "fmt": "json"}) or {}
+        buone = []
+        for r in j.get("recordings") or []:
+            if not isinstance(r, dict) or (r.get("score") or 0) < 70:
+                continue
+            rt = _norm(_titolo_pulito(r.get("title")))
+            artisti = [c.get("artist") or {} for c in r.get("artist-credit") or [] if isinstance(c, dict)]
+            nomi = [_norm(x.get("name")) for x in artisti] + [_norm(c.get("name")) for c in r.get("artist-credit") or []
+                                                             if isinstance(c, dict)]
+            if not (rt == nt or rt.startswith(nt + " ") or nt.startswith(rt + " ")):
+                continue
+            if not any(n and (n == na or na in n or n in na) for n in nomi):
+                continue
+            buone.append((r, [x.get("id") for x in artisti if x.get("id")]))
+        if not buone:
+            return None
+        buone.sort(key=lambda x: (-(x[0].get("score") or 0), not x[0].get("tags")))
+        rec, aids = buone[0]
+        anni = [int(r.get("first-release-date")[:4]) for r, _ in buone
+                if re.match(r"^\d{4}", r.get("first-release-date") or "") and int(r.get("first-release-date")[:4]) > 1800]
+        etichette = []
+        for r, _ in buone[:3]:
+            etichette += [x for x in self._etichette(r) if x not in etichette]
+        paese = ""
+        if aids:
+            art = self.artista(aids[0])
+            paese = art["paese"]
+            etichette += [x for x in art["etichette"] if x not in etichette]
+        generi = set()
+        for e in etichette:
+            generi |= _generi_da_testo(e)
+        if not generi:   # registrazione e artista senza generi: si prova l'album
+            gids = [((x.get("release-group") or {}).get("id"), x.get("title")) for x in rec.get("releases") or []
+                    if isinstance(x, dict)]
+            gids = [g for g in gids if g[0]]
+            gids.sort(key=lambda g: _norm(g[1]) != _norm(album))
+            if gids:
+                etichette += [x for x in self.gruppo(gids[0][0])["etichette"] if x not in etichette]
+                for e in etichette:
+                    generi |= _generi_da_testo(e)
+        italiano = True if paese == "IT" or any(_TAG_ITALIANO.search(e) for e in etichette) else (False if paese else None)
+        return {"rec": rec.get("id") or "", "generi": sorted(generi), "etichette": etichette[:30], "paese": paese,
+                "italiano": italiano, "anno": min(anni) if anni else None}
+
+
+def _titolo_pulito(t):
+    """Il nome del brano senza «(Official Video)», «[HD]», «(feat. X)», «- Remastered 2011»."""
+    t = RUMORE.sub("", str(t or ""))
+    t = re.sub(r"\s*[(\[](?:feat|ft|featuring|con|with)\b[^()\[\]]*[)\]]", "", t, flags=re.I)
+    t = re.sub(r"\s+(?:feat|ft|featuring)\.?\s.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+-\s+(?:\d{4}\s+)?(?:remaster(?:ed)?|remix|live|radio edit|versione|version)\b.*$", "", t, flags=re.I)
+    return " ".join(t.split())
+
+
+def _primo_artista(a):
+    a = re.split(r"\s+(?:feat\.?|ft\.?|featuring|con|with|x|&|e|and|vs\.?)\s+|\s*[,;/]\s*", str(a or ""), flags=re.I)[0]
+    return " ".join(a.split())
+
+
+# ----- le regole delle playlist -----
+
+_CAMPI_INTERVALLO = {"bpm": "bpm", "energia": "energia", "regolarita": "regolarita", "anni": "anno",
+                     "anni_fa": "anni_fa", "durata": "durata"}
+_CAMPI_ELENCO = ("generi", "non_generi", "etichette", "parole")
+ORDINI = {"aggiunti": (lambda d: -d["aggiunto"], False), "bpm": (lambda d: d["bpm"], True),
+          "-bpm": (lambda d: -d["bpm"], True), "energia": (lambda d: d["energia"], True),
+          "-energia": (lambda d: -d["energia"], True), "anno": (lambda d: d["anno"], True),
+          "-anno": (lambda d: -d["anno"], True), "titolo": (lambda d: d["titolo"], False),
+          "artista": (lambda d: (d["artista"], d["titolo"]), False)}
+
+
+def _controlla_regola(r, dove):
+    """Errori di una regola (elenco vuoto se va bene): una regola sbagliata si salta, le altre restano."""
+    if not isinstance(r, dict) or not r:
+        return ["%s: la regola deve essere un oggetto con almeno una condizione" % dove]
+    err = []
+    for k, v in r.items():
+        if k in _CAMPI_INTERVALLO:
+            if not (isinstance(v, list) and len(v) == 2 and all(_numero(x) is not None for x in v) and
+                    _numero(v[0]) <= _numero(v[1])):
+                err.append("%s: %s deve essere [minimo, massimo]" % (dove, k))
+        elif k in _CAMPI_ELENCO:
+            if not (isinstance(v, list) and v and all(isinstance(x, str) and x.strip() for x in v)):
+                err.append("%s: %s deve essere un elenco di parole" % (dove, k))
+            elif k in ("generi", "non_generi"):
+                err += ["%s: genere sconosciuto «%s»" % (dove, x) for x in v if x not in GENERI]
+        elif k == "italiano":
+            if not isinstance(v, bool):
+                err.append("%s: italiano deve essere true o false" % dove)
+        elif k == "modo":
+            if v not in ("maggiore", "minore"):
+                err.append("%s: modo deve essere \"maggiore\" o \"minore\"" % dove)
+        elif k in ("una_di", "nessuna_di"):
+            if not (isinstance(v, list) and v):
+                err.append("%s: %s deve essere un elenco di regole" % (dove, k))
+            else:
+                for i, x in enumerate(v):
+                    err += _controlla_regola(x, "%s › %s %d" % (dove, k, i + 1))
+        else:
+            err.append("%s: condizione sconosciuta «%s»" % (dove, k))
+    return err
+
+
+def _compila(r):
+    """La regola diventa una funzione sui dati di un brano (veloce: 6000 brani per 80 playlist a ogni ricalcolo)."""
+    prove = []
+    for k, v in r.items():
+        if k == "generi":
+            prove.append(lambda d, s=frozenset(v): not s.isdisjoint(d["generi"]))
+        elif k == "non_generi":
+            prove.append(lambda d, s=frozenset(v): s.isdisjoint(d["generi"]))
+        elif k == "italiano":
+            prove.append(lambda d, v=v: d["italiano"] is v)
+        elif k == "modo":
+            prove.append(lambda d, v=1 if v == "maggiore" else -1: d["modo"] == v)
+        elif k in _CAMPI_INTERVALLO:
+            prove.append(lambda d, c=_CAMPI_INTERVALLO[k], a=_numero(v[0]), b=_numero(v[1]):
+                         d[c] is not None and a <= d[c] <= b)
+        elif k == "etichette":
+            prove.append(lambda d, s=frozenset(_norm(x) for x in v): not s.isdisjoint(d["etichette"]))
+        elif k == "parole":   # parole intere o il loro inizio, nel titolo o nell'album
+            prove.append(lambda d, p=tuple(" " + _norm(x) for x in v if _norm(x)): any(x in d["testo"] for x in p))
+        elif k == "una_di":
+            prove.append(lambda d, f=[_compila(x) for x in v]: any(g(d) for g in f))
+        elif k == "nessuna_di":
+            prove.append(lambda d, f=[_compila(x) for x in v]: not any(g(d) for g in f))
+    return lambda d: all(p(d) for p in prove)
+
+
+def regole_atlante(personali=None):
+    """(gruppi, nomi dei generi, errori) da playlist-atlante.json e dalle modifiche in `personali` (regole.json)."""
+    with open(REGOLE_FILE, encoding="utf-8") as f:
+        base = json.load(f)
+    gruppi = [{"id": g["id"], "nome": g["nome"], "playlist": [dict(p) for p in g["playlist"]]} for g in base["gruppi"]]
+    errori = []
+    if personali and os.path.isfile(personali):
+        try:
+            with open(personali, encoding="utf-8") as f:
+                mie = json.load(f)
+            for g in mie.get("gruppi") or []:
+                qui = next((x for x in gruppi if x["id"] == g.get("id")), None)
+                if qui is None:
+                    qui = {"id": str(g.get("id") or "miei"), "nome": str(g.get("nome") or "Le mie"), "playlist": []}
+                    gruppi.append(qui)
+                elif g.get("nome"):
+                    qui["nome"] = str(g["nome"])
+                for p in g.get("playlist") or []:
+                    if not isinstance(p, dict) or not p.get("id"):
+                        errori.append("regole.json: una playlist senza id")
+                        continue
+                    vecchia = next((x for x in qui["playlist"] if x["id"] == p["id"]), None)
+                    if vecchia is None:
+                        vecchia = next((x for gg in gruppi for x in gg["playlist"] if x["id"] == p["id"]), None)
+                    if vecchia is not None:
+                        vecchia.update(p)
+                    else:
+                        qui["playlist"].append(dict(p))
+        except (OSError, ValueError, AttributeError, TypeError) as e:
+            errori.append("regole.json non letto: %s" % e)
+    for g in gruppi:
+        tenute = []
+        for p in g["playlist"]:
+            if p.get("nascosta"):
+                continue
+            dove = "%s › %s" % (g["nome"], p.get("nome") or p.get("id"))
+            e = _controlla_regola(p.get("regola"), dove)
+            if p.get("ordine", "aggiunti") not in ORDINI:
+                e.append("%s: ordine sconosciuto «%s»" % (dove, p.get("ordine")))
+            if not p.get("nome"):
+                e.append("%s: manca il nome" % dove)
+            if e:
+                errori += e
+                continue
+            p["_prova"] = _compila(p["regola"])
+            tenute.append(p)
+        g["playlist"] = tenute
+    nomi = {k: v for k, v in (base.get("generi") or {}).items() if k in GENERI}
+    return [g for g in gruppi if g["playlist"]], nomi, errori
+
+
+def _dati_brano(i, b, s, anno_ora):
+    """Quello che le regole guardano di un brano: catalogo (titolo, anno e genere dei tag) più la sua scheda."""
+    s = s or {}
+    generi = _generi_da_testo(b.get("genre")) | set(s.get("generi") or ())
+    if not generi:
+        generi = set(s.get("generi_ia") or ())
+    italiano = s.get("italiano")
+    if italiano is None:
+        italiano = s.get("italiano_ia")
+    anni = [a for a in (_intero(b.get("year")), s.get("anno")) if isinstance(a, int) and 1800 < a <= anno_ora + 1]
+    anno = min(anni) if anni else None   # l'uscita originale: una raccolta di successi ha l'anno della raccolta
+    return {"id": i, "generi": frozenset(generi), "italiano": italiano if isinstance(italiano, bool) else None,
+            "bpm": s.get("bpm"), "energia": s.get("energia"), "regolarita": s.get("regolarita"), "anno": anno,
+            "modo": s.get("modo") or 0,
+            "anni_fa": anno_ora - anno if anno else None, "durata": b.get("duration") or None,
+            "etichette": frozenset(s.get("etichette") or ()), "aggiunto": b.get("added") or 0,
+            "testo": " " + _norm("%s %s" % (b.get("title"), b.get("album"))) + " ",
+            "titolo": _norm(b.get("title")), "artista": _norm(b.get("artist")), "copertina": b.get("cover")}
+
+
+def _in_ordine(dati, ordine):
+    chiave, numerica = ORDINI.get(ordine) or ORDINI["aggiunti"]
+    if not numerica:
+        return sorted(dati, key=chiave)
+    campo = ordine.lstrip("-")   # i brani senza quel dato (non ancora misurati) vanno in fondo
+    return (sorted([d for d in dati if d[campo] is not None], key=chiave) +
+            sorted([d for d in dati if d[campo] is None], key=ORDINI["aggiunti"][0]))
+
+
+# ----- playlist con l'IA: dalla richiesta ai criteri, dai criteri ai brani della libreria -----
+
+_IA_UNA = threading.Lock()   # l'IA del Mac è una sola: una richiesta alla volta (anche quelle del lavoro in sottofondo)
+_ENERGIE = {"alta": [0.65, 1.0], "media": [0.35, 0.75], "bassa": [0.0, 0.45]}
+_GRUPPI_TEMI = ("umore", "attivita", "momenti")
+_SISTEMA_PLAYLIST = ("Trasformi la richiesta di una playlist in criteri per scegliere i brani da una libreria musicale. "
+                     "Rispondi solo con un oggetto JSON, senza spiegazioni. Non elencare brani: li sceglie il programma.")
+
+
+def _json_da_testo(t):
+    """L'oggetto JSON nella risposta dell'IA (anche se ci ha messo intorno altre parole), o None."""
+    t = str(t or "").strip()
+    m = re.search(r"\{.*\}", t, re.S)
+    for prova in (t, m.group(0) if m else ""):
+        try:
+            o = json.loads(prova)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            return o
+    return None
+
+
+def _booleano(v):
+    if isinstance(v, bool):
+        return v
+    t = _norm(v)
+    return True if t in ("si", "true", "yes", "vero") else False if t in ("no", "false", "falso") else None
+
+
+def _intervallo(v, minimo, massimo, largo):
+    """[a, b] dentro i limiti; None se manca o è assurdo (tutto fuori dai limiti, o nessun limite vero)."""
+    if isinstance(v, dict):
+        v = [v.get("min", v.get("minimo")), v.get("max", v.get("massimo"))]
+    if not isinstance(v, (list, tuple)):
+        n = _numero(v)
+        if n is None:
+            return None
+        v = [n - largo, n + largo]
+    if len(v) != 2:
+        return None
+    a, b = _numero(v[0]), _numero(v[1])
+    if a is None and b is None:
+        return None
+    a, b = minimo if a is None else a, massimo if b is None else b
+    if a > b:
+        a, b = b, a
+    if b < minimo or a > massimo:
+        return None
+    a, b = max(minimo, a), min(massimo, b)
+    if a <= minimo and b >= massimo:
+        return None
+    return [round(a, 2), round(b, 2)]
+
+
+def _generi_scelti(v, nomi):
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return []
+    per_nome = {_norm(n): g for g, n in nomi.items()}
+    o = []
+    for x in v[:20]:
+        if not isinstance(x, str):
+            continue
+        t = _norm(x)
+        trovati = {t} if t in GENERI else {per_nome[t]} if t in per_nome else _generi_da_testo(x)
+        o += [g for g in sorted(trovati) if g not in o]
+    return o
+
+
+def _temi_scelti(v, gruppi):
+    """Umori, attività e momenti chiesti → id delle playlist di Atlante con quella regola."""
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return []
+    pl = [p for g in gruppi if g["id"] in _GRUPPI_TEMI for p in g["playlist"]]
+    o = []
+    for x in v[:20]:
+        t = _norm(x) if isinstance(x, str) else ""
+        if not t:
+            continue
+        for p in pl:
+            n = _norm(p["nome"])
+            if t in (n, _norm(p["id"]), _norm(p["id"].split("-", 1)[-1])) or (len(t) >= 4 and (t in n or n in t)):
+                if p["id"] not in o:
+                    o.append(p["id"])
+                break
+    return o
+
+
+def criteri_da_ia(testo, richiesta, gruppi, nomi):
+    """Criteri controllati dalla risposta dell'IA: valori assurdi o sconosciuti si ignorano, mai brani inventati."""
+    j = _json_da_testo(testo)
+    if j is None:
+        raise ErroreExtra(502, "L'IA non ha capito la richiesta: prova a dirla in un altro modo")
+    anno = time.localtime().tm_year
+    nome = " ".join(str(j.get("nome") or "").split())[:60] if isinstance(j.get("nome"), str) else ""
+    durata = _numero(j.get("durata_minuti"))
+    energia = j.get("energia")
+    if isinstance(energia, str):
+        energia = _ENERGIE.get(_norm(energia))
+    else:
+        energia = _intervallo(energia, 0.0, 1.0, 0.15)
+    temi = []
+    for k in ("umori", "umore", "attivita", "momenti", "temi"):
+        temi += [t for t in _temi_scelti(j.get(k), gruppi) if t not in temi]
+    artisti = j.get("artisti")
+    artisti = [" ".join(a.split())[:80] for a in (artisti if isinstance(artisti, list) else [artisti])
+               if isinstance(a, str) and a.strip()][:20]
+    return {"nome": nome or (richiesta[:1].upper() + richiesta[1:])[:60],
+            "generi": _generi_scelti(j.get("generi"), nomi), "escludi_generi": _generi_scelti(j.get("escludi_generi"), nomi),
+            "temi": temi, "bpm": _intervallo(j.get("bpm"), 50, 200, 10), "anni": _intervallo(j.get("anni"), 1900, anno, 0),
+            "artisti": artisti, "italiano": _booleano(j.get("italiano")), "energia": energia,
+            "durata_minuti": int(min(240, max(10, durata))) if durata and durata > 0 else 60}
+
+
+def _riassunto(c, nomi, gruppi):
+    nomi_pl = {p["id"]: p["nome"] for g in gruppi for p in g["playlist"]}
+    v = [nomi.get(g, g) for g in c.get("generi") or []]
+    if c.get("italiano") is True:
+        v.append("italiana")
+    elif c.get("italiano") is False:
+        v.append("straniera")
+    v += [nomi_pl.get(t, t) for t in c.get("temi") or []]
+    if c.get("energia"):
+        v.append("energia " + next((k for k, x in _ENERGIE.items() if x == c["energia"]), "%g–%g" % tuple(c["energia"])))
+    if c.get("bpm"):
+        v.append("BPM %g–%g" % tuple(c["bpm"]))
+    if c.get("anni"):
+        v.append("%d–%d" % tuple(c["anni"]) if c["anni"][0] != c["anni"][1] else "%d" % c["anni"][0])
+    if c.get("artisti"):
+        v.append(", ".join(c["artisti"][:4]))
+    if c.get("escludi_generi"):
+        v.append("niente " + ", ".join(nomi.get(g, g) for g in c["escludi_generi"]))
+    v.append("%d min" % c.get("durata_minuti", 60))
+    return v
+
+
+def _prendi(cand, obiettivo, caso, per_artista=3, massimo=300):
+    """Dai candidati (migliori prima) fino alla durata voluta, senza troppi brani dello stesso artista; poi in ordine
+    sparso, con gli artisti uguali lontani tra loro."""
+    scelti, conti, tot = [], collections.Counter(), 0
+    for d in cand:
+        if tot >= obiettivo or len(scelti) >= massimo:
+            break
+        if per_artista and d["artista"] and conti[d["artista"]] >= per_artista:
+            continue
+        scelti.append(d)
+        conti[d["artista"]] += 1
+        tot += d["durata"] or 210
+    caso.shuffle(scelti)
+    for i in range(1, len(scelti)):
+        if scelti[i]["artista"] and scelti[i]["artista"] == scelti[i - 1]["artista"]:
+            for j in range(i + 1, len(scelti)):
+                if scelti[j]["artista"] != scelti[i - 1]["artista"]:
+                    scelti[i], scelti[j] = scelti[j], scelti[i]
+                    break
+    return scelti, tot
+
+
+def scegli_brani(c, dati, prove_temi, caso):
+    """I brani della libreria che rispettano i criteri; se sono troppo pochi si allargano i limiti, uno alla volta,
+    e si dice quale. {brani, durata, note}"""
+    obiettivo = c["durata_minuti"] * 60
+    artisti = [_norm(a) for a in c.get("artisti") or [] if _norm(a)]
+    note = []
+    if c.get("artisti"):
+        presenti = [a for a in artisti if any(d["artista"] and (a in d["artista"] or d["artista"] in a) for d in dati)]
+        if len(presenti) < len(artisti):
+            note.append("Non ho trovato nella libreria: " + ", ".join(x for x, a in zip(c["artisti"], artisti) if a not in presenti))
+        artisti = presenti
+        if not artisti:
+            return {"brani": [], "durata": 0, "note": note + ["Nessuno degli artisti chiesti è nella libreria"]}
+    lim = {"bpm": c.get("bpm"), "anni": c.get("anni"), "energia": c.get("energia"), "temi": bool(prove_temi)}
+
+    def filtra():
+        o = []
+        for d in dati:
+            if artisti and not (d["artista"] and any(a in d["artista"] or d["artista"] in a for a in artisti)):
+                continue
+            if c["generi"] and d["generi"].isdisjoint(c["generi"]):
+                continue
+            if c["escludi_generi"] and not d["generi"].isdisjoint(c["escludi_generi"]):
+                continue
+            if c["italiano"] is not None and d["italiano"] is not c["italiano"]:
+                continue
+            if any(lim[k] and (d[f] is None or not lim[k][0] <= d[f] <= lim[k][1])
+                   for k, f in (("bpm", "bpm"), ("anni", "anno"), ("energia", "energia"))):
+                continue
+            if lim["temi"] and not any(p(d) for p in prove_temi):
+                continue
+            o.append(d)
+        return o
+    # troppo pochi: si allarga un limite alla volta, con misura (chi chiede la salita non vuole brani lenti)
+    allarga = [("temi", False, "Pochi brani proprio così: ho aggiunto brani simili"),
+               ("energia", 0.15, "Pochi brani con questa energia: ho allargato un po' il limite"),
+               ("bpm", 15, "Pochi brani con questi BPM: ho allargato a %s"),
+               ("anni", 5, "Pochi brani di quegli anni: ho allargato a %s")]
+    cand = filtra()
+    for k, di, testo in allarga:
+        if sum(d["durata"] or 210 for d in cand) >= obiettivo * 0.6:
+            break
+        if not lim[k]:
+            continue
+        if k == "temi":
+            lim[k] = False
+        else:
+            a, b = lim[k]
+            lim[k] = [round(max(0.0, a - di), 2), round(min(1.0, b + di), 2)] if k == "energia" else \
+                [max(40, a - di), min(220, b + di)] if k == "bpm" else [a - di, min(time.localtime().tm_year, b + di)]
+            testo = testo % ("%g–%g" % tuple(lim[k])) if "%s" in testo else testo
+        note.append(testo)
+        cand = filtra()
+    if (lim["bpm"] or lim["energia"]) and sum(d["durata"] or 210 for d in cand) < obiettivo * 0.6:
+        # nei primi giorni l'audio di molti brani non è ancora stato misurato: allora BPM ed energia non si chiedono
+        prima = dict(lim)
+        lim.update(bpm=None, energia=None)
+        tutti = filtra()
+        if sum(1 for d in tutti if d["bpm"] is None) * 2 > len(tutti):
+            note.append("Molti brani non hanno ancora BPM ed energia misurati: per ora non ne ho tenuto conto")
+            cand = tutti
+        else:
+            lim.update(prima)
+    if not cand:
+        return {"brani": [], "durata": 0, "note": note + ["Nella libreria non ho trovato brani così"]}
+    centro = lambda r: (r[0] + r[1]) / 2 if r else None   # noqa: E731
+    ce, cb = centro(c.get("energia")), centro(c.get("bpm"))
+    punti = []
+    for d in cand:
+        p = 2 * sum(1 for f in prove_temi if f(d)) + caso.random()
+        if ce is not None and d["energia"] is not None:
+            p += 1 - min(1, abs(d["energia"] - ce) * 2)
+        if cb is not None and d["bpm"] is not None:
+            p += 1 - min(1, abs(d["bpm"] - cb) / 40)
+        punti.append((p, d))
+    punti.sort(key=lambda x: -x[0])
+    scelti, tot = _prendi([d for _, d in punti], obiettivo, caso, None if artisti else 3)
+    if tot < obiettivo * 0.9:
+        note.append("Ho trovato %d minuti di musica sui %d chiesti" % (round(tot / 60), c["durata_minuti"]))
+    return {"brani": [d["id"] for d in scelti], "durata": round(tot), "note": note}
+
+
+def su_misura(ascolti, dati, caso, minuti=60):
+    """«Su misura per me»: generi, artisti ed energia di quello che la persona ascolta (dal suo telefono), con brani
+    suoi e brani della libreria che non ha ancora sentito."""
+    per_id = {d["id"]: d for d in dati}
+    pesi = {}
+    for a in (ascolti if isinstance(ascolti, list) else [])[:5000]:
+        if isinstance(a, dict) and str(a.get("id")) in per_id:
+            n = min(1000.0, max(0.0, _numero(a.get("n")) or 0.0))
+            w = n + (3 if a.get("fav") is True else 0)
+            if w > 0:
+                pesi[str(a["id"])] = w
+    tot = sum(pesi.values())
+    if not tot:
+        raise ErroreExtra(409, "Ascolta qualche brano (o mettine tra i preferiti): «Su misura» parte da quello che ascolti")
+    g_peso, a_peso, energie = collections.Counter(), collections.Counter(), []
+    for i, w in pesi.items():
+        d = per_id[i]
+        for g in d["generi"]:
+            g_peso[g] += w / len(d["generi"])
+        if d["artista"]:
+            a_peso[d["artista"]] += w
+        if d["energia"] is not None:
+            energie += [d["energia"]] * int(min(20, max(1, w)))
+    artisti = {a for a, _ in a_peso.most_common(10)}
+    em = sorted(energie)[len(energie) // 2] if energie else None
+    punti = []
+    for d in dati:
+        p = 3 * sum(g_peso[g] for g in d["generi"]) / tot + (1.5 if d["artista"] in artisti else 0)
+        if em is not None and d["energia"] is not None:
+            p += 1 - min(1, abs(d["energia"] - em) * 2)
+        p += caso.random() * 0.8 - (0.4 if d["id"] in pesi else 0)
+        if p > 1:
+            punti.append((p, d))
+    punti.sort(key=lambda x: -x[0])
+    # al più metà di brani già ascoltati: il resto sono scoperte nella libreria
+    noti = [d for _, d in punti if d["id"] in pesi][:max(3, len(punti) // 2)]
+    cand = [d for _, d in punti if d["id"] not in pesi or d in noti]
+    scelti, durata = _prendi(cand, minuti * 60, caso)
+    if not scelti:
+        raise ErroreExtra(409, "Non ho ancora abbastanza dati sui brani per capire i tuoi gusti: riprova più tardi")
+    principali = [g for g, w in g_peso.most_common(3) if w >= tot * 0.1]
+    return {"brani": [d["id"] for d in scelti], "durata": round(durata), "note": [],
+            "generi": principali}
+
+
+# ----- il lavoro in sottofondo e l'archivio delle playlist -----
+
+class Tematiche:
+    """Schede dei brani, lavoro in sottofondo che le prepara, calcolo delle playlist, limiti dell'IA e condivise."""
+
+    def __init__(self, cartella):
+        self.dir = cartella
+        os.makedirs(cartella, exist_ok=True)
+        self.blocco = threading.RLock()
+        self.blocco_calcolo = threading.Lock()
+        self.schede = self._leggi("schede.json").get("brani") or {}
+        mb = self._leggi("musicbrainz.json")
+        self.mb = MusicBrainz(mb.get("artisti"), mb.get("gruppi"))
+        self.condivise = [x for x in self._leggi("condivise.json").get("playlist") or []
+                          if isinstance(x, dict) and x.get("id") and isinstance(x.get("brani"), list)]
+        self.limiti = self._leggi("limiti.json")
+        self.versione = 0           # cresce a ogni scheda nuova: le playlist si ricalcolano
+        self.ora = ""               # brano in lavorazione
+        self.attivo = False
+        self.prova = 0              # >0: il lavoro fa solo questi brani (ATLANTE_TEMATICHE_PROVA), da controllare a mano
+        self.mb_pausa = 0.0         # MusicBrainz non risponde: fino a quando si lascia stare
+        self.sveglia = threading.Event()
+        self._regole = (None, None)
+        self._cache = None          # (chiave, versione, quando, risultato)
+        self._mb_cambiato = False
+
+    # --- file ---
+
+    def _leggi(self, nome):
+        try:
+            with open(os.path.join(self.dir, nome), encoding="utf-8") as f:
+                o = json.load(f)
+            return o if isinstance(o, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _scrivi(self, nome, dati):
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix="." + nome + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(dati, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, os.path.join(self.dir, nome))
+        except BaseException:
+            _cancella(tmp)
+            raise
+
+    def salva(self):
+        with self.blocco:
+            schede = dict(self.schede)
+            mb = {"artisti": dict(self.mb.artisti), "gruppi": dict(self.mb.gruppi)} if self._mb_cambiato else None
+            self._mb_cambiato = False
+        try:
+            self._scrivi("schede.json", {"versione": TEM_VERSIONE, "brani": schede})
+            if mb is not None:
+                self._scrivi("musicbrainz.json", mb)
+        except OSError as e:   # disco pieno: il lavoro va avanti, si salverà la prossima volta
+            print("Playlist di Atlante: schede non salvate:", e, flush=True)
+
+    # --- regole e calcolo delle playlist ---
+
+    def regole(self):
+        mio = os.path.join(self.dir, "regole.json")
+        chiave = []
+        for p in (REGOLE_FILE, mio):
+            try:
+                chiave.append(os.stat(p).st_mtime_ns)
+            except OSError:
+                chiave.append(None)
+        if self._regole[0] != chiave:
+            r = regole_atlante(mio)
+            for e in r[2]:
+                print("Playlist di Atlante:", e, flush=True)
+            self._regole = (chiave, r)
+        return self._regole[1]
+
+    def _calcola(self):
+        """Le playlist di Atlante (ricalcolate quando cambiano regole o catalogo, e al più ogni TEM_RICALCOLO secondi
+        mentre arrivano schede nuove)."""
+        gruppi, nomi, errori = self.regole()
+        anno = time.localtime().tm_year
+        chiave = (id(gruppi), LIB.ultima if LIB else 0, len(LIB.brani) if LIB else 0, anno)
+        with self.blocco_calcolo:
+            c = self._cache
+            # mentre il lavoro in sottofondo sta facendo un brano le schede nuove si aspettano un po': con 6000 brani
+            # un ricalcolo costa un secondo. A lavoro fermo (anche tra un brano e l'altro) si ricalcola subito.
+            if c and c[0] == chiave and (c[1] == self.versione or (self.ora and time.time() - c[2] < TEM_RICALCOLO)):
+                return c[3]
+            versione = self.versione
+            if LIB is not None:
+                with LIB.blocco:
+                    voci = list(LIB.brani.items())
+            else:
+                voci = []
+            with self.blocco:
+                schede = dict(self.schede)
+            dati = [_dati_brano(i, b, schede.get(i), anno) for i, b in voci]
+            out, brani = [], {}
+            for g in gruppi:
+                pl = []
+                for p in g["playlist"]:
+                    sel = [d for d in dati if p["_prova"](d)]
+                    if not sel:
+                        continue   # una playlist vuota non compare
+                    sel = _in_ordine(sel, p.get("ordine", "aggiunti"))
+                    brani[p["id"]] = [d["id"] for d in sel]
+                    pl.append(self._voce(p["id"], p["nome"], p.get("descrizione") or "", sel))
+                if pl:
+                    out.append({"id": g["id"], "nome": g["nome"], "playlist": pl})
+            ris = {"gruppi": out, "brani": brani, "dati": dati, "nomi": nomi, "regole": gruppi, "errori": errori,
+                   "info": {p["id"]: p for g in out for p in g["playlist"]}}
+            self._cache = (chiave, versione, time.time(), ris)
+            return ris
+
+    @staticmethod
+    def _voce(pid, nome, descrizione, sel):
+        copertine = []
+        for d in sel:
+            if d["copertina"] and d["copertina"] not in copertine:
+                copertine.append(d["copertina"])
+                if len(copertine) == 4:
+                    break
+        return {"id": pid, "nome": nome, "descrizione": descrizione, "n": len(sel),
+                "durata": round(sum(d["durata"] or 0 for d in sel)), "copertine": copertine}
+
+    def _da_nome(self, di):
+        if di == "p":
+            return "Samuele"
+        return (PERS.nome(di) if PERS else "") or "un amico"
+
+    def _condivise(self, chi, ris):
+        per_id = {d["id"]: d for d in ris["dati"]}
+        pl = []
+        with self.blocco:
+            cond = list(self.condivise)
+        for x in reversed(cond):   # le più recenti prima
+            sel = [per_id[i] for i in x["brani"] if i in per_id]
+            if sel:
+                v = self._voce("c-" + x["id"], x["nome"], "Condivisa da " + self._da_nome(x["di"]), sel)
+                v.update(da_nome=self._da_nome(x["di"]), mia=x["di"] == chi, condivisa=x["id"])
+                pl.append((v, [d["id"] for d in sel]))
+        return pl
+
+    def elenco(self, chi):
+        ris = self._calcola()
+        gruppi = list(ris["gruppi"])
+        cond = self._condivise(chi, ris)
+        if cond:
+            gruppi.insert(0, {"id": "condivise", "nome": "Condivise in Atlante", "playlist": [v for v, _ in cond]})
+        return {"gruppi": gruppi, "stato": self.stato(), "ia": {"rimaste": self.rimaste(chi), "al_giorno": IA_AL_GIORNO}}
+
+    def playlist(self, pid, chi):
+        ris = self._calcola()
+        if pid.startswith("c-"):
+            for v, ids in self._condivise(chi, ris):
+                if v["id"] == pid:
+                    return dict(v, brani=ids)
+            return None
+        if pid not in ris["brani"]:
+            return None
+        return dict(ris["info"][pid], brani=ris["brani"][pid])
+
+    def ritmi(self):
+        """Per «Per ritmo» e «Mettimi di buonumore» nell'app, che li tiene anche per quando non c'è rete: BPM,
+        regolarità, energia e modo di ogni brano misurato; i brani di «Buonumore» ed «Energia» (con energia almeno
+        media) con il loro peso: il modo maggiore conta di più, il minore meno (la misura del modo è una stima)."""
+        ris = self._calcola()
+        ritmi = {d["id"]: [d["bpm"], d["regolarita"], d["energia"], d["modo"]] for d in ris["dati"] if d["bpm"] is not None}
+        allegri = set(ris["brani"].get("umore-buonumore", ())) | set(ris["brani"].get("umore-energia", ()))
+        buonumore = [[d["id"], 2 if d["modo"] == 1 else 0.5 if d["modo"] == -1 else 1] for d in ris["dati"]
+                     if d["id"] in allegri and (d["energia"] is None or d["energia"] >= 0.45)]
+        return {"ritmi": ritmi, "buonumore": buonumore}
+
+    # --- il lavoro in sottofondo ---
+
+    def _voci(self):
+        """I brani su cui lavorare: tutta la libreria, o con la prova un campione fisso (gli id sono impronte SHA-1:
+        i primi in ordine sono brani qualsiasi, di tutti i generi e di tutti gli anni)."""
+        if LIB is None:
+            return []
+        with LIB.blocco:
+            voci = list(LIB.brani.items())
+        if self.prova:
+            voci = sorted(voci)[:self.prova]
+        return voci
+
+    def campione(self):
+        """Per il controllo a mano: i brani con la scheda finita, i loro dati e le playlist in cui sono."""
+        ris, ora = self._calcola(), time.time()
+        dove = collections.defaultdict(list)
+        for g in ris["gruppi"]:
+            for p in g["playlist"]:
+                for i in ris["brani"][p["id"]]:
+                    dove[i].append(p["nome"])
+        righe = []
+        with self.blocco:
+            schede = dict(self.schede)
+        for i, b in self._voci():
+            s = schede.get(i)
+            if not s or self._passi(s, b, ora, tutti=True):
+                continue
+            d = _dati_brano(i, b, s, time.localtime().tm_year)
+            righe.append({"id": i, "titolo": b.get("title"), "artista": b.get("artist"), "anno": d["anno"],
+                          "generi": sorted(d["generi"]), "italiano": d["italiano"],
+                          "fonte": "musicbrainz" if s.get("generi") else "ia" if s.get("generi_ia") else
+                          "tag del file" if d["generi"] else "", "etichette": (s.get("etichette") or [])[:8],
+                          "bpm": s.get("bpm"), "energia": s.get("energia"), "regolarita": s.get("regolarita"),
+                          "tonalita": s.get("tonalita") or "", "playlist": dove.get(i, [])})
+        return righe[:1000]
+
+    def stato(self):
+        ora = time.time()
+        voci = self._voci()
+        with self.blocco:
+            fatti = sum(1 for i, b in voci if not self._passi(self.schede.get(i), b, ora, tutti=True))
+        o = {"attivo": self.attivo, "fatti": fatti, "totale": len(voci), "ora": self.ora}
+        if self.prova:
+            o["prova"] = self.prova
+        if self.mb_pausa > ora:
+            o["musicbrainz"] = "non risponde: riprovo alle %s" % time.strftime("%H:%M", time.localtime(self.mb_pausa))
+        errori = self._regole[1][2] if self._regole[1] else []
+        if errori:
+            o["errori_regole"] = errori[:20]
+        return o
+
+    def _serve_ia(self, s, b):
+        """L'IA serve quando MusicBrainz (e il file) non dicono il genere o se l'artista è italiano; senza artista
+        tirerebbe a indovinare dal solo titolo, e allora no."""
+        if not (b.get("artist") or "").strip():
+            return False
+        return not (s.get("generi") or _generi_da_testo(b.get("genre"))) or s.get("italiano") is None
+
+    def _passi(self, s, b, ora, tutti=False):
+        """Cosa manca alla scheda di un brano: «mb», «ia», «audio». Con tutti=False non quelli che ora non si possono
+        fare (MusicBrainz in pausa, IA occupata)."""
+        if not s or s.get("v") != TEM_VERSIONE:
+            s = {}
+        p = []
+        mb_ok = s.get("t") == b.get("title") and s.get("a") == b.get("artist") and s.get("mb") in ("fatto", "sconosciuto")
+        if not mb_ok and not (s.get("mb") == "errore" and s.get("t") == b.get("title") and ora - s.get("mb_q", 0) < TEM_RIPROVA):
+            p.append("mb")
+        elif mb_ok and self._serve_ia(s, b) and not (s.get("ia") == "fatto" or
+                                                     (s.get("ia") == "attesa" and ora - s.get("ia_q", 0) < TEM_RIPROVA)):
+            p.append("ia")
+        # audio non letto (disco scollegato a metà?) o ffmpeg mancante: si riprova dopo qualche ora, al più tre volte
+        if s.get("f") != b.get("_f") or s.get("audio") not in ("fatto", "errore", "attesa") or \
+                (s.get("audio") == "attesa" and ora - s.get("audio_q", 0) >= TEM_RIPROVA) or \
+                (s.get("audio") == "errore" and s.get("audio_n", 0) < 3 and ora - s.get("audio_q", 0) >= TEM_RIPROVA):
+            p.append("audio")
+        if not tutti:
+            if ora < self.mb_pausa and "mb" in p:
+                p.remove("mb")
+            if "ia" in p and _IA_UNA.locked():
+                p.remove("ia")
+        return p
+
+    def avvia(self):
+        with self.blocco:
+            if self.attivo:
+                return
+            self.attivo = True
+        threading.Thread(target=self._lavora, daemon=True).start()
+
+    def _prossimo(self):
+        voci = self._voci()
+        voci.sort(key=lambda x: -(x[1].get("added") or 0))   # i brani nuovi (classifiche, caricamenti) per primi
+        ora = time.time()
+        with self.blocco:
+            for i, b in voci:
+                p = self._passi(self.schede.get(i), b, ora)
+                if p:
+                    return i, b, p
+        return None
+
+    def _lavora(self):
+        while LIB is None or not LIB.ultima:   # si aspetta la prima lettura del disco
+            time.sleep(2)
+        print("Playlist di Atlante: lavoro in sottofondo avviato", flush=True)
+        while True:
+            x = self._prossimo()
+            if not x:
+                self.ora = ""
+                self.salva()
+                self.sveglia.wait(TEM_RIPOSO)
+                self.sveglia.clear()
+                continue
+            self.un_brano(*x)
+            self.salva()
+
+    def un_brano(self, i, b, passi):
+        self.ora = " — ".join(v for v in (b.get("title"), b.get("artist")) if v)
+        try:
+            self.classifica(i, b, passi)
+        except Exception as e:   # noqa: BLE001  un brano che non va non ferma gli altri (e si riprova più tardi)
+            print("Playlist di Atlante: %s non riuscito: %s" % (self.ora, e), flush=True)
+            with self.blocco:
+                s, ora = dict(self.schede.get(i) or {"v": TEM_VERSIONE}), int(time.time())
+                if "mb" in passi:
+                    s.update(mb="errore", mb_q=ora, t=b.get("title"), a=b.get("artist"))
+                if "ia" in passi:
+                    s.update(ia="attesa", ia_q=ora)
+                if "audio" in passi:
+                    s.update(audio="errore", audio_q=ora, f=b.get("_f"), audio_n=s.get("audio_n", 0) + 1)
+                self.schede[i] = s
+                self.versione += 1
+                self.ora = ""
+
+    def classifica(self, i, b, passi):
+        """Un passo dopo l'altro sulla scheda di un brano: MusicBrainz, IA (se serve), audio."""
+        with self.blocco:
+            s = dict(self.schede.get(i) or {})
+        if s.get("v") != TEM_VERSIONE:
+            s = {"v": TEM_VERSIONE}
+        ora = int(time.time())
+        if "mb" in passi:
+            try:
+                r = self.mb.brano(b.get("title"), b.get("artist"), b.get("album"))
+            except ErroreMB as e:
+                print("Playlist di Atlante:", e, flush=True)
+                self.mb_pausa = time.time() + TEM_PAUSA_MB
+                n = s.get("mb_n", 0) + 1   # tre volte di fila sullo stesso brano: lo si lascia per qualche ora
+                s.update(mb_n=n)
+                if n >= 3:
+                    s.update(mb="errore", mb_q=ora, t=b.get("title"), a=b.get("artist"), mb_n=0)
+            else:
+                r = r or {}
+                s.update(t=b.get("title"), a=b.get("artist"), mb="fatto" if r else "sconosciuto", mb_q=ora, mb_n=0,
+                         rec=r.get("rec"), generi=r.get("generi") or [], etichette=r.get("etichette") or [],
+                         paese=r.get("paese") or "", italiano=r.get("italiano"), anno=r.get("anno"))
+                for k in ("ia", "ia_q", "generi_ia", "italiano_ia"):
+                    s.pop(k, None)
+                self._mb_cambiato = True
+        if s.get("mb") in ("fatto", "sconosciuto") and ("mb" in passi or "ia" in passi) and self._serve_ia(s, b) \
+                and s.get("ia") != "fatto" and _IA_UNA.acquire(blocking=False):
+            try:
+                g, ital = _genere_da_ia(b.get("title"), b.get("artist"), b.get("album"), self.regole()[1])
+                s.update(ia="fatto", ia_q=ora, generi_ia=g, italiano_ia=ital)
+            except ErroreExtra as e:   # IA spenta o lenta: si riprova tra qualche ora
+                s.update(ia="attesa" if e.codice in (503, 504) else "fatto", ia_q=ora)
+            finally:
+                _IA_UNA.release()
+        if "audio" in passi:
+            try:
+                m = _misura_in_processo(b["_p"], b.get("duration") or 0)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+                print("Playlist di Atlante: audio di %s non misurato: %s" % (self.ora, e), flush=True)
+                s.update(audio="errore", audio_q=ora, f=b.get("_f"), audio_n=s.get("audio_n", 0) + 1)
+            else:
+                if m.get("senza_ffmpeg"):
+                    s.update(audio="attesa", audio_q=ora, f=b.get("_f"))
+                else:
+                    s.update(audio="fatto", audio_q=ora, f=b.get("_f"), bpm=m.get("bpm"), energia=m.get("energia"),
+                             regolarita=m.get("regolarita"), db=m.get("db"), modo=m.get("modo") or 0,
+                             tonalita=m.get("tonalita") or "", audio_n=0)
+        with self.blocco:
+            self.schede[i] = s
+            self.versione += 1
+            self.ora = ""
+        return s
+
+    # --- IA: limiti, richieste, condivise ---
+
+    def rimaste(self, chi):
+        with self.blocco:
+            oggi = time.strftime("%Y-%m-%d")
+            if self.limiti.get("giorno") != oggi or not isinstance(self.limiti.get("conti"), dict):
+                self.limiti = {"giorno": oggi, "conti": {}}
+            return max(0, IA_AL_GIORNO - int(self.limiti["conti"].get(chi) or 0))
+
+    def _conta(self, chi):
+        with self.blocco:
+            self.rimaste(chi)
+            self.limiti["conti"][chi] = int(self.limiti["conti"].get(chi) or 0) + 1
+            try:
+                self._scrivi("limiti.json", self.limiti)
+            except OSError:
+                pass
+
+    def crea(self, chi, nome_persona, corpo):
+        ris = self._calcola()
+        caso = secrets.SystemRandom()
+        if corpo.get("su_misura"):
+            r = su_misura(corpo.get("ascolti"), ris["dati"], caso)
+            nomi = ris["nomi"]
+            riassunto = ["dai tuoi ascolti"] + [nomi.get(g, g) for g in r.pop("generi")] + ["%d min" % round(r["durata"] / 60)]
+            return dict(r, nome="Su misura per " + nome_persona, riassunto=riassunto, criteri={"su_misura": True},
+                        rimaste=self.rimaste(chi))
+        richiesta = " ".join(str(corpo.get("richiesta") or "").split())[:400]
+        if len(richiesta) < 3:
+            raise ErroreExtra(400, "Scrivi che musica vuoi: per esempio «rap italiano carico per la salita, 40 minuti»")
+        if self.rimaste(chi) <= 0:
+            raise ErroreExtra(429, "Oggi hai già chiesto %d playlist all'IA: riprova domani" % IA_AL_GIORNO)
+        if not _IA_UNA.acquire(timeout=IA_ATTESA):
+            raise ErroreExtra(429, "L'IA del Mac mini sta preparando un'altra playlist: riprova tra un minuto")
+        try:
+            if self.rimaste(chi) <= 0:   # due richieste insieme della stessa persona all'ultima rimasta
+                raise ErroreExtra(429, "Oggi hai già chiesto %d playlist all'IA: riprova domani" % IA_AL_GIORNO)
+            risposta = _chiedi_ia({"prompt": _domanda_playlist(richiesta, ris["regole"], ris["nomi"]),
+                                   "sistema": _SISTEMA_PLAYLIST, "json": True})
+            self._conta(chi)
+        finally:
+            _IA_UNA.release()
+        c = criteri_da_ia(risposta.get("testo"), richiesta, ris["regole"], ris["nomi"])
+        prove = [p["_prova"] for g in ris["regole"] for p in g["playlist"] if p["id"] in c["temi"]]
+        scelta = scegli_brani(c, ris["dati"], prove, caso)
+        return dict(scelta, nome=c["nome"], criteri=c, riassunto=_riassunto(c, ris["nomi"], ris["regole"]),
+                    rimaste=self.rimaste(chi))
+
+    def condividi(self, chi, corpo):
+        nome = " ".join(str(corpo.get("nome") or "").split())[:80]
+        if not nome:
+            raise ErroreExtra(400, "Manca il nome della playlist")
+        locale = str(corpo.get("locale") or "")[:80]
+        brani = corpo.get("brani") if isinstance(corpo.get("brani"), list) else []
+        if LIB is not None:
+            with LIB.blocco:
+                ci = set(LIB.brani)
+        else:
+            ci = set()
+        visti, ids = set(), []
+        for x in brani[:CONDIVISA_BRANI * 2]:
+            if isinstance(x, str) and x in ci and x not in visti:
+                visti.add(x)
+                ids.append(x)
+        ids = ids[:CONDIVISA_BRANI]
+        if not ids:
+            raise ErroreExtra(400, "In questa playlist non ci sono brani della libreria del Mac: non si può condividere")
+        with self.blocco:
+            x = next((c for c in self.condivise if locale and c["di"] == chi and c.get("locale") == locale), None)
+            if x is None:
+                if sum(1 for c in self.condivise if c["di"] == chi) >= CONDIVISE_PERSONA:
+                    raise ErroreExtra(409, "Hai già condiviso %d playlist: togline una prima" % CONDIVISE_PERSONA)
+                if len(self.condivise) >= CONDIVISE_MAX:
+                    raise ErroreExtra(409, "Ci sono già troppe playlist condivise in Atlante")
+                x = {"id": secrets.token_hex(6), "di": chi, "locale": locale, "creato": int(time.time())}
+                self.condivise.append(x)
+            x.update(nome=nome, brani=ids, aggiornato=int(time.time()))
+            self._scrivi("condivise.json", {"playlist": self.condivise})
+            return {"id": x["id"], "n": len(ids)}
+
+    def togli(self, cid, chi, samuele):
+        with self.blocco:
+            x = next((c for c in self.condivise if c["id"] == cid), None)
+            if x is None:
+                raise ErroreExtra(404, "Playlist condivisa non trovata")
+            if x["di"] != chi and not samuele:
+                raise ErroreExtra(403, "La può togliere solo chi l'ha condivisa (o Samuele)")
+            self.condivise.remove(x)
+            self._scrivi("condivise.json", {"playlist": self.condivise})
+
+
+def _domanda_playlist(richiesta, gruppi, nomi):
+    temi = {g["id"]: ", ".join(p["nome"].lower() for p in g["playlist"]) for g in gruppi if g["id"] in _GRUPPI_TEMI}
+    return ("Richiesta: «%s»\n\nChiavi possibili (tutte facoltative):\n"
+            '- "nome": titolo breve della playlist, in italiano\n'
+            '- "generi": generi da includere, SOLO tra: %s\n'
+            '- "escludi_generi": generi da escludere, dallo stesso elenco\n'
+            '- "umori": SOLO tra: %s\n'
+            '- "attivita": SOLO tra: %s\n'
+            '- "momenti": SOLO tra: %s\n'
+            '- "bpm": [minimo, massimo], battiti al minuto (tra 50 e 200)\n'
+            '- "anni": [dal, al], anni di uscita (es. [1990, 1999] per gli anni \'90; quest\'anno è il %d)\n'
+            '- "artisti": nomi degli artisti chiesti\n'
+            '- "durata_minuti": quanto deve durare la playlist\n'
+            '- "italiano": true se chiede musica italiana o «niente inglese», false se chiede musica straniera\n'
+            '- "energia": "alta", "media" o "bassa"\n'
+            'Esempio: «rap italiano carico per la salita, 40 minuti» → {"nome": "Salita rap", "generi": ["rap"], '
+            '"italiano": true, "attivita": ["handbike: salita e scatti"], "energia": "alta", "durata_minuti": 40}') % (
+        richiesta, ", ".join(nomi.get(g, g).lower() for g in GENERI), temi.get("umore", ""), temi.get("attivita", ""),
+        temi.get("momenti", ""), time.localtime().tm_year)
+
+
+def _genere_da_ia(titolo, artista, album, nomi):
+    """Generi (e se l'artista è italiano) proposti dall'IA locale per un brano che MusicBrainz non conosce."""
+    elenco = ", ".join("%s (%s)" % (g, nomi.get(g, g)) for g in GENERI)
+    prompt = ("Brano: «%s» di %s%s.\nA quali generi appartiene? Scegli da 1 a 3 generi SOLO da questo elenco: %s.\n"
+              "Dimmi anche se l'artista è italiano o canta in italiano.\n"
+              'Rispondi solo con JSON: {"generi": ["..."], "italiano": true oppure false}') % (
+        titolo or "", artista or "artista sconosciuto", " (album «%s»)" % album if album else "", elenco)
+    r = _chiedi_ia({"prompt": prompt, "sistema": "Sei un esperto di musica. Rispondi solo con JSON valido.", "json": True})
+    j = _json_da_testo(r.get("testo")) or {}
+    return _generi_scelti(j.get("generi"), nomi)[:3], _booleano(j.get("italiano"))
+
+
+TEM = None
+_blocco_tem = threading.Lock()
+
+
+def _tem():
+    global TEM
+    with _blocco_tem:
+        if TEM is None:
+            TEM = Tematiche(os.path.join(_cart("cache"), "tematiche"))
+        return TEM
+
+
+def _nome_di(h):
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato" and PERS:
+        return PERS.nome(chi["persona"]) or "te"
+    return "Samuele" if chi["ruolo"] == "proprietario" else "te"
+
+
+def _tematiche(h, metodo, resto, corpo):
+    """Le rotte api/extra/tematiche…: per tutti, anche gli invitati (le loro playlist e i loro limiti sono loro)."""
+    tem, chi = _tem(), _di(h)
+
+    def solo(m):
+        if metodo != m:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    if not resto:
+        solo("GET")
+        return _json(h, tem.elenco(chi))
+    if resto == ["ia"]:
+        solo("POST")
+        return _json(h, tem.crea(chi, _nome_di(h), corpo))
+    if resto == ["condivise"]:
+        solo("POST")
+        return _json(h, tem.condividi(chi, corpo))
+    if len(resto) == 2 and resto[0] == "condivise":
+        solo("DELETE")
+        tem.togli(resto[1], chi, _chi_e(h)["ruolo"] == "proprietario")
+        return _json(h, {"ok": True})
+    if resto == ["ritmi"]:   # BPM dei brani per «Per ritmo» e brani per «Mettimi di buonumore»
+        solo("GET")
+        return _json(h, tem.ritmi())
+    if resto == ["campione"]:   # controllo a mano dei dati dei brani (con ATLANTE_TEMATICHE_PROVA, prima di tutto)
+        solo("GET")
+        if _chi_e(h)["ruolo"] != "proprietario":
+            raise ErroreExtra(403, "Il controllo dei dati dei brani è di Samuele")
+        return _json(h, {"stato": tem.stato(), "brani": tem.campione()})
+    if len(resto) == 1:
+        solo("GET")
+        x = tem.playlist(resto[0], chi)
+        if x is None:
+            raise ErroreExtra(404, "Questa playlist di Atlante non c'è (o per ora è vuota)")
+        return _json(h, x)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/tematiche/%s" % "/".join(resto))
+
+
 # ----- stato e dispositivo -----
 
 def stato():
@@ -6597,6 +8052,8 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "classifiche" and not resto:   # le classifiche come playlist, per tutti (anche gli invitati)
         solo("GET")
         _json(h, CL.classifiche_app() if CL else {"classifiche": []})
+    elif cosa == "tematiche":   # playlist di Atlante e playlist con l'IA
+        _tematiche(h, metodo, resto, corpo)
     elif cosa == "inviti" and not resto:
         solo("GET", "POST")
         _inviti(h, metodo, corpo)
@@ -8000,7 +9457,8 @@ PERMESSE_INVITATI = re.compile(
     r"|extra/(?:io|inviti|idee|classifiche|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
     # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria: ognuno i suoi
     r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?)"
-    r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?)$")
+    r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?"
+    r"|extra/tematiche(?:/[^/]+){0,2})$")   # playlist di Atlante: anche gli invitati le ascoltano, creano e condividono
 # la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
 
@@ -8079,6 +9537,12 @@ def main():
     # classifiche e playlist: anche da variabile d'ambiente (nel LaunchAgent una versione vecchia del server la ignora)
     ap.add_argument("--classifiche", action="store_true", default=os.environ.get("ATLANTE_CLASSIFICHE") == "1",
                     help="aggiunge da solo i brani delle classifiche e delle playlist più seguite (anche ATLANTE_CLASSIFICHE=1)")
+    ap.add_argument("--tematiche", action="store_true", default=os.environ.get("ATLANTE_TEMATICHE") == "1",
+                    help="prepara in sottofondo, un brano alla volta, i dati delle playlist di Atlante (generi da "
+                    "MusicBrainz, BPM ed energia dall'audio); anche ATLANTE_TEMATICHE=1")
+    ap.add_argument("--tematiche-prova", type=int, default=int(os.environ.get("ATLANTE_TEMATICHE_PROVA") or 0),
+                    help="come --tematiche, ma solo su questo numero di brani, da controllare a mano in "
+                    "api/extra/tematiche/campione prima di farlo su tutta la libreria (anche ATLANTE_TEMATICHE_PROVA)")
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
@@ -8132,6 +9596,9 @@ def main():
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
                 ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
     avvia_classifiche(a.cache, a.classifiche)
+    if a.tematiche or a.tematiche_prova > 0:
+        _tem().prova = max(0, a.tematiche_prova)
+        _tem().avvia()
     if a.clip_piano:
         CLIP = Videoclip(os.path.abspath(os.path.expanduser(a.clip_piano)), os.path.abspath(os.path.expanduser(a.clip_dir)),
                          auto=a.clip_auto, prima=os.path.abspath(os.path.expanduser(a.clip_prima)) if a.clip_prima else "")
@@ -8227,4 +9694,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--misura-audio"]:   # misura dell'audio per le playlist di Atlante, in un processo a parte
+        sys.exit(_misura_da_riga(sys.argv[2:]))
     main()
