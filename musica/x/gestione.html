@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Gestione</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.btn.danger{background:var(--bad);color:#fff}
+.btn.full{width:100%}
+.av{width:40px;height:40px;border-radius:20px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;background:#8e8e93;font-size:17px;text-transform:uppercase}
+.det{padding:4px 14px 14px;border-bottom:.5px solid var(--sep)}
+.det:last-child{border-bottom:0}
+.dev{display:flex;align-items:center;gap:10px;min-height:44px}
+.dev .tx{flex:1;min-width:0}
+.dev .tx b,.dev .tx span{display:block}
+.link{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;background:var(--fill);border-radius:8px;padding:8px 10px;margin:8px 0}
+.qr{display:block;margin:10px auto;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:8px}
+.chev{color:var(--fg3);font-size:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="richieste" hidden>
+    <h2 class="h2">Richieste</h2>
+    <div class="list" id="rlist"></div>
+  </div>
+  <h2 class="h2">Persone</h2>
+  <div class="card">
+    <div class="field"><label for="nome">Invita una persona</label><input class="in" id="nome" maxlength="40" placeholder="Nome" autocomplete="off"></div>
+    <button class="btn pri full" id="invita">Crea il link d'invito</button>
+    <div id="nuovo" hidden></div>
+  </div>
+  <div class="list" id="plist"></div>
+  <p class="small" id="pvuote" hidden>Nessuna persona invitata, per ora.</p>
+  <h2 class="h2">I tuoi dispositivi</h2>
+  <p class="small">Quelli entrati come Samuele (con Tailscale o con la password). Se ne vedi uno che non è tuo, revocalo.</p>
+  <div class="list" id="tlist"></div>
+</div>
+<script src="kit.js"></script>
+<script>
+'use strict';
+const {$, esc, toast, api} = AX;
+AX.header('Gestione');
+const TIPI = {iphone:'iPhone', ipad:'iPad', android:'Telefono Android', mac:'Mac', pc:'Computer'};
+let aperta = '';   // persona con i dettagli aperti
+let QRLIB = null;
+
+function quando(t) {
+  if (!t) return 'mai';
+  const d = new Date(t * 1000), ora = new Date(), hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const giorni = Math.floor((new Date(ora.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (giorni <= 0) return 'oggi alle ' + hm;
+  if (giorni === 1) return 'ieri alle ' + hm;
+  return giorni < 30 ? giorni + ' giorni fa' : d.toLocaleDateString('it-IT');
+}
+// testo da mandare con il link (Condividi): per ora Atlante fa ascoltare e salvare i brani; si allunga con le parti nuove
+function messaggio(nome, link) {
+  return 'Ciao ' + nome + '! Ti ho invitato su Atlante Musica, la mia libreria musicale. Apri questo link sul telefono e sei dentro: ' +
+    'puoi ascoltare tutto e salvare i brani sul telefono.\n' + link;
+}
+async function caricaQR() {
+  if (QRLIB) return QRLIB;
+  await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); });
+  return (QRLIB = window.qrcode);
+}
+function cartaLink(nome, link, scade) {
+  return '<p class="small" style="margin-top:12px">Link per <b>' + esc(nome) + '</b> · vale fino al ' + new Date(scade * 1000).toLocaleDateString('it-IT') + ', una volta sola</p>' +
+    '<div class="link">' + esc(link) + '</div>' +
+    '<div class="btns"><button class="btn sm pri" data-a="condividi">Condividi</button><button class="btn sm" data-a="copia">Copia</button><button class="btn sm" data-a="qr">Codice QR</button></div>' +
+    '<div data-q></div>';
+}
+function attivaLink(box, nome, link) {
+  box.querySelector('[data-a=condividi]').onclick = async () => {
+    const text = messaggio(nome, link);
+    if (navigator.share) { try { await navigator.share({text}); } catch (e) {} return; }
+    copia(text);
+  };
+  box.querySelector('[data-a=copia]').onclick = () => copia(link);
+  box.querySelector('[data-a=qr]').onclick = async () => {
+    try {
+      const q = (await caricaQR())(0, 'M'); q.addData(link); q.make();
+      box.querySelector('[data-q]').innerHTML = '<img class="qr" alt="Codice QR del link" src="' + q.createDataURL(6, 2) + '"><p class="small" style="text-align:center">Fallo inquadrare con la fotocamera del telefono di ' + esc(nome) + '.</p>';
+    } catch (e) { toast('Il codice QR non si è caricato: usa Condividi o Copia'); }
+  };
+}
+async function copia(t) {
+  try { await navigator.clipboard.writeText(t); toast('Copiato'); }
+  catch (e) { toast('Non riesco a copiare: tieni premuto sul link e scegli Copia'); }
+}
+
+async function disegna() {
+  let el, rq;
+  try { [el, rq] = await Promise.all([api('gestione/persone'), api('gestione/richieste')]); }
+  catch (e) { $('plist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le persone</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+  const attesa = rq.richieste.filter(r => r.stato === 'attesa');
+  $('richieste').hidden = !attesa.length;
+  $('rlist').innerHTML = attesa.map(r => '<div class="row"><span class="tx"><b>' + esc(r.nome) + '</b><span>Lo chiede ' + esc(r.da_nome || 'una persona revocata') + ' · ' + quando(r.creato) + '</span></span>' +
+    '<button class="btn sm pri" data-ok="' + r.id + '">Consenti</button><button class="btn sm" data-no="' + r.id + '">Rifiuta</button></div>').join('');
+  $('rlist').querySelectorAll('[data-ok]').forEach(b => b.onclick = async () => {
+    try { const r = await api('gestione/richieste/' + b.dataset.ok + '/consenti', {method:'POST'}); toast('Fatto: il link per ' + r.persona.nome + ' è arrivato a chi l\'ha chiesto'); }
+    catch (e) { toast(e.message); }
+    disegna();
+  });
+  $('rlist').querySelectorAll('[data-no]').forEach(b => b.onclick = async () => {
+    try { await api('gestione/richieste/' + b.dataset.no + '/rifiuta', {method:'POST'}); } catch (e) { toast(e.message); }
+    disegna();
+  });
+  $('pvuote').hidden = el.persone.length > 0;
+  $('plist').hidden = !el.persone.length;
+  $('plist').innerHTML = el.persone.map(p => {
+    const ult = Math.max(0, ...p.dispositivi.map(d => d.visto));
+    const det = p.id !== aperta ? '' : '<div class="det">' +
+      (p.dispositivi.length ? p.dispositivi.map(d => '<div class="dev"><span class="tx"><b>' + (TIPI[d.tipo] || 'Dispositivo') + '</b><span class="small">Ultimo accesso: ' + quando(d.visto) + '</span></span><button class="btn sm" data-rd="' + d.id + '">Revoca</button></div>').join('') :
+        '<p class="small">Nessun dispositivo collegato, per ora.</p>') +
+      '<div class="btns"><button class="btn sm" data-nl="' + p.id + '">Nuovo link</button><button class="btn sm danger" data-rp="' + p.id + '">Revoca ' + esc(p.nome) + '</button></div><div data-box></div></div>';
+    return '<button class="row" data-p="' + p.id + '"><span class="av">' + esc(p.nome.slice(0, 1)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b><span>' +
+      p.dispositivi.length + (p.dispositivi.length === 1 ? ' dispositivo' : ' dispositivi') + ' · ultimo accesso ' + quando(ult) +
+      (p.da_nome ? ' · invito di ' + esc(p.da_nome) : '') + '</span></span><span class="chev">' + (p.id === aperta ? '⌄' : '›') + '</span></button>' + det;
+  }).join('');
+  $('plist').querySelectorAll('[data-p]').forEach(b => b.onclick = () => { aperta = aperta === b.dataset.p ? '' : b.dataset.p; disegna(); });
+  $('plist').querySelectorAll('[data-rd]').forEach(b => b.onclick = () => revocaDisp(b.dataset.rd));
+  $('plist').querySelectorAll('[data-nl]').forEach(b => b.onclick = async () => {
+    const p = el.persone.find(x => x.id === b.dataset.nl), box = b.closest('.det').querySelector('[data-box]');
+    try { const r = await api('gestione/persone/' + p.id + '/invito', {method:'POST'}); box.innerHTML = cartaLink(p.nome, r.invito.link, r.invito.scade); attivaLink(box, p.nome, r.invito.link); }
+    catch (e) { toast(e.message); }
+  });
+  $('plist').querySelectorAll('[data-rp]').forEach(b => b.onclick = async () => {
+    const p = el.persone.find(x => x.id === b.dataset.rp);
+    if (!confirm(p.nome + ' non potrà più aprire Atlante Musica. I brani già salvati sul suo telefono restano lì.')) return;
+    try { await api('gestione/persone/' + p.id, {method:'DELETE'}); toast('Accesso di ' + p.nome + ' revocato'); aperta = ''; } catch (e) { toast(e.message); }
+    disegna();
+  });
+  $('tlist').innerHTML = el.tuoi.length ? el.tuoi.map(d => '<div class="row"><span class="tx"><b>' + (TIPI[d.tipo] || 'Dispositivo') + '</b><span>Ultimo accesso: ' + quando(d.visto) + '</span></span><button class="btn sm" data-rd="' + esc(d.id) + '">Revoca</button></div>').join('') :
+    '<div class="row"><span class="tx"><span>Nessuno, per ora: compaiono appena si collegano.</span></span></div>';
+  $('tlist').querySelectorAll('[data-rd]').forEach(b => b.onclick = () => revocaDisp(b.dataset.rd));
+}
+async function revocaDisp(id) {
+  if (!confirm('Questo dispositivo non potrà più aprire Atlante Musica finché non rientra con un invito o con la password.')) return;
+  try { await api('gestione/dispositivi/' + encodeURIComponent(id), {method:'DELETE'}); toast('Dispositivo revocato'); } catch (e) { toast(e.message); }
+  disegna();
+}
+$('invita').onclick = async () => {
+  const nome = $('nome').value.trim();
+  if (!nome) { $('nome').focus(); return; }
+  $('invita').disabled = true;
+  try {
+    const r = await api('gestione/persone', {method:'POST', body:{nome}});
+    const box = $('nuovo'); box.hidden = false; box.innerHTML = cartaLink(r.persona.nome, r.invito.link, r.invito.scade);
+    attivaLink(box, r.persona.nome, r.invito.link);
+    $('nome').value = '';
+    disegna();
+  } catch (e) { toast(e.message); }
+  $('invita').disabled = false;
+};
+$('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('invita').click(); });
+disegna();
+</script>
+</body>
+</html>

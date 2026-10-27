@@ -186,6 +186,7 @@ body.hasmini #xp iframe{height:calc(100% - 122px - env(safe-area-inset-bottom,0p
 body.xnav #mini{display:none}
 body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .xgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
+.xnote{color:var(--fg2);font-size:15px;margin:4px 4px 18px}
 .xtile{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:14px;background:var(--bg2);text-align:left;min-height:118px}
 .xtile .xi{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px}
 .xtile b{font-weight:600;font-size:16px}
@@ -780,7 +781,7 @@ function oldIds() {
 // il Mac torna raggiungibile (rete attiva, app riaperta): si rilegge il catalogo e riprendono i download
 async function reconnect(force) {
   if (!force && Date.now() - srvLast < (SRV && SRVN && !SRVSCAN ? 600000 : 30000)) { runDl(); return SRV; }
-  const ok = await loadServer(); render(true); runDl(); return ok;
+  const ok = await loadServer(); ioCarica(); render(true); runDl(); return ok;
 }
 let rescanning = false;
 async function rescan() {   // tasto «Aggiorna»: il Mac rilegge subito il disco di backup
@@ -1284,7 +1285,7 @@ function emptyState() {
   if (SRV && SRVSCAN) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Il Mac sta leggendo il disco…</h3><p>La prima volta ci vuole qualche minuto: i brani compaiono man mano.</p></div>';
   if (srvWait) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Carico la musica…</h3><p>Sto chiedendo la libreria al Mac.</p></div>';
   return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Aggiungi la tua musica</h3><p>' + (SRV ? 'Il disco di musica sul Mac è vuoto o non è collegato. ' : '') + 'Scegli i file audio dal dispositivo: MP3, M4A, FLAC, WAV. Restano salvati qui e si ascoltano anche senza connessione.</p><button class="cta" data-a="add">' + ic('plus') + 'Aggiungi musica</button>' +
-    (SRV ? '<button class="ba" data-a="rescan" style="color:var(--accent);font-weight:600;margin-top:8px">Rileggi il disco del Mac</button>' : '') + '</div>';
+    (SRV && IO.ruolo !== 'invitato' ? '<button class="ba" data-a="rescan" style="color:var(--accent);font-weight:600;margin-top:8px">Rileggi il disco del Mac</button>' : '') + '</div>';
 }
 // aperta in http da un altro dispositivo (es. http://<mac>:8790 dal telefono): niente service worker, quindi niente app
 // offline né installazione. Si propone l'indirizzo https fisso, se il Mac lo conosce.
@@ -1324,7 +1325,7 @@ const pages = {
     const rem = hasRemote();
     h += secureBanner();
     if (SRV && SRVSCAN) h += '<div class="banner"><span class="bt">Il Mac sta leggendo il disco di backup' + (SRVN ? ': ' + SRVN + ' brani finora…' : '…') + '</span></div>';
-    else if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span><button class="ba" data-a="rescan">Aggiorna</button></div>';
+    else if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span>' + (IO.ruolo !== 'invitato' ? '<button class="ba" data-a="rescan">Aggiorna</button>' : '') + '</div>';
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
     h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
     if (rem) {
@@ -1411,8 +1412,9 @@ const pages = {
   },
   altro() {
     return '<div class="top"><span></span></div><h1 class="lt">Altro</h1>' +
-      XMODS.map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
-        '<button class="xtile" data-a="xopen" data-k="' + m.k + '"><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span></button>').join('') + '</div>').join('');
+      xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
+        '<button class="xtile" data-a="xopen" data-k="' + m.k + '"><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span></button>').join('') + '</div>').join('') +
+      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, idee, la tua interfaccia e la chat.</p>' : '');
   },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
@@ -2259,11 +2261,32 @@ const XMODS = [
     {k:'studio', t:'Studio e idee', d:'Atlante UCI, ciclismo, allenamenti, idee', i:'🚴', c:'#5856d6'},
     {k:'strumenti', t:'Strumenti', d:'Prezzi, negozi, test, carte, dispositivo', i:'🧰', c:'#8e8e93'}]}
 ];
+// chi è questo dispositivo per il Mac: Samuele (con la Gestione), casa (la rete di casa: come Samuele, senza Gestione) o
+// una persona invitata (ascolta e basta: dei moduli solo «Invita un amico»). Il Mac controlla comunque ogni richiesta.
+let IO = ls.get('am-io', {ruolo:'', persona:null});
+const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti e accessi', i:'🛡️', c:'#1c1c1e'}]};
+const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}]}];
+function xmodsVisibili() {
+  if (IO.ruolo === 'invitato') return XINVITATI;
+  return (IO.ruolo === 'proprietario' ? [XGESTIONE] : []).concat(XMODS);
+}
+async function ioCarica() {
+  try {
+    const r = await fetchT(XAPI + 'io', {cache:'no-store'}, 6000);
+    if (!r.ok) return;
+    const j = await r.json(), prima = IO.ruolo;
+    IO = {ruolo:j.ruolo || '', persona:j.persona || null}; ls.set('am-io', IO);
+    // un invitato non si ritrova migliaia di brani sul telefono senza averlo chiesto: «Scarica tutto» lo accende lui
+    let scelto = true; try { scelto = localStorage.getItem('am-tutto') !== null; } catch (e) {}
+    if (IO.ruolo === 'invitato' && !scelto) { TUTTO = false; ls.set('am-tutto', false); }
+    if (prima !== IO.ruolo) render(true);
+  } catch (e) {}
+}
 const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entrano in libreria né in «Brani»
 const TT = id => T.get(id) || EXT.get(id);
 let xCur = '';
 function openX(k, q) {
-  const m = XMODS.flatMap(g => g.m).find(x => x.k === k); if (!m) return;
+  const m = xmodsVisibili().flatMap(g => g.m).find(x => x.k === k); if (!m) return;
   closeNP(); xCur = k;
   const f = $('xf'), src = 'x/' + k + '.html' + (q || '');
   if (f.getAttribute('src') !== src) f.setAttribute('src', src);
@@ -2661,6 +2684,7 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   const lt = ls.get('am-tab', null); tab = lt && tabs[lt] ? lt : (T.size ? 'home' : 'lib');
   render();   // subito la musica già sul telefono, poi quella del Mac
   if (window.PWA && 'serviceWorker' in navigator) { try { navigator.serviceWorker.register('sw.js'); } catch (e) {} }
+  await ioCarica();   // prima del catalogo: chi è decide se scaricare tutta la musica
   await loadServer();
   srvWait = false;
   // brano del Mac toccato durante il collegamento, ma il Mac non ha risposto: lo si dice (e si passa a uno salvato) invece del silenzio
