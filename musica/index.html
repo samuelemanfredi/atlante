@@ -187,6 +187,10 @@ body.xnav #mini{display:none}
 body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .xgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
 .xnote{color:var(--fg2);font-size:15px;margin:4px 4px 18px}
+/* YouTube ha bloccato gli scaricamenti del Mac mini (classifiche e playlist): il riquadro Gestione in rosso */
+.xtile.xyt{box-shadow:inset 0 0 0 2px #ff3b30}
+.xtile.xyt::after{content:"YouTube ha bloccato gli scaricamenti";color:#ff3b30;font-size:13px;font-weight:600;line-height:1.25}
+.xtile.xyt .xn{background:#ff3b30}
 .xtile .xn{position:absolute;top:10px;right:10px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--accent);color:#fff;font-size:13px;font-weight:700;line-height:22px;text-align:center}
 .xtile{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:14px;background:var(--bg2);text-align:left;min-height:118px}
 .xtile .xi{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px}
@@ -1425,7 +1429,7 @@ const pages = {
   altro() {
     return '<div class="top"><span></span></div><h1 class="lt">Altro</h1>' +
       xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
-        '<button class="xtile" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
+        '<button class="xtile' + (m.k === 'gestione' && (IO.nuove || {}).youtube_bloccato ? ' xyt' : '') + '" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
           (m.k === 'gestione' && nuoveGestione() ? '<span class="xn" aria-label="cose nuove">' + nuoveGestione() + '</span>' : '') + '</button>').join('') + '</div>').join('') +
       (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, idee, la tua interfaccia e la chat.</p>' : '');
   },

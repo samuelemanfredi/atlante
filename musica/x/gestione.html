@@ -19,9 +19,21 @@
 .qr{display:block;margin:10px auto;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:8px}
 .chev{color:var(--fg3);font-size:20px}
 </style>
+<style>
+/* Classifiche e playlist */
+.avviso{background:rgba(255,59,48,.14);border-radius:12px;padding:12px 14px;margin:10px 0;color:var(--fg)}
+.avviso b{display:block;color:var(--bad);font-size:17px}
+.avviso span{display:block;font-size:14px;color:var(--fg2);margin-top:2px}
+.numeri{display:flex;gap:10px}
+.numeri div{flex:1;background:var(--bg);border-radius:10px;padding:10px 12px}
+.numeri b{display:block;font-size:28px;line-height:1.1}
+.numeri span{font-size:13px;color:var(--fg2)}
+.esp{font-style:normal;display:inline-block;font-size:11px;font-weight:700;line-height:16px;padding:0 4px;border-radius:3px;background:var(--fill);color:var(--fg2);vertical-align:2px}
+</style>
 </head>
 <body>
 <div class="wrap">
+  <div class="avviso" id="clavviso" hidden></div>
   <div id="richieste" hidden>
     <h2 class="h2">Richieste</h2>
     <div class="list" id="rlist"></div>
@@ -37,6 +49,9 @@
   <h2 class="h2">I tuoi dispositivi</h2>
   <p class="small">Quelli entrati come Samuele (con Tailscale o con la password). Se ne vedi uno che non è tuo, revocalo.</p>
   <div class="list" id="tlist"></div>
+  <h2 class="h2" id="classifiche">Classifiche e playlist</h2>
+  <p class="small">I brani delle classifiche più note (ogni settimana), poi delle playlist più seguite di Spotify e YouTube Music, sempre nella versione explicit, entrano da soli nella libreria.</p>
+  <div id="cl"><p class="small">Un momento…</p></div>
 </div>
 <script src="kit.js"></script>
 <script>
@@ -167,6 +182,66 @@ $('invita').onclick = async () => {
 };
 $('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('invita').click(); });
 disegna();
+</script>
+<script>
+'use strict';
+// ----- Classifiche e playlist: brani nuovi da soli; se YouTube blocca, l'avviso rosso in cima e «Riprova adesso» -----
+(function () {
+  const {$, esc, toast, api} = AX;
+  const hm = t => new Date(t * 1000).toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  // «alle 18:40», «ieri alle 18:40», «domani alle 9:10», «il 25/10 alle 18:40»
+  function alle(t) {
+    const d = new Date(t * 1000), g = Math.round((new Date(d.toDateString()) - new Date(new Date().toDateString())) / 86400000);
+    return (g === 0 ? '' : g === -1 ? 'ieri ' : g === 1 ? 'domani ' : 'il ' + d.toLocaleDateString('it-IT', {day:'2-digit', month:'2-digit'}) + ' ') + 'alle ' + hm(t);
+  }
+  const pill = f => f.esito === 'ok' ? '<span class="pill ok">letta</span>' : f.esito === 'errore' ? '<span class="pill bad">non letta</span>' : '<span class="pill">da leggere</span>';
+  function riga(f) {
+    const sotto = f.esito === 'errore' ? esc(f.errore) + ' · ' + quando(f.letta) + ': riprovo domani' :
+      f.esito === 'ok' ? f.brani + ' brani · ' + quando(f.letta) : 'non ancora letta';
+    return '<div class="row"><span class="tx"><b>' + esc(f.nome) + '</b><span>' + sotto + '</span></span>' + pill(f) + '</div>';
+  }
+  async function riprova(b) {
+    b.disabled = true;
+    try { await api('gestione/classifiche/riprova', {method:'POST'}); toast('Riprovo adesso: una ricerca sola'); } catch (e) { toast(e.message); }
+    setTimeout(disegna, 2500);
+  }
+  async function disegna() {
+    let j;
+    try { j = await api('gestione/classifiche'); }
+    catch (e) { $('cl').innerHTML = '<p class="small">Non riesco a leggere lo stato: ' + esc(e.message) + '</p>'; return; }
+    const b = j.blocco;
+    $('clavviso').hidden = !b;
+    if (b) {
+      $('clavviso').innerHTML = '<b>YouTube ha bloccato gli scaricamenti ' + alle(b.quando) + '</b><span>' +
+        (b.tipo === 'robot' ? 'Chiede di confermare che non sei un robot: riprovo una volta al giorno, ' : 'Ha chiesto di rallentare: riprovo ') +
+        alle(b.prossima) + ', con una ricerca sola. Niente proxy né cambi di indirizzo.</span>' +
+        '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button><a class="btn sm" href="#classifiche">Dettagli</a></div>';
+    }
+    if (!j.attivo) {
+      $('cl').innerHTML = '<div class="card"><p class="small">Spento su questo Mac. Si accende sul Mac mini con <b>ATLANTE_CLASSIFICHE=1</b> nel servizio del server.</p></div>';
+    } else {
+      const p = j.pausa, f = j.fonte;
+      let h = '<div class="card"><div class="numeri"><div><b>' + j.oggi + '</b><span>aggiunti oggi</span></div><div><b>' + j.totale + '</b><span>in tutto</span></div></div>';
+      if (b) h += '<p class="small" style="color:var(--bad)">Fermo: YouTube ha bloccato gli scaricamenti. Prossima prova ' + alle(b.prossima) + '.</p>';
+      else if (p) h += '<p class="small">In pausa: ' + esc(p.motivo) + ' Riprendo ' + alle(p.fino) + '.</p>';
+      else if (j.ora) h += '<p class="small">Adesso: ' + esc(j.ora) + '</p>';
+      if (f && f.in_coda) h += '<p class="small">Fonte in corso: <b>' + esc(f.nome) + '</b> · ' + f.in_coda + (f.in_coda === 1 ? ' brano' : ' brani') + ' da guardare</p>';
+      h += '<p class="small">' + j.cercati + ' brani già cercati su YouTube Music · ' + j.playlist_lette + ' playlist lette' +
+        (j.spazio_libero_gb != null ? ' · ' + Math.round(j.spazio_libero_gb) + ' GB liberi (mi fermo sotto i 200)' : '') + '</p>';
+      if (b || p) h += '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button></div>';
+      h += '</div>';
+      h += '<h2 class="h2" style="font-size:17px">Ultimi aggiunti</h2>' + (j.ultimi.length ? '<div class="list">' + j.ultimi.map(u =>
+        '<div class="row"><span class="tx"><b>' + esc(u.titolo) + (u.explicit ? ' <em class="esp" title="Explicit">E</em>' : '') + '</b><span>' + esc(u.artista) + ' · ' + esc(u.fonte) + ' · ' + quando(u.quando) + '</span></span></div>').join('') + '</div>' :
+        '<p class="small">Ancora nessuno.</p>');
+      h += '<h2 class="h2" style="font-size:17px">Classifiche (ogni settimana)</h2><div class="list">' + j.classifiche.map(riga).join('') + '</div>';
+      if (j.playlist.length) h += '<h2 class="h2" style="font-size:17px">Playlist lette di recente</h2><div class="list">' + j.playlist.map(riga).join('') + '</div>';
+      $('cl').innerHTML = h;
+    }
+    document.querySelectorAll('[data-riprova]').forEach(x => x.onclick = () => riprova(x));
+  }
+  disegna();
+  setInterval(() => { if (document.visibilityState === 'visible') disegna(); }, 15000);
+})();
 </script>
 </body>
 </html>
