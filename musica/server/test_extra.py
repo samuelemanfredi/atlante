@@ -1815,5 +1815,677 @@ class TestPersone(unittest.TestCase):
             self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
 
 
+# ----- chat cifrata da telefono a telefono (fase 5a) -----
+#
+# Il Mac mini non decifra niente: qui i messaggi sono byte a caso della grandezza giusta e le chiavi pubbliche punti
+# veri della curva P-256 (calcolati qui sotto). La cifratura vera si prova con Deno in TestChatCifra.
+
+import base64 as _base64
+import secrets as _secrets
+
+_P256_P = 2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1
+_P256_G = (0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
+           0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5)
+_SPKI = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+FINTO_PUSH = []   # richieste arrivate al servizio di notifiche finto
+OPENSSL_MAC = "/usr/bin/openssl"
+DENO = shutil.which("deno") or next((p for p in ("/opt/homebrew/bin/deno", "/usr/local/bin/deno") if os.path.isfile(p)), None)
+
+
+def b64u(b):
+    return _base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def deb64u(s):
+    return _base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _somma(a, b):
+    p = _P256_P
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and (a[1] + b[1]) % p == 0:
+        return None
+    if a == b:
+        l = (3 * a[0] * a[0] - 3) * pow(2 * a[1], -1, p) % p
+    else:
+        l = (b[1] - a[1]) * pow(b[0] - a[0], -1, p) % p
+    x = (l * l - a[0] - b[0]) % p
+    return x, (l * (a[0] - x) - a[1]) % p
+
+
+def punto(k):
+    r, q = None, _P256_G
+    while k:
+        if k & 1:
+            r = _somma(r, q)
+        q = _somma(q, q)
+        k >>= 1
+    return r
+
+
+def chiave_finta(k=None):
+    """Chiave pubblica P-256 vera (k·G), come la manda il browser: 0x04 || x || y in base64url."""
+    x, y = punto(k or _secrets.randbelow(2 ** 250) + 2)
+    return b64u(b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big"))
+
+
+def finto_messaggio(conv, disp, dest, id_=None):
+    return {"id": id_ or b64u(os.urandom(16)), "conv": conv, "disp": disp, "corpo": b64u(os.urandom(300)),
+            "sale": b64u(os.urandom(16)), "chiavi": {d: b64u(os.urandom(60)) for d in dest}}
+
+
+def _intero_der(v):
+    v = v.lstrip(b"\x00") or b"\x00"
+    if v[0] & 0x80:
+        v = b"\x00" + v
+    return b"\x02" + bytes([len(v)]) + v
+
+
+def rs_a_der(rs):
+    corpo = _intero_der(rs[:32]) + _intero_der(rs[32:])
+    return b"\x30" + bytes([len(corpo)]) + corpo
+
+
+def verifica_es256(k, dati, firma, cartella):
+    """Firma ES256 (r || s) controllata con openssl del Mac, a partire dalla chiave pubblica di una notifica."""
+    pem = os.path.join(cartella, "pub-%s.pem" % _secrets.token_hex(4))
+    sig = pem + ".sig"
+    with open(pem, "w") as f:
+        f.write("-----BEGIN PUBLIC KEY-----\n%s-----END PUBLIC KEY-----\n" % _base64.encodebytes(_SPKI + deb64u(k)).decode("ascii"))
+    with open(sig, "wb") as f:
+        f.write(rs_a_der(firma))
+    r = subprocess.run([OPENSSL_MAC, "dgst", "-sha256", "-verify", pem, "-signature", sig], input=dati,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    return r.returncode == 0 and b"Verified OK" in r.stdout
+
+
+class FintoPush(http.server.BaseHTTPRequestHandler):
+    """Servizio di notifiche finto (al posto di web.push.apple.com): ricorda le richieste; /vecchio/… risponde 410."""
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        FINTO_PUSH.append({"path": self.path, "headers": dict(self.headers), "corpo": self.rfile.read(n) if n else b""})
+        codice = 410 if self.path.startswith("/vecchio/") else 201
+        self.send_response(codice)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *x):
+        pass
+
+
+def carica_modulo(nome):
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location(nome, SERVER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class Tel:
+    """Un telefono di una persona: biscotto dell'invito da Internet (Funnel), oppure Samuele dal Mac (biscotto None)."""
+
+    def __init__(self, prova, pid, biscotto=None):
+        self.t, self.pid, self.biscotto = prova, pid, biscotto
+
+    def chiama(self, metodo, percorso, corpo=None, grezzi=None, intest=None):
+        h = {}
+        if self.biscotto:
+            h = dict(FUNNEL, **{"Cookie": "am_accesso=" + self.biscotto, "Origin": "https://mac.esempio.ts.net:10000"})
+        if grezzi is not None:
+            h["Content-Type"], corpo = "application/octet-stream", grezzi
+        h.update(intest or {})
+        return richiesta(self.t.s.porta, metodo, "/api/extra/chat/" + percorso, corpo, intest=h)
+
+    def j(self, metodo, percorso, corpo=None, codice=200, grezzi=None):
+        st, h, b = self.chiama(metodo, percorso, corpo, grezzi)
+        self.t.assertEqual(st, codice, "%s %s: %r" % (metodo, percorso, b[:300]))
+        return json.loads(b.decode("utf-8")) if b and "json" in (h.get("Content-Type") or "") else None
+
+    def disp(self):
+        did = b64u(os.urandom(16))
+        self.j("POST", "dispositivi", {"id": did, "chiave": chiave_finta()})
+        return did
+
+    def manda(self, conv, disp, dest, codice=200, **extra):
+        return self.j("POST", "messaggi", dict(finto_messaggio(conv, disp, dest), **extra), codice)
+
+    def leggi(self, disp, dopo=0, **k):
+        q = "".join("&%s=%s" % kv for kv in k.items())
+        return self.j("GET", "messaggi?disp=%s&dopo=%d%s" % (disp, dopo, q))
+
+
+class TestChat(unittest.TestCase):
+    """Rotte della chat sul server vero: nessuno vede i messaggi degli altri (nemmeno cifrati, Samuele compreso), chiavi
+    che cambiano, revoche, gruppi, blocchi, consegnato e letto, allegati, notifiche firmate VAPID."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-chat-")
+        cls.c = prepara_cartelle(cls.base)
+        for f in ("x/chat.html", "x/chat-cifra.js", "x/qrcode.js"):
+            with open(os.path.join(cls.c["app"], f), "w", encoding="utf-8") as fh:
+                fh.write("ciao")
+        cls.push = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoPush)
+        threading.Thread(target=cls.push.serve_forever, daemon=True).start()
+        cls.push_url = "http://127.0.0.1:%d/" % cls.push.server_address[1]
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_PUSH_PROVA": cls.push_url}):
+            cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        cls.m = carica_modulo("musica_libreria_chat")
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cls.ip = 10
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.push.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def telefono(self, pid):
+        """Un accesso nuovo (un altro telefono) della persona, entrato dal suo link d'invito."""
+        TestChat.ip += 1
+        codice, _ = self.pers.invito(pid)
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso/invito/" + codice, b"", intest=dict(
+            FUNNEL, **{"X-Forwarded-For": "203.0.113.%d" % TestChat.ip, "Content-Type": "application/x-www-form-urlencoded",
+                       "Origin": "https://mac.esempio.ts.net:10000", "User-Agent": TestAccesso.IPHONE}))
+        self.assertEqual(st, 200, b[:200])
+        v = [x for x in h.get_all("Set-Cookie") if x.startswith("am_accesso=")][0].split(";")[0].split("=", 1)[1]
+        return Tel(self, pid, v)
+
+    def entra(self, nome):
+        return self.telefono(self.pers.crea(nome)["id"])
+
+    def due(self, a, b):
+        return a.j("POST", "conversazioni", {"con": b.pid})["conversazione"]["id"]
+
+    def test_1_dispositivi_e_persone(self):
+        anna, bruno = self.entra("Anna"), self.entra("Bruno")
+        da = anna.disp()
+        x, y = punto(5)
+        storta = b64u(b"\x04" + x.to_bytes(32, "big") + ((y + 1) % _P256_P).to_bytes(32, "big"))
+        anna.j("POST", "dispositivi", {"id": b64u(os.urandom(16)), "chiave": storta}, 400)   # non sta sulla curva
+        anna.j("POST", "dispositivi", {"id": "corto", "chiave": chiave_finta()}, 400)
+        bruno.j("POST", "dispositivi", {"id": da, "chiave": chiave_finta()}, 409)   # l'id di un altro
+        st = anna.j("GET", "stato")
+        self.assertEqual(st["io"], {"id": anna.pid, "nome": "Anna"})
+        self.assertEqual([(d["id"], d["questo"]) for d in st["dispositivi"]], [(da, True)])
+        self.assertTrue(self.m._punto_p256(deb64u(st["vapid"])))   # chiave VAPID vera, creata con openssl
+        p = {x["id"]: x for x in bruno.j("GET", "persone")["persone"]}
+        self.assertEqual([(d["id"], d["attivo"]) for d in p[anna.pid]["dispositivi"]], [(da, True)])
+        self.assertEqual((p["p"]["nome"], p[bruno.pid]["dispositivi"]), ("Samuele", []))
+        self.assertTrue(re.fullmatch(r"[A-Za-z0-9_-]{87}", p[anna.pid]["dispositivi"][0]["chiave"]))
+        # Samuele dal Mac e un invitato sono persone della chat; la rete di casa no
+        self.assertEqual(Tel(self, "p").j("GET", "stato")["io"]["id"], "p")
+        finta = FintaRichiesta("192.168.1.20")
+        finta._chi = {"ruolo": "casa", "persona": None, "chiave": None}
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.m._chat_io(finta)
+        self.assertEqual(e.exception.codice, 403)
+
+    def test_2_chat_a_due_e_niente_ai_curiosi(self):
+        anna, bruno, carla = self.entra("Alba"), self.entra("Berto"), self.entra("Cloe")
+        sam = Tel(self, "p")
+        da, db, dc, ds = anna.disp(), bruno.disp(), carla.disp(), sam.disp()
+        cid = self.due(anna, bruno)
+        self.assertTrue(cid.startswith("d"))
+        self.assertEqual(self.due(bruno, anna), cid)   # la chat a due è sempre la stessa
+        anna.j("POST", "conversazioni", {"con": anna.pid}, 404)
+        m = finto_messaggio(cid, da, [db])
+        seq = anna.j("POST", "messaggi", m)["seq"]
+        self.assertEqual(anna.j("POST", "messaggi", m)["seq"], seq)   # mandato due volte (rete caduta): una volta sola
+        r = bruno.leggi(db)["messaggi"]
+        self.assertEqual(len(r), 1)
+        self.assertEqual((r[0]["corpo"], r[0]["chiave"], r[0]["da"], r[0]["disp"]), (m["corpo"], m["chiavi"][db], anna.pid, da))
+        self.assertNotIn("chiavi", r[0])   # ogni dispositivo riceve solo la sua chiave
+        # nessun altro vede la conversazione o i suoi messaggi, nemmeno cifrati: Samuele compreso
+        for t, d in ((sam, ds), (carla, dc)):
+            self.assertNotIn(cid, [c["id"] for c in t.j("GET", "conversazioni")["conversazioni"]])
+            self.assertEqual(t.leggi(d)["messaggi"], [])
+            t.j("GET", "messaggi?disp=%s&dopo=0" % db, codice=404)   # il dispositivo di Bruno non è suo
+            t.j("GET", "avvisi?disp=%s" % db, codice=404)
+            t.j("POST", "conversazioni/%s/letto" % cid, {"seq": seq}, 404)
+            t.j("POST", "conversazioni/%s/membri" % cid, {"persone": [t.pid]}, 404)
+            t.manda(cid, d, [da, db], 404)
+            t.j("POST", "allegati", {"conv": cid, "dimensione": 128, "pezzi": 1}, 404)
+        # e la conversazione non porta via i dispositivi di un altro
+        sam.j("POST", "messaggi", finto_messaggio(cid, db, [da]), 404)
+
+    def test_3_chiavi_cambiate_e_revoche(self):
+        anna, bruno = self.entra("Ada"), self.entra("Bice")
+        da, db1 = anna.disp(), bruno.disp()
+        bruno2 = self.telefono(bruno.pid)
+        db2 = bruno2.disp()
+        cid = self.due(anna, bruno)
+        j = anna.manda(cid, da, [db1], 409)   # Anna non sa ancora del telefono nuovo di Bruno
+        self.assertEqual(j["mancano"], [db2])
+        anna.manda(cid, da, [db1, db2])
+        # un dispositivo revocato esce subito dai destinatari
+        self.assertTrue(self.pers.revoca_dispositivo(bruno2.biscotto.split(".")[2]))
+        anna.manda(cid, da, [db1])
+        seq = anna.manda(cid, da, [db1, db2])["seq"]   # quello di troppo si scarta
+        with open(os.path.join(self.c["cache"], "chat", "messaggi", "%d.json" % seq), encoding="utf-8") as f:
+            self.assertEqual(list(json.load(f)["chiavi"]), [db1])
+        self.assertEqual(bruno2.chiama("GET", "messaggi?disp=%s&dopo=0" % db2)[0], 401)
+        p = {x["id"]: x for x in anna.j("GET", "persone")["persone"]}
+        self.assertEqual({d["id"]: d["attivo"] for d in p[bruno.pid]["dispositivi"]}, {db1: True, db2: False})
+        # chi non ha ancora aperto la chat: il messaggio non può partire (non c'è una chiave per cui cifrarlo)
+        carla = self.entra("Ciro")
+        j = anna.manda(self.due(anna, carla), da, [], 409)
+        self.assertTrue(j["nessuno"])
+        self.assertIn("non ha ancora aperto la chat", j["errore"])
+        # una persona revocata esce dalla chat
+        self.assertTrue(self.pers.revoca_persona(bruno.pid))
+        j = anna.manda(cid, da, [db1], 409)
+        self.assertIn("non è più in Atlante", j["errore"])
+        self.assertNotIn(bruno.pid, [x["id"] for x in anna.j("GET", "persone")["persone"]])
+
+    def test_4_gruppi(self):
+        a, b, c, d = self.entra("Gaia"), self.entra("Ugo"), self.entra("Ines"), self.entra("Olga")
+        da, db, dc, dd = a.disp(), b.disp(), c.disp(), d.disp()
+        g = a.j("POST", "conversazioni", {"nome": "  Amici  del giovedì ", "membri": [b.pid, c.pid, "0123456789abcdef", a.pid]})["conversazione"]
+        gid = g["id"]
+        self.assertEqual((g["tipo"], g["nome"], g["membri"], g["creatore"]), ("gruppo", "Amici del giovedì", [a.pid, b.pid, c.pid], a.pid))
+        b.j("POST", "conversazioni/%s/membri" % gid, {"persone": [d.pid]}, 403)   # solo chi l'ha creato
+        b.j("DELETE", "conversazioni/%s/membri/%s" % (gid, c.pid), codice=403)
+        a.j("POST", "conversazioni/%s/membri" % gid, {"persone": [d.pid]})
+        self.assertEqual(a.manda(gid, da, [db, dc], 409)["mancano"], [dd])
+        a.manda(gid, da, [db, dc, dd])
+        a.j("DELETE", "conversazioni/%s/membri/%s" % (gid, c.pid))
+        self.assertNotIn(gid, [x["id"] for x in c.j("GET", "conversazioni")["conversazioni"]])
+        c.manda(gid, dc, [da], 404)   # chi è stato tolto non scrive più nel gruppo
+        a.manda(gid, da, [db, dd])     # e non è più tra i destinatari
+        b.j("DELETE", "conversazioni/%s/membri/%s" % (gid, b.pid))   # Ugo esce
+        a.j("DELETE", "conversazioni/%s/membri/%s" % (gid, a.pid))   # esce anche chi l'ha creato: passa a Olga
+        g = [x for x in d.j("GET", "conversazioni")["conversazioni"] if x["id"] == gid][0]
+        self.assertEqual((g["membri"], g["creatore"]), ([d.pid], d.pid))
+        self.assertEqual([(e["tipo"], e["da"], e["chi"]) for e in g["eventi"]],
+                         [("creato", a.pid, [b.pid, c.pid]), ("aggiunti", a.pid, [d.pid]), ("tolto", a.pid, [c.pid]),
+                          ("uscito", b.pid, [b.pid]), ("uscito", a.pid, [a.pid])])
+        # una persona revocata esce dai gruppi
+        e = self.entra("Pia")
+        g2 = d.j("POST", "conversazioni", {"nome": "Due", "membri": [e.pid]})["conversazione"]["id"]
+        self.assertTrue(self.pers.revoca_persona(e.pid))
+        self.assertEqual([x["membri"] for x in d.j("GET", "conversazioni")["conversazioni"] if x["id"] == g2], [[d.pid]])
+        # al più 32 persone, chi lo crea compreso
+        altri = [self.pers.crea("Persona %d" % i)["id"] for i in range(32)]
+        a.j("POST", "conversazioni", {"nome": "Troppi", "membri": altri}, 409)
+        self.assertEqual(len(a.j("POST", "conversazioni", {"nome": "Giusti", "membri": altri[:31]})["conversazione"]["membri"]), 32)
+        a.j("POST", "conversazioni", {"nome": "   ", "membri": [b.pid]}, 400)
+
+    def test_5_blocca(self):
+        a, b = self.entra("Nadia"), self.entra("Pietro")
+        da, db = a.disp(), b.disp()
+        cid = self.due(a, b)
+        self.assertEqual(b.j("POST", "blocchi", {"persona": a.pid}), {"bloccati": [a.pid]})
+        seq = a.manda(cid, da, [db])["seq"]   # Nadia non lo sa: il messaggio parte, ma a Pietro non arriva
+        self.assertEqual(b.leggi(db)["messaggi"], [])
+        self.assertFalse(os.path.exists(os.path.join(self.c["cache"], "chat", "messaggi", "%d.json" % seq)))
+        self.assertEqual(b.j("GET", "persone")["bloccati"], [a.pid])
+        b.manda(cid, db, [da])   # chi blocca può ancora scrivere
+        self.assertEqual(len(a.leggi(da)["messaggi"]), 1)
+        self.assertEqual(b.j("DELETE", "blocchi/" + a.pid), {"bloccati": []})
+        a.manda(cid, da, [db])
+        self.assertEqual(len(b.leggi(db)["messaggi"]), 1)
+        b.j("POST", "blocchi", {"persona": b.pid}, 404)
+
+    def test_6_consegnato_letto_e_attesa_lunga(self):
+        a, b = self.entra("Elsa"), self.entra("Fabio")
+        da, db = a.disp(), b.disp()
+        cid = self.due(a, b)
+        r0 = b.leggi(db)
+        fuori = {}
+
+        def aspetta_messaggi():
+            fuori["r"] = b.leggi(db, r0["fino"], v=r0["v"], attesa=10)
+            fuori["t"] = time.time()
+        th = threading.Thread(target=aspetta_messaggi)
+        th.start()
+        time.sleep(0.5)
+        t0 = time.time()
+        seq = a.manda(cid, da, [db])["seq"]
+        th.join(15)
+        self.assertEqual([m["seq"] for m in fuori["r"]["messaggi"]], [seq])
+        self.assertLess(fuori["t"] - t0, 3)   # arriva subito, non alla fine dell'attesa
+
+        def stati():
+            return [c for c in a.j("GET", "conversazioni")["conversazioni"] if c["id"] == cid][0]["stati"].get(b.pid, {"c": 0, "l": 0})
+        self.assertLess(stati()["c"], seq)
+        b.leggi(db, fuori["r"]["fino"])   # Fabio l'ha salvato: consegnato
+        self.assertEqual((stati()["c"] >= seq, stati()["l"] >= seq), (True, False))
+        # Elsa aspetta: quando Fabio legge, la sua attesa finisce con una versione nuova (le spunte blu)
+        ra = a.leggi(da)
+        fuori.clear()
+
+        def aspetta_novita():
+            fuori["r"] = a.leggi(da, ra["fino"], v=ra["v"], attesa=10)
+            fuori["t"] = time.time()
+        th = threading.Thread(target=aspetta_novita)
+        th.start()
+        time.sleep(0.5)
+        t0 = time.time()
+        b.j("POST", "conversazioni/%s/letto" % cid, {"seq": seq})
+        th.join(15)
+        self.assertLess(fuori["t"] - t0, 3)
+        self.assertNotEqual(fuori["r"]["v"], ra["v"])
+        self.assertEqual(fuori["r"]["messaggi"], [])
+        self.assertGreaterEqual(stati()["l"], seq)
+
+    def test_7_allegati(self):
+        a, b, c = self.entra("Lara"), self.entra("Marco"), self.entra("Nico")
+        da, db, dc = a.disp(), b.disp(), c.disp()
+        cid = self.due(a, b)
+        al = a.j("POST", "allegati", {"conv": cid, "dimensione": 1000 + 28, "pezzi": 1})
+        self.assertEqual(al["pezzo"], 8 * 1024 * 1024)
+        dati = os.urandom(1028)
+        a.j("POST", "allegati/%s/0" % al["id"], grezzi=dati[:-1], codice=400)   # grandezza sbagliata
+        a.j("POST", "allegati/%s/0" % al["id"], {"x": 1}, 415)                    # non sono byte
+        b.j("POST", "allegati/%s/0" % al["id"], grezzi=dati, codice=404)          # non è suo
+        a.manda(cid, da, [db], 409, allegati=[al["id"]])                           # non ancora caricato
+        self.assertEqual(a.j("POST", "allegati/%s/0" % al["id"], grezzi=dati), {"ok": True, "mancano": []})
+        self.assertEqual(b.chiama("GET", "allegati/%s/0" % al["id"])[0], 404)    # non ancora mandato a Marco
+        a.manda(cid, da, [db], allegati=[al["id"]])
+        m = b.leggi(db)["messaggi"][-1]
+        self.assertEqual(m["allegati"], [{"id": al["id"], "pezzi": 1, "dimensione": 1028}])
+        st, h, got = b.chiama("GET", "allegati/%s/0" % al["id"])
+        self.assertEqual((st, h["Content-Type"], got), (200, "application/octet-stream", dati))
+        for t in (c, Tel(self, "p")):   # chi non ha ricevuto il messaggio non lo scarica, nemmeno cifrato
+            self.assertEqual(t.chiama("GET", "allegati/%s/0" % al["id"])[0], 404)
+        a.j("POST", "allegati/%s/0" % al["id"], grezzi=dati, codice=409)          # mandato: non si cambia più
+        a.j("POST", "allegati", {"conv": cid, "dimensione": 200 * 1024 * 1024 + 1 + 25 * 28, "pezzi": 25}, 413)
+        a.j("POST", "allegati", {"conv": cid, "dimensione": 5000, "pezzi": 2}, 400)
+        # due pezzi, in qualsiasi ordine (un caricamento ripreso)
+        pz = 8 * 1024 * 1024
+        al2 = a.j("POST", "allegati", {"conv": cid, "dimensione": pz + 5 + 56, "pezzi": 2})
+        self.assertEqual(a.j("POST", "allegati/%s/1" % al2["id"], grezzi=os.urandom(33))["mancano"], [0])
+        self.assertEqual(a.j("POST", "allegati/%s/0" % al2["id"], grezzi=os.urandom(pz + 28))["mancano"], [])
+
+    def test_8_notifiche_vapid(self):
+        a, b = self.entra("Rita"), self.entra("Sara")
+        da, db = a.disp(), b.disp()
+        cid = self.due(a, b)
+        b.j("POST", "push", {"disp": db, "endpoint": "https://example.com/push/1"}, 400)
+        b.j("POST", "push", {"disp": db, "endpoint": "http://127.0.0.1:1/x"}, 400)
+        b.j("POST", "push", {"disp": da, "endpoint": self.push_url + "iscr/sara"}, 404)   # il dispositivo di un'altra
+        b.j("POST", "push", {"disp": db, "endpoint": self.push_url + "iscr/sara"})
+
+        def arrivate():
+            return [x for x in FINTO_PUSH if x["path"] == "/iscr/sara"]
+        a.manda(cid, da, [db])
+        x = aspetta(arrivate, 10)
+        self.assertTrue(x, "nessuna notifica")
+        x = x[0]
+        self.assertEqual((x["headers"]["TTL"], x["headers"]["Urgency"], x["corpo"]), ("86400", "high", b""))   # senza contenuto
+        m = re.fullmatch(r"vapid t=([\w-]+)\.([\w-]+)\.([\w-]+), k=([\w-]+)", x["headers"]["Authorization"])
+        self.assertTrue(m, x["headers"]["Authorization"])
+        testa, dati, firma, k = m.groups()
+        self.assertEqual(json.loads(deb64u(testa)), {"typ": "JWT", "alg": "ES256"})
+        d = json.loads(deb64u(dati))
+        self.assertEqual((d["aud"], d["sub"]), (self.push_url.rstrip("/"), "https://mac.esempio.ts.net:10000/"))
+        self.assertTrue(11 * 3600 < d["exp"] - time.time() <= 12 * 3600 + 60)
+        self.assertEqual(k, b.j("GET", "stato")["vapid"])
+        self.assertEqual(len(deb64u(firma)), 64)
+        self.assertTrue(verifica_es256(k, (testa + "." + dati).encode("ascii"), deb64u(firma), self.base))
+        self.assertFalse(verifica_es256(k, (testa + "." + dati + "x").encode("ascii"), deb64u(firma), self.base))
+        # il service worker chiede chi ha scritto: il nome, mai il testo (il Mac mini non lo conosce)
+        av = b.j("GET", "avvisi?disp=" + db)["avvisi"]
+        self.assertEqual([(y["conv"], y["da"], y["nome"], y["n"], y["gruppo"]) for y in av], [(cid, a.pid, "Rita", 1, None)])
+        self.assertEqual(set(av[0]), {"conv", "da", "nome", "n", "t", "gruppo"})
+        # finché Sara non prende i messaggi, niente altre notifiche; poi sì
+        a.manda(cid, da, [db])
+        time.sleep(1.5)
+        self.assertEqual(len(arrivate()), 1)
+        self.assertEqual(b.j("GET", "avvisi?disp=" + db)["avvisi"][0]["n"], 2)
+        b.leggi(db, b.leggi(db)["fino"])
+        self.assertEqual(b.j("GET", "avvisi?disp=" + db)["avvisi"], [])
+        a.manda(cid, da, [db])
+        self.assertTrue(aspetta(lambda: len(arrivate()) == 2, 10))
+        # i propri messaggi non fanno suonare gli altri propri telefoni
+        a2 = self.telefono(a.pid)
+        da2 = a2.disp()
+        a2.j("POST", "push", {"disp": da2, "endpoint": self.push_url + "iscr/rita2"})
+
+        def rita2():
+            return [y for y in FINTO_PUSH if y["path"] == "/iscr/rita2"]
+        b.manda(cid, db, [da, da2])
+        self.assertTrue(aspetta(rita2, 10))
+        a2.leggi(da2, a2.leggi(da2)["fino"])
+        a.manda(cid, da, [db, da2])
+        time.sleep(1)
+        self.assertEqual(len(rita2()), 1)
+        # un'iscrizione scaduta (410) si toglie da sola
+        t = self.entra("Teo")
+        dt = t.disp()
+        t.j("POST", "push", {"disp": dt, "endpoint": self.push_url + "vecchio/teo"})
+        a.manda(self.due(a, t), da, [dt, da2])   # (Rita ha anche il secondo telefono)
+        self.assertTrue(aspetta(lambda: [y for y in FINTO_PUSH if y["path"] == "/vecchio/teo"], 10))
+        self.assertTrue(aspetta(lambda: not t.j("GET", "stato")["dispositivi"][0]["notifiche"], 10))
+
+    def test_9_permessi_degli_invitati(self):
+        v = self.entra("Vera")
+        for p in ("/x/chat.html", "/x/chat-cifra.js", "/x/qrcode.js"):
+            st, h, b = richiesta(self.s.porta, "GET", p, intest=dict(FUNNEL, Cookie="am_accesso=" + v.biscotto))
+            self.assertEqual(st, 200, p)
+        for metodo, rotta in (("GET", "stato"), ("GET", "persone"), ("GET", "conversazioni"), ("POST", "conversazioni"),
+                              ("POST", "dispositivi"), ("GET", "messaggi?disp=x"), ("POST", "messaggi"), ("POST", "allegati"),
+                              ("POST", "allegati/x/0"), ("GET", "allegati/x/0"), ("POST", "blocchi"), ("DELETE", "blocchi/x"),
+                              ("POST", "push"), ("DELETE", "push/x"), ("GET", "avvisi?disp=x"), ("POST", "conversazioni/x/membri"),
+                              ("DELETE", "conversazioni/x/membri/y"), ("POST", "conversazioni/x/letto")):
+            st, h, b = v.chiama(metodo, rotta, {} if metodo == "POST" else None)
+            self.assertNotIn(st, (401, 403), (metodo, rotta, b[:200]))
+        st, h, b = v.chiama("POST", "conversazioni", {"con": "p"}, intest={"Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+
+
+class TestChatArchivio(unittest.TestCase):
+    """La classe Chat da sola: pulizia dopo 30 giorni, riavvii, limite del giorno, notifiche con la chat aperta."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_chat_archivio")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-chat-archivio-")
+        self.m.PERS = self.m.Persone(os.path.join(self.base, "persone.json"))
+        self.m.PUBBLICO = "https://mac.esempio.ts.net:10000/"
+        self.ch = self.m.Chat(os.path.join(self.base, "chat"))
+
+    def tearDown(self):
+        if self.ch.timer:
+            self.ch.timer.cancel()
+        self.m.PERS = None
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def piu_tardi(self, secondi):
+        return unittest.mock.patch.object(self.m.time, "time", return_value=time.time() + secondi)
+
+    def persona(self, nome):
+        a = self.m.PERS.crea(nome)
+        return a["id"], self.m.PERS.usa_invito(self.m.PERS.invito(a["id"])[0], "iphone")
+
+    def disp(self, pid, accesso):
+        did = b64u(os.urandom(16))
+        self.ch.registra(pid, accesso, {"id": did, "chiave": chiave_finta()}, "iphone")
+        return did
+
+    def coppia(self):
+        (a, aa), (b, ab) = self.persona("Anna"), self.persona("Bruno")
+        da, db = self.disp(a, aa), self.disp(b, ab)
+        cid = self.ch.nuova(a, {"con": b})["conversazione"]["id"]
+        return (a, aa, da), (b, ab, db), cid
+
+    def test_der_a_rs(self):
+        r, s = b"\x80" + b"\x01" * 31, b"\x00\x7f" + b"\x02" * 30   # r col bit alto (0x00 davanti), s corto (31 byte)
+        self.assertEqual(self.m._der_a_rs(rs_a_der(r + s)), r + s)
+        for falso in (b"", b"\x30\x02\x02\x00", rs_a_der(r + s)[:-1], b"\x31" + rs_a_der(r + s)[1:]):
+            with self.assertRaises(ValueError):
+                self.m._der_a_rs(falso)
+        # una firma vera di openssl, convertita e controllata
+        t, k = self.ch._jwt("https://web.push.apple.com")
+        testa, dati, firma = t.split(".")
+        self.assertTrue(verifica_es256(k, (testa + "." + dati).encode("ascii"), deb64u(firma), self.base))
+        self.assertEqual(self.ch._jwt("https://web.push.apple.com")[0], t)   # si riusa per ore
+        self.assertEqual(oct(os.stat(os.path.join(self.base, "chat", "vapid.pem")).st_mode & 0o777), "0o600")
+
+    def test_servizi_di_notifica(self):
+        for e in ("https://web.push.apple.com/QWxhZGRpbjpvcGVu", "https://fcm.googleapis.com/fcm/send/abc:def",
+                  "https://updates.push.services.mozilla.com/wpush/v2/gAAA", "https://wns2-par02p.notify.windows.com/w/?token=x"):
+            self.assertTrue(self.m._push_ammesso(e), e)
+        for e in ("http://web.push.apple.com/x", "https://push.apple.com.example.com/x", "https://127.0.0.1/x",
+                  "https://example.com/web.push.apple.com/", "https://web.push.apple.com:8443/x", "https://web.push.apple.com/a b"):
+            self.assertFalse(self.m._push_ammesso(e), e)
+
+    def test_pulizia_e_trenta_giorni(self):
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        preso = self.ch.invia(a, aa, finto_messaggio(cid, da, [db]))["seq"]
+        self.ch.ricevi(b, ab, db, preso, 0, 0)   # Bruno l'ha preso: via dal Mac mini alla prossima pulizia
+        with self.ch.blocco:
+            self.ch._pulisci(forza=True)
+        self.assertFalse(os.path.exists(self.ch._file_msg(preso)))
+        fermo = self.ch.invia(a, aa, finto_messaggio(cid, da, [db]))["seq"]   # il telefono di Bruno è spento
+        al = self.ch.nuovo_allegato(a, {"conv": cid, "dimensione": 128, "pezzi": 1})["id"]
+        self.ch.carica_pezzo(a, al, "0", os.urandom(128))
+        self.ch.invia(a, aa, dict(finto_messaggio(cid, da, [db]), allegati=[al]))
+        mai = self.ch.nuovo_allegato(a, {"conv": cid, "dimensione": 128, "pezzi": 1})["id"]   # mai mandato
+        with self.piu_tardi(2 * 86400), self.ch.blocco:
+            self.ch._pulisci(forza=True)
+        self.assertTrue(os.path.exists(self.ch._file_msg(fermo)))
+        self.assertIn(al, self.ch.dati["allegati"])
+        self.assertNotIn(mai, self.ch.dati["allegati"])
+        with self.piu_tardi(31 * 86400), self.ch.blocco:
+            self.ch._pulisci(forza=True)
+        self.assertFalse(os.path.exists(self.ch._file_msg(fermo)))
+        self.assertEqual((self.ch.dati["allegati"], os.listdir(self.ch.cartella_all)), ({}, []))
+
+    def test_riavvio_e_archivio_rotto(self):
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        seq = self.ch.invia(a, aa, finto_messaggio(cid, da, [db]))["seq"]
+        ch2 = self.m.Chat(self.ch.cartella)   # dopo un riavvio: stessi messaggi, numeri che non tornano indietro
+        self.assertEqual([x["seq"] for x in ch2.ricevi(b, ab, db, 0, 0, 0)["messaggi"]], [seq])
+        self.assertGreater(ch2.invia(a, aa, finto_messaggio(cid, da, [db]))["seq"], seq)
+        with open(self.ch.file, "w") as f:
+            f.write("{rotto")
+        ch3 = self.m.Chat(self.ch.cartella)
+        self.assertTrue(os.path.exists(self.ch.file + ".rotto"))
+        self.assertGreater(ch3.dati["seq"], time.time() - 60)   # più in alto di quello che i telefoni ricordano
+
+    def test_dispositivi_per_persona(self):
+        chiavi = ["p:%016x" % i for i in range(11)]
+        dd = [self.disp("p", k) for k in chiavi]
+        attivi = [x["id"] for x in self.ch.persone("p")["persone"][0]["dispositivi"] if x["attivo"]]
+        self.assertEqual(sorted(attivi), sorted(dd[1:]))   # oltre 10 esce quello sentito meno di recente
+        nuovo = self.disp("p", chiavi[5])   # stesso browser, dati del sito cancellati: prende il posto del vecchio
+        attivi = [x["id"] for x in self.ch.persone("p")["persone"][0]["dispositivi"] if x["attivo"]]
+        self.assertIn(nuovo, attivi)
+        self.assertNotIn(dd[5], attivi)
+
+    def test_limite_del_giorno(self):
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        with unittest.mock.patch.object(self.m, "CHAT_GIORNO_MAX", 1500):
+            al = [self.ch.nuovo_allegato(a, {"conv": cid, "dimensione": 1000, "pezzi": 1})["id"] for _ in range(2)]
+            self.ch.carica_pezzo(a, al[0], "0", os.urandom(1000))
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                self.ch.carica_pezzo(a, al[1], "0", os.urandom(1000))
+            self.assertEqual((e.exception.codice, e.exception.testo), (429, "Hai raggiunto i 20 GB di oggi: si riprende domani"))
+            with unittest.mock.patch.object(self.m.time, "strftime", return_value="2099-01-01"):   # il giorno dopo
+                self.ch.carica_pezzo(a, al[1], "0", os.urandom(1000))
+
+    def test_notifiche_con_la_chat_aperta(self):
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        mandate = []
+        self.ch._manda_notifica = lambda e: mandate.append(e) or 201
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_PUSH_PROVA": "http://127.0.0.1:9/"}), \
+                unittest.mock.patch.object(self.m, "CHAT_PUSH_RITARDO", 0.5):
+            self.ch.iscrivi(b, ab, {"disp": db, "endpoint": "http://127.0.0.1:9/b"})
+            self.ch.attese[db] = 1   # Bruno ha la chat aperta (attesa lunga)
+            seq = self.ch.invia(a, aa, finto_messaggio(cid, da, [db]))["seq"]
+            del self.ch.attese[db]
+            self.ch.ricevi(b, ab, db, seq, 0, 0)   # e prende subito il messaggio
+            time.sleep(1)
+            self.assertEqual(mandate, [])
+            self.ch.invia(a, aa, finto_messaggio(cid, da, [db]))   # chat chiusa: notifica subito
+            self.assertTrue(aspetta(lambda: mandate == ["http://127.0.0.1:9/b"], 5))
+
+    def test_bloccato(self):
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        self.m.CHAT = self.ch
+        try:
+            self.ch.blocca(b, a, True)
+            self.assertEqual((self.m.chat_bloccato(a, b), self.m.chat_bloccato(b, a)), (True, False))
+        finally:
+            self.m.CHAT = None
+
+
+@unittest.skipUnless(DENO, "Deno non c'è: la cifratura del browser si prova solo a mano")
+class TestChatCifra(unittest.TestCase):
+    """x/chat-cifra.js con la WebCrypto vera (Deno): cifratura, firme e codice di sicurezza, poi due persone che si
+    scrivono attraverso il server di prova; alla fine nei file del Mac mini non c'è niente in chiaro."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-chat-deno-")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def deno(self, *args, rete=None):
+        env = dict(os.environ, DENO_DIR=os.path.join(self.base, "deno"), DENO_NO_UPDATE_CHECK="1", NO_COLOR="1")
+        x = os.path.join(os.path.dirname(QUI), "x")
+        r = subprocess.run([DENO, "run", "--quiet", "--no-config", "--no-lock", "--no-remote", "--no-npm",
+                            "--allow-read=%s,%s" % (x, QUI)] + (["--allow-net=" + rete] if rete else []) +
+                           [os.path.join(QUI, "test_chat_cifra.js")] + list(args),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180, env=env)
+        righe = r.stdout.decode("utf-8", "replace").strip().splitlines()
+        self.assertTrue(righe, r.stderr.decode("utf-8", "replace")[-2000:])
+        j = json.loads(righe[-1])
+        self.assertTrue(j["ok"], j.get("errore"))
+        return j
+
+    def test_prove_nel_browser(self):
+        self.assertEqual(len(self.deno("prove")["prove"]), 6)
+
+    def test_firma_vapid_controllata_da_webcrypto(self):
+        m = carica_modulo("musica_libreria_chat_vapid")
+        m.PUBBLICO = "https://mac.esempio.ts.net:10000/"
+        t, k = m.Chat(os.path.join(self.base, "vapid"))._jwt("https://web.push.apple.com")
+        self.assertEqual(self.deno("vapid", t, k)["testa"]["alg"], "ES256")
+
+    def test_due_persone_attraverso_il_mac_mini(self):
+        c = prepara_cartelle(os.path.join(self.base, "server"))
+        s = Server(self.base, c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        try:
+            pers = carica_modulo("musica_libreria_chat_deno").Persone(os.path.join(c["cache"], "persone.json"))
+            intest, ip = {}, 30
+
+            def biscotto(pid):
+                nonlocal ip
+                ip += 1
+                st, h, b = richiesta(s.porta, "POST", "/accesso/invito/" + pers.invito(pid)[0], b"", intest=dict(
+                    FUNNEL, **{"X-Forwarded-For": "203.0.113.%d" % ip, "Content-Type": "application/x-www-form-urlencoded",
+                               "Origin": "https://mac.esempio.ts.net:10000"}))
+                self.assertEqual(st, 200)
+                v = [x for x in h.get_all("Set-Cookie") if x.startswith("am_accesso=")][0].split(";")[0]
+                return {"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.%d" % ip, "Cookie": v}
+            anna, bruno = pers.crea("Anna")["id"], pers.crea("Bruno")["id"]
+            intest = {"anna": biscotto(anna), "bruno": biscotto(bruno), "bruno2": biscotto(bruno)}
+            j = self.deno("server", "http://127.0.0.1:%d/" % s.porta, json.dumps(intest), rete="127.0.0.1:%d" % s.porta)
+        finally:
+            s.ferma()
+        # sul Mac mini solo cifrato: né i testi né il segno messo in chiaro dentro l'allegato
+        cerca = [x.encode("utf-8") for x in j["segreti"] + [j["segno"]]]
+        letti = 0
+        for radice, _, nomi in os.walk(os.path.join(c["cache"], "chat")):
+            for n in nomi:
+                with open(os.path.join(radice, n), "rb") as f:
+                    dati = f.read()
+                letti += len(dati)
+                for x in cerca:
+                    self.assertNotIn(x, dati, os.path.join(radice, n))
+        self.assertGreater(letti, 8 * 1024 * 1024)   # l'allegato c'è (cifrato)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

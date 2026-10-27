@@ -40,6 +40,7 @@ Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve 
 """
 import argparse
 import array
+import base64
 import collections
 import getpass
 import hashlib
@@ -3211,6 +3212,1075 @@ def _proxy_media(h, r, sock, url, lun):
         h.wfile.write(b)
 
 
+# ----- chat cifrata da telefono a telefono (fase 5a) -----
+#
+# Messaggi, foto, video, vocali e brani della libreria tra chi è in Atlante (Samuele è "p", gli invitati il loro id),
+# a due e in gruppo. Il Mac mini fa solo da postino: ogni telefono crea le sue chiavi (ECDH P-256 nel browser, la
+# privata non esce mai dal telefono; qui arriva solo la pubblica) e cifra ogni messaggio con una chiave nuova, cifrata a
+# sua volta per ciascun dispositivo dei partecipanti (vedi x/chat-cifra.js). Il Mac mini sa chi scrive a chi, quando e
+# quanto è grande, non cosa. Un messaggio cifrato resta qui finché l'hanno preso tutti i dispositivi a cui è diretto,
+# al più 30 giorni; gli allegati 30 giorni. Notifiche: Web Push senza contenuto (il service worker chiede poi qui chi
+# ha scritto), firmate VAPID con /usr/bin/openssl, perché la libreria standard di Python non ha le curve ellittiche.
+#
+#   GET    chat/stato                           chi sono, i miei dispositivi della chat, chiave VAPID per le notifiche
+#   POST   chat/dispositivi {id,chiave}         questo telefono entra nella chat con la sua chiave pubblica
+#   GET    chat/persone                         chi è in Atlante, le chiavi pubbliche dei suoi dispositivi, chi ho bloccato
+#   GET    chat/conversazioni                   le mie conversazioni (membri, consegnato e letto, eventi dei gruppi)
+#   POST   chat/conversazioni {con} | {nome,membri}     chat a due (sempre la stessa) o gruppo nuovo
+#   POST   chat/conversazioni/<id>/membri {persone}     aggiunge al gruppo (solo chi l'ha creato)
+#   DELETE chat/conversazioni/<id>/membri/<persona>     toglie dal gruppo (chi l'ha creato) o esce (sé stessi)
+#   POST   chat/conversazioni/<id>/letto {seq}          letto fino a quel messaggio
+#   POST   chat/messaggi {id,conv,disp,corpo,sale,chiavi,allegati}  messaggio cifrato -> {seq,t}; 409 con «mancano»
+#   GET    chat/messaggi?disp=&dopo=&v=&attesa=25       i messaggi per questo dispositivo (attesa lunga); `dopo` conferma
+#   POST   chat/allegati {conv,dimensione,pezzi}        allegato cifrato nuovo -> {id,pezzo}
+#   POST   chat/allegati/<id>/<n>                       un pezzo (byte cifrati, Content-Type application/octet-stream)
+#   GET    chat/allegati/<id>/<n>                       un pezzo, solo per chi ha ricevuto il messaggio
+#   POST   chat/blocchi {persona} · DELETE chat/blocchi/<persona>
+#   POST   chat/push {disp,endpoint} · DELETE chat/push/<disp>   notifiche di questo dispositivo
+#   GET    chat/avvisi?disp=                            chi ha scritto (il testo della notifica, letto dal service worker)
+
+CHAT_GIORNI = 30                  # i messaggi cifrati aspettano i telefoni spenti al più 30 giorni, poi si cancellano
+CHAT_DISP_MAX = 10                # dispositivi della chat per persona: oltre, esce quello sentito meno di recente
+CHAT_GRUPPO_MAX = 32              # persone in un gruppo, chi l'ha creato compreso
+CHAT_GRUPPI_PERSONA = 200         # gruppi creati da una persona
+CHAT_NOME_MAX = 40
+CHAT_PEZZO = 8 * 1024 * 1024      # byte in chiaro di un pezzo di allegato: cifrato sta sotto i 20 MB di una richiesta
+CHAT_CIFRA = 28                   # quanto aggiunge la cifratura a un pezzo: 12 byte di vettore iniziale e 16 di controllo
+CHAT_ALLEGATO_MAX = 200 * 1024 * 1024
+CHAT_PEZZI_MAX = -(-CHAT_ALLEGATO_MAX // CHAT_PEZZO)
+CHAT_ALLEGATI_MESSAGGIO = 10
+CHAT_ALLEGATI_APERTI = 20         # allegati cominciati e non ancora mandati, per persona
+CHAT_CORPO_MAX = 256 * 1024       # un messaggio cifrato (testo, o la scheda di un allegato con l'anteprima), in base64
+CHAT_RISPOSTA_MAX = 200           # messaggi per risposta: il telefono chiede subito il resto
+CHAT_SALVA_OGNI = 5               # conferme di consegna e letture: su disco al più ogni 5 secondi
+CHAT_PULISCI_OGNI = 600
+CHAT_GIORNO_MAX = 20 * 1024 ** 3  # 20 GB al giorno per persona (vedi _chat_conta_giorno)
+CHAT_SPAZIO_MIN = 5 * 1024 ** 3   # sotto 5 GB liberi sul disco della cache gli allegati non partono
+CHAT_PUSH_RITARDO = 10            # telefono con la chat aperta: il messaggio arriva subito, la notifica solo se non lo prende
+CHAT_PUSH_DI_NUOVO = 300          # a chi non ha ancora preso i messaggi della notifica precedente, un'altra dopo 5 minuti
+CHAT_PUSH_TTL = 86400             # una notifica che non arriva entro un giorno non serve più (i messaggi arrivano comunque)
+CHAT_EVENTI_MAX = 100             # eventi di un gruppo tenuti (creato, aggiunti, tolti, usciti)
+NOME_SAMUELE = "Samuele"
+ID_CHAT = re.compile(r"^[A-Za-z0-9_-]{16,43}$")          # id scelti dai telefoni (messaggi, dispositivi): 16 byte casuali
+PERSONA_CHAT = re.compile(r"^(?:p|[0-9a-f]{16})$")
+CONV_CHAT = re.compile(r"^(?:d[0-9a-f]{24}|g[0-9a-f]{16})$")
+ALLEGATO_CHAT = re.compile(r"^[A-Za-z0-9_-]{22}$")
+B64U = re.compile(r"^[A-Za-z0-9_-]*$")
+# notifiche solo verso i servizi di Apple, Google, Mozilla e Microsoft: con un indirizzo qualsiasi il Mac mini farebbe
+# richieste dove vuole chi si iscrive (anche nella rete di casa). ATLANTE_PUSH_PROVA aggiunge il servizio finto delle prove
+PUSH_SERVIZI = re.compile(r"^https://(?:[a-z0-9-]+\.)*(?:push\.apple\.com|fcm\.googleapis\.com|push\.services\.mozilla\.com"
+                          r"|notify\.windows\.com)(?::443)?/[!-~]*$")
+OPENSSL = os.environ.get("ATLANTE_OPENSSL") or "/usr/bin/openssl"   # LibreSSL del Mac: firma le notifiche (ES256)
+_P256 = (2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1, 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b)
+_SPKI_P256 = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")   # chiave pubblica P-256 in DER, prima del punto
+
+
+class ErroreChat(ErroreExtra):
+    """Errore con campi in più per il telefono: i dispositivi mancanti (409) o «registra» (si ricollega alla chat)."""
+
+    def __init__(self, codice, testo, **extra):
+        super().__init__(codice, testo)
+        self.extra = extra
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _da_b64u(s, massimo):
+    if not isinstance(s, str) or not B64U.match(s) or len(s) % 4 == 1 or len(s) > massimo:
+        raise ErroreExtra(400, "Dati cifrati non validi")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _punto_p256(raw):
+    """Chiave pubblica P-256 non compressa (0x04 || x || y) che sta davvero sulla curva y² = x³ − 3x + b."""
+    p, b = _P256
+    if len(raw) != 65 or raw[0] != 4:
+        return False
+    x, y = int.from_bytes(raw[1:33], "big"), int.from_bytes(raw[33:], "big")
+    return x < p and y < p and (y * y - (x * x * x - 3 * x + b)) % p == 0
+
+
+def _der_a_rs(der):
+    """Firma ECDSA da DER (SEQUENCE di due INTEGER, come la scrive openssl) a r || s di 32 byte ciascuno (come la vuole
+    un JWT ES256)."""
+    if len(der) < 8 or der[0] != 0x30 or der[1] & 0x80 or der[1] != len(der) - 2:
+        raise ValueError("firma DER non valida")
+    i, out = 2, b""
+    for _ in range(2):
+        if i + 2 > len(der) or der[i] != 0x02:
+            raise ValueError("firma DER non valida")
+        n = der[i + 1]
+        v = der[i + 2:i + 2 + n]
+        if len(v) != n or n == 0:
+            raise ValueError("firma DER non valida")
+        v = v.lstrip(b"\x00")
+        if len(v) > 32:
+            raise ValueError("firma DER non valida")
+        out += v.rjust(32, b"\x00")
+        i += 2 + n
+    if i != len(der):
+        raise ValueError("firma DER non valida")
+    return out
+
+
+def _chat_numero(v, minimo, massimo, cosa):
+    if isinstance(v, bool) or not isinstance(v, int) or not minimo <= v <= massimo:
+        raise ErroreExtra(400, "%s non valido" % cosa)
+    return v
+
+
+def _chat_io(h):
+    """La persona della chat: "p" per Samuele, l'id per un invitato. Dalla rete di casa senza biscotto no: lì non si sa
+    chi c'è, e un dispositivo registrato da lì riceverebbe i messaggi di Samuele."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"]
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    raise ErroreExtra(403, "La chat si apre con Tailscale o con il proprio invito, non dalla rete di casa")
+
+
+def _chat_vivi():
+    """(persone in Atlante {id: nome}, dispositivo d'accesso -> persona, chiavi «p:…» revocate) con una sola lettura di
+    persone.json: una persona o un dispositivo revocati escono subito dai destinatari."""
+    persone, accessi, revocati = {}, {}, set()
+    if PERS is not None:
+        with PERS.blocco:
+            d = PERS._aggiorna()
+            persone = {pid: x["nome"] for pid, x in d["persone"].items()}
+            accessi = {k: x.get("persona") for k, x in d["dispositivi"].items()}
+            revocati = set(d["revocati"])
+    persone["p"] = NOME_SAMUELE
+    return persone, accessi, revocati
+
+
+def _byte_grezzi(h):
+    return (h.headers.get("Content-Type") or "").split(";")[0].strip().lower() == "application/octet-stream"
+
+
+def _push_ammesso(endpoint):
+    if not isinstance(endpoint, str) or len(endpoint) > 2000:
+        return False
+    prova = os.environ.get("ATLANTE_PUSH_PROVA", "")
+    return bool(PUSH_SERVIZI.match(endpoint) or (prova and endpoint.startswith(prova) and re.fullmatch(r"[!-~]+", endpoint)))
+
+
+def _chat_contatto():
+    """Il «sub» del JWT delle notifiche: Apple vuole un indirizzo https o mailto di chi le manda."""
+    return PUBBLICO or INDIRIZZO or "mailto:atlante-musica@example.com"
+
+
+# ----- PUNTO DI UNIONE con «Caricamenti»: 20 GB al giorno per persona -----
+# Brani caricati, film e allegati della chat contano insieme (spec, «Caricamenti e Da controllare»). Finché quel conto
+# comune non c'è, la chat tiene il suo (in chat.json, si azzera a mezzanotte): all'unione dei rami questa funzione deve
+# chiamare il conto comune, con lo stesso errore 429.
+def _chat_conta_giorno(chat, persona, byte):
+    oggi = time.strftime("%Y-%m-%d")
+    g = chat.dati["giorno"]
+    if g.get("data") != oggi or not isinstance(g.get("byte"), dict):
+        g.clear()
+        g.update(data=oggi, byte={})
+    usati = g["byte"].get(persona, 0)
+    if usati + byte > CHAT_GIORNO_MAX:
+        raise ErroreExtra(429, "Hai raggiunto i 20 GB di oggi: si riprende domani")
+    g["byte"][persona] = usati + byte
+
+
+class Chat:
+    """Archivio della chat in <cache>/chat/: chat.json (dispositivi con le chiavi pubbliche, conversazioni, blocchi,
+    iscrizioni alle notifiche, consegne), messaggi/<seq>.json (un messaggio cifrato ciascuno) e allegati/<id>/<n> (pezzi
+    cifrati). Niente di quello che c'è qui si legge senza le chiavi private, che stanno solo nei telefoni."""
+
+    def __init__(self, cartella):
+        self.cartella = cartella
+        self.cartella_msg = os.path.join(cartella, "messaggi")
+        self.cartella_all = os.path.join(cartella, "allegati")
+        for c in (cartella, self.cartella_msg, self.cartella_all):
+            os.makedirs(c, mode=0o700, exist_ok=True)
+        self.file = os.path.join(cartella, "chat.json")
+        self.blocco = threading.RLock()
+        self.cond = threading.Condition(self.blocco)         # attese lunghe dei telefoni
+        self.cond_posta = threading.Condition(self.blocco)   # il postino delle notifiche
+        self.blocco_vapid = threading.Lock()
+        self.dati = self._leggi()
+        self.indice, self.seqs, self.ids = {}, [], {}        # seq -> riassunto del messaggio; id -> seq
+        self._carica_messaggi()
+        # versione per persona: cambia quando cambia qualcosa che il telefono deve rileggere (conversazioni, consegne,
+        # chiavi). Parte dall'ora: dopo un riavvio i telefoni rileggono tutto
+        self.ver, self.base = {}, int(time.time())
+        self.attese = {}                                     # dispositivo -> attese lunghe aperte
+        self.posta, self.postino, self.notificato = [], None, {}
+        self.jwt, self.vapid = {}, None
+        self.salvato, self.timer, self.pulito = 0.0, None, 0.0
+        with self.blocco:
+            self._pulisci(forza=True)
+
+    # --- file ---
+
+    def _leggi(self):
+        d = {}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            # la cronologia vive nei telefoni: si riparte (i telefoni si ricollegano da soli), il file rotto resta da parte
+            print("Atlante: %s non si legge (%s): lo metto da parte e riparto" % (self.file, e), flush=True)
+            try:
+                os.replace(self.file, self.file + ".rotto")
+            except OSError:
+                pass
+        if not isinstance(d, dict) or not d:
+            # archivio nuovo o ripartito: i numeri dei messaggi partono dall'ora, più in alto di quelli che i telefoni
+            # ricordano da un archivio di prima (altrimenti i messaggi nuovi sembrerebbero già presi)
+            d = {"seq": int(time.time())} if os.path.exists(self.file + ".rotto") else {}
+        for k in ("dispositivi", "conversazioni", "blocchi", "push", "cursori", "allegati", "giorno"):
+            if not isinstance(d.get(k), dict):
+                d[k] = {}
+        d["seq"] = d["seq"] if isinstance(d.get("seq"), int) else 0
+        return d
+
+    def _scrivi(self):
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(self.dati, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, self.file)
+        self.salvato = time.time()
+
+    def _salva(self, subito=True):
+        """Su disco subito (messaggi, conversazioni, chiavi) o al più ogni CHAT_SALVA_OGNI (consegne, letture)."""
+        if subito or time.time() - self.salvato >= CHAT_SALVA_OGNI:
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+            self._scrivi()
+        elif self.timer is None:
+            self.timer = threading.Timer(CHAT_SALVA_OGNI, self._salva_dopo)
+            self.timer.daemon = True
+            self.timer.start()
+
+    def _salva_dopo(self):
+        with self.blocco:
+            self.timer = None
+            try:
+                self._scrivi()
+            except OSError as e:
+                print("Atlante: chat non salvata: %s" % e, flush=True)
+
+    def _file_msg(self, seq):
+        return os.path.join(self.cartella_msg, "%d.json" % seq)
+
+    def _carica_messaggi(self):
+        for n in os.listdir(self.cartella_msg):
+            p = os.path.join(self.cartella_msg, n)
+            if not re.fullmatch(r"\d{1,15}\.json", n):
+                _cancella(p)   # scrittura interrotta
+                continue
+            try:
+                with open(p, encoding="utf-8") as f:
+                    self._indicizza(json.load(f))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                _cancella(p)
+        self.seqs.sort()
+        if self.seqs:
+            self.dati["seq"] = max(self.dati["seq"], self.seqs[-1])
+
+    def _indicizza(self, m):
+        self.indice[m["seq"]] = {"id": m["id"], "conv": m["conv"], "da": m["da"], "disp": m["disp"], "t": m["t"],
+                                 "dest": set(m["chiavi"]), "allegati": list(m.get("allegati") or [])}
+        self.ids[m["id"]] = m["seq"]
+        self.seqs.append(m["seq"])
+
+    def _togli_msg(self, seq):
+        m = self.indice.pop(seq, None)
+        if m is not None:
+            self.ids.pop(m["id"], None)
+            self.seqs.remove(seq)
+        _cancella(self._file_msg(seq))
+
+    # --- versioni e controlli ---
+
+    def _v(self, persona):
+        return self.base + self.ver.get(persona, 0)
+
+    def _tocca(self, persone):
+        for p in persone:
+            self.ver[p] = self.ver.get(p, 0) + 1
+        self.cond.notify_all()
+
+    def _tocca_tutti(self):
+        self.base += 1
+        self.cond.notify_all()
+
+    def _vivo(self, x, vivi):
+        """Dispositivo che riceve i messaggi: attivo, di una persona ancora in Atlante, con l'accesso non revocato."""
+        persone, accessi, revocati = vivi
+        if x is None or not x.get("attivo", True) or x["persona"] not in persone:
+            return False
+        a = x.get("accesso")
+        if x["persona"] == "p":
+            return not a or (a.startswith("p:") and a not in revocati)
+        return bool(a) and accessi.get(a) == x["persona"]
+
+    def _disp_di(self, persona, vivi):
+        return [k for k, x in self.dati["dispositivi"].items() if x["persona"] == persona and self._vivo(x, vivi)]
+
+    def _membri(self, c, vivi):
+        return [p for p in c["membri"] if p in vivi[0]]
+
+    def _conv(self, cid, persona, vivi):
+        """La conversazione, solo per chi ne fa parte: agli altri risponde come se non ci fosse."""
+        c = self.dati["conversazioni"].get(cid) if isinstance(cid, str) else None
+        if not c or persona not in self._membri(c, vivi):
+            raise ErroreExtra(404, "Conversazione sconosciuta")
+        return c
+
+    def _mio(self, persona, did, accesso, vivi):
+        """Il dispositivo della chat di chi fa la richiesta, legato al suo accesso (biscotto): revocato l'accesso, il
+        dispositivo esce dalla chat. Lo stesso telefono rientrato con un link nuovo si ricollega da sé (POST dispositivi)."""
+        x = self.dati["dispositivi"].get(did) if isinstance(did, str) else None
+        if not x or x["persona"] != persona:
+            raise ErroreChat(404, "Questo telefono non è ancora nella chat", registra=True)
+        if accesso and x.get("accesso") != accesso:
+            if x.get("accesso"):
+                raise ErroreChat(409, "Questo telefono deve ricollegarsi alla chat", registra=True)
+            x["accesso"] = accesso   # Samuele entrato prima senza biscotto (dal Mac o da Tailscale)
+            self._salva(False)
+        if not self._vivo(x, vivi):
+            raise ErroreChat(403, "Questo telefono non è più nella chat", registra=True)
+        return x
+
+    # --- dispositivi e persone ---
+
+    def stato(self, persona, accesso):
+        v = self._vapid()
+        with self.blocco:
+            vivi = _chat_vivi()
+            suoi = [{"id": k, "tipo": x.get("tipo", "pc"), "creato": x["creato"], "visto": x.get("visto", 0),
+                     "notifiche": k in self.dati["push"], "questo": bool(accesso) and x.get("accesso") == accesso}
+                    for k, x in self.dati["dispositivi"].items() if x["persona"] == persona and self._vivo(x, vivi)]
+            return {"io": {"id": persona, "nome": vivi[0].get(persona, "")}, "dispositivi": suoi,
+                    "vapid": v[2] if v else "", "pezzo": CHAT_PEZZO, "giorni": CHAT_GIORNI, "v": self._v(persona)}
+
+    def registra(self, persona, accesso, corpo, tipo):
+        did, chiave = corpo.get("id"), corpo.get("chiave")
+        if not isinstance(did, str) or not ID_CHAT.match(did):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        if not _punto_p256(_da_b64u(chiave, 100)):
+            raise ErroreExtra(400, "Chiave pubblica non valida: serve una chiave P-256 non compressa")
+        ora = time.time()
+        with self.blocco:
+            vivi = _chat_vivi()
+            d = self.dati["dispositivi"]
+            x = d.get(did)
+            if x is not None and (x["persona"] != persona or x["chiave"] != chiave):
+                raise ErroreExtra(409, "Questo id è già di un altro dispositivo: il telefono ne crea uno nuovo")
+            prima = self._vivo(x, vivi), (x or {}).get("accesso")
+            if x is None:
+                # un browser ha una sola identità: un dispositivo nuovo con lo stesso accesso (dati del sito cancellati)
+                # prende il posto del vecchio; oltre CHAT_DISP_MAX esce quello sentito meno di recente
+                for y in d.values():
+                    if accesso and y.get("accesso") == accesso and y.get("attivo", True):
+                        y.update(attivo=False, spento=ora)
+                suoi = sorted(self._disp_di(persona, vivi), key=lambda k: d[k].get("visto", 0))
+                for k in suoi[:max(0, len(suoi) - CHAT_DISP_MAX + 1)]:
+                    d[k].update(attivo=False, spento=ora)
+                x = d[did] = {"persona": persona, "chiave": chiave, "creato": ora}
+            x.update(accesso=accesso or x.get("accesso"), tipo=tipo, visto=ora, attivo=True)
+            x.pop("spento", None)
+            self._salva()
+            if prima != (True, x.get("accesso")):
+                self._tocca_tutti()   # le chiavi di questa persona sono cambiate per tutti
+        return self.stato(persona, accesso)
+
+    def persone(self, persona):
+        """Chi è in Atlante con le chiavi pubbliche dei suoi dispositivi: quelli attivi, e per 30 giorni anche quelli
+        usciti (servono per leggere i messaggi che avevano mandato prima)."""
+        with self.blocco:
+            vivi = _chat_vivi()
+            ora = time.time()
+            per = {p: [] for p in vivi[0]}
+            for k, x in self.dati["dispositivi"].items():
+                if x["persona"] in per:
+                    vivo = self._vivo(x, vivi)
+                    if vivo or ora - x.get("spento", x.get("visto", 0)) < CHAT_GIORNI * 86400:
+                        per[x["persona"]].append({"id": k, "chiave": x["chiave"], "attivo": vivo})
+            elenco = [{"id": p, "nome": n, "dispositivi": sorted(per[p], key=lambda y: y["id"])}
+                      for p, n in sorted(vivi[0].items(), key=lambda kv: (kv[0] != "p", kv[1].lower()))]
+            return {"io": persona, "persone": elenco, "bloccati": list(self.dati["blocchi"].get(persona, [])),
+                    "v": self._v(persona)}
+
+    def blocca(self, persona, altro, si):
+        with self.blocco:
+            vivi = _chat_vivi()
+            b = self.dati["blocchi"].setdefault(persona, [])
+            if si:
+                if not isinstance(altro, str) or altro == persona or altro not in vivi[0]:
+                    raise ErroreExtra(404, "Persona sconosciuta")
+                if altro not in b:
+                    b.append(altro)
+                    del b[:-500]
+            elif altro in b:
+                b.remove(altro)
+            self._salva()
+            self._tocca([persona])
+            return {"bloccati": list(b)}
+
+    # --- conversazioni ---
+
+    def _vista(self, cid, c, vivi):
+        membri = self._membri(c, vivi)
+        x = {"id": cid, "tipo": c["tipo"], "membri": list(c["membri"]) if c["tipo"] == "due" else membri,
+             "creato": c["creato"], "ultimo": c.get("ultimo", c["creato"]),
+             "stati": {p: dict(s) for p, s in c.get("stati", {}).items() if p in membri}}
+        if c["tipo"] == "gruppo":
+            x.update(nome=c["nome"], creatore=c.get("creatore"), eventi=c.get("eventi", [])[-CHAT_EVENTI_MAX:])
+        return x
+
+    def conversazioni(self, persona):
+        with self.blocco:
+            vivi = _chat_vivi()
+            self._pulisci()
+            return {"conversazioni": [self._vista(k, c, vivi) for k, c in self.dati["conversazioni"].items()
+                                      if persona in self._membri(c, vivi)], "v": self._v(persona)}
+
+    def _evento(self, c, tipo, da, chi):
+        c.setdefault("eventi", []).append({"t": time.time(), "tipo": tipo, "da": da, "chi": list(chi)})
+        del c["eventi"][:-CHAT_EVENTI_MAX]
+
+    def nuova(self, persona, corpo):
+        ora = time.time()
+        with self.blocco:
+            vivi = _chat_vivi()
+            convs = self.dati["conversazioni"]
+            if "con" in corpo:
+                altro = corpo.get("con")
+                if not isinstance(altro, str) or altro == persona or altro not in vivi[0]:
+                    raise ErroreExtra(404, "Persona sconosciuta")
+                coppia = sorted([persona, altro])
+                cid = "d" + hashlib.sha256(("due\n" + "\n".join(coppia)).encode("utf-8")).hexdigest()[:24]
+                if cid not in convs:
+                    convs[cid] = {"tipo": "due", "membri": coppia, "creato": ora, "stati": {}}
+                    self._salva()
+                    self._tocca(coppia)
+                return {"conversazione": self._vista(cid, convs[cid], vivi)}
+            nome = " ".join(str(corpo.get("nome") or "").split())[:CHAT_NOME_MAX]
+            if not nome:
+                raise ErroreExtra(400, "Serve il nome del gruppo")
+            if not isinstance(corpo.get("membri"), list):
+                raise ErroreExtra(400, "Serve l'elenco delle persone del gruppo")
+            altri = []
+            for p in corpo["membri"]:
+                if isinstance(p, str) and p != persona and p in vivi[0] and p not in altri:
+                    altri.append(p)
+            if len(altri) + 1 > CHAT_GRUPPO_MAX:
+                raise ErroreExtra(409, "In un gruppo ci stanno al più %d persone" % CHAT_GRUPPO_MAX)
+            if sum(1 for c in convs.values() if c["tipo"] == "gruppo" and c.get("fondatore") == persona) >= CHAT_GRUPPI_PERSONA:
+                raise ErroreExtra(409, "Hai già creato %d gruppi" % CHAT_GRUPPI_PERSONA)
+            cid = "g" + secrets.token_hex(8)
+            c = convs[cid] = {"tipo": "gruppo", "nome": nome, "membri": [persona] + altri, "creatore": persona,
+                              "fondatore": persona, "creato": ora, "stati": {}}
+            self._evento(c, "creato", persona, altri)
+            self._salva()
+            self._tocca(c["membri"])
+            return {"conversazione": self._vista(cid, c, vivi)}
+
+    def aggiungi(self, persona, cid, corpo):
+        with self.blocco:
+            vivi = _chat_vivi()
+            c = self._conv(cid, persona, vivi)
+            if c["tipo"] != "gruppo":
+                raise ErroreExtra(400, "Le persone si aggiungono solo ai gruppi")
+            if c.get("creatore") != persona:
+                raise ErroreExtra(403, "Solo chi ha creato il gruppo aggiunge e toglie le persone")
+            membri = self._membri(c, vivi)
+            nuovi = []
+            for p in corpo.get("persone") if isinstance(corpo.get("persone"), list) else []:
+                if isinstance(p, str) and p in vivi[0] and p not in membri and p not in nuovi:
+                    nuovi.append(p)
+            if not nuovi:
+                raise ErroreExtra(400, "Nessuna persona nuova da aggiungere")
+            if len(membri) + len(nuovi) > CHAT_GRUPPO_MAX:
+                raise ErroreExtra(409, "In un gruppo ci stanno al più %d persone" % CHAT_GRUPPO_MAX)
+            c["membri"] = membri + nuovi
+            self._evento(c, "aggiunti", persona, nuovi)
+            self._salva()
+            self._tocca(c["membri"])
+            return {"conversazione": self._vista(cid, c, vivi)}
+
+    def togli(self, persona, cid, chi):
+        """Chi ha creato il gruppo toglie una persona; ognuno può uscire. Se esce chi l'ha creato, il gruppo passa a chi
+        c'è da più tempo."""
+        with self.blocco:
+            vivi = _chat_vivi()
+            c = self._conv(cid, persona, vivi)
+            if c["tipo"] != "gruppo":
+                raise ErroreExtra(400, "Dalle chat a due non si esce: si può bloccare la persona")
+            if chi != persona and c.get("creatore") != persona:
+                raise ErroreExtra(403, "Solo chi ha creato il gruppo aggiunge e toglie le persone")
+            if chi not in c["membri"]:
+                raise ErroreExtra(404, "Questa persona non è nel gruppo")
+            prima = self._membri(c, vivi)
+            c["membri"] = [p for p in prima if p != chi]
+            c.get("stati", {}).pop(chi, None)
+            self._evento(c, "uscito" if chi == persona else "tolto", persona, [chi])
+            if c.get("creatore") == chi:
+                c["creatore"] = c["membri"][0] if c["membri"] else None
+            if not c["membri"]:
+                del self.dati["conversazioni"][cid]
+            self._salva()
+            self._tocca(prima)
+            return {"ok": True}
+
+    def letto(self, persona, cid, seq):
+        with self.blocco:
+            vivi = _chat_vivi()
+            c = self._conv(cid, persona, vivi)
+            seq = min(_chat_numero(seq, 0, 10 ** 15, "Messaggio"), self.dati["seq"])
+            s = c.setdefault("stati", {}).setdefault(persona, {"c": 0, "l": 0})
+            if seq > s["l"]:
+                s["l"], s["c"] = seq, max(s["c"], seq)
+                self._salva(False)
+                self._tocca(self._membri(c, vivi))
+            return {"ok": True}
+
+    # --- messaggi ---
+
+    def invia(self, persona, accesso, corpo):
+        mid, cid = corpo.get("id"), corpo.get("conv")
+        if not isinstance(mid, str) or not ID_CHAT.match(mid):
+            raise ErroreExtra(400, "Messaggio non valido")
+        testo = corpo.get("corpo")
+        if isinstance(testo, str) and len(testo) > CHAT_CORPO_MAX:
+            raise ErroreExtra(413, "Messaggio troppo grande")
+        if len(_da_b64u(testo, CHAT_CORPO_MAX)) < 29:
+            raise ErroreExtra(400, "Messaggio cifrato non valido")
+        if len(_da_b64u(corpo.get("sale"), 64)) != 16:
+            raise ErroreExtra(400, "Messaggio cifrato non valido")
+        chiavi = corpo.get("chiavi")
+        if not isinstance(chiavi, dict) or len(chiavi) > CHAT_GRUPPO_MAX * CHAT_DISP_MAX:
+            raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+        for k, w in chiavi.items():
+            if not ID_CHAT.match(k) or len(_da_b64u(w, 200)) != 60:
+                raise ErroreExtra(400, "Chiavi dei destinatari non valide")
+        allegati = corpo.get("allegati") or []
+        if not isinstance(allegati, list) or len(allegati) > CHAT_ALLEGATI_MESSAGGIO or \
+                not all(isinstance(a, str) and ALLEGATO_CHAT.match(a) for a in allegati):
+            raise ErroreExtra(400, "Allegati non validi")
+        with self.blocco:
+            vivi = _chat_vivi()
+            x = self._mio(persona, corpo.get("disp"), accesso, vivi)
+            mio = corpo["disp"]
+            c = self._conv(cid, persona, vivi)
+            if mid in self.ids:   # lo stesso messaggio mandato due volte (rete che cade a metà): una volta sola
+                m = self.indice[self.ids[mid]]
+                if m["da"] != persona or m["conv"] != cid:
+                    raise ErroreExtra(409, "Id del messaggio già usato")
+                return {"seq": self.ids[mid], "t": m["t"]}
+            membri = self._membri(c, vivi)
+            atteso, qualcuno = set(), False
+            for p in membri:
+                suoi = self._disp_di(p, vivi)
+                if p != persona:
+                    qualcuno = qualcuno or bool(suoi)
+                    if persona in self.dati["blocchi"].get(p, []):
+                        continue   # chi ha bloccato questa persona non riceve i suoi messaggi (e lei non lo sa)
+                atteso.update(suoi)
+            atteso.discard(mio)
+            if c["tipo"] == "due" and not qualcuno:
+                altro = [p for p in c["membri"] if p != persona][0]
+                if altro not in vivi[0]:
+                    raise ErroreChat(409, "Questa persona non è più in Atlante", nessuno=True)
+                raise ErroreChat(409, "%s non ha ancora aperto la chat: il messaggio partirà quando lo farà" % vivi[0][altro],
+                                 nessuno=True)
+            mancano = sorted(atteso - set(chiavi))
+            if mancano:   # un dispositivo nuovo che il telefono non conosceva ancora: rilegge le chiavi e cifra di nuovo
+                raise ErroreChat(409, "Le chiavi sono cambiate: il telefono cifra di nuovo il messaggio", mancano=mancano)
+            dest = {k: chiavi[k] for k in sorted(atteso)}
+            per = sorted({self.dati["dispositivi"][k]["persona"] for k in dest} | {persona})
+            dim = len(testo)
+            for a in allegati:
+                y = self.dati["allegati"].get(a)
+                if not y or y["da"] != persona or y["conv"] != cid or len(y["ricevuti"]) != y["pezzi"]:
+                    raise ErroreExtra(409, "Allegato non ancora caricato del tutto")
+                dim += y["dimensione"]
+            ora = time.time()
+            seq = self.dati["seq"] + 1
+            m = {"seq": seq, "id": mid, "conv": cid, "da": persona, "disp": mio, "t": ora, "corpo": testo,
+                 "sale": corpo["sale"], "chiavi": dest, "allegati": allegati, "dim": dim}
+            if dest:   # bloccato da tutti, o nessun altro dispositivo: non c'è niente da consegnare
+                tmp = self._file_msg(seq) + ".tmp"
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(m, f, separators=(",", ":"))
+                os.replace(tmp, self._file_msg(seq))
+                self._indicizza(m)
+            for a in allegati:
+                y = self.dati["allegati"][a]
+                y["usato"], y["per"] = True, sorted(set(y.get("per", [])) | set(per))
+            self.dati["seq"] = seq
+            c["ultimo"] = ora
+            x["visto"] = ora
+            self._salva()   # subito: un numero di messaggio non si riusa mai, nemmeno dopo un riavvio
+            self.cond.notify_all()
+            self._accoda_notifiche(seq, persona, dest)
+            return {"seq": seq, "t": ora}
+
+    def _per(self, did, dopo):
+        out = []
+        for seq in self.seqs:
+            if seq > dopo and did in self.indice[seq]["dest"]:
+                out.append(seq)
+                if len(out) >= CHAT_RISPOSTA_MAX:
+                    return out, True
+        return out, False
+
+    def _conferma(self, did, persona, dopo):
+        """Il dispositivo ha salvato i messaggi fino a `dopo`: consegnati (le due spunte per chi li ha mandati)."""
+        dopo = min(dopo, self.dati["seq"])
+        vecchio = self.dati["cursori"].get(did, 0)
+        if dopo <= vecchio:
+            return
+        self.dati["cursori"][did] = dopo
+        toccate = set()
+        for seq in self.seqs:
+            m = self.indice[seq]
+            if vecchio < seq <= dopo and did in m["dest"]:
+                c = self.dati["conversazioni"].get(m["conv"])
+                if c is not None:
+                    s = c.setdefault("stati", {}).setdefault(persona, {"c": 0, "l": 0})
+                    if seq > s["c"]:
+                        s["c"] = seq
+                        toccate.add(m["conv"])
+        for cid in toccate:
+            self._tocca(self.dati["conversazioni"][cid]["membri"])
+        self._salva(False)
+
+    def ricevi(self, persona, accesso, did, dopo, v, attesa):
+        fine = time.time() + max(0.0, min(attesa, ATTESA_MAX))
+        with self.blocco:
+            vivi = _chat_vivi()
+            x = self._mio(persona, did, accesso, vivi)
+            x["visto"] = time.time()
+            if dopo > self.dati["seq"]:
+                dopo = 0   # archivio della chat ripartito da capo: il telefono rilegge tutto e scarta i doppioni
+            self._conferma(did, persona, dopo)
+            self._pulisci()
+            self.attese[did] = self.attese.get(did, 0) + 1
+            try:
+                while True:
+                    seqs, altri = self._per(did, dopo)
+                    if seqs or self._v(persona) != v or time.time() >= fine:
+                        break
+                    self.cond.wait(max(0.01, fine - time.time()))
+            finally:
+                self.attese[did] -= 1
+                if not self.attese[did]:
+                    del self.attese[did]
+            out = []
+            for seq in seqs:
+                try:
+                    with open(self._file_msg(seq), encoding="utf-8") as f:
+                        m = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                al = [{"id": a, "pezzi": self.dati["allegati"][a]["pezzi"], "dimensione": self.dati["allegati"][a]["dimensione"]}
+                      for a in m.get("allegati") or [] if a in self.dati["allegati"]]
+                out.append({"seq": seq, "id": m["id"], "conv": m["conv"], "da": m["da"], "disp": m["disp"], "t": m["t"],
+                            "corpo": m["corpo"], "sale": m["sale"], "chiave": m["chiavi"][did], "allegati": al})
+            fino = seqs[-1] if altri else self.dati["seq"]
+            return {"messaggi": out, "fino": max(fino, dopo), "altri": altri, "v": self._v(persona)}
+
+    def avvisi(self, persona, accesso, did):
+        """Per il testo della notifica: chi ha scritto nei messaggi che questo dispositivo non ha ancora preso."""
+        with self.blocco:
+            vivi = _chat_vivi()
+            self._mio(persona, did, accesso, vivi)
+            cur = self.dati["cursori"].get(did, 0)
+            per = {}
+            for seq in self.seqs:
+                m = self.indice[seq]
+                if seq > cur and did in m["dest"] and m["da"] != persona:
+                    n = per.get(m["conv"], (None, 0))[1] + 1
+                    per[m["conv"]] = (m, n)
+            out = []
+            for cid, (m, n) in per.items():
+                c = self.dati["conversazioni"].get(cid) or {}
+                out.append({"conv": cid, "da": m["da"], "nome": vivi[0].get(m["da"], "qualcuno"), "n": n, "t": m["t"],
+                            "gruppo": c.get("nome") if c.get("tipo") == "gruppo" else None})
+            return {"avvisi": sorted(out, key=lambda y: -y["t"])[:10]}
+
+    # --- allegati ---
+
+    def nuovo_allegato(self, persona, corpo):
+        dim = _chat_numero(corpo.get("dimensione"), 1, 10 ** 13, "Grandezza")
+        pezzi = _chat_numero(corpo.get("pezzi"), 1, 10 ** 6, "Numero di pezzi")
+        chiaro = dim - pezzi * CHAT_CIFRA
+        if chiaro > CHAT_ALLEGATO_MAX:
+            raise ErroreExtra(413, "Allegato troppo grande: al più 200 MB")
+        if chiaro < 1 or -(-chiaro // CHAT_PEZZO) != pezzi:
+            raise ErroreExtra(400, "Allegato non valido: grandezza e pezzi non tornano")
+        with self.blocco:
+            vivi = _chat_vivi()
+            cid = corpo.get("conv")
+            self._conv(cid, persona, vivi)
+            if sum(1 for a in self.dati["allegati"].values() if a["da"] == persona and not a.get("usato")) >= CHAT_ALLEGATI_APERTI:
+                raise ErroreExtra(429, "Troppi allegati cominciati e non mandati: riprova fra un giorno")
+            if shutil.disk_usage(self.cartella_all).free - dim < CHAT_SPAZIO_MIN:
+                raise ErroreExtra(507, "Il Mac mini ha poco spazio libero: l'allegato non parte")
+            aid = secrets.token_urlsafe(16)
+            os.makedirs(os.path.join(self.cartella_all, aid), mode=0o700)
+            self.dati["allegati"][aid] = {"conv": cid, "da": persona, "dimensione": dim, "pezzi": pezzi, "ricevuti": [],
+                                          "creato": time.time()}
+            self._salva()
+            return {"id": aid, "pezzo": CHAT_PEZZO}
+
+    def _allegato(self, aid, n):
+        a = self.dati["allegati"].get(aid) if isinstance(aid, str) else None
+        if not a or not re.fullmatch(r"\d{1,3}", n or "") or int(n) >= a["pezzi"]:
+            raise ErroreExtra(404, "Allegato sconosciuto")
+        return a, int(n)
+
+    def carica_pezzo(self, persona, aid, n, dati):
+        with self.blocco:
+            a, n = self._allegato(aid, n)
+            if a["da"] != persona:
+                raise ErroreExtra(404, "Allegato sconosciuto")
+            if a.get("usato"):
+                raise ErroreExtra(409, "Allegato già mandato: non si cambia")
+            atteso = CHAT_PEZZO + CHAT_CIFRA if n < a["pezzi"] - 1 else a["dimensione"] - (a["pezzi"] - 1) * (CHAT_PEZZO + CHAT_CIFRA)
+            if len(dati) != atteso:
+                raise ErroreExtra(400, "Pezzo della grandezza sbagliata: attesi %d byte" % atteso)
+            if n not in a["ricevuti"]:
+                _chat_conta_giorno(self, persona, len(dati))
+                self._salva(False)
+            p = os.path.join(self.cartella_all, aid, str(n))
+        tmp = "%s.%s.tmp" % (p, secrets.token_hex(4))
+        try:   # 8 MB su disco fuori dal blocco: gli altri intanto scrivono e leggono
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(dati)
+            os.replace(tmp, p)
+        except OSError:
+            _cancella(tmp)
+            raise ErroreExtra(503, "Pezzo non salvato sul Mac mini: riprova")
+        with self.blocco:
+            if n not in a["ricevuti"]:
+                a["ricevuti"] = sorted(a["ricevuti"] + [n])
+                self._salva(len(a["ricevuti"]) == a["pezzi"])
+            return {"ok": True, "mancano": [k for k in range(a["pezzi"]) if k not in a["ricevuti"]]}
+
+    def leggi_pezzo(self, persona, aid, n):
+        """Un pezzo cifrato, solo a chi ha ricevuto il messaggio con l'allegato (e a chi l'ha mandato)."""
+        with self.blocco:
+            a, n = self._allegato(aid, n)
+            if (persona not in a.get("per", []) and a["da"] != persona) or n not in a["ricevuti"]:
+                raise ErroreExtra(404, "Allegato sconosciuto")
+            p = os.path.join(self.cartella_all, aid, str(n))
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            raise ErroreExtra(404, "Allegato non più sul Mac mini (dopo 30 giorni si cancella)")
+
+    # --- notifiche ---
+
+    def iscrivi(self, persona, accesso, corpo):
+        endpoint = corpo.get("endpoint")
+        if not _push_ammesso(endpoint):
+            raise ErroreExtra(400, "Servizio di notifiche non riconosciuto")
+        with self.blocco:
+            vivi = _chat_vivi()
+            self._mio(persona, corpo.get("disp"), accesso, vivi)
+            for k in [k for k, s in self.dati["push"].items() if s["endpoint"] == endpoint]:
+                del self.dati["push"][k]   # lo stesso browser con un dispositivo della chat nuovo
+            self.dati["push"][corpo["disp"]] = {"endpoint": endpoint, "creato": time.time()}
+            self._salva()
+            return {"ok": True}
+
+    def disiscrivi(self, persona, accesso, did):
+        with self.blocco:
+            self._mio(persona, did, accesso, _chat_vivi())
+            self.dati["push"].pop(did, None)
+            self._salva()
+            return {"ok": True}
+
+    def _accoda_notifiche(self, seq, da, dest):
+        ora, nuove = time.time(), False
+        for did in dest:
+            if did in self.dati["push"] and self.dati["dispositivi"][did]["persona"] != da:
+                self.posta.append((ora + (CHAT_PUSH_RITARDO if self.attese.get(did) else 0), seq, did))
+                nuove = True
+        if nuove:
+            if self.postino is None or not self.postino.is_alive():
+                self.postino = threading.Thread(target=self._postino, daemon=True)
+                self.postino.start()
+            self.cond_posta.notify_all()
+
+    def _postino(self):
+        """Manda le notifiche: una per telefono finché non ha preso i messaggi (e di nuovo dopo CHAT_PUSH_DI_NUOVO)."""
+        while True:
+            lavoro = []
+            with self.blocco:
+                while True:
+                    ora = time.time()
+                    pronte = [x for x in self.posta if x[0] <= ora]
+                    if pronte:
+                        break
+                    prossima = min((x[0] for x in self.posta), default=ora + 300)
+                    self.cond_posta.wait(max(0.05, min(prossima - ora, 300)))
+                for x in pronte:
+                    self.posta.remove(x)
+                    _, seq, did = x
+                    sub, cur = self.dati["push"].get(did), self.dati["cursori"].get(did, 0)
+                    f = self.notificato.get(did)
+                    if not sub or cur >= seq or (f and f[0] > cur and ora - f[1] < CHAT_PUSH_DI_NUOVO):
+                        continue
+                    self.notificato[did] = (seq, ora)
+                    if sub["endpoint"] not in [e for _, e in lavoro]:
+                        lavoro.append((did, sub["endpoint"]))
+            for did, endpoint in lavoro:
+                esito = self._manda_notifica(endpoint)
+                if esito in (404, 410):   # iscrizione scaduta o tolta dal telefono
+                    with self.blocco:
+                        if (self.dati["push"].get(did) or {}).get("endpoint") == endpoint:
+                            del self.dati["push"][did]
+                            self._salva()
+
+    def _vapid(self):
+        """(programma, file della chiave privata, chiave pubblica in base64url) per firmare le notifiche; None se openssl
+        manca. La chiave si crea una volta e resta in <cache>/chat/vapid.pem (0600)."""
+        with self.blocco_vapid:
+            if self.vapid:
+                return self.vapid
+            prog = OPENSSL if os.path.isfile(OPENSSL) else _programma("openssl")
+            if not prog:
+                return None
+            p = os.path.join(self.cartella, "vapid.pem")
+            try:
+                if not os.path.isfile(p):
+                    r = subprocess.run([prog, "ecparam", "-name", "prime256v1", "-genkey", "-noout"], stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, timeout=20)
+                    if r.returncode or b"PRIVATE KEY" not in r.stdout:
+                        raise OSError(r.stderr.decode("utf-8", "replace").strip() or "chiave non creata")
+                    tmp = p + ".tmp"
+                    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(r.stdout)
+                    os.replace(tmp, p)
+                r = subprocess.run([prog, "ec", "-in", p, "-pubout", "-outform", "DER"], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=20)
+                if r.returncode or len(r.stdout) != 91 or not r.stdout.startswith(_SPKI_P256):
+                    raise OSError(r.stderr.decode("utf-8", "replace").strip() or "chiave pubblica non letta")
+            except (OSError, subprocess.SubprocessError) as e:
+                print("Atlante: chiavi delle notifiche non pronte: %s" % e, flush=True)
+                return None
+            self.vapid = (prog, p, _b64u(r.stdout[-65:]))
+            return self.vapid
+
+    def _jwt(self, aud):
+        """JWT ES256 per il servizio di notifiche `aud` (vale 12 ore e si riusa): la firma la fa openssl, in DER, e qui
+        diventa r || s."""
+        v = self._vapid()
+        if not v:
+            return None, None
+        ora = int(time.time())
+        with self.blocco_vapid:
+            j = self.jwt.get(aud)
+            if j and j[1] - ora > 3600:
+                return j[0], v[2]
+        testa = _b64u(b'{"typ":"JWT","alg":"ES256"}')
+        dati = _b64u(json.dumps({"aud": aud, "exp": ora + 12 * 3600, "sub": _chat_contatto()},
+                                separators=(",", ":")).encode("utf-8"))
+        try:
+            r = subprocess.run([v[0], "dgst", "-sha256", "-sign", v[1]], input=(testa + "." + dati).encode("ascii"),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            firma = _der_a_rs(r.stdout) if not r.returncode else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            firma = None
+        if firma is None:
+            print("Atlante: notifica non firmata (openssl)", flush=True)
+            return None, None
+        t = testa + "." + dati + "." + _b64u(firma)
+        with self.blocco_vapid:
+            self.jwt[aud] = (t, ora + 12 * 3600)
+        return t, v[2]
+
+    def _manda_notifica(self, endpoint):
+        """Notifica senza contenuto (RFC 8030 + VAPID, RFC 8292): niente da cifrare, il telefono chiede poi chi ha scritto.
+        Il codice HTTP del servizio, o None se non risponde."""
+        u = urlsplit(endpoint)
+        t, k = self._jwt("%s://%s" % (u.scheme, u.netloc))
+        if not t:
+            return None
+        try:
+            if u.scheme == "https":
+                conn = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=15, context=_ssl())
+            else:   # solo il servizio finto delle prove (ATLANTE_PUSH_PROVA)
+                conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=15)
+            try:
+                conn.request("POST", (u.path or "/") + ("?" + u.query if u.query else ""), body=b"",
+                             headers={"TTL": str(CHAT_PUSH_TTL), "Urgency": "high", "Topic": "atlante-chat",
+                                      "Authorization": "vapid t=%s, k=%s" % (t, k), "Content-Length": "0"})
+                r = conn.getresponse()
+                r.read(65536)
+                if r.status >= 400 and r.status not in (404, 410):
+                    print("Atlante: notifica rifiutata da %s: %d" % (u.hostname, r.status), flush=True)
+                return r.status
+            finally:
+                conn.close()
+        except (OSError, http.client.HTTPException) as e:
+            print("Atlante: notifica non mandata a %s: %s" % (u.hostname, e), flush=True)
+            return None
+
+    # --- pulizia ---
+
+    def _pulisci(self, forza=False):
+        """Ogni 10 minuti: via i messaggi presi da tutti (o più vecchi di 30 giorni), gli allegati di 30 giorni e quelli
+        mai mandati, i dispositivi usciti da 30 giorni; chi non è più in Atlante esce dai gruppi."""
+        ora = time.time()
+        if not forza and ora - self.pulito < CHAT_PULISCI_OGNI:
+            return
+        self.pulito = ora
+        vivi, d, limite, cambiati = _chat_vivi(), self.dati, ora - CHAT_GIORNI * 86400, False
+        for k, x in list(d["dispositivi"].items()):
+            if x.get("attivo", True) and not self._vivo(x, vivi):
+                x.update(attivo=False, spento=ora)
+                cambiati = True
+            if not x.get("attivo", True) and x.get("spento", 0) < limite:
+                del d["dispositivi"][k]
+                d["cursori"].pop(k, None)
+        for k in [k for k in d["push"] if not d["dispositivi"].get(k, {}).get("attivo", False)]:
+            del d["push"][k]
+        for seq in list(self.seqs):
+            m = self.indice[seq]
+            if m["t"] < limite or all(d["cursori"].get(k, 0) >= seq or not self._vivo(d["dispositivi"].get(k), vivi)
+                                      for k in m["dest"]):
+                self._togli_msg(seq)
+        for aid, a in list(d["allegati"].items()):
+            if a["creato"] < limite or (not a.get("usato") and a["creato"] < ora - 86400):
+                shutil.rmtree(os.path.join(self.cartella_all, aid), ignore_errors=True)
+                del d["allegati"][aid]
+        for cid, c in list(d["conversazioni"].items()):
+            vive = self._membri(c, vivi)
+            if c["tipo"] == "gruppo" and len(vive) != len(c["membri"]):
+                usciti = [p for p in c["membri"] if p not in vive]
+                c["membri"] = vive
+                for p in usciti:
+                    c.get("stati", {}).pop(p, None)
+                self._evento(c, "tolto", None, usciti)
+                if c.get("creatore") not in vive:
+                    c["creatore"] = vive[0] if vive else None
+                cambiati = True
+            if not vive:
+                del d["conversazioni"][cid]
+        for p in list(d["blocchi"]):
+            if p not in vivi[0]:
+                del d["blocchi"][p]
+            else:
+                d["blocchi"][p] = [q for q in d["blocchi"][p] if q in vivi[0]]
+        self._salva()
+        if cambiati:
+            self._tocca_tutti()
+
+
+CHAT = None
+_CHAT_BLOCCO = threading.Lock()
+
+
+def _chat_archivio():
+    global CHAT
+    with _CHAT_BLOCCO:
+        if CHAT is None:
+            CHAT = Chat(os.path.join(_cart("cache"), "chat"))
+        return CHAT
+
+
+def chat_bloccato(da, a):
+    """True se la persona `a` ha bloccato `da` (per le chiamate della fase 5b: chi è bloccato non scrive né chiama)."""
+    ch = _chat_archivio()
+    with ch.blocco:
+        return da in (ch.dati["blocchi"].get(a) or [])
+
+
+def _chat_byte(h, dati):
+    h._musica_risposto = True
+    h.send_response(200)
+    h.send_header("Content-Type", "application/octet-stream")
+    h.send_header("Content-Length", str(len(dati)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(dati)
+
+
+def _chat(h, metodo, resto, corpo):
+    """Rotte api/extra/chat/…: ognuno vede solo le sue conversazioni e solo i messaggi diretti ai suoi dispositivi,
+    Samuele compreso."""
+    persona = _chat_io(h)
+    accesso = _chi_e(h).get("chiave")
+    ch = _chat_archivio()
+    q = parse_qs(urlsplit(h.path).query)
+
+    def arg(k):
+        return (q.get(k) or [""])[0]
+
+    def numero(k, tipo=int):
+        try:
+            return tipo(arg(k) or 0)
+        except ValueError:
+            raise ErroreExtra(400, "Parametro non valido: %s" % k)
+
+    cosa, n = (resto[0] if resto else ""), len(resto)
+    try:
+        if cosa == "stato" and n == 1 and metodo == "GET":
+            return _json(h, ch.stato(persona, accesso))
+        if cosa == "dispositivi" and n == 1 and metodo == "POST":
+            return _json(h, ch.registra(persona, accesso, corpo, tipo_da_agente(h.headers.get("User-Agent"))))
+        if cosa == "persone" and n == 1 and metodo == "GET":
+            return _json(h, ch.persone(persona))
+        if cosa == "conversazioni":
+            if n == 1 and metodo == "GET":
+                return _json(h, ch.conversazioni(persona))
+            if n == 1 and metodo == "POST":
+                return _json(h, ch.nuova(persona, corpo))
+            if n == 3 and resto[2] == "membri" and metodo == "POST":
+                return _json(h, ch.aggiungi(persona, resto[1], corpo))
+            if n == 4 and resto[2] == "membri" and metodo == "DELETE":
+                return _json(h, ch.togli(persona, resto[1], resto[3]))
+            if n == 3 and resto[2] == "letto" and metodo == "POST":
+                return _json(h, ch.letto(persona, resto[1], corpo.get("seq")))
+        if cosa == "messaggi" and n == 1 and metodo == "POST":
+            return _json(h, ch.invia(persona, accesso, corpo))
+        if cosa == "messaggi" and n == 1 and metodo == "GET":
+            return _json(h, ch.ricevi(persona, accesso, arg("disp"), numero("dopo"), numero("v"), numero("attesa", float)))
+        if cosa == "allegati" and n == 1 and metodo == "POST":
+            return _json(h, ch.nuovo_allegato(persona, corpo))
+        if cosa == "allegati" and n == 3 and metodo == "POST":
+            if not _byte_grezzi(h):
+                raise ErroreExtra(415, "Il pezzo va mandato come application/octet-stream")
+            return _json(h, ch.carica_pezzo(persona, resto[1], resto[2], getattr(h, "_grezzo", b"")))
+        if cosa == "allegati" and n == 3 and metodo == "GET":
+            return _chat_byte(h, ch.leggi_pezzo(persona, resto[1], resto[2]))
+        if cosa == "blocchi" and n == 1 and metodo == "POST":
+            return _json(h, ch.blocca(persona, corpo.get("persona"), True))
+        if cosa == "blocchi" and n == 2 and metodo == "DELETE":
+            return _json(h, ch.blocca(persona, resto[1], False))
+        if cosa == "push" and n == 1 and metodo == "POST":
+            return _json(h, ch.iscrivi(persona, accesso, corpo))
+        if cosa == "push" and n == 2 and metodo == "DELETE":
+            return _json(h, ch.disiscrivi(persona, accesso, resto[1]))
+        if cosa == "avvisi" and n == 1 and metodo == "GET":
+            return _json(h, ch.avvisi(persona, accesso, arg("disp")))
+    except ErroreChat as e:
+        return _json(h, dict(e.extra, errore=e.testo), e.codice)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/chat/%s" % "/".join(resto))
+
+
 # ----- richieste HTTP -----
 
 def _leggi_corpo(h):
@@ -3310,6 +4380,8 @@ def _instrada(h, metodo, parti, corpo):
         _json(h, _clip_brano(resto[0]))
     elif cosa == "gestione":
         _gestione(h, metodo, resto, corpo)
+    elif cosa == "chat":   # chat cifrata da telefono a telefono: vedi la sua sezione
+        _chat(h, metodo, resto, corpo)
     elif cosa == "inviti" and not resto:
         solo("GET", "POST")
         _inviti(h, metodo, corpo)
@@ -3378,7 +4450,8 @@ def gestisci_extra(h, metodo=None):
         dati = _leggi_corpo(h)
         if metodo in ("POST", "DELETE", "PUT", "PATCH") and not _stessa_origine(h):
             raise ErroreExtra(403, "Richiesta da un altro sito: rifiutata")
-        corpo = _da_json(dati) if metodo == "POST" else {}
+        h._grezzo = dati   # i pezzi degli allegati della chat arrivano come byte cifrati, non come JSON
+        corpo = _da_json(dati) if metodo == "POST" and not _byte_grezzi(h) else {}
         _instrada(h, metodo, [p for p in m.group(1).split("/") if p], corpo)
     except ErroreExtra as e:
         if not h._musica_risposto:
@@ -4352,7 +5425,9 @@ PERMESSE_INVITATI = re.compile(
     r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
     r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html)$"
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
-    r"|extra/(?:io|inviti|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?))$")
+    r"|extra/(?:io|inviti|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?))$"
+    # la chat (fase 5a): la pagina, la cifratura, il QR del codice di sicurezza e le sue rotte
+    r"|^/x/(?:chat\.html|chat-cifra\.js|qrcode\.js)$|^(?:/.*)?/api/extra/chat(?:/[^/]+){1,4}$")
 
 
 def _permesso(h):
