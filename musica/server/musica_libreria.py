@@ -1395,7 +1395,8 @@ YOUTUBEI = {"ytm": ("https://music.youtube.com", {"clientName": "WEB_REMIX", "cl
                     "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"),   # filtro «Brani»
             "yt": ("https://www.youtube.com", {"clientName": "WEB", "clientVersion": "2.20251020.01.00"}, None)}
 ID_YT = re.compile(r"^[A-Za-z0-9_-]{11}$")
-CENSURATA = re.compile(r"\b(clean|censored|censurat[ao]|edited|radio edit)\b", re.I)
+# solo tra parentesi o dopo un trattino («(Clean)», «- Radio Edit»): «Clean» di Taylor Swift o i Clean Bandit no
+CENSURATA = re.compile(r"[(\[\-–—][^()\[\]]*?\b(clean|censored|censurat[ao]|edited|radio edit)\b", re.I)
 # pezzi dei titoli dei video che non fanno parte del nome del brano
 RUMORE = re.compile(r"\s*[(\[][^()\[\]]*\b(official|video|audio|lyrics?|testo|visuali[sz]er|videoclip|ufficiale|hd|4k|mv)\b"
                     r"[^()\[\]]*[)\]]", re.I)

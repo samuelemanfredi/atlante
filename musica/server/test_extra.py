@@ -161,6 +161,7 @@ RISPOSTA_YTM = {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRende
         _brano_ytm("tqxRidAWER8", "Without Me", ["Eminem"], "The Eminem Show", "4:51", True),
         _brano_ytm("RadioEdit01", "Shake That (Radio Edit)", ["Eminem", "Nate Dogg"], "Curtain Call", "4:35", True),
         _brano_ytm("D1I1x2pYMK0", "Kill You", ["Eminem"], "The Marshall Mathers LP", "1:04:25", True),
+        _brano_ytm("TaylorClean", "Clean", ["Taylor Swift"], "1989", "4:31", False),
         _brano_ytm("tqxRidAWER8", "Without Me", ["Eminem"], "The Eminem Show", "4:51", True)]}}]}}}}]}}}
 RISPOSTA_YT = {"contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {"sectionListRenderer": {"contents": [
     {"itemSectionRenderer": {"contents": [
@@ -524,13 +525,14 @@ class TestExtra(unittest.TestCase):
         self.assertEqual(j["fonte"], "ytm")
         r = j["risultati"]
         # doppione tolto; explicit prima, censurate (la copia senza «E» e la «Radio Edit») in fondo, il resto in ordine
-        self.assertEqual([x["id"] for x in r], ["tqxRidAWER8", "D1I1x2pYMK0", "NoExplicit1", "RadioEdit01"])
-        self.assertEqual([x["censurata"] for x in r], [False, False, True, True])
+        # «Clean» è il titolo del brano, non una versione censurata
+        self.assertEqual([x["id"] for x in r], ["tqxRidAWER8", "D1I1x2pYMK0", "TaylorClean", "NoExplicit1", "RadioEdit01"])
+        self.assertEqual([x["censurata"] for x in r], [False, False, False, True, True])
         self.assertEqual(r[0], {"id": "tqxRidAWER8", "titolo": "Without Me", "artista": "Eminem", "album": "The Eminem Show",
                                 "durata": 291, "copertina": "https://yt3.googleusercontent.com/c-tqxRidAWER8=w544-h544-s-l90-rj",
                                 "explicit": True, "censurata": False})
         self.assertEqual(r[1]["durata"], 3865)
-        self.assertEqual(r[3]["artista"], "Eminem e Nate Dogg")
+        self.assertEqual(r[4]["artista"], "Eminem e Nate Dogg")
         percorso, corpo = FintoYouTube.richieste[-1]
         self.assertEqual(percorso, "/youtubei/v1/search?prettyPrint=false")
         self.assertEqual(corpo["query"], "eminem without me")   # spazi in più tolti
