@@ -3203,6 +3203,11 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "clip" and len(resto) == 1:
         solo("GET")
         _json(h, _clip_brano(resto[0]))
+    elif cosa == "io" and not resto:   # chi è questo dispositivo: l'app mostra la Gestione o le funzioni degli invitati
+        solo("GET")
+        chi = getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None}
+        pid = chi.get("persona")
+        _json(h, {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None})
     elif cosa == "dispositivi" and not resto:
         solo("GET")
         _json(h, {"dispositivi": DISP.elenco()})
@@ -4171,6 +4176,33 @@ def controlla_accesso(h):
     return True
 
 
+# un invitato ascolta e basta: la musica, i videoclip, i suoi dispositivi, chi è e i suoi inviti. Il resto (proxy,
+# scaricamenti, IA, voci, la Gestione, i moduli di «Altro») usa le risorse del Mac mini o è di Samuele
+PERMESSE_INVITATI = re.compile(
+    r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
+    r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html)$"
+    r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
+    r"|extra/(?:io|inviti|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?))$")
+
+
+def _permesso(h):
+    """Da chiamare subito dopo controlla_accesso: False (e risposta 403) se un invitato chiede quello che non può."""
+    chi = getattr(h, "_chi", None)
+    if not chi or chi["ruolo"] != "invitato" or PERMESSE_INVITATI.match(unquote(urlsplit(h.path).path)):
+        return True
+    if h.command not in ("GET", "HEAD"):
+        h.close_connection = True   # corpo non letto
+    corpo = json.dumps({"errore": "Non disponibile per gli invitati"}, ensure_ascii=False).encode("utf-8")
+    h.send_response(403)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+    return False
+
+
 def _imposta_password(file):
     if sys.stdin.isatty():
         p = getpass.getpass("Nuova password per aprire Atlante Musica da Internet: ")
@@ -4265,26 +4297,26 @@ def main():
             return True
 
         def do_GET(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "GET") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_GET()
 
         def do_HEAD(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "HEAD") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
 
         def do_POST(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "POST"):
                 self.close_connection = True   # corpo non letto
                 self.send_error(501, "Unsupported method ('POST')")
 
         def do_DELETE(self):
-            if controlla_accesso(self):
+            if controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "DELETE"):
                 self.close_connection = True

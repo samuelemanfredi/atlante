@@ -1390,6 +1390,36 @@ class TestAccesso(unittest.TestCase):
         self.assertIn("&lt;script&gt;x&lt;/script&gt;", b.decode("utf-8"))
         self.assertNotIn("<script>x", b.decode("utf-8"))
 
+    def test_9d_permessi_invitato(self):
+        pid, v, t = self.invitato("Elena", ip="203.0.113.100")
+        for f in ("index.html", "sw.js", "x/kit.js", "x/kit.css", "x/inviti.html", "x/benessere.html"):
+            with open(os.path.join(self.c["app"], f), "w", encoding="utf-8") as fh:
+                fh.write("ciao")
+        permesse = [("GET", "/"), ("GET", "/index.html"), ("GET", "/sw.js"), ("GET", "/x/kit.js"), ("GET", "/x/kit.css"),
+                    ("GET", "/x/inviti.html"), ("GET", "/api/musica/catalogo"), ("HEAD", "/api/musica/file/1"),
+                    ("GET", "/api/musica/copertina/x.jpg"), ("GET", "/api/musica/pezzo/1?da=0&durata=30"),
+                    ("GET", "/api/extra/clip"), ("GET", "/api/extra/clip/file/abc.mp4"), ("GET", "/api/extra/clip/abc"),
+                    ("GET", "/api/extra/dispositivi"), ("GET", "/api/extra/io"), ("GET", "/api/extra/inviti"),
+                    ("POST", "/api/extra/inviti"), ("GET", "/musica/api/musica/catalogo")]
+        for metodo, p in permesse:
+            st, h, b = self.da_fuori(metodo, p, {} if metodo == "POST" else None, biscotto=v, extra=self.ORIGINE)
+            self.assertNotEqual(st, 403, (metodo, p, b[:200]))
+            self.assertNotEqual(st, 401, (metodo, p))
+        vietate = [("GET", "/api/musica/aggiorna"), ("GET", "/api/extra/proxy?url=https://example.com/"),
+                   ("GET", "/api/extra/video"), ("POST", "/api/extra/video"), ("GET", "/api/extra/musica/cerca?q=x"),
+                   ("POST", "/api/extra/musica"), ("GET", "/api/extra/voci"), ("POST", "/api/extra/audiolibro"),
+                   ("DELETE", "/api/extra/audiolibro/x"), ("POST", "/api/extra/ia"), ("GET", "/api/extra/dispositivo"),
+                   ("GET", "/api/extra/stato"), ("GET", "/api/extra/gestione/persone"), ("GET", "/x/benessere.html"),
+                   ("GET", "/x/"), ("GET", "/x/studio.html"), ("GET", "/musica/api/extra/stato")]
+        for metodo, p in vietate:
+            st, h, b = self.da_fuori(metodo, p, {} if metodo == "POST" else None, biscotto=v, extra=self.ORIGINE)
+            self.assertEqual(st, 403, (metodo, p))
+            self.assertEqual(json.loads(b.decode("utf-8"))["errore"], "Non disponibile per gli invitati", p)
+        st, h, b = self.da_fuori("GET", "/api/extra/io", biscotto=v)
+        self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "invitato", "persona": {"id": pid, "nome": "Elena"}})
+        st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io")
+        self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "proprietario", "persona": None})
+
 
 class FintaRichiesta:
     """Quanto basta di BaseHTTPRequestHandler per controlla_accesso (indirizzi che dal Mac non si possono fingere)."""
