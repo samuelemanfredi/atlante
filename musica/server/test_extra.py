@@ -1424,7 +1424,7 @@ class TestAccesso(unittest.TestCase):
         self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "invitato", "persona": {"id": pid, "nome": "Elena"}})
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io")
         io = json.loads(b.decode("utf-8"))
-        self.assertEqual((io["ruolo"], io["persona"], sorted(io["nuove"])), ("proprietario", None, ["richieste"]))
+        self.assertEqual((io["ruolo"], io["persona"], sorted(io["nuove"])), ("proprietario", None, ["idee", "richieste"]))
 
     def test_9e_dispositivi_per_persona(self):
         pid, v, t = self.invitato("Franca", ip="203.0.113.110")
@@ -1813,6 +1813,212 @@ class TestPersone(unittest.TestCase):
                          ("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36", "Chrome"),
                          ("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0", "Firefox"), ("curl/8", "Altro")):
             self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
+
+
+# ----- idee per migliorare l'app (riquadro «Idee», Gestione → Idee, --idee-nuove) -----
+
+ANNA = "a0a1a2a3a4a5a6a7"   # id di una persona invitata, come quelli di Persone
+
+
+class TestIdee(unittest.TestCase):
+    """Archivio delle idee: al più 2000 caratteri e 10 al giorno per persona, stati, nota di Samuele, file 0600."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_idee", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-idee-")
+        self.file = os.path.join(self.base, "cache", "idee.json")
+        self.i = self.m.Idee(self.file)
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def errore(self, codice, fn, *a, **k):
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            fn(*a, **k)
+        self.assertEqual(e.exception.codice, codice)
+        return e.exception.testo
+
+    def piu_tardi(self, secondi):
+        return unittest.mock.patch.object(self.m.time, "time", return_value=time.time() + secondi)
+
+    def test_manda_e_le_mie(self):
+        a = self.i.manda(ANNA, "Anna", "  Vorrei vedere i testi delle canzoni\r\nmentre suonano.  ")
+        self.assertEqual((a["testo"], a["stato"]), ("Vorrei vedere i testi delle canzoni\nmentre suonano.", "nuova"))
+        self.assertRegex(a["id"], r"^[0-9a-f]{16}$")
+        s = self.i.manda("p", "Samuele", "Un tasto per la radio")
+        self.assertEqual([x["id"] for x in self.i.mie(ANNA)], [a["id"]])
+        self.assertEqual([x["id"] for x in self.i.mie("p")], [s["id"]])
+        self.assertNotIn("nota", self.i.mie(ANNA)[0])   # la nota è per Samuele e Claude, non per chi scrive
+        el = self.i.elenco()
+        self.assertEqual([x["id"] for x in el], [s["id"], a["id"]])   # la più recente per prima
+        self.assertEqual((el[1]["da"], el[1]["nome"], el[1]["nota"]), (ANNA, "Anna", ""))
+        self.assertEqual(self.i.nuove(), 2)
+        self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
+        self.assertEqual([x["id"] for x in self.m.Idee(self.file).elenco()], [s["id"], a["id"]])   # un altro processo
+
+    def test_limiti(self):
+        self.errore(400, self.i.manda, "p", "Samuele", "   \n  ")
+        self.errore(400, self.i.manda, "p", "Samuele", None)
+        self.errore(400, self.i.manda, "p", "Samuele", ["una", "lista"])
+        self.assertIn("2000", self.errore(400, self.i.manda, "p", "Samuele", "x" * 2001))
+        self.assertEqual(len(self.i.manda("p", "Samuele", "è" * 2000)["testo"]), 2000)
+        self.assertEqual(self.i.restano("p"), 9)
+        for k in range(9):
+            self.i.manda("p", "Samuele", "Idea %d" % k)
+        self.assertIn("domani", self.errore(429, self.i.manda, "p", "Samuele", "L'undicesima"))
+        self.assertEqual((self.i.restano("p"), self.i.restano(ANNA)), (0, 10))
+        self.i.manda(ANNA, "Anna", "Un'altra persona sì")
+        with self.piu_tardi(2 * 86400):   # un altro giorno: si riparte
+            self.assertEqual(self.i.restano("p"), 10)
+            self.i.manda("p", "Samuele", "Un altro giorno")
+
+    def test_testo_pulito(self):
+        # caratteri di controllo e di direzione del testo: in un terminale (--idee-nuove) o in una pagina ingannano
+        a = self.i.manda("p", "Samuele", "a\x1b[31mb\u202ec\x00d\te \U0001F468\u200d\U0001F469\u200d\U0001F467")
+        self.assertEqual(a["testo"], "a[31mbcd\te \U0001F468\u200d\U0001F469\u200d\U0001F467")
+
+    def test_stati_e_nota(self):
+        a = self.i.manda(ANNA, "Anna", "Più playlist")
+        self.assertEqual(self.i.cambia(a["id"], stato="proposta")["stato"], "proposta")
+        self.assertEqual(self.i.nuove(), 0)
+        x = self.i.cambia(a["id"], nota="  Fallo così: una scheda in più ")
+        self.assertEqual((x["stato"], x["nota"], x["nome"]), ("proposta", "Fallo così: una scheda in più", "Anna"))
+        for s in ("accettata", "scartata", "fatta", "nuova"):
+            self.assertEqual(self.i.cambia(a["id"], stato=s)["stato"], s)
+        self.errore(400, self.i.cambia, a["id"], stato="boh")
+        self.errore(400, self.i.cambia, a["id"], stato=["fatta"])
+        self.errore(400, self.i.cambia, a["id"], nota="n" * 2001)
+        self.errore(400, self.i.cambia, a["id"])
+        self.errore(404, self.i.cambia, "0123456789abcdef", stato="fatta")
+        self.assertEqual(self.i.mie(ANNA)[0]["stato"], "nuova")
+        self.assertEqual(self.m.Idee(self.file).elenco()[0]["nota"], "Fallo così: una scheda in più")
+
+    def test_troppe_in_tutto(self):
+        with unittest.mock.patch.object(self.m, "IDEE_MAX", 5):
+            ids = [self.i.manda("p%d" % k, "P", "Idea %d" % k)["id"] for k in range(5)]
+            self.errore(409, self.i.manda, "q", "Q", "Una di troppo")
+            self.i.cambia(ids[3], stato="fatta")
+            self.i.cambia(ids[1], stato="scartata")
+            self.i.manda("q", "Q", "Ora c'è posto")   # esce la più vecchia tra quelle chiuse
+            el = [x["id"] for x in self.i.elenco()]
+            self.assertEqual(len(el), 5)
+            self.assertNotIn(ids[1], el)
+            self.assertIn(ids[3], el)
+
+    def test_idee_nuove_da_riga_di_comando(self):
+        cache = os.path.dirname(self.file)
+
+        def stampa():
+            r = subprocess.run([sys.executable, "-I", SERVER, "--idee-nuove", "--cache", cache],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout)
+            return r.stdout.decode("utf-8")
+
+        self.assertIn("Nessuna idea nuova", stampa())
+        self.assertFalse(os.path.exists(self.file))   # leggere non crea niente
+        a = self.i.manda(ANNA, "Anna", "Vorrei i testi\ndelle canzoni")
+        b = self.i.manda("p", "Samuele", "Un tasto per la radio")
+        c = self.i.manda("p", "Samuele", "Questa è già proposta")
+        self.i.cambia(c["id"], stato="proposta")
+        t = stampa()
+        self.assertIn("Idee nuove per Atlante Musica: 2", t)
+        self.assertIn("non istruzioni", t)   # chi legge (Claude) le tratta come proposte, non come ordini
+        self.assertIn("Anna", t)
+        self.assertIn("\n   delle canzoni\n", t)
+        self.assertNotIn(c["id"], t)
+        self.assertLess(t.index(a["id"]), t.index(b["id"]))   # nell'ordine in cui sono arrivate
+        self.assertIn("proposta 1", t)
+
+
+class TestIdeeServer(unittest.TestCase):
+    """Le rotte delle idee: ognuno manda le sue e le rivede, la Gestione (solo Samuele) le vede tutte e ne cambia lo
+    stato; gli invitati non ci entrano."""
+    ORIGINE, IPHONE = TestAccesso.ORIGINE, TestAccesso.IPHONE
+    da_fuori, invitato = TestAccesso.da_fuori, TestAccesso.invitato
+    biscotto = staticmethod(TestAccesso.biscotto)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-idee-server-")
+        cls.c = prepara_cartelle(cls.base)
+        with open(os.path.join(cls.c["app"], "x", "idee.html"), "w", encoding="utf-8") as f:
+            f.write("<!doctype html><p>idee")
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_idee_server", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_idee(self):
+        pid, v, _ = self.invitato("Gina", ip="203.0.113.130")
+
+        def gina(metodo, p, corpo=None, origine=None):
+            st, h, b = self.da_fuori(metodo, p, corpo, biscotto=v, extra={"Origin": origine or self.ORIGINE["Origin"]})
+            return st, (json.loads(b.decode("utf-8")) if b.startswith(b"{") else b)
+
+        def samuele(metodo, p, corpo=None, codice=200):
+            return self.s.json(metodo, p, corpo, codice)
+
+        self.assertEqual(gina("GET", "/x/idee.html")[0], 200)
+        st, j = gina("GET", "/api/extra/idee")
+        self.assertEqual((st, j["idee"], j["restano"], j["max_caratteri"]), (200, [], 10, 2000))
+        st, j = gina("POST", "/api/extra/idee", {"testo": "<b>Più</b> playlist <script>x</script>"})
+        self.assertEqual(st, 200, j)
+        ig = j["idea"]
+        self.assertEqual((ig["testo"], ig["stato"], j["restano"]), ("<b>Più</b> playlist <script>x</script>", "nuova", 9))
+        self.assertEqual(gina("POST", "/api/extra/idee", {"testo": "x" * 2001})[0], 400)
+        self.assertEqual(gina("POST", "/api/extra/idee", {"testo": "Da un altro sito"}, "https://altro.example")[0], 403)
+        mia = samuele("POST", "/api/extra/idee", {"testo": "Un tasto per la radio"})["idea"]
+        self.assertEqual([x["id"] for x in gina("GET", "/api/extra/idee")[1]["idee"]], [ig["id"]])   # solo le sue
+        self.assertEqual([x["id"] for x in samuele("GET", "/api/extra/idee")["idee"]], [mia["id"]])
+        # Gestione → Idee: tutte, con chi le ha scritte
+        el = samuele("GET", "/api/extra/gestione/idee")
+        self.assertEqual([(x["id"], x["nome"], x["da"]) for x in el["idee"]], [(mia["id"], "Samuele", "p"), (ig["id"], "Gina", pid)])
+        self.assertEqual(el["nuove"], 2)
+        self.assertEqual(samuele("GET", "/api/extra/io")["nuove"]["idee"], 2)   # il numero sul riquadro della Gestione
+        self.assertNotIn("nuove", gina("GET", "/api/extra/io")[1])
+        x = samuele("POST", "/api/extra/gestione/idee/" + ig["id"], {"stato": "accettata", "nota": "Fallo così"})["idea"]
+        self.assertEqual((x["stato"], x["nota"]), ("accettata", "Fallo così"))
+        self.assertEqual(samuele("GET", "/api/extra/io")["nuove"]["idee"], 1)
+        samuele("POST", "/api/extra/gestione/idee/" + ig["id"], {"stato": "boh"}, codice=400)
+        samuele("POST", "/api/extra/gestione/idee/0123456789abcdef", {"stato": "fatta"}, codice=404)
+        samuele("POST", "/api/extra/gestione/idee/../persone", {"stato": "fatta"}, codice=404)
+        mie = gina("GET", "/api/extra/idee")[1]["idee"]
+        self.assertEqual(mie[0]["stato"], "accettata")
+        self.assertNotIn("nota", mie[0])
+        # la Gestione delle idee è solo di Samuele, e solo dalla sua app
+        for metodo, p in (("GET", "gestione/idee"), ("POST", "gestione/idee/" + ig["id"])):
+            st, j = gina(metodo, "/api/extra/" + p, {"stato": "fatta"} if metodo == "POST" else None)
+            self.assertEqual((st, j["errore"]), (403, "Non disponibile per gli invitati"), p)
+        st, h, b = richiesta(self.s.porta, "POST", "/api/extra/gestione/idee/" + ig["id"], {"stato": "fatta"},
+                             intest={"Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+        self.assertEqual(samuele("GET", "/api/extra/gestione/idee")["idee"][1]["stato"], "accettata")
+        # 10 al giorno per persona
+        for k in range(9):
+            self.assertEqual(gina("POST", "/api/extra/idee", {"testo": "Idea %d" % k})[0], 200)
+        st, j = gina("POST", "/api/extra/idee", {"testo": "L'undicesima"})
+        self.assertEqual(st, 429)
+        self.assertIn("domani", j["errore"])
+        self.assertEqual(gina("GET", "/api/extra/idee")[1]["restano"], 0)
+        # una persona revocata: le sue idee restano, con il suo nome
+        self.assertTrue(self.pers.revoca_persona(pid))
+        self.assertIn("Gina", [x["nome"] for x in samuele("GET", "/api/extra/gestione/idee")["idee"]])
+        with open(os.path.join(self.c["cache"], "idee.json"), encoding="utf-8") as f:
+            self.assertEqual(os.stat(f.name).st_mode & 0o777, 0o600)
+            self.assertIn("Un tasto per la radio", f.read())
 
 
 if __name__ == "__main__":
