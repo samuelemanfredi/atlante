@@ -5955,6 +5955,35 @@ class TestChatArchivio(unittest.TestCase):
             self.ch.invia(a, aa, finto_messaggio(cid, da, [db]))   # chat chiusa: notifica subito
             self.assertTrue(aspetta(lambda: mandate == ["http://127.0.0.1:9/b"], 5))
 
+    def test_avviso_di_chiamata(self):
+        # il centralino delle chiamate usa le notifiche della chat: «Chiamata da Anna» sui telefoni di Bruno
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        mandate = []
+        self.ch._manda_notifica = lambda e: mandate.append(e) or 201
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_PUSH_PROVA": "http://127.0.0.1:9/"}):
+            self.ch.iscrivi(b, ab, {"disp": db, "endpoint": "http://127.0.0.1:9/b"})
+            self.ch.avviso_chiamata(b, "arriva", {"id": "c1", "da": a, "da_nome": "Anna", "video": True})
+            self.assertTrue(aspetta(lambda: mandate == ["http://127.0.0.1:9/b"], 5))
+            ch = self.ch.avvisi(b, ab, db)["chiamate"]
+            self.assertEqual([(x["id"], x["evento"], x["nome"], x["video"]) for x in ch], [("c1", "arriva", "Anna", True)])
+            self.ch.avviso_chiamata(b, "persa", {"id": "c1", "da": a, "da_nome": "Anna", "video": True})
+            self.assertEqual([x["evento"] for x in self.ch.avvisi(b, ab, db)["chiamate"]], ["persa"])
+            self.ch.avviso_chiamata(b, "chiusa", {"id": "c1", "da": a, "da_nome": "Anna", "video": True})
+            self.assertEqual([(x["id"], x["evento"]) for x in self.ch.avvisi(b, ab, db)["chiamate"]], [("c1", "chiusa")])
+            self.assertEqual(self.ch.avvisi(a, aa, da)["chiamate"], [])   # Anna non riceve gli avvisi di Bruno
+        # e le funzioni d'aggancio del centralino passano dalla chat (avviso e «Blocca»)
+        self.m.CHAT = self.ch
+        try:
+            self.ch.blocca(b, a, True)
+            self.assertTrue(self.m.chiamata_bloccata(a, b))
+            self.assertFalse(self.m.chiamata_bloccata(b, a))
+            prima = len(mandate)
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_PUSH_PROVA": "http://127.0.0.1:9/"}):
+                self.m.avviso_chiamata(b, "arriva", {"id": "c2", "da": a, "da_nome": "Anna", "video": False})
+                self.assertTrue(aspetta(lambda: len(mandate) > prima, 5))
+        finally:
+            self.m.CHAT = None
+
     def test_bloccato(self):
         (a, aa, da), (b, ab, db), cid = self.coppia()
         self.m.CHAT = self.ch

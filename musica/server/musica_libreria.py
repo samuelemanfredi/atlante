@@ -6845,10 +6845,23 @@ class Centralino:
             self._manda()
 
 
+def chiamata_bloccata(da, a):
+    """True se `a` ha bloccato `da` con «Blocca» della chat: allora a `a` non squilla niente."""
+    try:
+        return CHAT is not None and chat_bloccato(da, a)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _nome_in_atlante(chi):
+    if chi == "p":
+        return NOME_PROPRIETARIO
+    return PERS.nome(chi) if PERS is not None and isinstance(chi, str) and re.fullmatch(r"[0-9a-f]{16}", chi) else ""
+
+
 def avviso_chiamata(persona, evento, chiamata):
-    """Punto d'aggancio per le notifiche delle chiamate (le manda il ramo della chat, con Web Push: quando c'è, si
-    sostituisce il corpo di questa funzione). La chiama il centralino in un filo a parte, fuori dal suo blocco: può
-    fare richieste di rete. Argomenti:
+    """Notifiche delle chiamate: le manda la chat (Web Push) ai telefoni iscritti. La chiama il centralino in un filo
+    a parte, fuori dal suo blocco: può fare richieste di rete. Argomenti:
     - persona: chi riceve l'avviso ("p" = Samuele, se no l'id dell'invitato), su tutti i suoi dispositivi iscritti;
     - evento: "arriva" (comincia a squillare: «Chiamata da Anna» o «Videochiamata da Anna»), "persa" (nessuno ha
       risposto o chi chiamava ha chiuso: «Chiamata persa da Anna»), "chiusa" (ha risposto o rifiutato: la notifica di
@@ -6856,18 +6869,11 @@ def avviso_chiamata(persona, evento, chiamata):
     - chiamata: {"id", "da", "da_nome", "video"}. Etichetta della notifica: "chiamata-<id>", così «persa» e «chiusa»
       prendono il posto di «arriva». Toccandola si apre l'app (./): se squilla ancora, la chiamata compare da sola
       (l'app chiede api/extra/chiamate/attendi appena si apre); per le perse va bene ./?x=chiamate (l'elenco)."""
-    return None
-
-
-def chiamata_bloccata(da, a):
-    """True se `a` ha bloccato `da` (lo deciderà la chat con «Blocca»): allora a `a` non squilla niente."""
-    return False
-
-
-def _nome_in_atlante(chi):
-    if chi == "p":
-        return NOME_PROPRIETARIO
-    return PERS.nome(chi) if PERS is not None and isinstance(chi, str) and re.fullmatch(r"[0-9a-f]{16}", chi) else ""
+    try:
+        if CHAT is not None:   # la chat c'è da quando il server parte (main); nelle prove del centralino da solo no
+            CHAT.avviso_chiamata(persona, evento, chiamata)
+    except Exception as e:  # noqa: BLE001  una notifica non riuscita non deve fermare la chiamata
+        print("Atlante: avviso di chiamata non mandato: %s" % e, flush=True)
 
 
 CENTRALINO = Centralino(_nome_in_atlante, bloccato=lambda da, a: chiamata_bloccata(da, a),
@@ -9511,6 +9517,7 @@ class Chat:
         self.ver, self.base = {}, int(time.time())
         self.attese = {}                                     # dispositivo -> attese lunghe aperte
         self.posta, self.postino, self.notificato = [], None, {}
+        self.chiamate = {}   # persona -> {id chiamata: avviso}: le chiamate in arrivo, perse e chiuse (solo in memoria)
         self.jwt, self.vapid = {}, None
         self.salvato, self.timer, self.pulito = 0.0, None, 0.0
         with self.blocco:
@@ -10011,7 +10018,28 @@ class Chat:
                 c = self.dati["conversazioni"].get(cid) or {}
                 out.append({"conv": cid, "da": m["da"], "nome": vivi[0].get(m["da"], "qualcuno"), "n": n, "t": m["t"],
                             "gruppo": c.get("nome") if c.get("tipo") == "gruppo" else None})
-            return {"avvisi": sorted(out, key=lambda y: -y["t"])[:10]}
+            ora = time.time()
+            vive = {"arriva": SQUILLO_DURATA + 5, "persa": 3600, "chiusa": 120}   # quanto conta ancora ogni avviso
+            chiamate = sorted((x for x in (self.chiamate.get(persona) or {}).values() if ora - x["t"] <= vive[x["evento"]]),
+                              key=lambda y: -y["t"])[:5]
+            return {"avvisi": sorted(out, key=lambda y: -y["t"])[:10], "chiamate": chiamate}
+
+    def avviso_chiamata(self, persona, evento, chiamata):
+        """Notifica di una chiamata (dal centralino): si ricorda l'avviso per il service worker, che lo legge con
+        chat/avvisi, e si sveglia ogni telefono iscritto di quella persona (notifica senza contenuto, come i messaggi)."""
+        if evento not in ("arriva", "persa", "chiusa") or not isinstance(chiamata, dict) or not chiamata.get("id"):
+            return
+        with self.blocco:
+            avvisi = self.chiamate.setdefault(persona, {})
+            ora = time.time()
+            for k in [k for k, x in avvisi.items() if ora - x["t"] > 3600]:
+                del avvisi[k]
+            avvisi[str(chiamata["id"])] = {"id": str(chiamata["id"]), "evento": evento, "t": ora,
+                                           "nome": str(chiamata.get("da_nome") or "qualcuno")[:60], "video": bool(chiamata.get("video"))}
+            fini = [sub["endpoint"] for did, sub in self.dati["push"].items()
+                    if (self.dati["dispositivi"].get(did) or {}).get("persona") == persona]
+        for e in dict.fromkeys(fini):   # fuori dal blocco: sono richieste di rete
+            threading.Thread(target=self._manda_notifica, args=(e,), daemon=True).start()
 
     # --- allegati ---
 
@@ -12061,6 +12089,12 @@ def main():
     avvia(cartelle, a.cache, indirizzo=indirizzo)
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
                 ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
+    # la chat pronta da subito (dopo avvia_extra, che sceglie la cartella della cache): le chiamate ne usano le
+    # notifiche e i blocchi anche prima che qualcuno la apra
+    try:
+        _chat_archivio()
+    except OSError as e:
+        print("Atlante: chat non pronta: %s" % e, flush=True)
     avvia_classifiche(a.cache, a.classifiche)
     if a.tematiche or a.tematiche_prova > 0:
         _tem().prova = max(0, a.tematiche_prova)
