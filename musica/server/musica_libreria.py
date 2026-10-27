@@ -2868,8 +2868,11 @@ def _clip_file(h, nome):
 # ----- classifiche e playlist: brani nuovi nella libreria, da soli -----
 #
 # Con --classifiche (ATLANTE_CLASSIFICHE=1) il Mac mini aggiunge alla musica scaricata i brani delle classifiche più note
-# (ogni settimana: Spotify tramite kworb.net, FIMI, Billboard, UK, YouTube Music con la sua API web, Apple Music), poi
-# quelli delle playlist più seguite di Spotify e di YouTube Music, genere per genere, dalla più seguita in giù, senza fine.
+# (rilette ogni giorno: Spotify tramite kworb.net, FIMI, Billboard, UK, YouTube Music con la sua API web, Apple Music),
+# poi quelli delle playlist più seguite di Spotify e di YouTube Music, genere per genere, dalla più seguita in giù, senza
+# fine. I nuovi ingressi di una classifica passano davanti ai brani delle playlist. Ogni classifica è anche una playlist
+# per l'app di tutti (api/extra/classifiche): posizioni, ▲▼ e «nuovo», e in fondo gli usciti delle ultime 4 settimane,
+# che restano nella libreria (niente si cancella).
 # Ogni brano si cerca su YouTube Music con le regole di «Cerca e scarica»: versione explicit (mai la censurata), artista
 # principale tra gli esecutori, niente tributi, cover, karaoke né altre versioni (remix, live…) se la classifica non le
 # chiede. I brani che la libreria ha già (anche scritti in un altro modo) e quelli già cercati si saltano senza chiedere
@@ -2878,13 +2881,15 @@ def _clip_file(h, nome):
 # poi una prova sola ogni tanto (al più una al giorno dopo le prime ore) e «Riprova adesso». Niente proxy né cambi di
 # indirizzo: si va alla velocità che YouTube permette. Si ferma anche sotto i 200 GB liberi sul disco della musica.
 # Una fonte che non si legge (sito cambiato o irraggiungibile) si salta e lo si dice in Gestione.
-# Stato nella cache (extra/classifiche/): stato.json (coda, fonti lette, ultimi aggiunti), cercati.jsonl (ogni brano già
-# cercato, una riga) e videoclip.json (videoclip dei brani aggiunti, letto da Videoclip insieme al suo elenco);
+# Stato nella cache (extra/classifiche/): stato.json (coda, fonti lette, ultimi aggiunti), elenchi.json (le classifiche
+# per l'app), cercati.jsonl (ogni brano già cercato, una riga) e videoclip.json (videoclip dei brani aggiunti, letto da
+# Videoclip insieme al suo elenco);
 # il blocco di YouTube in extra/youtube-blocco.json (lo rispettano anche i videoclip). Dopo un riavvio si riprende da lì.
 
 CL_PAUSA = 5                     # secondi tra un brano e l'altro (quando si è chiesto qualcosa a YouTube)
 CL_SPAZIO_MIN = 200 * 1024 ** 3  # sotto i 200 GB liberi sul disco della musica ci si ferma
-CL_SETTIMANA = 7 * 86400         # le classifiche si rileggono ogni settimana
+CL_CLASSIFICHE_OGNI = 86400      # le classifiche si rileggono ogni giorno: i nuovi ingressi entrano subito
+CL_USCITI = 28 * 86400           # i brani usciti da una classifica restano in fondo («Usciti di recente») per 4 settimane
 CL_PLAYLIST_OGNI = 30 * 86400    # una playlist si rilegge dopo un mese (per i brani nuovi)
 CL_RIPROVA_FONTE = 86400         # una fonte che non si è letta si riprova il giorno dopo
 CL_RIPROVA_BRANO = 90 * 86400    # un brano non trovato (o solo censurato) si cerca di nuovo dopo tre mesi
@@ -2903,7 +2908,7 @@ YT_BLOCCO = re.compile(r"\b429\b|too many requests|rate.?limit|isn.t available,?
 YT_RETE = re.compile(r"urlopen error|timed? ?out|temporary failure|name or service not known|nodename nor servname|"
                      r"network is unreachable|no route to host|connection (?:reset|refused|aborted)|remote end closed|"
                      r"HTTP Error 5\d\d|getaddrinfo|\bssl\b", re.I)
-# le classifiche, nell'ordine in cui si leggono ogni settimana
+# le classifiche, nell'ordine in cui si leggono ogni giorno
 CL_FONTI = (
     {"id": "spotify-it", "nome": "Spotify Top 50 Italia", "tipo": "kworb", "quanti": 50,
      "dove": "https://kworb.net/spotify/country/it_weekly.html"},
@@ -3588,12 +3593,12 @@ def _cl_videoclip(artista, titolo):
 
 
 def _cl_catalogo():
-    """(firma, [(artista, titolo)]) dei brani della libreria: la firma cambia a ogni rilettura del disco."""
+    """(firma, [(artista, titolo, id)]) dei brani della libreria: la firma cambia a ogni rilettura del disco."""
     if LIB is None:
         return None, []
     with LIB.blocco:
         b = LIB.brani
-        return (id(b), len(b), LIB.ultima), [(v.get("artist") or "", v.get("title") or "") for v in b.values()]
+        return (id(b), len(b), LIB.ultima), [(v.get("artist") or "", v.get("title") or "", v.get("id") or "") for v in b.values()]
 
 
 def _cl_libero():
@@ -3614,6 +3619,7 @@ class Classifiche:
         self.file_cercati = os.path.join(cartella, "cercati.jsonl")
         self.file_fonti = os.path.join(cartella, "fonti.json")
         self.piano_clip = os.path.join(cartella, "videoclip.json")
+        self.file_elenchi = os.path.join(cartella, "elenchi.json")   # le classifiche come playlist per l'app
         self.blocco_yt = blocco
         self.lock = threading.RLock()
         self.sveglia = threading.Event()
@@ -3629,6 +3635,12 @@ class Classifiche:
         self._fonti_file = (None, None)
         self._prova = None        # (ricerca, risultati) della prova dopo un blocco: il brano dopo non la rifà
         self.s = self._carica()
+        try:
+            with open(self.file_elenchi, encoding="utf-8") as f:
+                d = json.load(f)
+            self.elenchi = d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            self.elenchi = {}
         self.cercati, self.yt_fatti = {}, set()
         try:
             with open(self.file_cercati, encoding="utf-8") as f:
@@ -3676,9 +3688,12 @@ class Classifiche:
     def _giorno(self):
         return time.strftime("%Y-%m-%d", time.localtime(self.adesso()))
 
-    def _cercato(self, k, esito, v, yt="", errore=""):
-        """Un brano cercato su YouTube: si ricorda (cercati.jsonl) ed esce dalla coda."""
+    def _cercato(self, k, esito, v, yt="", errore="", brano=""):
+        """Un brano cercato su YouTube: si ricorda (cercati.jsonl, con l'id del catalogo se è nella libreria) ed esce
+        dalla coda."""
         x = {"k": k, "e": esito, "t": int(self.adesso()), "a": v["a"][:200], "ti": v["t"][:200]}
+        if brano:
+            x["b"] = brano
         if yt:
             x["yt"] = yt
         if errore:
@@ -3720,20 +3735,33 @@ class Classifiche:
 
     def _indice_libreria(self):
         firma, voci = self.catalogo()
-        if firma != self._firma:
-            indice = {}
-            for a, t in list(voci) + self._aggiunti:
-                indice.setdefault(_cl_titolo(t), []).append((_cl_parole(a), _cl_principale(a).split()))
-            self._indice, self._firma, self._aggiunti = indice, firma, []
-        return self._indice
+        with self.lock:   # lo usano il lavoro e le richieste dell'app (le classifiche come playlist)
+            if firma != self._firma:
+                indice = {}
+                for v in list(voci) + self._aggiunti:
+                    a, t, i = (tuple(v) + ("",))[:3]
+                    indice.setdefault(_cl_titolo(t), []).append((_cl_parole(a), _cl_principale(a).split(), i))
+                self._indice, self._firma, self._aggiunti = indice, firma, []
+            return self._indice
 
-    def _in_libreria(self, artista, titolo):
-        """Il brano c'è già (stesso titolo scritto anche in un altro modo, e l'artista principale tra gli esecutori)."""
+    def _trova_in_libreria(self, artista, titolo):
+        """L'id del brano nel catalogo se c'è già (stesso titolo scritto anche in un altro modo, e l'artista principale
+        tra gli esecutori), se no None."""
         t = _cl_titolo(titolo)
         if not t:
-            return False
+            return None
         p, tutti = _cl_principale(artista).split(), _cl_parole(artista)
-        return any(_cl_dentro(p, parole) or _cl_dentro(princ, tutti) for parole, princ in self._indice_libreria().get(t, ()))
+        for parole, princ, i in self._indice_libreria().get(t, ()):
+            if _cl_dentro(p, parole) or _cl_dentro(princ, tutti):
+                return i
+        return None
+
+    def _in_libreria(self, artista, titolo):
+        return self._trova_in_libreria(artista, titolo) is not None
+
+    def _brano_di(self, vid):
+        """L'id del catalogo di un video già scaricato dalle classifiche ('' se non si sa)."""
+        return next((x.get("b") for x in self.cercati.values() if x.get("yt") == vid and x.get("b")), "")
 
     def _gia_scaricato(self, vid):
         for coda in (self.lavori, _CODE.get("musica")):
@@ -3814,9 +3842,11 @@ class Classifiche:
             return self._pausa("Meno di 200 GB liberi sul disco della musica (%d GB): fermo, riprovo fra mezz'ora"
                                % (libero // 1024 ** 3), 1800)
         try:
-            if self.s["coda"]:
+            f = self._classifica_da_leggere(ora)   # le classifiche appena è ora: i nuovi ingressi passano davanti
+            if f is None and self.s["coda"]:
                 return self._brano(ora)
-            f = self._prossima_fonte(ora)
+            if f is None:
+                f = self._prossima_playlist(ora)
             if f is None:
                 self.ora_fa = "Tutto fatto: aspetto le classifiche nuove"
                 return 3600
@@ -3841,8 +3871,9 @@ class Classifiche:
         if r is None:
             self._cercato(k, motivo, v)
             return CL_PAUSA
-        if r["id"] in self.yt_fatti or self._gia_scaricato(r["id"]) or self._in_libreria(r["artista"], r["titolo"]):
-            self._cercato(k, "doppione", v, r["id"])
+        gia = self._trova_in_libreria(r["artista"], r["titolo"])
+        if r["id"] in self.yt_fatti or self._gia_scaricato(r["id"]) or gia is not None:
+            self._cercato(k, "doppione", v, r["id"], brano=gia or self._brano_di(r["id"]))
             return CL_PAUSA
         self.ora_fa = "Scarico «%s» di %s" % (r["titolo"], r["artista"])
         try:
@@ -3864,10 +3895,11 @@ class Classifiche:
             self.s["ultimi"] = ([{"titolo": r["titolo"], "artista": r["artista"], "album": r.get("album") or "",
                                   "explicit": bool(r.get("explicit")), "fonte": v.get("f") or "", "quando": int(ora),
                                   "brano": x.get("brano") or "", "yt": r["id"]}] + self.s["ultimi"])[:CL_ULTIMI]
-            self._aggiunti.append((r["artista"], r["titolo"]))
+            self._aggiunti.append((r["artista"], r["titolo"], x.get("brano") or ""))
             self._indice.setdefault(_cl_titolo(r["titolo"]), []).append((_cl_parole(r["artista"]),
-                                                                       _cl_principale(r["artista"]).split()))
-        self._cercato(k, "aggiunto", v, r["id"])
+                                                                       _cl_principale(r["artista"]).split(),
+                                                                       x.get("brano") or ""))
+        self._cercato(k, "aggiunto", v, r["id"], brano=x.get("brano") or "")
         print("Classifiche: aggiunto «%s» di %s (%s)" % (r["titolo"], r["artista"], v.get("f") or ""), flush=True)
         self._videoclip(r, x)
         return CL_PAUSA
@@ -3957,10 +3989,10 @@ class Classifiche:
         voci = self._dal_file().get("generi") or self.generi
         return [(str(x[0]), str(x[1])) for x in voci if isinstance(x, (list, tuple)) and len(x) >= 2 and x[1]]
 
-    def _prossima_fonte(self, ora):
-        for f in self.fonti:   # prima le classifiche della settimana
-            if self._da_leggere(f["id"], CL_SETTIMANA, ora):
-                return f
+    def _classifica_da_leggere(self, ora):
+        return next((f for f in self.fonti if self._da_leggere(f["id"], CL_CLASSIFICHE_OGNI, ora)), None)
+
+    def _prossima_playlist(self, ora):
         pl = self.s["playlist"]
         sp = next((f for f in self._lista_spotify() if self._da_leggere(f["id"], CL_PLAYLIST_OGNI, ora)), None)
         if sp and pl.get("turno") != "ytm":   # poi le playlist, a turno: una di Spotify e una di YouTube Music
@@ -4030,18 +4062,95 @@ class Classifiche:
         brani = _cl_unici(brani)
         if f.get("quanti"):
             brani = brani[:f["quanti"]]
+        classifica = any(f["id"] == c["id"] for c in self.fonti)
         with self.lock:
             if brani:
                 self.s["fonti"][f["id"]] = {"nome": f["nome"], "letta": int(ora), "esito": "ok", "errore": "",
                                             "brani": len(brani)}
-                self.s["coda"] += [{"a": a, "t": t, "f": f["nome"]} for a, t in brani
-                                   if not self._gia_cercato(_cl_chiave(a, t), ora)]
+                nuovi = [{"a": a, "t": t, "f": f["nome"]} for a, t in brani
+                         if not self._gia_cercato(_cl_chiave(a, t), ora) and not self._in_libreria(a, t)]
+                if classifica:
+                    # i nuovi ingressi passano davanti ai brani delle playlist (dopo quelli delle classifiche già in coda,
+                    # nel loro ordine); un brano che era già in coda non si ripete
+                    coda = self.s["coda"]
+                    i = next((j for j, v in enumerate(coda) if not v.get("c")), len(coda))
+                    davanti = {_cl_chiave(v["a"], v["t"]) for v in coda[:i]}
+                    nuovi = [dict(v, c=1) for v in nuovi if _cl_chiave(v["a"], v["t"]) not in davanti]
+                    chiavi = {_cl_chiave(v["a"], v["t"]) for v in nuovi}
+                    self.s["coda"] = coda[:i] + nuovi + [v for v in coda[i:] if _cl_chiave(v["a"], v["t"]) not in chiavi]
+                    self._aggiorna_elenco(f, brani, ora)
+                else:
+                    self.s["coda"] += nuovi
             else:
                 errore = errore or "pagina letta ma senza brani: forse il sito ha cambiato forma"
                 self.s["fonti"][f["id"]] = {"nome": f["nome"], "letta": int(ora), "esito": "errore",
                                             "errore": errore[:300], "brani": 0}
                 print("Classifiche: %s non letta: %s" % (f["nome"], errore), flush=True)
             self._salva()
+
+    # ----- le classifiche come playlist dell'app -----
+
+    def _aggiorna_elenco(self, f, brani, ora):
+        """La classifica letta: se è cambiata, quella di prima diventa il confronto (▲▼, «nuovo») e chi è uscito va tra
+        gli «Usciti di recente». Riletta uguale (le classifiche cambiano una volta alla settimana) resta com'era."""
+        e = self.elenchi.get(f["id"]) or {}
+        voci = [{"a": a, "t": t, "k": _cl_chiave(a, t)} for a, t in brani]
+        prima = e.get("brani") or []
+        if [v["k"] for v in voci] != [v.get("k") for v in prima]:
+            ora_dentro = {v["k"] for v in voci}
+            usciti = [{"a": v["a"], "t": v["t"], "k": v["k"], "pos": i + 1, "quando": int(ora)}
+                      for i, v in enumerate(prima) if v.get("k") not in ora_dentro]
+            usciti += [u for u in e.get("usciti") or [] if u.get("k") not in ora_dentro and ora - u.get("quando", 0) < CL_USCITI]
+            e = {"brani": voci, "cambiata": int(ora), "usciti": usciti,
+                 "prima": {v["k"]: i + 1 for i, v in enumerate(prima)} if prima else None}
+        e.update(nome=f["nome"], letta=int(ora))
+        self.elenchi[f["id"]] = e
+        try:
+            with open(self.file_elenchi + ".tmp", "w", encoding="utf-8") as fh:
+                json.dump(self.elenchi, fh, ensure_ascii=False)
+            os.replace(self.file_elenchi + ".tmp", self.file_elenchi)
+        except OSError as err:
+            print("Classifiche: classifiche per l'app non salvate: %s" % err, flush=True)
+
+    def _voce_app(self, v, ora):
+        """Un brano di una classifica per l'app: il suo id nel catalogo («libreria»), «in arrivo» (ancora da cercare o da
+        scaricare) o «non disponibile» (cercato su YouTube Music: non c'è, o c'è solo la versione censurata)."""
+        i = self._trova_in_libreria(v["a"], v["t"])
+        c = self.cercati.get(v.get("k")) or {}
+        if i is None and c.get("e") in ("aggiunto", "doppione"):
+            i = c.get("b") or ""   # scaricato dalle classifiche con un titolo scritto in un altro modo
+        if i is not None:
+            stato = "libreria"
+        elif c and self._gia_cercato(v["k"], ora):
+            stato = "non disponibile"
+        else:
+            stato = "in arrivo"
+        return {"artista": v["a"], "titolo": v["t"], "brano": i or "", "stato": stato}
+
+    def classifiche_app(self):
+        """Le classifiche lette, come playlist per l'app di tutti: posizioni, ▲▼ e «nuovo» rispetto alla classifica di
+        prima, ogni brano nella libreria o «in arrivo», e gli usciti delle ultime 4 settimane (restano nella libreria)."""
+        ora = self.adesso()
+        fuori = []
+        with self.lock:
+            for f in self.fonti:
+                e = self.elenchi.get(f["id"])
+                if not e or not e.get("brani"):
+                    continue
+                prima = e.get("prima")
+                brani = []
+                for n, v in enumerate(e["brani"], 1):
+                    b = dict(self._voce_app(v, ora), pos=n, segno="", di=0)
+                    if prima is not None:
+                        p = prima.get(v["k"])
+                        b["segno"], b["di"] = ("nuovo", 0) if p is None else (
+                            "su" if p > n else "giu" if p < n else "uguale", abs(p - n))
+                    brani.append(b)
+                usciti = [dict(self._voce_app(u, ora), pos=u.get("pos", 0), uscito=u.get("quando", 0))
+                          for u in e.get("usciti") or [] if ora - u.get("quando", 0) < CL_USCITI]
+                fuori.append({"id": f["id"], "nome": f["nome"], "letta": e.get("letta", 0), "cambiata": e.get("cambiata", 0),
+                              "brani": brani, "usciti": usciti})
+        return {"classifiche": fuori}
 
     # ----- per la Gestione -----
 
@@ -4060,6 +4169,8 @@ class Classifiche:
                                 "errore": x.get("errore", ""), "brani": x.get("brani", 0)}
                                for k, x in s["fonti"].items() if k not in ids), key=lambda y: -y["letta"])
             fonte = dict(s["fonte"], in_coda=len(s["coda"])) if s.get("fonte") else None
+            if s["coda"]:   # la fonte del brano che si fa adesso (una classifica può essere passata davanti a una playlist)
+                fonte = {"nome": s["coda"][0].get("f") or "", "in_coda": len(s["coda"])}
             r = {"attivo": True, "oggi": s["oggi"] if s["giorno"] == self._giorno() else 0, "totale": s["totale"],
                  "ora": self.ora_fa, "fonte": fonte, "pausa": pausa, "ultimi": [dict(u) for u in s["ultimi"]],
                  "classifiche": classifiche, "playlist": playlist[:12], "playlist_lette": len(playlist),
@@ -6483,6 +6594,9 @@ def _instrada(h, metodo, parti, corpo):
         _ascoltati(h, metodo, resto, corpo)
     elif cosa == "gestione":
         _gestione(h, metodo, resto, corpo)
+    elif cosa == "classifiche" and not resto:   # le classifiche come playlist, per tutti (anche gli invitati)
+        solo("GET")
+        _json(h, CL.classifiche_app() if CL else {"classifiche": []})
     elif cosa == "inviti" and not resto:
         solo("GET", "POST")
         _inviti(h, metodo, corpo)
@@ -7876,14 +7990,14 @@ def controlla_accesso(h):
     return True
 
 
-# un invitato ascolta: la musica, i videoclip, i suoi dispositivi, chi è, i suoi inviti, le sue idee e i suoi ascolti; e
+# un invitato ascolta: la musica, i videoclip, i suoi dispositivi, le classifiche, chi è, i suoi inviti, le sue idee e i suoi ascolti; e
 # manda brani a Samuele (Cerca e scarica, Carica nella libreria: finiscono in «Da controllare»). Il resto (proxy, video,
 # IA, voci, la Gestione, gli altri moduli di «Altro») usa le risorse del Mac mini o è di Samuele
 PERMESSE_INVITATI = re.compile(
     r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
     r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/(?:inviti|idee|cerca|carica)\.html)$"
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
-    r"|extra/(?:io|inviti|idee|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
+    r"|extra/(?:io|inviti|idee|classifiche|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
     # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria: ognuno i suoi
     r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?)"
     r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?)$")

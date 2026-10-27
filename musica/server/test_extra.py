@@ -1699,6 +1699,12 @@ class TestAccesso(unittest.TestCase):
             self.assertEqual(h["X-Frame-Options"], "SAMEORIGIN", p)
             self.assertIn("frame-ancestors 'self'", h["Content-Security-Policy"], p)
 
+    def test_9k_classifiche_anche_per_gli_invitati(self):
+        pid, v, t = self.invitato("Olga", ip="203.0.113.160")
+        st, h, b = self.da_fuori("GET", "/api/extra/classifiche", biscotto=v)
+        self.assertEqual((st, json.loads(b.decode("utf-8"))), (200, {"classifiche": []}))   # qui le classifiche sono spente
+        self.assertEqual(self.da_fuori("GET", "/api/extra/gestione/classifiche", biscotto=v)[0], 403)
+
 
 class FintaRichiesta:
     """Quanto basta di BaseHTTPRequestHandler per controlla_accesso (indirizzi che dal Mac non si possono fingere)."""
@@ -2557,11 +2563,11 @@ class TestClassificheLavoro(unittest.TestCase):
                          [("Balorda nostalgia", "Olly", "Classifica di prova"), ("Without Me", "Eminem", "Classifica di prova")])
         self.assertEqual(r["classifiche"][0]["esito"], "ok")
         self.assertEqual(r["classifiche"][0]["brani"], 5)   # senza il doppione
-        # la settimana dopo la classifica si rilegge, ma i brani già cercati non si cercano più
-        self.ora.t += 3 * 86400
+        # la classifica si rilegge ogni giorno (i nuovi ingressi arrivano subito), ma i brani già cercati non si cercano più
+        self.ora.t += 3600
         self.assertEqual(self.gira(c), 3600)
         self.assertEqual(self.letture, ["prova"])
-        self.ora.t += 5 * 86400
+        self.ora.t += 86400
         self.assertEqual(self.gira(c), 3600)
         self.assertEqual(self.letture, ["prova", "prova"])
         self.assertEqual(len(self.ricerche), 4)
@@ -2704,11 +2710,14 @@ class TestClassificheLavoro(unittest.TestCase):
         self.assertEqual((esiti["uno"]["esito"], esiti["due"]["esito"], esiti["tre"]["esito"]), ("errore", "errore", "ok"))
         self.assertIn("503", esiti["uno"]["errore"])
         self.assertIn("cambiato", esiti["due"]["errore"])
-        # una fonte che non si è letta si riprova il giorno dopo, non dopo una settimana
+        # una fonte che non si è letta si riprova il giorno dopo (come le altre classifiche)
         self.pagine["uno"] = [("Olly", "Balorda nostalgia")]
+        self.ora.t += 3600
+        self.gira(c)
+        self.assertEqual(self.letture, ["uno", "due", "tre"])
         self.ora.t += 86401
         self.gira(c)
-        self.assertEqual(self.letture, ["uno", "due", "tre", "uno", "due"])
+        self.assertEqual(self.letture, ["uno", "due", "tre", "uno", "due", "tre"])
 
     def test_playlist_senza_fine(self):
         m = self.m
@@ -2785,6 +2794,74 @@ class TestClassificheLavoro(unittest.TestCase):
             self.assertEqual(e.exception.codice, 403)
         for p in ("/api/extra/gestione/classifiche", "/api/extra/gestione/classifiche/riprova"):
             self.assertIsNone(m.PERMESSE_INVITATI.match(p), p)   # agli invitati non arriva nemmeno
+        self.assertTrue(m.PERMESSE_INVITATI.match("/api/extra/classifiche"))   # le classifiche come playlist sì
+        self.assertIsNone(m.PERMESSE_INVITATI.match("/api/extra/classifiche/x"))
+
+    def brani(self, c, fid="prova"):
+        el = {x["id"]: x for x in c.classifiche_app()["classifiche"]}[fid]
+        return [(b["pos"], b["titolo"], b["segno"], b["di"], b["stato"], b["brano"]) for b in el["brani"]], el
+
+    def test_classifiche_come_playlist(self):
+        self.pagine["prova"] = [("Olly", "Balorda nostalgia"), ("Coma_Cose", "Cuoricini"), ("Geolier", "Nun te scetà")]
+        self.risposte = {"Olly Balorda nostalgia": [risultato("Olly0000001", "Balorda nostalgia", "Olly")],
+                         "Geolier Nun te scetà": [risultato("Altro000001", "Altra canzone", "Geolier")]}
+        self.libreria = [("Coma_Cose", "Cuoricini", "lib-cuoricini")]   # c'è già nella libreria
+        c = self.nuovo()
+        self.assertEqual(c.classifiche_app(), {"classifiche": []})   # prima della prima lettura: niente
+        self.gira(c)
+        brani, el = self.brani(c)
+        # la prima volta: le posizioni, senza segni (non c'è una lettura prima); il brano scaricato ha il suo id del catalogo
+        self.assertEqual(brani, [(1, "Balorda nostalgia", "", 0, "libreria", "b1"), (2, "Cuoricini", "", 0, "libreria", "lib-cuoricini"),
+                                 (3, "Nun te scetà", "", 0, "non disponibile", "")])
+        self.assertEqual((el["nome"], el["usciti"]), ("Classifica di prova", []))
+        # intanto una playlist lunga riempie la coda…
+        c.s["coda"] = [{"a": "Artista %d" % i, "t": "Brano %d" % i, "f": "Una playlist"} for i in range(50)]
+        # …la classifica nuova (il giorno dopo) passa davanti: i nuovi ingressi si scaricano subito
+        self.pagine["prova"] = [("ANNA", "30°C"), ("Geolier", "Nun te scetà"), ("Olly", "Balorda nostalgia"), ("Coma_Cose", "Cuoricini")]
+        self.risposte["ANNA 30°C"] = [risultato("Anna0000001", "30°C", "ANNA", explicit=True)]
+        self.ora.t += 86400
+        self.assertEqual(c.passo(), 0)
+        self.assertEqual(self.letture[-1], "prova")
+        self.assertEqual(c.s["coda"][0]["t"], "30°C")
+        self.assertEqual(len(c.s["coda"]), 51)
+        # un'altra classifica letta subito dopo va dietro a questa, ma sempre davanti alla playlist
+        altra = {"id": "altra", "nome": "Altra classifica", "tipo": "finta"}
+        c.fonti.append(altra)
+        self.pagine["altra"] = [("Artista 7", "Brano 7"), ("ANNA", "30°C"), ("Sfera Ebbasta", "Nuova")]
+        c.passo()
+        self.assertEqual([v["t"] for v in c.s["coda"][:4]], ["30°C", "Brano 7", "Nuova", "Brano 0"])
+        self.assertEqual(len(c.s["coda"]), 52)   # «Brano 7» spostato davanti, non ripetuto
+        c.fonti.remove(altra)
+        brani, el = self.brani(c)
+        self.assertEqual(brani, [(1, "30°C", "nuovo", 0, "in arrivo", ""), (2, "Nun te scetà", "su", 1, "non disponibile", ""),
+                                 (3, "Balorda nostalgia", "giu", 2, "libreria", "b1"), (4, "Cuoricini", "giu", 2, "libreria", "lib-cuoricini")])
+        c.passo()
+        self.assertEqual(self.scaricati[-1], "Anna0000001")
+        self.assertEqual(self.brani(c)[0][0][4:], ("libreria", "b2"))
+        # riletta uguale il giorno dopo: i segni restano quelli della classifica nuova
+        self.ora.t += 86400
+        c.passo()
+        self.assertEqual(self.letture.count("prova"), 3)
+        self.assertEqual([b[2] for b in self.brani(c)[0]], ["nuovo", "su", "giu", "giu"])
+        # un brano esce: sparisce dalla classifica ma resta nella libreria, in fondo tra gli «Usciti di recente»
+        self.pagine["prova"] = [("ANNA", "30°C"), ("Olly", "Balorda nostalgia"), ("Geolier", "Nun te scetà")]
+        self.ora.t += 86400
+        c.passo()
+        brani, el = self.brani(c)
+        self.assertEqual([b[1] for b in brani], ["30°C", "Balorda nostalgia", "Nun te scetà"])
+        self.assertEqual([(u["titolo"], u["pos"], u["stato"], u["brano"]) for u in el["usciti"]],
+                         [("Cuoricini", 4, "libreria", "lib-cuoricini")])
+        self.assertEqual([b[2:4] for b in brani], [("uguale", 0), ("su", 1), ("giu", 1)])
+        # dopo quattro settimane gli usciti non si mostrano più; chi rientra torna «nuovo» e non è più tra gli usciti
+        self.ora.t += 29 * 86400
+        self.assertEqual(self.brani(c)[1]["usciti"], [])
+        self.pagine["prova"] = [("Coma_Cose", "Cuoricini"), ("ANNA", "30°C")]
+        c.passo()
+        brani, el = self.brani(c)
+        self.assertEqual([b[1:3] for b in brani], [("Cuoricini", "nuovo"), ("30°C", "giu")])
+        self.assertEqual([u["titolo"] for u in el["usciti"]], ["Balorda nostalgia", "Nun te scetà"])
+        # dopo un riavvio le classifiche restano
+        self.assertEqual(self.brani(self.nuovo())[0], brani)
 
 
 class FintoWeb(http.server.BaseHTTPRequestHandler):
@@ -2892,6 +2969,16 @@ class TestClassificheServer(unittest.TestCase):
         self.assertIsNone(r["blocco"])
         self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Dua Lipa - Houdini.mp3")))
         self.assertNotIn("youtube_bloccato", self.s.json("GET", "/api/extra/io").get("nuove", {}))
+        # ogni classifica letta è una playlist per l'app: posizioni e il brano della libreria (id del catalogo)
+        cl = {x["id"]: x for x in self.s.json("GET", "/api/extra/classifiche")["classifiche"]}
+        self.assertEqual(cl["spotify-it"]["nome"], "Spotify Top 50 Italia")
+        b = cl["spotify-it"]["brani"][0]
+        self.assertEqual((b["pos"], b["titolo"], b["artista"], b["stato"]), (1, "Without Me", "Eminem", "libreria"))
+        cat = {x["id"]: x for x in self.s.json("GET", "/api/musica/catalogo")["brani"]}
+        self.assertEqual(cat[b["brano"]]["title"], "Without Me")
+        self.assertEqual(cl["spotify-mondo"]["brani"][0]["titolo"], "Houdini")
+        self.assertNotIn("billboard", cl)   # non letta: nessuna playlist
+        self.s.json("POST", "/api/extra/classifiche", {}, codice=405)
         # le fonti che non esistono qui (404) si saltano e lo si dice
         esiti = {f["id"]: f["esito"] for f in self.stato()["classifiche"]}
         self.assertEqual((esiti["spotify-it"], esiti["spotify-mondo"]), ("ok", "ok"))
