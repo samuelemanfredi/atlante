@@ -34,7 +34,7 @@ Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale fun
 
     python3 musica_libreria.py --imposta-password          # una volta: da Internet l'app chiede questa password
                                                             # (o dalla pagina <app>/accesso aperta con Tailscale)
-    tailscale funnel --bg --https=10000 8790
+    tailscale funnel --bg --https=10000 8790             # oppure dall'app: Gestione → Rete
 
 Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
 """
@@ -2006,6 +2006,8 @@ def _gestione(h, metodo, resto, corpo):
         raise ErroreExtra(403, "Solo Samuele può usare la Gestione")
     if metodo not in ("GET", "POST", "DELETE"):
         raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    if resto[:1] == ["rete"]:   # Gestione → Rete: Tailscale sul Mac mini
+        return _rete(h, metodo, resto[1:], corpo)
     if resto == ["persone"] and metodo == "GET":
         el, mio = PERS.elenco(), _chi_e(h)["chiave"]
         for x in el["persone"]:
@@ -3320,6 +3322,7 @@ def _instrada(h, metodo, parti, corpo):
         r = {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None}
         if chi["ruolo"] == "proprietario" and PERS:   # il riquadro Gestione mostra quante cose nuove aspettano Samuele
             r["nuove"] = {"richieste": sum(1 for x in PERS.richieste() if x["stato"] == "attesa")}
+        r["via"] = _via(h)   # «Rete e VPN»: questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet
         _json(h, r)
     elif cosa == "dispositivi" and not resto:
         solo("GET")
@@ -3397,6 +3400,353 @@ def gestisci_extra(h, metodo=None):
                 pass
         h.close_connection = True
     return True
+
+
+# ----- Rete: Tailscale sul Mac mini (Gestione → Rete) -----
+#
+# Un'app web non può accendere né cambiare il VPN del telefono (iPhone e Android non lo permettono): da qui Samuele
+# comanda Tailscale sul Mac mini e l'app guida il telefono (x/rete.html, con il campo «via» di api/extra/io). Si leggono
+# lo stato del Mac nella rete Tailscale e i suoi dispositivi, si accende o spegne l'accesso da Internet (Funnel) e
+# l'uscita da casa (exit node). I comandi hanno argomenti fissi: porte e indirizzi solo tra quelli permessi, riscritti
+# dal server (nessun testo dell'utente nel comando), e un tempo massimo. Ogni cambio scrive una riga nel registro.
+
+TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"   # l'app per Mac ha dentro anche il comando
+FUNNEL_PORTE = (443, 8443, 10000)    # le sole porte che Tailscale apre a Internet
+FUNNEL_PORTA = 10000                 # quella predefinita, se l'indirizzo pubblico dei link d'invito non ne dice un'altra
+TEMPO_TAILSCALE = 8                  # secondi per leggere lo stato
+TEMPO_TAILSCALE_CAMBIO = 20          # per un cambio: con Funnel non permesso tailscale scrive il link e resta ad aspettare
+PANNELLO_TAILSCALE = "https://login.tailscale.com/admin"
+RETE_LOCK = threading.Lock()         # un cambio alla volta
+_RETE_LOCALI = ("127.0.0.1", "localhost", "::1")
+
+
+class RifiutoTailscale(ErroreExtra):
+    """tailscale ha detto di no (o non ha finito in tempo): il suo messaggio e se va sistemato nel pannello di Tailscale."""
+
+    def __init__(self, cosa, dettaglio, scaduto=False):
+        d = "\n".join(x.strip() for x in (dettaglio or "").strip().splitlines())[:1500]   # senza i rientri di tailscale
+        m = re.search(r"https://login\.tailscale\.com/[^\s\"'<>]+", d)
+        self.dettaglio, self.link = d, m.group(0) if m else ""
+        self.pannello = bool(self.link) or bool(re.search(r"not enabled|not allowed|nodeattr|access control|approv", d, re.I))
+        if self.pannello:
+            testo = "%s: va permesso una volta dal pannello di Tailscale, poi riprova da qui" % cosa
+        elif scaduto:
+            testo = "%s: Tailscale non ha risposto entro il tempo massimo" % cosa
+        else:
+            testo = "%s: Tailscale ha risposto con un errore" % cosa
+        super().__init__(409, testo)
+
+
+def _tailscale_programma():
+    """Il comando tailscale: nel PATH (o in Homebrew, /usr/local/bin) oppure quello dentro l'app per Mac."""
+    p = _programma("tailscale")
+    if p:
+        return p
+    return TAILSCALE_APP if os.path.isfile(TAILSCALE_APP) and os.access(TAILSCALE_APP, os.X_OK) else None
+
+
+def _rete_testo(b):
+    return (b or b"").decode("utf-8", "replace").strip()
+
+
+def _tailscale(args, tempo):
+    """(codice d'uscita, uscita, errori) di `tailscale <args>`. Codice None se non parte o va oltre `tempo`: allora
+    l'uscita è quella scritta fino a lì (con Funnel non permesso, il link del pannello). Senza tailscale: errore 503."""
+    prog = _tailscale_programma()
+    if not prog:
+        raise ErroreExtra(503, "Tailscale non è installato sul Mac mini")
+    try:
+        r = subprocess.run([prog] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=tempo, env=_ambiente())
+    except subprocess.TimeoutExpired as e:
+        return None, _rete_testo(e.stdout), _rete_testo(e.stderr) or "nessuna risposta in %d secondi" % tempo
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return None, "", str(e)
+    return r.returncode, _rete_testo(r.stdout), _rete_testo(r.stderr)
+
+
+def _tailscale_json(args):
+    """(JSON, "") di un comando che legge soltanto; (None, messaggio) se non riesce."""
+    codice, out, err = _tailscale(args, TEMPO_TAILSCALE)
+    if codice != 0:
+        return None, err or out or "Tailscale non risponde"
+    try:
+        return json.loads(out or "{}"), ""
+    except ValueError:
+        return None, "risposta di Tailscale non leggibile"
+
+
+def _rete_ora(t):
+    """Secondi dal 1970 di un'ora di Tailscale (2026-10-26T18:30:00.123456789Z); None per «mai» (l'anno 1)."""
+    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)$", t if isinstance(t, str) else "")
+    if not m or int(m.group(1)) < 2000:
+        return None
+    import calendar
+    s = calendar.timegm(tuple(int(x) for x in m.groups()[:6]))
+    z = m.group(7)
+    if z != "Z":
+        s -= (1 if z[0] == "+" else -1) * (int(z[1:3]) * 3600 + int(z[4:6]) * 60)
+    return s
+
+
+def _rete_nome(p):
+    """Il nome di un dispositivo nella rete Tailscale (quello del pannello: sull'iPhone il nome del sistema è «localhost»)."""
+    dns = str(p.get("DNSName") or "").rstrip(".")
+    return dns.split(".")[0] if dns else str(p.get("HostName") or "")
+
+
+def _rete_ipv4(ips):
+    ips = [str(x) for x in ips] if isinstance(ips, list) else []
+    return next((x for x in ips if ":" not in x), ips[0] if ips else "")
+
+
+def _rete_porta_locale(destino):
+    """La porta sul Mac di un indirizzo come http://127.0.0.1:8790 (o localhost); None per qualsiasi altra cosa."""
+    try:
+        u = urlsplit(destino.strip())
+        porta = u.port
+    except (AttributeError, ValueError):
+        return None
+    if (u.scheme != "http" or (u.hostname or "") not in _RETE_LOCALI or not porta or u.path not in ("", "/")
+            or u.query or u.fragment or u.username or u.password):
+        return None
+    return porta
+
+
+def _rete_serve(conf):
+    """Gli indirizzi che il Mac pubblica con tailscale serve (solo rete Tailscale) o funnel (anche Internet), compresi
+    quelli aperti in primo piano da un Terminale: [{porta, indirizzo, destino, funnel}]."""
+    voci = []
+
+    def leggi(c):
+        if not isinstance(c, dict):
+            return
+        aperti = c.get("AllowFunnel") if isinstance(c.get("AllowFunnel"), dict) else {}
+        web = c.get("Web") if isinstance(c.get("Web"), dict) else {}
+        for hp, w in web.items():
+            host, _, porta = str(hp).rpartition(":")
+            if not host or not porta.isdigit():
+                continue
+            gest = w.get("Handlers") if isinstance(w, dict) else None
+            gest = gest if isinstance(gest, dict) else {}
+            primo = gest.get("/") if isinstance(gest.get("/"), dict) else next((v for v in gest.values() if isinstance(v, dict)), {})
+            destino = primo.get("Proxy") or primo.get("Path") or ("testo fisso" if primo.get("Text") else "")
+            voci.append({"porta": int(porta), "indirizzo": "https://%s%s/" % (host, "" if porta == "443" else ":" + porta),
+                         "destino": str(destino), "funnel": bool(aperti.get(hp))})
+        sotto = c.get("Foreground")
+        for f in (sotto.values() if isinstance(sotto, dict) else ()):
+            leggi(f)
+
+    leggi(conf)
+    voci.sort(key=lambda v: (v["porta"], v["indirizzo"]))
+    return voci
+
+
+def _rete_file():
+    return os.path.join(_cart("cache"), "rete.json")
+
+
+def _rete_scelte(porta_server):
+    """(porta di Funnel, indirizzo dell'app sul Mac): quelli dell'ultima accensione dalla Gestione, se no la porta
+    dell'indirizzo pubblico dei link d'invito (o 10000) e questo server su 127.0.0.1."""
+    porta, locale = FUNNEL_PORTA, porta_server
+    try:
+        u = urlsplit(PUBBLICO)
+        p = u.port or (443 if u.scheme == "https" else None)
+    except ValueError:
+        p = None
+    if p in FUNNEL_PORTE:
+        porta = p
+    try:
+        with open(_rete_file(), encoding="utf-8") as f:
+            x = json.load(f)
+        if x.get("porta") in FUNNEL_PORTE and not isinstance(x.get("porta"), bool):
+            porta = int(x["porta"])
+        locale = _rete_porta_locale(x.get("destino")) or locale
+    except (OSError, ValueError, AttributeError):
+        pass
+    return porta, "http://127.0.0.1:%d" % locale
+
+
+def _rete_salva(porta, destino):
+    p = _rete_file()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"porta": porta, "destino": destino}, f)
+        os.replace(p + ".tmp", p)
+    except OSError as e:
+        print("Atlante: Rete: scelte di Funnel non salvate: %s" % e, flush=True)
+
+
+def _rete_stato(porta_server, via=None):
+    """Tailscale sul Mac mini per la Gestione: collegamento, dispositivi, indirizzi pubblicati, Funnel e uscita da casa."""
+    porta, destino = _rete_scelte(porta_server)
+    r = {"installato": bool(_tailscale_programma()), "collegato": False, "stato": "", "errore": "", "versione": "",
+         "nome": "", "dns": "", "indirizzo": "", "rete": "", "dispositivi": [], "serve": [], "questo": via,
+         "pannello": PANNELLO_TAILSCALE,
+         "funnel": {"acceso": False, "porta": None, "indirizzo": "", "destino": "", "porte": list(FUNNEL_PORTE),
+                    "predefiniti": {"porta": porta, "destino": destino}, "pubblico": PUBBLICO},
+         "uscita": {"annunciata": False, "approvata": False}}
+    if not r["installato"]:
+        r["errore"] = "Tailscale non è installato sul Mac mini"
+        return r
+    st, err = _tailscale_json(["status", "--json"])
+    if not isinstance(st, dict):
+        r["errore"] = err or "risposta di Tailscale non leggibile"
+        return r
+    io = st.get("Self") if isinstance(st.get("Self"), dict) else {}
+    rete = st.get("CurrentTailnet") if isinstance(st.get("CurrentTailnet"), dict) else {}
+    r.update(stato=str(st.get("BackendState") or ""), versione=str(st.get("Version") or "").split("-")[0], nome=_rete_nome(io),
+             dns=str(io.get("DNSName") or "").rstrip("."), indirizzo=_rete_ipv4(st.get("TailscaleIPs") or io.get("TailscaleIPs")),
+             rete=str(st.get("MagicDNSSuffix") or rete.get("MagicDNSSuffix") or ""))
+    r["collegato"] = r["stato"] == "Running"
+    if not r["collegato"]:
+        r["errore"] = {"Stopped": "Tailscale è spento sul Mac mini",
+                       "NeedsLogin": "Tailscale sul Mac mini chiede di accedere di nuovo",
+                       "NeedsMachineAuth": "Il Mac mini aspetta l'approvazione nel pannello di Tailscale",
+                       "Starting": "Tailscale si sta avviando sul Mac mini"}.get(r["stato"], "Tailscale non è collegato (%s)" % r["stato"])
+    pari = st.get("Peer") if isinstance(st.get("Peer"), dict) else {}
+    disp = [{"nome": _rete_nome(p), "sistema": str(p.get("OS") or ""), "indirizzo": _rete_ipv4(p.get("TailscaleIPs")),
+             "online": bool(p.get("Online")), "visto": _rete_ora(p.get("LastSeen"))} for p in pari.values() if isinstance(p, dict)]
+    disp.sort(key=lambda d: (not d["online"], d["nome"].lower()))
+    r["dispositivi"] = disp[:200]
+    conf, _ = _tailscale_json(["funnel", "status", "--json"])
+    if conf is None:
+        conf, _ = _tailscale_json(["serve", "status", "--json"])
+    r["serve"] = _rete_serve(conf)
+    nostri = [v for v in r["serve"] if v["funnel"] and _rete_porta_locale(v["destino"]) == _rete_porta_locale(destino)]
+    if nostri:
+        r["funnel"].update(acceso=True, porta=nostri[0]["porta"], indirizzo=nostri[0]["indirizzo"], destino=nostri[0]["destino"])
+    # uscita da casa: annunciata dal Mac (preferenze) e approvata nel pannello (allora la rete Tailscale la offre)
+    prefs, _ = _tailscale_json(["debug", "prefs"])
+    approvata = bool(io.get("ExitNodeOption"))
+    if isinstance(prefs, dict):
+        rotte = prefs.get("AdvertiseRoutes") if isinstance(prefs.get("AdvertiseRoutes"), list) else []
+        annunciata = approvata or any(x in ("0.0.0.0/0", "::/0") for x in rotte)
+    else:
+        annunciata = True if approvata else None   # preferenze non lette: non si sa se aspetta l'approvazione
+    r["uscita"] = {"annunciata": annunciata, "approvata": approvata}
+    return r
+
+
+def _rete_richiesta_funnel(corpo):
+    """(porta, indirizzo) chiesti dall'app, None per quelli scelti l'ultima volta: solo valori permessi, riscritti qui."""
+    porta = corpo.get("porta")
+    if porta is not None:
+        if isinstance(porta, str) and porta.strip().isdigit():
+            porta = int(porta)
+        if isinstance(porta, bool) or not isinstance(porta, int) or porta not in FUNNEL_PORTE:
+            raise ErroreExtra(400, "Porta non permessa per Funnel: solo 443, 8443 o 10000")
+    destino = corpo.get("destino")
+    if destino is not None:
+        locale = _rete_porta_locale(destino) if isinstance(destino, str) else None
+        if not locale:
+            raise ErroreExtra(400, "Indirizzo dell'app sul Mac non valido: deve essere come http://127.0.0.1:8790")
+        destino = "http://127.0.0.1:%d" % locale
+    return porta, destino
+
+
+def _rete_funnel(acceso, porta, destino, porta_server):
+    """Accende Funnel per l'app (`tailscale funnel --bg --https=<porta> http://127.0.0.1:<porta del server>`) o lo spegne
+    sulle porte dove porta all'app (`tailscale funnel --https=<porta> off`)."""
+    with RETE_LOCK:
+        p_scelta, d_scelto = _rete_scelte(porta_server)
+        porta = p_scelta if porta is None else porta
+        locale = _rete_porta_locale(d_scelto if destino is None else destino)
+        prima = _rete_stato(porta_server)
+        if acceso:
+            f = prima["funnel"]
+            if f["acceso"] and (f["porta"] != porta or _rete_porta_locale(d_scelto) != locale):
+                raise ErroreExtra(409, "Funnel è già acceso sulla porta %d: spegnilo prima di cambiare porta o indirizzo" % f["porta"])
+            if f["acceso"]:
+                return
+            occupata = [v for v in prima["serve"] if v["porta"] == porta and not v["funnel"]]
+            if occupata:   # tailscale funnel … off la toglierebbe anche dalla rete Tailscale (l'indirizzo dell'iPhone)
+                raise ErroreExtra(409, "La porta %d è già usata nella rete Tailscale (%s): scegli un'altra porta per Funnel"
+                                  % (porta, occupata[0]["indirizzo"]))
+            codice, out, err = _tailscale(["funnel", "--bg", "--https=%d" % porta, "http://127.0.0.1:%d" % locale],
+                                          TEMPO_TAILSCALE_CAMBIO)
+            if codice != 0:
+                testo = "\n".join(x for x in (out, err) if x)
+                print("Atlante: Rete: Funnel non acceso (porta %d): %s" % (porta, " ".join(testo.split())[:300]), flush=True)
+                raise RifiutoTailscale("Funnel non si è acceso", testo, codice is None)
+            _rete_salva(porta, "http://127.0.0.1:%d" % locale)
+            print("Atlante: Rete: Funnel acceso sulla porta %d → http://127.0.0.1:%d (da Internet con la password e con "
+                  "gli inviti)" % (porta, locale), flush=True)
+            return
+        if not prima["stato"]:
+            porte = [porta]   # Tailscale non dice niente (non risponde): si prova comunque sulla porta scelta
+        else:
+            porte = sorted({v["porta"] for v in prima["serve"] if v["funnel"] and _rete_porta_locale(v["destino"]) == locale})
+        for p in porte:
+            codice, out, err = _tailscale(["funnel", "--https=%d" % p, "off"], TEMPO_TAILSCALE_CAMBIO)
+            if codice != 0:
+                testo = "\n".join(x for x in (out, err) if x)
+                print("Atlante: Rete: Funnel non spento (porta %d): %s" % (p, " ".join(testo.split())[:300]), flush=True)
+                raise RifiutoTailscale("Funnel non si è spento", testo, codice is None)
+            print("Atlante: Rete: Funnel spento sulla porta %d: da Internet l'app non si apre più" % p, flush=True)
+
+
+def _rete_uscita(acceso):
+    """Uscita da casa: `tailscale set --advertise-exit-node=true|false`. La prima volta va approvata nel pannello."""
+    with RETE_LOCK:
+        codice, out, err = _tailscale(["set", "--advertise-exit-node=%s" % ("true" if acceso else "false")],
+                                      TEMPO_TAILSCALE_CAMBIO)
+        if codice != 0:
+            testo = "\n".join(x for x in (out, err) if x)
+            print("Atlante: Rete: uscita da casa non %s: %s" % ("accesa" if acceso else "spenta", " ".join(testo.split())[:300]),
+                  flush=True)
+            raise RifiutoTailscale("L'uscita da casa non si è %s" % ("accesa" if acceso else "spenta"), testo, codice is None)
+        print("Atlante: Rete: Uscita da casa %s (exit node del Mac mini)" % ("accesa" if acceso else "spenta"), flush=True)
+
+
+def _rete(h, metodo, resto, corpo):
+    """api/extra/gestione/rete…, chiamata da _gestione: solo Samuele, e le scritture solo dall'app (_stessa_origine)."""
+    srv = getattr(getattr(h, "server", None), "server_address", None)
+    porta_server = srv[1] if isinstance(srv, tuple) and len(srv) > 1 and isinstance(srv[1], int) else 8790
+    if not resto:
+        if metodo != "GET":
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+        return _json(h, _rete_stato(porta_server, _via(h)))
+    if resto not in (["funnel"], ["uscita"]):
+        raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/rete/%s" % "/".join(resto))
+    if metodo != "POST":
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    acceso = corpo.get("acceso")
+    if not isinstance(acceso, bool):
+        raise ErroreExtra(400, "Serve «acceso»: true o false")
+    try:
+        if resto == ["funnel"]:
+            porta, destino = _rete_richiesta_funnel(corpo)
+            _rete_funnel(acceso, porta, destino, porta_server)
+        else:
+            _rete_uscita(acceso)
+    except RifiutoTailscale as e:
+        return _json(h, {"errore": e.testo, "dettaglio": e.dettaglio, "link": e.link, "pannello": e.pannello,
+                         "rete": _rete_stato(porta_server, _via(h))}, e.codice)
+    return _json(h, _rete_stato(porta_server, _via(h)))
+
+
+def _via(h):
+    """Da dove arriva questa richiesta: "tailscale" (rete Tailscale, anche attraverso tailscale serve), "casa" (il Mac
+    stesso o la rete di casa) o "internet" (tailscale funnel, o un proxy che non è tailscaled sul Mac)."""
+    if h.headers.get("Tailscale-Funnel-Request") is not None:
+        return "internet"
+    vicino = _ip(h.client_address[0])
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:
+        if _ip_tailscale(vicino):
+            return "tailscale"
+        return "casa" if vicino is not None and (vicino.is_loopback or vicino.is_private or vicino.is_link_local) else "internet"
+    if vicino is None or not vicino.is_loopback:
+        return "internet"
+    if h.headers.get("Tailscale-User-Login"):
+        return "tailscale"
+    ultimo = _ip(xff.split(",")[-1])   # l'ultimo l'ha scritto tailscaled, quelli prima possono essere inventati
+    if _ip_tailscale(ultimo):
+        return "tailscale"
+    return "casa" if ultimo is not None and ultimo.is_loopback else "internet"
 
 
 # ---------- accesso da Internet (Tailscale Funnel) ----------
@@ -4353,6 +4703,8 @@ PERMESSE_INVITATI = re.compile(
     r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html)$"
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
     r"|extra/(?:io|inviti|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?))$")
+# la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
 
 
 def _permesso(h):

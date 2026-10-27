@@ -2279,6 +2279,10 @@ const XMODS = [
 let IO = ls.get('am-io', {ruolo:'', persona:null});
 const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti e accessi', i:'🛡️', c:'#1c1c1e'}]};
 const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}]}];
+// «Rete e VPN» per tutti: dice se questo dispositivo arriva dal Mac mini con Tailscale e come accenderlo (agli invitati
+// spiega che non serve). Il VPN del telefono non si accende da una pagina web: si apre l'app Tailscale.
+const XRETE = {g:'Rete', m:[{k:'rete', t:'Rete e VPN', d:'Tailscale su questo dispositivo', i:'🌐', c:'#0a84ff'}]};
+XMODS.push(XRETE); XINVITATI.push(XRETE);
 // quante cose nuove aspettano Samuele (richieste d'invito…): il numero sul riquadro Gestione
 const nuoveGestione = () => Object.values(IO.nuove || {}).reduce((a, n) => a + (+n || 0), 0);
 function xmodsVisibili() {

@@ -3,6 +3,8 @@ const CACHE = 'atlante-musica-v5';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png?v=2', './icon-512.png?v=2', './icon-maskable-512.png?v=2', './apple-touch-icon.png?v=2'];
 // moduli della scheda Altro: si mettono in copia uno per uno (se uno manca, gli altri restano)
 const MODULI = ['x/kit.css', 'x/kit.js'].concat(['podcast', 'libri', 'video', 'live', 'naviga', 'benessere', 'strumenti', 'studio'].map(m => 'x/' + m + '.html'));
+// «Rete e VPN» serve proprio quando il Mac non risponde (Tailscale spento fuori casa): deve aprirsi anche offline
+MODULI.push('x/rete.html');
 const ATTESA = 3000;   // se il Mac non risponde entro 3 s l'app si apre dalla copia offline
 // 'reload': la copia offline si prende dal Mac, non da una vecchia copia nella cache del browser
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES.map(f => new Request(f, {cache:'reload'})))

@@ -19,6 +19,25 @@
 .qr{display:block;margin:10px auto;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:8px}
 .chev{color:var(--fg3);font-size:20px}
 </style>
+<style id="stile-rete">
+/* Gestione → Rete: interruttori come in Impostazioni */
+.sw{appearance:none;-webkit-appearance:none;width:51px;height:31px;border-radius:16px;background:var(--fill);position:relative;flex:none;cursor:pointer;transition:background .2s;margin:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.25);transition:transform .2s}
+.sw:checked{background:var(--ok)}
+.sw:checked::after{transform:translateX(20px)}
+.sw:disabled{opacity:.45}
+.orow{display:flex;align-items:center;gap:12px}
+.orow .tx{flex:1;min-width:0}
+.orow .tx b{display:block;font-weight:600}
+.orow .tx span{display:block;font-size:13px;color:var(--fg2);margin-top:2px}
+.rnota{font-size:14px;margin:10px 0 0}
+.rnota a{word-break:break-all}
+.rerr{background:rgba(255,59,48,.1);border-radius:10px;padding:10px 12px;margin:10px 0 0;font-size:14px}
+.rerr pre{white-space:pre-wrap;word-break:break-all;font-size:12px;margin:8px 0 0;color:var(--fg2)}
+.rconf{background:var(--fill);border-radius:10px;padding:10px 12px;margin:10px 0 0}
+details.rimp{margin:10px 0 0;font-size:14px}
+details.rimp summary{color:var(--link);cursor:pointer}
+</style>
 </head>
 <body>
 <div class="wrap">
@@ -37,6 +56,17 @@
   <h2 class="h2">I tuoi dispositivi</h2>
   <p class="small">Quelli entrati come Samuele (con Tailscale o con la password). Se ne vedi uno che non è tuo, revocalo.</p>
   <div class="list" id="tlist"></div>
+  <div id="rete">
+    <h2 class="h2">Rete</h2>
+    <p class="small">Tailscale sul Mac mini. Il VPN del telefono non si accende da qui (iPhone e Android non lo permettono alle app web): si accende dall'app Tailscale, con la <a href="rete.html">guida per il telefono</a>.</p>
+    <div class="list" id="rmac"><div class="row"><span class="tx"><span>Leggo Tailscale sul Mac mini…</span></span></div></div>
+    <div class="card" id="rfunnel" hidden></div>
+    <div class="card" id="ruscita" hidden></div>
+    <div id="rdispbox" hidden>
+      <p class="small" style="margin:16px 4px 0">Dispositivi nella rete Tailscale</p>
+      <div class="list" id="rdisp"></div>
+    </div>
+  </div>
 </div>
 <script src="kit.js"></script>
 <script>
@@ -167,6 +197,127 @@ $('invita').onclick = async () => {
 };
 $('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('invita').click(); });
 disegna();
+</script>
+<script>
+// ----- Gestione → Rete: Tailscale sul Mac mini (api/extra/gestione/rete) -----
+// Funnel (Atlante da Internet, con password e inviti) e uscita da casa (exit node) si accendono sul Mac mini; il VPN
+// del telefono invece si accende dall'app Tailscale (guida in rete.html).
+(() => {
+  'use strict';
+  const $ = AX.$, esc = AX.esc;
+  const VIA = {tailscale:'arriva con Tailscale', casa:'arriva dalla rete di casa', internet:'arriva da Internet: Tailscale è spento qui'};
+  const MACCHINE = 'https://login.tailscale.com/admin/machines';
+  let R = null;          // ultimo stato letto dal Mac
+  let conferma = false;  // «Vuoi accenderlo?» in vista
+  let occupato = '';     // 'funnel' o 'uscita' mentre il Mac chiede a Tailscale
+  let scelta = null;     // porta e indirizzo di Funnel scelti qui (prima di accendere)
+  const errori = {};     // ultimo rifiuto di Tailscale, per funnel e uscita
+  function quando(t) {
+    const d = new Date(t * 1000), oggi = new Date();
+    const hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+    const giorni = Math.floor((new Date(oggi.toDateString()) - new Date(d.toDateString())) / 86400000);
+    return giorni <= 0 ? 'oggi alle ' + hm : giorni === 1 ? 'ieri alle ' + hm : d.toLocaleDateString('it-IT');
+  }
+  function stessoHost(a, b) { try { return new URL(a).host === new URL(b).host; } catch (e) { return a === b; } }
+  async function leggi() {
+    try { R = await AX.api('gestione/rete', {timeout:45000}); }
+    catch (e) { $('rmac').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere Tailscale sul Mac mini</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+    disegna();
+  }
+  async function cambia(cosa, corpo) {
+    occupato = cosa; delete errori[cosa]; disegna();
+    try {
+      const r = await AX.fetchT(AX.API + 'gestione/rete/' + cosa, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(corpo)}, 90000);
+      let j = null; try { j = await r.json(); } catch (e) {}
+      if (r.ok && j) { R = j; if (cosa === 'funnel') scelta = null; AX.toast(cosa === 'funnel' ? (corpo.acceso ? 'Accesso da Internet acceso' : 'Accesso da Internet spento') : (corpo.acceso ? 'Uscita da casa accesa' : 'Uscita da casa spenta')); }
+      else { errori[cosa] = j && j.errore ? j : {errore:'Il Mac ha risposto ' + r.status}; if (j && j.rete) R = j.rete; }
+    } catch (e) { errori[cosa] = {errore:'Il Mac non ha risposto: ' + e.message}; }
+    occupato = ''; disegna();
+  }
+  function erroreHtml(e, cosa) {
+    const link = /^https:\/\/login\.tailscale\.com\//.test(e.link || '') ? e.link : (R && R.pannello) || 'https://login.tailscale.com/admin';
+    let h = '<div class="rerr"><b>' + esc(e.errore) + '</b>';
+    if (e.pannello) h += '<p style="margin:6px 0 0">' + (cosa === 'funnel' ?
+      'Funnel non è ancora permesso nella tua rete Tailscale. Va abilitato una volta sola dal pannello di Tailscale, con il tuo account: apri il pannello, consenti Funnel al Mac mini e poi torna qui e riprova.' :
+      'Va consentita una volta sola nel pannello di Tailscale, con il tuo account; poi torna qui e riprova.') + '</p>' +
+      '<div class="btns" style="margin:8px 0 0"><a class="btn sm pri" target="_blank" rel="noopener" href="' + esc(link) + '">Apri il pannello di Tailscale</a></div>';
+    if (e.dettaglio) h += '<p class="small" style="margin:8px 0 0">Tailscale ha scritto:</p><pre>' + esc(e.dettaglio) + '</pre>';
+    return h + '</div>';
+  }
+  function disegna() {
+    if (!R) return;
+    const usabile = R.installato && R.collegato && !occupato;
+    let h = '<div class="row"><span class="tx"><b>' + esc(R.nome || 'Mac mini') + '</b><span>' +
+      esc([R.dns, R.indirizzo, R.versione ? 'Tailscale ' + R.versione : ''].filter(Boolean).join(' · ') || 'Tailscale sul Mac mini') + '</span></span>' +
+      (R.collegato ? '<span class="pill ok">collegato</span>' : '<span class="pill bad">' + (R.installato ? 'non collegato' : 'non installato') + '</span>') + '</div>';
+    if (R.errore) h += '<div class="row"><span class="tx"><span style="white-space:normal">' + esc(R.errore) +
+      (R.installato ? '' : ': si scarica da tailscale.com/download, poi si entra con il tuo account.') + '</span></span></div>';
+    if (R.questo) h += '<div class="row"><span class="tx"><b>Questo dispositivo</b><span>' + esc(VIA[R.questo] || R.questo) + '</span></span><a class="btn sm" href="rete.html">Guida</a></div>';
+    $('rmac').innerHTML = h;
+    $('rfunnel').hidden = $('ruscita').hidden = !R.installato;
+    if (!R.installato) { $('rdispbox').hidden = true; return; }
+
+    // accesso da Internet (Funnel)
+    const f = R.funnel, tailnet = R.serve.filter(v => !v.funnel), usate = new Set(tailnet.map(v => v.porta));
+    if (!scelta) {
+      const p = usate.has(f.predefiniti.porta) ? (f.porte.find(x => !usate.has(x)) || f.predefiniti.porta) : f.predefiniti.porta;
+      scelta = {porta:p, destino:f.predefiniti.destino};
+    }
+    let x = '<div class="orow"><div class="tx"><b>Accesso da Internet (Funnel)</b><span>Atlante si apre anche senza Tailscale, con la password e con i link d\'invito.</span></div>' +
+      '<input type="checkbox" class="sw" id="swFunnel" aria-label="Accesso da Internet"' + (f.acceso ? ' checked' : '') + (usabile ? '' : ' disabled') + '></div>';
+    if (occupato === 'funnel') x += '<p class="rnota">Un momento: il Mac mini lo chiede a Tailscale…</p>';
+    else if (f.acceso) {
+      x += '<p class="rnota"><span class="pill ok">acceso</span> Da Internet: <a href="' + esc(f.indirizzo) + '" target="_blank" rel="noopener">' + esc(f.indirizzo) + '</a></p>';
+      if (f.pubblico && !stessoHost(f.pubblico, f.indirizzo)) x += '<p class="rnota small">I link d\'invito usano ' + esc(f.pubblico) + ': con questo indirizzo non si aprono. Spegni e riaccendi con la porta giusta, oppure cambia ATLANTE_PUBBLICO sul Mac mini.</p>';
+      if (!f.pubblico) x += '<p class="rnota small">Per i link d\'invito, sul Mac mini va impostato ATLANTE_PUBBLICO=' + esc(f.indirizzo) + '</p>';
+    } else x += '<p class="rnota"><span class="pill">spento</span> Da Internet Atlante non si apre (e i link d\'invito non funzionano). Con Tailscale acceso sul telefono non serve.</p>';
+    if (conferma && !f.acceso && !occupato) x += '<div class="rconf"><p style="margin:0 0 8px">Da Internet Atlante si aprirà con la password e con gli inviti. Vuoi accenderlo?</p>' +
+      '<div class="btns" style="margin:0"><button class="btn sm pri" id="fSi">Accendi</button><button class="btn sm" id="fNo">Annulla</button></div></div>';
+    if (!f.acceso && occupato !== 'funnel') x += '<details class="rimp" id="fImp"><summary>Porta e indirizzo</summary>' +
+      '<div class="field"><label for="fPorta">Porta su Internet</label><select class="in" id="fPorta">' + f.porte.map(p => '<option value="' + p + '"' +
+        (p === scelta.porta ? ' selected' : '') + (usate.has(p) ? ' disabled' : '') + '>' + p + (usate.has(p) ? ' (già usata nella rete Tailscale)' : '') + '</option>').join('') + '</select></div>' +
+      '<div class="field"><label for="fDest">Atlante sul Mac mini</label><input class="in" id="fDest" value="' + esc(scelta.destino) + '" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url"></div>' +
+      '<p class="small">Tailscale apre a Internet solo le porte 443, 8443 e 10000. L\'indirizzo è quello del server di Atlante sul Mac (di solito http://127.0.0.1:8790).</p></details>';
+    tailnet.forEach(v => { x += '<p class="rnota small">Nella rete Tailscale: ' + esc(v.indirizzo) + ' → ' + esc(v.destino) + '</p>'; });
+    R.serve.filter(v => v.funnel && v.indirizzo !== f.indirizzo).forEach(v => { x += '<p class="rnota small">Aperto a Internet anche: ' + esc(v.indirizzo) + ' → ' + esc(v.destino) + '</p>'; });
+    if (errori.funnel) x += erroreHtml(errori.funnel, 'funnel');
+    const aperto = $('fImp') && $('fImp').open;
+    $('rfunnel').innerHTML = x;
+    if (aperto && $('fImp')) $('fImp').open = true;
+
+    // uscita da casa (exit node)
+    const u = R.uscita, nome = esc(R.nome || 'Mac mini');
+    let y = '<div class="orow"><div class="tx"><b>Uscita da casa (exit node)</b><span>Fuori casa il telefono va su Internet passando dal Mac mini, come se fosse a casa (utile sui Wi-Fi pubblici).</span></div>' +
+      '<input type="checkbox" class="sw" id="swUscita" aria-label="Uscita da casa"' + (u.annunciata || u.approvata ? ' checked' : '') + (usabile ? '' : ' disabled') + '></div>';
+    if (occupato === 'uscita') y += '<p class="rnota">Un momento: il Mac mini lo chiede a Tailscale…</p>';
+    else if (u.approvata) y += '<p class="rnota"><span class="pill ok">accesa</span> Sul telefono si sceglie una volta: app Tailscale → Exit Node → ' + nome + '. Per tornare come prima: Exit Node → None.</p>';
+    else if (u.annunciata) y += '<p class="rnota"><span class="pill warn">da approvare</span> Il Mac mini la offre, ma la prima volta va approvata nel pannello di Tailscale: Machines → ' + nome +
+      ' → ⋯ → Edit route settings → «Use as exit node». Poi sul telefono: app Tailscale → Exit Node → ' + nome + '.</p><div class="btns"><a class="btn sm" target="_blank" rel="noopener" href="' + MACCHINE + '">Apri il pannello di Tailscale</a></div>';
+    else if (u.annunciata === null) y += '<p class="rnota"><span class="pill">non so</span> Tailscale non dice se il Mac mini la offre.</p>';
+    else y += '<p class="rnota"><span class="pill">spenta</span> Il telefono va su Internet dalla rete dove si trova, come sempre.</p>';
+    if (errori.uscita) y += erroreHtml(errori.uscita, 'uscita');
+    $('ruscita').innerHTML = y;
+
+    // dispositivi della rete Tailscale
+    $('rdispbox').hidden = !R.dispositivi.length;
+    $('rdisp').innerHTML = R.dispositivi.map(d => '<div class="row"><span class="tx"><b>' + esc(d.nome || 'Dispositivo') + '</b><span>' +
+      esc([d.sistema, d.indirizzo, d.online ? 'collegato adesso' : d.visto ? 'ultimo contatto ' + quando(d.visto) : 'non collegato'].filter(Boolean).join(' · ')) + '</span></span>' +
+      (d.online ? '<span class="pill ok">online</span>' : '<span class="pill">offline</span>') + '</div>').join('');
+
+    const sw = $('swFunnel');
+    sw.onchange = () => {
+      if (sw.checked) { sw.checked = false; conferma = true; disegna(); return; }   // prima di aprire a Internet si chiede
+      conferma = false; cambia('funnel', {acceso:false});
+    };
+    if ($('fSi')) $('fSi').onclick = () => { conferma = false; cambia('funnel', {acceso:true, porta:scelta.porta, destino:scelta.destino}); };
+    if ($('fNo')) $('fNo').onclick = () => { conferma = false; disegna(); };
+    if ($('fPorta')) $('fPorta').onchange = e => { scelta.porta = +e.target.value; };
+    if ($('fDest')) $('fDest').oninput = e => { scelta.destino = e.target.value.trim(); };
+    $('swUscita').onchange = e => cambia('uscita', {acceso:e.target.checked});
+  }
+  leggi();
+  if (location.hash === '#rete') setTimeout(() => $('rete').scrollIntoView({block:'start'}), 60);
+})();
 </script>
 </body>
 </html>
