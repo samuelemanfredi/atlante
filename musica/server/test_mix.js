@@ -340,6 +340,7 @@ function mondo(src, opz) {
     load:(i, play) => { log.load.push([i, !!play]); F.xfAbort(); env.S.qi = i; env.curId = env.S.queue[i]; const t = T.get(env.curId); env.au.src = salvati.has(t.id) ? 'blob:' + t.id : 'api/musica/file/' + t.sid; if (play) env.au.play(); },
     next:auto => log.next.push(auto),
     updateNow() {}, saveState() {}, markCur() {}, checkHeard() {}, controllaPassaggio() {},
+    castUnLettore:() => false,   // AirPlay del Mac / Chromecast (controlli fuori dall'app): qui nessuna trasmissione
     xfPreparaFinto:P => { log.prep.push([P.idB, W.t, !!env.MIX.salto]); return SP.resolve(); },   // mix a fine brano finto: si guarda solo quando si prepara
     document:{hidden:false}, corri,
     getFile:id => SP.resolve(salvati.has(id) ? {nome:id} : null),
