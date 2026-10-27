@@ -752,8 +752,8 @@ class TestExtra(unittest.TestCase):
             self.assertTrue({"nome", "percorso", "dimensione"} <= set(v), v)
 
 
-def suono_finto(secondi, seme, hz=4000):
-    """Audio finto a 4 kHz: colpi casuali (circa 4 al secondo, ampiezze e lunghezze diverse) su un fondo leggero,
+def suono_finto(secondi, seme, hz=8000):
+    """Audio finto a 8 kHz: colpi casuali (circa 4 al secondo, ampiezze e lunghezze diverse) su un fondo leggero,
     come gli attacchi di un brano vero. Stesso seme = stesso suono."""
     import array
     import random
@@ -786,13 +786,16 @@ class TestVideoclip(unittest.TestCase):
     def tempo_video(self, mappa, t):
         for x in mappa:
             if x["da"] <= t < x["a"]:
-                return t + x["sp"]
+                return t + x["sp"] + x.get("k", 0) * (t - x["da"])
         return None
 
+    def allinea(self, brano, video):
+        return self.m.allinea(self.m._caratteristiche([brano]), self.m._caratteristiche([video]))
+
     def test_introduzione_e_taglio(self):
-        b, hz = self.brano, 4000
+        b, hz = self.brano, 8000
         video = suono_finto(7.3, 99) + b[:60 * hz] + b[80 * hz:]   # 7,3 s in più all'inizio, 20 s tagliati a metà
-        r = self.m.allinea(b, video)
+        r = self.allinea(b, video)
         self.assertEqual(len(r["mappa"]), 2, r)
         for t in (2, 10, 30, 50, 57):
             self.assertAlmostEqual(self.tempo_video(r["mappa"], t), t + 7.3, delta=0.03, msg=(t, r["mappa"]))
@@ -804,18 +807,27 @@ class TestVideoclip(unittest.TestCase):
 
     def test_finale_diverso_e_silenzio(self):
         import array
-        b, hz = self.brano, 4000
+        b, hz = self.brano, 8000
         silenzio = array.array("h", bytes(2 * 20 * hz))
         con_silenzio = b[:50 * hz] + silenzio + b[50 * hz:]   # 20 s muti in mezzo al brano
         video = b[:50 * hz] + silenzio + b[50 * hz:100 * hz] + suono_finto(30, 5)   # finale del video diverso
-        r = self.m.allinea(con_silenzio, video)
+        r = self.allinea(con_silenzio, video)
         self.assertAlmostEqual(self.tempo_video(r["mappa"], 20), 20, delta=0.03, msg=r["mappa"])
         self.assertAlmostEqual(self.tempo_video(r["mappa"], 110), 110, delta=0.03, msg=r["mappa"])
         for t in (125, 135):   # il brano finisce in un altro modo: copertina
             self.assertIsNone(self.tempo_video(r["mappa"], t), (t, r["mappa"]))
 
+    def test_deriva(self):
+        # il video è l'1,5 per mille più lento (es. 25 contro 24,96 fotogrammi) e comincia 4 s dopo
+        import array
+        b = self.brano
+        lento = array.array("h", (b[int(i / 1.0015)] for i in range(int(len(b) * 1.0015))))
+        r = self.allinea(b, suono_finto(4, 3) + lento)
+        for t in (5, 60, 115):
+            self.assertAlmostEqual(self.tempo_video(r["mappa"], t), 4 + t * 1.0015, delta=0.03, msg=(t, r["mappa"]))
+
     def test_video_senza_rapporto(self):
-        r = self.m.allinea(self.brano, suono_finto(150, 42))
+        r = self.allinea(self.brano, suono_finto(150, 42))
         self.assertLess(r["copertura"], self.m.CLIP_COPERTURA, r)
 
     def test_preparazione_e_scheda(self):
@@ -839,7 +851,7 @@ class TestVideoclip(unittest.TestCase):
                 pcm[p] = vid_pcm
                 return p
             v._scarica = scarica
-            m._pcm = lambda p, ff: pcm[p]
+            m._bande = lambda p, ff: [pcm[p]]
             m._programma = lambda n: "/bin/" + n
             m._durata_audio = lambda p: 122.5
             s = v.prepara("A - Brano.mp3", brano)
@@ -875,7 +887,7 @@ class TestClipServer(unittest.TestCase):
         cls.mappa = [{"da": 0.0, "a": 8.0, "sp": 3.25}]
         with open(os.path.join(cls.clip, "abcdefghijk.json"), "w") as f:
             json.dump({"id": "abcdefghijk", "nome": "Artista - Brano.mp3", "firma": "%d:%d" % (st.st_size, int(st.st_mtime)),
-                       "stato": "pronto", "mappa": cls.mappa, "durata_video": 11.5}, f)
+                       "stato": "pronto", "mappa": cls.mappa, "durata_video": 11.5, "versione": 2}, f)
         cls.piano = os.path.join(cls.base, "videoclip-piano.json")
         with open(cls.piano, "w") as f:
             json.dump({"Artista - Brano.mp3": {"id": "abcdefghijk"}}, f)

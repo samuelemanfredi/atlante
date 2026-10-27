@@ -1971,36 +1971,57 @@ def _attesa(h):
 #
 # Nel lettore dell'app, al posto della copertina, il videoclip ufficiale del brano, muto: si sente il file della
 # libreria (per esempio la versione explicit) e il video lo segue istante per istante. I videoclip non hanno sempre gli
-# stessi tempi del brano (introduzione, finale diverso, pezzi tagliati): l'allineamento confronta gli attacchi del suono
-# (inviluppo ogni 10 ms) del brano e del video a finestre di 10 s e ne ricava una mappa a tratti «video = brano + sp».
+# stessi tempi del brano (introduzione, pezzi aggiunti o tagliati, finale diverso, audio un po' più lento). Il confronto
+# usa tre bande del suono (bassi, voce e melodia, acuti: la voce distingue un ritornello dall'altro anche quando il giro
+# di batteria si ripete uguale), finestre di 10 s ogni 7,5 s del brano e, per ognuna, quanto si somiglia il video a ogni
+# ritardo entro ±60 s. Un percorso con continuità (Viterbi: i videoclip cambiano ritardo di rado) sceglie per ogni
+# finestra uno dei ritardi candidati o «nessuno»; le finestre consecutive sullo stesso ritardo diventano tratti con una
+# retta «video = brano + sp + k·(brano − da)» (k: deriva lenta), i cui bordi si cercano con prove di 4 s.
 # Dove nessun tratto è sicuro si mostra la copertina: meglio niente video che un video fuori sincrono.
 # Elenco dei videoclip: un JSON {nome del file: {"id": ID YouTube}} (--clip-piano / ATLANTE_CLIP_PIANO); i video
 # (MP4 fino a 1080p, H.264, con il loro audio che serve all'allineamento) e le mappe in --clip-dir / ATLANTE_CLIP_DIR.
 
-CLIP_HZ = 4000            # campioni al secondo per il confronto: bastano per cassa, rullante e voce
-CLIP_PASSO = 40           # campioni per punto dell'inviluppo (10 ms)
-CLIP_GROSSO = 5           # punti fini per punto grossolano (50 ms) nella prima ricerca
+CLIP_HZ = 8000            # campioni al secondo delle tre bande
+CLIP_FILTRI = ("[0:a]aformat=sample_rates=8000:channel_layouts=mono,asplit=3[a][b][c];[a]lowpass=f=250[l];"
+               "[b]highpass=f=250,lowpass=f=2000[m];[c]highpass=f=2000[h];[l][m][h]join=inputs=3:channel_layout=3.0[o]")
+CLIP_PASSO = 80           # campioni per punto (10 ms)
+CLIP_GROSSO = 5           # punti fini per punto grossolano (50 ms) nella ricerca larga
 CLIP_FINESTRA = 10.0      # secondi di brano per ogni confronto
-CLIP_OGNI = 15.0          # secondi tra l'inizio di una finestra e la successiva
+CLIP_OGNI = 7.5           # secondi tra l'inizio di una finestra e la successiva
 CLIP_RITARDO = 60.0       # secondi massimi di differenza cercati (introduzioni lunghe dei videoclip)
-CLIP_SOGLIA = 0.45        # correlazione minima di una finestra
-CLIP_STACCO = 0.08        # di quanto il ritardo migliore deve battere il secondo (lontano più di 1 s)
-CLIP_STESSO = 0.12        # secondi: finestre con ritardi così vicini sono lo stesso tratto
+CLIP_VICINO = 0.5         # secondi: un ritardo candidato vale per una finestra se il suo picco è entro questa distanza
+CLIP_SOGLIA = 0.4         # correlazione sopra la quale una finestra «sta» su un ritardo
+CLIP_CAMBIO = 0.35        # costo nel percorso di un piccolo cambio di ritardo (pochi secondi aggiunti o tolti nel video)
+CLIP_SALTO = 0.7          # costo di un salto grande (oltre CLIP_SALTO_S): un ritornello uguale più avanti o più indietro
+CLIP_SALTO_S = 5.0
+CLIP_CAMBIO_NESSUNO = 0.15  # costo di un passaggio tra un ritardo e «nessuno»
+CLIP_CANDIDATI = 8        # ritardi candidati al più
+CLIP_DERIVA = 0.01        # deriva massima tra brano e video (1%)
 CLIP_COPERTURA = 0.5      # parte del brano che i tratti devono coprire
-CLIP_PROVA = 4.0          # secondi delle prove che cercano i bordi dei tratti
-CLIP_SOGLIA_BORDO = 0.35  # correlazione minima di una prova di bordo
+CLIP_BORDO = 0.35         # bordo di un tratto: dove la somiglianza scende sotto questa parte di quella tipica del tratto
+CLIP_VERSIONE = 2         # versione dell'allineamento: le schede fatte con una versione diversa si rifanno
 CLIP_SPAZIO_MIN = 50 * 1024 ** 3
 CLIP_RIPROVA = 86400      # un videoclip non riuscito per un errore temporaneo si riprova dopo un giorno
 ID_CLIP = re.compile(r"^([A-Za-z0-9_-]{11})\.mp4$")
 
 
-def _inviluppo(pcm):
-    """Attacchi del suono ogni 10 ms: di quanto cresce l'energia (in scala logaritmica) rispetto al punto prima."""
-    n, en = CLIP_PASSO, []
-    for i in range(0, len(pcm) - n + 1, n):
-        q = pcm[i:i + n]
-        en.append(math.log1p(sum(map(operator.mul, q, q)) / n))
-    return [max(0.0, en[i] - en[i - 1]) if i else 0.0 for i in range(len(en))]
+def _caratteristiche(bande):
+    """Per ogni banda l'energia ogni 10 ms in scala logaritmica meno la sua media dell'ultimo secondo: restano colpi e
+    frasi di voce e melodia, non il volume generale (il video ha spesso un altro missaggio, più forte)."""
+    out = []
+    for pcm in bande:
+        n, en = CLIP_PASSO, []
+        for i in range(0, len(pcm) - n + 1, n):
+            q = pcm[i:i + n]
+            en.append(math.log1p(sum(map(operator.mul, q, q)) / n))
+        acc, f = 0.0, []
+        for i, x in enumerate(en):
+            acc += x
+            if i >= 100:
+                acc -= en[i - 100]
+            f.append(x - acc / min(i + 1, 100))
+        out.append(f)
+    return out
 
 
 def _riduci(x, k):
@@ -2018,108 +2039,210 @@ def _prefissi(v):
 
 
 def _correlazioni(w, v, inizio, da, a, p, p2):
-    """Correlazione normalizzata della finestra w con v[inizio+L : inizio+L+len(w)] per L da `da` ad `a` (escluso)."""
+    """Correlazione normalizzata della finestra w con v[inizio+L : inizio+L+len(w)] per L da `da` ad `a` (escluso).
+    Banda muta nella finestra: 0 (non dice niente); ritardo fuori dal video: -1."""
     m = len(w)
     mw = sum(w) / m
     wc = [x - mw for x in w]
     dw = math.sqrt(sum(x * x for x in wc))
+    if dw <= 1e-9:
+        return [0.0] * (a - da)
     out = []
     for L in range(da, a):
         s = inizio + L
-        if dw <= 1e-9 or s < 0 or s + m > len(v):
+        if s < 0 or s + m > len(v):
             out.append(-1.0)
             continue
         somma = p[s + m] - p[s]
         var = (p2[s + m] - p2[s]) - somma * somma / m
-        out.append(sum(map(operator.mul, wc, v[s:s + m])) / (dw * math.sqrt(var)) if var > 1e-9 else -1.0)
+        out.append(sum(map(operator.mul, wc, v[s:s + m])) / (dw * math.sqrt(var)) if var > 1e-9 else 0.0)
     return out
 
 
-def _coincide(fb, fv, t, sp):
-    """I 4 s del brano da t coincidono con il video spostato di sp? (prova dei bordi dei tratti)"""
-    i, m = int(round(t * 100)), int(CLIP_PROVA * 100)
-    j = i + int(round(sp * 100))
-    if i < 0 or j < 0 or i + m > len(fb) or j + m > len(fv):
-        return False
-    w, v = fb[i:i + m], fv[j:j + m]
-    mw, mv = sum(w) / m, sum(v) / m
-    dw = math.sqrt(sum((x - mw) ** 2 for x in w))
-    dv = math.sqrt(sum((x - mv) ** 2 for x in v))
-    if dw <= 1e-9 or dv <= 1e-9:
-        return False
-    return sum((x - mw) * (y - mv) for x, y in zip(w, v)) / (dw * dv) >= CLIP_SOGLIA_BORDO
+def _curva(wb, vb, inizio, da, a, pref):
+    """Correlazione media sulle bande."""
+    tot = None
+    for w, v, (p, p2) in zip(wb, vb, pref):
+        c = _correlazioni(w, v, inizio, da, a, p, p2)
+        tot = c if tot is None else [x + y for x, y in zip(tot, c)]
+    return [x / len(wb) for x in tot]
 
 
-def allinea(pcm_brano, pcm_video):
-    """Mappa a tratti dal tempo del brano al tempo del video: {mappa:[{da, a, sp}], copertura, finestre}.
-    Per ogni finestra di 10 s del brano il ritardo migliore (prima ogni 50 ms su ±60 s, poi ogni 10 ms vicino al
-    migliore), solo se netto; le finestre con lo stesso ritardo diventano un tratto (almeno due finestre)."""
-    fb, fv = _inviluppo(pcm_brano), _inviluppo(pcm_video)
-    gb, gv = _riduci(fb, CLIP_GROSSO), _riduci(fv, CLIP_GROSSO)
-    pg, pg2 = _prefissi(gv)
-    pf, pf2 = _prefissi(fv)
-    hz_f, hz_g = 100, 100 // CLIP_GROSSO
-    durata, durata_v = len(fb) / hz_f, len(fv) / hz_f
-    mg, mf, rg = int(CLIP_FINESTRA * hz_g), int(CLIP_FINESTRA * hz_f), int(CLIP_RITARDO * hz_g)
+def _picchi(c, quanti, distanza):
+    """I picchi più alti di una curva, lontani tra loro almeno `distanza` punti."""
+    scelti = []
+    for j in sorted(range(len(c)), key=c.__getitem__, reverse=True):
+        if all(abs(j - s) > distanza for s in scelti):
+            scelti.append(j)
+            if len(scelti) == quanti:
+                break
+    return scelti
+
+
+def _normali(bande):
+    """Bande con media 0 e scarto 1 (per la somiglianza punto per punto)."""
+    out = []
+    for x in bande:
+        m = sum(x) / len(x) if x else 0.0
+        d = math.sqrt(sum((y - m) ** 2 for y in x) / len(x)) if x else 0.0
+        out.append([(y - m) / d for y in x] if d > 1e-9 else [0.0] * len(x))
+    return out
+
+
+def _somiglianza(nb, nv, i0, i1, lag):
+    """Somiglianza di brano e video spostato (lag(t) secondi) per i punti da i0 a i1 (10 ms), media su 1 s centrata:
+    vicina allo scarto comune dove coincidono, intorno a 0 dove no."""
+    grezza = []
+    for i in range(i0, i1):
+        j = i + int(round(lag(i / 100) * 100))
+        grezza.append(sum(b[i] * v[j] for b, v in zip(nb, nv)) / len(nb) if 0 <= j < len(nv[0]) else -1.0)
+    p, _ = _prefissi(grezza)
+    return [(p[min(len(grezza), k + 51)] - p[max(0, k - 50)]) / (min(len(grezza), k + 51) - max(0, k - 50))
+            for k in range(len(grezza))]
+
+
+def allinea(car_brano, car_video):
+    """Mappa a tratti dal tempo del brano al tempo del video: {mappa:[{da, a, sp, k}], copertura, finestre, durata}.
+    car_brano e car_video: le bande di _caratteristiche (punti ogni 10 ms)."""
+    fb, fv = car_brano, car_video
+    nb, nv = _normali(fb), _normali(fv)
+    gb, gv = [_riduci(x, CLIP_GROSSO) for x in fb], [_riduci(x, CLIP_GROSSO) for x in fv]
+    pref = [_prefissi(x) for x in gv]
+    hz_g = 100 // CLIP_GROSSO
+    durata, durata_v = len(fb[0]) / 100, len(fv[0]) / 100
+    mg, rg, vic = int(CLIP_FINESTRA * hz_g), int(CLIP_RITARDO * hz_g), int(CLIP_VICINO * hz_g)
     finestre, t = [], 0.0
     while t + CLIP_FINESTRA <= durata + 1e-9:
         ig = int(round(t * hz_g))
-        w = gb[ig:ig + mg]
-        if len(w) == mg and max(w) - min(w) > 1e-6:   # le finestre mute non dicono niente
-            c = _correlazioni(w, gv, ig, -rg, rg + 1, pg, pg2)
-            b = max(range(len(c)), key=c.__getitem__)
-            secondo = max([c[j] for j in range(len(c)) if abs(j - b) > hz_g] or [-1.0])
-            if c[b] >= CLIP_SOGLIA and c[b] - secondo >= CLIP_STACCO:
-                lg = (b - rg) * CLIP_GROSSO   # ritardo in punti fini
-                i_f = int(round(t * hz_f))
-                cf = _correlazioni(fb[i_f:i_f + mf], fv, i_f, lg - 10, lg + 11, pf, pf2)
-                bf = max(range(len(cf)), key=cf.__getitem__)
-                finestre.append({"t": t, "sp": round((lg - 10 + bf) / hz_f, 2), "c": round(c[b], 3)})
+        wb = [x[ig:ig + mg] for x in gb]
+        if len(wb[0]) == mg and any(max(w) - min(w) > 1e-6 for w in wb):   # le finestre mute non dicono niente
+            finestre.append((t, _curva(wb, gv, ig, -rg, rg + 1, pref)))
         t += CLIP_OGNI
+    if not finestre:
+        return {"mappa": [], "copertura": 0.0, "finestre": [], "durata": round(durata, 2)}
+    # ritardi candidati: i picchi più alti di ogni finestra, raggruppati entro mezzo secondo, pesati con la correlazione
+    picchi = sorted(((j - rg) / hz_g, c[j]) for _, c in finestre for j in _picchi(c, 3, hz_g) if c[j] >= CLIP_SOGLIA)
     gruppi = []
-    for f in finestre:
-        g = gruppi[-1] if gruppi else None
-        if g and abs(g["sp"][-1] - f["sp"]) <= CLIP_STESSO and f["t"] - g["fine"] <= 2 * CLIP_OGNI + 1e-9:
-            g["sp"].append(f["sp"])
-            g["fine"] = f["t"]
+    for lag, v in picchi:
+        if gruppi and lag - gruppi[-1]["ultimo"] <= CLIP_VICINO:
+            g = gruppi[-1]
+            g["peso"] += v
+            g["somma"] += lag * v
+            g["ultimo"] = lag
         else:
-            gruppi.append({"inizio": f["t"], "fine": f["t"], "sp": [f["sp"]]})
-    gruppi = [g for g in gruppi if len(g["sp"]) >= 2]   # una finestra sola può essere una somiglianza per caso
+            gruppi.append({"peso": v, "somma": lag * v, "ultimo": lag})
+    candidati = [g["somma"] / g["peso"] for g in sorted(gruppi, key=lambda g: -g["peso"])[:CLIP_CANDIDATI]]
+    if not candidati:
+        return {"mappa": [], "copertura": 0.0, "finestre": [], "durata": round(durata, 2)}
+    idx = [int(round(L * hz_g)) + rg for L in candidati]
+
+    def punteggio(c, j):
+        return max(c[max(0, j - vic):j + vic + 1]) - CLIP_SOGLIA
+
+    S = [[punteggio(c, j) for j in idx] for _, c in finestre]
+    # percorso con continuità (Viterbi): stato 0 = nessun ritardo, stati 1..n = i candidati
+    n = len(candidati)
+
+    def costo(p, s):
+        if p == s:
+            return 0.0
+        if p == 0 or s == 0:
+            return CLIP_CAMBIO_NESSUNO
+        return CLIP_SALTO if abs(candidati[p - 1] - candidati[s - 1]) > CLIP_SALTO_S else CLIP_CAMBIO
+    meglio = [0.0] + S[0]
+    indietro = []
+    for w in range(1, len(finestre)):
+        nuovo, da_dove = [], []
+        for s in range(n + 1):
+            v, p = max((meglio[p] - costo(p, s), p) for p in range(n + 1))
+            nuovo.append(v + (0.0 if s == 0 else S[w][s - 1]))
+            da_dove.append(p)
+        meglio = nuovo
+        indietro.append(da_dove)
+    s = max(range(n + 1), key=meglio.__getitem__)
+    percorso = [s]
+    for da_dove in reversed(indietro):
+        s = da_dove[s]
+        percorso.append(s)
+    percorso.reverse()
+    # ritardo preciso di ogni finestra del percorso: picco vicino al candidato, poi ogni 10 ms (±0,1 s)
+    prefin = [_prefissi(x) for x in fv]
+    trovate = []
+    for (t, c), s in zip(finestre, percorso):
+        if not s:
+            trovate.append(None)
+            continue
+        j0 = idx[s - 1]
+        lo = max(0, j0 - vic)
+        j = lo + max(range(len(c[lo:j0 + vic + 1])), key=c[lo:j0 + vic + 1].__getitem__)
+        lf = (j - rg) * CLIP_GROSSO
+        i_f = int(round(t * 100))
+        mf = int(CLIP_FINESTRA * 100)
+        cf = _curva([x[i_f:i_f + mf] for x in fb], fv, i_f, lf - 10, lf + 11, prefin)
+        bf = max(range(len(cf)), key=cf.__getitem__)
+        trovate.append({"t": t, "sp": (lf - 10 + bf) / 100, "c": round(c[j], 3), "s": s})
+    # tratti: finestre consecutive sullo stesso candidato (almeno due), retta del ritardo con i minimi quadrati
+    tratti, corrente = [], []
+    for f in trovate + [None]:
+        if f and corrente and f["s"] == corrente[-1]["s"]:
+            corrente.append(f)
+            continue
+        if len(corrente) >= 2:
+            tratti.append(corrente)
+        corrente = [f] if f else []
     mappa, limite = [], 0.0
-    for k, g in enumerate(gruppi):
-        sp = sorted(g["sp"])[len(g["sp"]) // 2]
-        # i confini veri (taglio, introduzione, finale diverso) si cercano con prove di 4 s ogni secondo al ritardo del
-        # tratto: il bordo si restringe se la prova non coincide (finestra a cavallo di un taglio), si allarga finché coincide
-        sx = max(limite, -sp)
-        dx = min(durata, durata_v - sp, gruppi[k + 1]["inizio"] if k + 1 < len(gruppi) else durata)
-        da, a = max(sx, g["inizio"]), min(dx, g["fine"] + CLIP_FINESTRA)
-        while da + CLIP_PROVA <= a and not _coincide(fb, fv, da, sp):
-            da += 1.0
-        while da - 1.0 >= sx and _coincide(fb, fv, da - 1.0, sp):
-            da -= 1.0
-        while a - CLIP_PROVA >= da and not _coincide(fb, fv, a - CLIP_PROVA, sp):
-            a -= 1.0
-        while a + 1.0 <= dx and _coincide(fb, fv, a + 1.0 - CLIP_PROVA, sp):
-            a += 1.0
+    for k, tr in enumerate(tratti):
+        xs = [f["t"] + CLIP_FINESTRA / 2 for f in tr]
+        ys = [f["sp"] for f in tr]
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        vx = sum((x - mx) ** 2 for x in xs)
+        pend = max(-CLIP_DERIVA, min(CLIP_DERIVA, sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / vx)) if vx else 0.0
+        if xs[-1] - xs[0] < 30:
+            pend = 0.0   # tratto corto: troppo poco per misurare una deriva
+        lag = lambda t, mx=mx, my=my, pend=pend: my + pend * (t - mx)   # noqa: E731
+        prossimo = tratti[k + 1][0]["t"] if k + 1 < len(tratti) else durata
+        sx = max(limite, 0.0)
+        dx = min(durata, prossimo + CLIP_FINESTRA / 2 if k + 1 < len(tratti) else durata)
+        da0, a0 = max(sx, tr[0]["t"]), min(dx, tr[-1]["t"] + CLIP_FINESTRA)
+        i0, i1 = int(sx * 100), int(dx * 100)
+        sim = _somiglianza(nb, nv, i0, i1, lag)
+        centro = sorted(sim[int(da0 * 100) - i0:int(a0 * 100) - i0]) or [0.0]
+        soglia = CLIP_BORDO * centro[len(centro) // 2]   # un terzo della somiglianza tipica del tratto
+        ok = lambda t: soglia > 0 and 0 <= int(t * 100) - i0 < len(sim) and sim[int(t * 100) - i0] >= soglia   # noqa: E731
+        da, a = da0, a0
+        while da < a and da - da0 < CLIP_FINESTRA and not ok(da):   # finestra a cavallo di un taglio: si restringe
+            da += 0.01
+        while da - 0.01 >= sx and ok(da - 0.01):                       # si allarga finché coincide
+            da -= 0.01
+        while a > da and a0 - a < CLIP_FINESTRA and not ok(a - 0.01):
+            a -= 0.01
+        while a + 0.01 <= dx and ok(a):
+            a += 0.01
+        # dentro il video: tempo del video tra 0 e la sua fine
+        while da < a and da + lag(da) < 0:
+            da += 0.5
+        while a > da and a + lag(a) > durata_v:
+            a -= 0.5
         if a - da >= CLIP_FINESTRA:
-            mappa.append({"da": round(da, 2), "a": round(a, 2), "sp": sp})
+            mappa.append({"da": round(da, 2), "a": round(a, 2), "sp": round(lag(da), 3), "k": round(pend, 5)})
             limite = a
     copertura = sum(x["a"] - x["da"] for x in mappa) / durata if durata else 0.0
-    return {"mappa": mappa, "copertura": round(copertura, 3), "finestre": finestre, "durata": round(durata, 2)}
+    return {"mappa": mappa, "copertura": round(copertura, 3), "finestre": [f for f in trovate if f],
+            "durata": round(durata, 2)}
 
 
-def _pcm(percorso, ff):
-    """Audio di un file (brano o video) a CLIP_HZ, mono, 16 bit."""
-    r = subprocess.run([ff, "-v", "error", "-nostdin", "-i", percorso, "-vn", "-ac", "1", "-ar", str(CLIP_HZ),
-                        "-f", "s16le", "-"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       env=_ambiente(), timeout=600)
+def _bande(percorso, ff):
+    """Le tre bande (bassi, voce e melodia, acuti) dell'audio di un file, a CLIP_HZ, 16 bit."""
+    r = subprocess.run([ff, "-v", "error", "-nostdin", "-i", percorso, "-vn", "-filter_complex", CLIP_FILTRI,
+                        "-map", "[o]", "-f", "s16le", "-"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, env=_ambiente(), timeout=900)
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError("audio non leggibile: %s" % r.stderr.decode("utf-8", "replace").strip()[-200:])
     a = array.array("h")
-    a.frombytes(r.stdout[:len(r.stdout) // 2 * 2])
+    a.frombytes(r.stdout[:len(r.stdout) // 6 * 6])
     if sys.byteorder == "big":
         a.byteswap()
-    return a
+    return [a[0::3], a[1::3], a[2::3]]
 
 
 class Videoclip:
@@ -2166,7 +2289,7 @@ class Videoclip:
                     for e in os.scandir(self.dir):
                         if e.name.endswith(".json"):
                             s = self._scheda(e.name[:-5])
-                            if s and s.get("stato") == "pronto" and s.get("nome"):
+                            if s and s.get("stato") == "pronto" and s.get("nome") and s.get("versione") == CLIP_VERSIONE:
                                 self._pronti[s["nome"]] = s.get("firma")
                 except OSError:
                     pass
@@ -2179,7 +2302,7 @@ class Videoclip:
         if not vid:
             return {"stato": "nessuno"}
         s = self._scheda(vid) or {}
-        if s.get("nome") == nome and s.get("firma") == firma:
+        if s.get("nome") == nome and s.get("firma") == firma and s.get("versione") == CLIP_VERSIONE:
             if s.get("stato") == "pronto" and os.path.isfile(os.path.join(self.dir, vid + ".mp4")):
                 return {"stato": "pronto", "url": "clip/file/%s.mp4" % vid, "mappa": s.get("mappa", []),
                         "durata": s.get("durata_video", 0)}
@@ -2238,7 +2361,8 @@ class Videoclip:
         except OSError:
             return False
         s = self._scheda(vid) or {}
-        if s.get("nome") == nome and s.get("firma") == "%d:%d" % (st.st_size, int(st.st_mtime)):
+        if (s.get("nome") == nome and s.get("firma") == "%d:%d" % (st.st_size, int(st.st_mtime))
+                and s.get("versione") == CLIP_VERSIONE):
             if s.get("stato") in ("pronto", "non allineato"):
                 return False
             if s.get("stato") == "errore" and (s.get("permanente") or time.time() - s.get("quando", 0) < CLIP_RIPROVA):
@@ -2267,13 +2391,15 @@ class Videoclip:
                 self.sveglia.clear()
                 continue
             try:
-                if shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir)).free < CLIP_SPAZIO_MIN:
-                    print("Videoclip: meno di 50 GB liberi, mi fermo", flush=True)
-                    self.sveglia.wait(3600)
-                    self.sveglia.clear()
-                    continue
+                pieno = shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir)).free < CLIP_SPAZIO_MIN
             except OSError:
-                self.sveglia.wait(600)   # disco scollegato
+                pieno = True   # disco scollegato
+            if pieno:
+                print("Videoclip: disco dei videoclip pieno (meno di 50 GB liberi) o scollegato, aspetto", flush=True)
+                with self.blocco:
+                    if nome not in self.richiesti:
+                        self.richiesti.appendleft(nome)   # il brano chiesto non si perde: torna davanti
+                self.sveglia.wait(1800)
                 self.sveglia.clear()
                 continue
             self.ora = nome
@@ -2318,7 +2444,8 @@ class Videoclip:
                 raise RuntimeError("cartella dei videoclip non raggiungibile: %s" % self.dir)
             os.makedirs(self.dir, exist_ok=True)
         st = os.stat(percorso)
-        scheda = {"id": vid, "nome": nome, "firma": "%d:%d" % (st.st_size, int(st.st_mtime)), "quando": int(time.time())}
+        scheda = {"id": vid, "nome": nome, "firma": "%d:%d" % (st.st_size, int(st.st_mtime)), "quando": int(time.time()),
+                  "versione": CLIP_VERSIONE}
         video = os.path.join(self.dir, vid + ".mp4")
         try:
             if not os.path.isfile(video):
@@ -2326,7 +2453,7 @@ class Videoclip:
             ff = _programma("ffmpeg")
             if not ff:
                 raise RuntimeError("serve ffmpeg sul Mac")
-            r = allinea(_pcm(percorso, ff), _pcm(video, ff))
+            r = allinea(_caratteristiche(_bande(percorso, ff)), _caratteristiche(_bande(video, ff)))
             scheda.update(mappa=r["mappa"], copertura=r["copertura"], finestre=len(r["finestre"]),
                           durata_video=round(_durata_audio(video) or 0, 2))
             scheda["stato"] = "pronto" if r["copertura"] >= CLIP_COPERTURA else "non allineato"

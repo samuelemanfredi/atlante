@@ -205,6 +205,10 @@ body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .npart{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;padding:10px 0}
 .npart .art{width:min(100%,46vh);aspect-ratio:1;border-radius:12px;box-shadow:0 22px 50px rgba(0,0,0,.4);transition:transform .55s cubic-bezier(.34,1.4,.64,1);background:linear-gradient(160deg,#48484a,#2c2c2e)}
 .npart .art .ph{color:rgba(255,255,255,.4)}
+.npart{position:relative}
+#npVid{width:100%;max-height:46vh;aspect-ratio:16/9;border-radius:12px;background:#000;object-fit:contain;box-shadow:0 22px 50px rgba(0,0,0,.4)}
+#np.vid .npart .art{display:none}
+#npVidMsg{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);padding:5px 11px;border-radius:99px;background:rgba(0,0,0,.45);color:#fff;font-size:12px;font-weight:600;white-space:nowrap;pointer-events:none}
 #np.paused .npart .art{transform:scale(.8)}
 .npq{flex:1;display:none;flex-direction:column;min-height:0}
 #np.q .npart,#np.q .npmeta{display:none}
@@ -317,7 +321,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
   <button class="grabhit" data-a="closenp" aria-label="Chiudi"></button>
   <div class="grab"></div>
   <div class="npin">
-    <div class="npart"><div class="art" id="npArt"></div></div>
+    <div class="npart"><div class="art" id="npArt"></div><video id="npVid" muted playsinline webkit-playsinline preload="none" disablepictureinpicture hidden></video><div id="npVidMsg" hidden></div></div>
     <div class="npq">
       <div class="npqhead"><div class="art" id="npqArt"></div><div class="tx"><b id="npqT"></b><span id="npqA"></span></div></div>
       <div class="qbar"><h4>Successivi<small id="qFrom"></small></h4>
@@ -340,7 +344,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
     </div>
     <button class="npdev" id="npDev" data-a="devs" hidden></button>
     <div class="vol" id="volRow"><span id="vLo"></span><input type="range" class="rg" id="vol" min="0" max="100" value="100" aria-label="Volume"><span id="vHi"></span></div>
-    <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bCast" data-a="cast" aria-label="AirPlay: ascolta su un altro dispositivo" hidden></button><button id="bDev" data-a="devs" aria-label="Dispositivi: comanda o sposta la musica"></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bShare" data-a="sharecur" aria-label="Condividi"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
+    <div class="npbot"><button id="bShufMain" data-a="shuffle" aria-label="Casuale"></button><button id="bCast" data-a="cast" aria-label="AirPlay: ascolta su un altro dispositivo" hidden></button><button id="bDev" data-a="devs" aria-label="Dispositivi: comanda o sposta la musica"></button><button id="bVid" data-a="video" aria-label="Video"></button><button id="bQ" data-a="queue" aria-label="Coda"></button><button id="bShare" data-a="sharecur" aria-label="Condividi"></button><button id="bRepMain" data-a="repeat" aria-label="Ripeti"></button></div>
   </div>
 </section>
 
@@ -394,6 +398,7 @@ const I = {
   spkHi:'<path d="M3 9.5h3.5L11 5.5v13l-4.5-4H3z"/><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M14.5 9a4.2 4.2 0 0 1 0 6M17.3 6.5a8 8 0 0 1 0 11"/></g>',
   share:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M7 10.5H6a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V12A1.5 1.5 0 0 0 18 10.5h-1"/></g>',
   cast:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/></g><path d="M12 14.5l5 6H7z"/>',
+  film:'<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/></g><path d="M10 9.1v5.8l5-2.9z"/>',
   devs:'<g fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="11" height="18" rx="2"/><circle cx="8.5" cy="14" r="3"/><circle cx="8.5" cy="7.3" r="1.1"/><rect x="16.5" y="8.5" width="4.5" height="12.5" rx="1.3"/></g>',
   grid:'<path d=""M4.5 3h5A1.5 1.5 0 0 1 11 4.5v5A1.5 1.5 0 0 1 9.5 11h-5A1.5 1.5 0 0 1 3 9.5v-5A1.5 1.5 0 0 1 4.5 3zm10 0h5A1.5 1.5 0 0 1 21 4.5v5a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 13 9.5v-5A1.5 1.5 0 0 1 14.5 3zm-10 10h5a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 9.5 21h-5A1.5 1.5 0 0 1 3 19.5v-5A1.5 1.5 0 0 1 4.5 13zm10 0h5a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5h-5a1.5 1.5 0 0 1-1.5-1.5v-5a1.5 1.5 0 0 1 1.5-1.5z"/>',
   mix:'<path fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" d="M12 12c-1.8-2.4-3.4-4-5.5-4a4 4 0 0 0 0 8c2.1 0 3.7-1.6 5.5-4zm0 0c1.8 2.4 3.4 4 5.5 4a4 4 0 0 0 0-8c-2.1 0-3.7 1.6-5.5 4z"/>',
@@ -2009,7 +2014,7 @@ vol.addEventListener('input', () => {
 
 /* ---------- player a tutto schermo ---------- */
 const np = $('np');
-function openNP() { if (!curId && !RC.id) return; np.classList.add('open'); document.documentElement.style.overflow = 'hidden'; }
+function openNP() { if (!curId && !RC.id) return; np.classList.add('open'); document.documentElement.style.overflow = 'hidden'; setTimeout(vidGiro, 50); }
 function closeNP() { np.classList.remove('open'); np.style.transform = ''; document.documentElement.style.overflow = ''; }
 (function swipe() {
   let y0 = null, dy = 0, t0 = 0;
@@ -2111,6 +2116,7 @@ document.addEventListener('click', e => {
   switch (a) {
     case 'go': go(d.v, d.k); break;
     case 'devs': devApri(); break;
+    case 'video': vidCambia(); break;
     case 'dev-qui': closeSheet(); if (RC.id) rcEsci(); else toast('Stai già usando questo dispositivo'); break;
     case 'dev-apri': devSheetK = d.k; devAzioni(d.k); break;
     case 'dev-comanda': closeSheet(); rcEntra(d.k); break;
@@ -2508,6 +2514,80 @@ document.addEventListener('visibilitychange', () => {
   if (!RC.id && au.paused) devElenco().then(L => { const p = L.find(x => x.stato.suona && x.stato.brano); if (p && !RC.id && au.paused) rcEntra(p.id, true); });
 });
 
+/* ---------- videoclip sincronizzati con il brano ----------
+   Nel lettore a tutto schermo, al posto della copertina, il videoclip ufficiale del brano, muto: si sente il brano
+   della libreria e il video lo segue istante per istante (posizione del video = mappa del Mac applicata alla posizione
+   del brano: introduzioni, tagli e finali diversi del videoclip). Ogni 200 ms e a ogni salto: scarto oltre 0,3 s →
+   salto; più piccolo → velocità tra 0,95 e 1,05 finché coincide. Dove la mappa non copre quel punto: la copertina.
+   Si carica solo a lettore aperto e con «Video» acceso su questo dispositivo (scelta ricordata qui, niente dati se è
+   spento). Comandando un altro dispositivo segue la posizione stimata di quello. */
+const VID = {on:ls.get('am-video', true), el:$('npVid'), sid:null, info:null, chiesto:0, mostra:false};
+VID.el.muted = true; VID.el.defaultMuted = true;
+function vidBrano() {   // il brano che il lettore mostra: di questo dispositivo, o di quello comandato
+  if (RC.id) { const s = RC.dev && RC.dev.stato, b = s && s.brano; return b && b.sid ? {sid:b.sid, t:rcPos(RC.dev), suona:!!s.suona, rc:true} : null; }
+  const t = curId && TT(curId);
+  return inLib(t) ? {sid:t.sid, t:au.currentTime || 0, suona:!au.paused, rc:false} : null;
+}
+// tempo del video per il secondo t del brano: tratto della mappa che lo contiene, con la sua deriva lenta (k)
+const vidTempo = (info, t) => { for (const x of info.mappa || []) if (t >= x.da && t < x.a) return t + x.sp + (x.k || 0) * (t - x.da); return null; };
+function vidMostra(si, msg) {
+  if (si !== VID.mostra) { VID.mostra = si; $('np').classList.toggle('vid', si); VID.el.hidden = !si; }
+  const m = $('npVidMsg'), testo = si ? '' : msg || '';
+  if (m.textContent !== testo) { m.textContent = testo; m.hidden = !testo; }
+  if (!si && !VID.el.paused) VID.el.pause();
+}
+async function vidChiedi(sid) {
+  VID.chiesto = Date.now();
+  try {
+    const r = await fetchT(XAPI + 'clip/' + encodeURIComponent(sid), {cache:'no-store'}, 10000);
+    const j = r.ok ? await r.json() : null;
+    if (sid === VID.sid) VID.info = j || {stato:'nessuno'};
+  } catch (e) { if (sid === VID.sid) VID.info = {stato:'errore'}; }
+}
+function vidSegna() { const b = $('bVid'); b.classList.toggle('on', VID.on); b.setAttribute('aria-label', VID.on ? 'Video acceso: tocca per spegnerlo su questo dispositivo' : 'Video spento: tocca per accenderlo su questo dispositivo'); }
+function vidCambia() {
+  VID.on = !VID.on; ls.set('am-video', VID.on); vidSegna();
+  if (!VID.on) { vidMostra(false); VID.el.removeAttribute('src'); try { VID.el.load(); } catch (e) {} }
+  const b = vidBrano(), info = b && b.sid === VID.sid ? VID.info : null;
+  toast(VID.on ? (info && info.stato === 'nessuno' ? 'Video acceso su questo dispositivo (questo brano non ha un videoclip)' : 'Video acceso su questo dispositivo') : 'Video spento su questo dispositivo: niente dati per i videoclip');
+  vidGiro();
+}
+function vidGiro() {
+  const el = VID.el, b = vidBrano();
+  if (!VID.on || !b || !np.classList.contains('open') || document.hidden) { vidMostra(false); return; }
+  if (b.sid !== VID.sid) {   // brano nuovo (anche nel passaggio del mix): si chiede il suo videoclip al Mac
+    VID.sid = b.sid; VID.info = null; vidMostra(false);
+    el.removeAttribute('src'); try { el.load(); } catch (e) {}
+    vidChiedi(b.sid);
+    return;
+  }
+  const info = VID.info;
+  if (!info) return;
+  if (info.stato !== 'pronto') {   // in preparazione sul Mac: si richiede ogni 20 s (il brano che si ascolta passa davanti)
+    if ((info.stato === 'in coda' || info.stato === 'in preparazione') && Date.now() - VID.chiesto > 20000) vidChiedi(b.sid);
+    vidMostra(false, info.stato === 'in coda' || info.stato === 'in preparazione' ? 'Videoclip in preparazione sul Mac…' : '');
+    return;
+  }
+  const url = new URL(XAPI + info.url, location.href).href;
+  if (el.src !== url) { el.src = url; el.preload = 'auto'; }
+  const tv = vidTempo(info, b.t);
+  if (tv == null || (info.durata && tv >= info.durata)) { vidMostra(false); return; }   // pezzo che il videoclip non ha
+  if (el.seeking || el.readyState < 1) return;
+  vidMostra(true);
+  const d = el.currentTime - tv, troppo = b.rc ? 0.6 : 0.3;   // da lontano la posizione è stimata: più tolleranza
+  if (!b.suona) { if (!el.paused) el.pause(); if (Math.abs(d) > 0.08) el.currentTime = tv; return; }
+  if (Math.abs(d) > troppo) { el.currentTime = tv; el.playbackRate = 1; }
+  else el.playbackRate = Math.abs(d) < 0.04 ? 1 : Math.max(0.95, Math.min(1.05, 1 - d * 0.5));
+  if (el.paused) el.play().catch(() => vidMostra(false));   // risparmio energetico dell'iPhone: niente video, la copertina
+}
+setInterval(vidGiro, 200);
+['seeked', 'play', 'pause', 'loadedmetadata'].forEach(n => auOn(n, vidGiro));   // salti e pause subito, non al giro dopo
+VID.el.addEventListener('click', () => {   // tocco sul video: schermo intero
+  const el = VID.el;
+  try { if (el.webkitEnterFullscreen && isIOS) el.webkitEnterFullscreen(); else if (el.requestFullscreen) el.requestFullscreen(); } catch (e) {}
+});
+vidSegna();
+
 /* ---------- AirPlay e condivisione ---------- */
 function castPick() {
   if (au.webkitShowPlaybackTargetPicker) { try { au.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso'); } return; }
@@ -2536,7 +2616,7 @@ function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList
 
 /* ---------- avvio ---------- */
 (function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; b[3].innerHTML = ic('grid') + 'Altro'; })();
-$('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list'); $('bCast').innerHTML = ic('cast'); $('bDev').innerHTML = ic('devs'); $('bShare').innerHTML = ic('share');
+$('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').innerHTML = ic('fwd'); $('bQ').innerHTML = ic('list'); $('bCast').innerHTML = ic('cast'); $('bDev').innerHTML = ic('devs'); $('bVid').innerHTML = ic('film'); $('bShare').innerHTML = ic('share');
 (async function boot() {
   try { DB = await openDB(); } catch (e) { DB = null; toast('Archivio non disponibile: la musica non verrà salvata'); }
   try {
