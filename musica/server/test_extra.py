@@ -4930,5 +4930,258 @@ def unquote_(s):
     return unquote(s).replace("+", " ")
 
 
+# ----- interfaccia: strato di modifiche (base di Samuele, personale di ciascuno) -----
+
+class TestInterfaccia(unittest.TestCase):
+    """Base di Samuele (bozza, Pubblica, ultime 10 versioni) e strato personale di ciascuno, con valori rigidi."""
+
+    ORIGINE = "https://mac.esempio.ts.net:10000"
+    # un altro login Tailscale: rete fidata ma non Samuele (ATLANTE_PROPRIETARI) = «casa»
+    CASA = {"X-Forwarded-For": "100.100.1.2", "Tailscale-User-Login": "anna@example.com"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-interfaccia-")
+        cls.c = prepara_cartelle(cls.base)
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_PROPRIETARI": "samuele@example.com"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_interfaccia", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cls.cartella = os.path.join(cls.c["cache"], "interfaccia")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    @staticmethod
+    def leggi(b):
+        try:
+            return json.loads(b.decode("utf-8"))
+        except ValueError:
+            return None
+
+    def invitato(self, nome):
+        """(persona, biscotto) di una persona appena entrata dal suo invito."""
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        return a["id"], self.pers.biscotto(self.pers.usa_invito(codice, "iphone"))
+
+    def da(self, biscotto, metodo, percorso, corpo=None):
+        """Da Internet con il biscotto di un invitato: (codice, JSON)."""
+        h = dict(FUNNEL, Cookie="am_accesso=" + biscotto, Origin=self.ORIGINE)
+        st, _, b = richiesta(self.s.porta, metodo, "/api/extra/" + percorso, corpo, intest=h)
+        return st, self.leggi(b)
+
+    def samuele(self, metodo, percorso, corpo=None, intest=None):
+        st, _, b = richiesta(self.s.porta, metodo, "/api/extra/" + percorso, corpo, intest=intest)
+        return st, self.leggi(b)
+
+    def casa(self, metodo, percorso, corpo=None):
+        return self.samuele(metodo, percorso, corpo, intest=self.CASA)
+
+    def test_1_personale_di_ciascuno(self):
+        st, j = self.samuele("GET", "interfaccia")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["base"], {"modifiche": {}, "versione": 0, "pubblicato": 0})
+        self.assertEqual(j["personale"]["modifiche"], {})
+        self.assertIsNone(j["bozza"])
+        self.assertEqual(j["chi"], "p")
+        mie = {"nav#tabs button[tab=home]": {"testo": "Casa", "colore": "#ff0000"},
+               "main#view[v=lib] h1.lt": {"grandezza": 150, "nascosto": False}}
+        st, j = self.samuele("POST", "interfaccia/personale", {"modifiche": mie})
+        self.assertEqual(st, 200, j)
+        self.assertEqual(j["personale"]["modifiche"], mie)
+        self.assertGreater(j["personale"]["aggiornato"], 0)
+        self.assertEqual(self.samuele("GET", "interfaccia")[1]["personale"]["modifiche"], mie)
+        # un invitato ha il suo strato, non vede quello di Samuele né la bozza della base
+        anna, v = self.invitato("Anna")
+        st, j = self.da(v, "GET", "interfaccia")
+        self.assertEqual(st, 200)
+        self.assertEqual((j["chi"], j["personale"]["modifiche"]), (anna, {}))
+        self.assertNotIn("bozza", j)
+        sue = {"button[a=xopen][k=interfaccia]": {"sfondo": "viola", "ordine": -2}}
+        self.assertEqual(self.da(v, "POST", "interfaccia/personale", {"modifiche": sue})[0], 200)
+        self.assertEqual(self.samuele("GET", "interfaccia")[1]["personale"]["modifiche"], mie)
+        # lo strato personale segue la persona su tutti i suoi dispositivi
+        v2 = self.pers.biscotto(self.pers.usa_collegamento(self.pers.collegamento(anna)[0], "mac"))
+        self.assertEqual(self.da(v2, "GET", "interfaccia")[1]["personale"]["modifiche"], sue)
+        # dalla rete di casa si usa l'app come Samuele (come per i dispositivi), ma senza la bozza
+        st, j = self.casa("GET", "interfaccia")
+        self.assertEqual((st, j["chi"], j["personale"]["modifiche"]), (200, "p", mie))
+        self.assertNotIn("bozza", j)
+        # file del Mac mini: uno per persona, leggibili solo dal proprietario, scritti per intero
+        f = os.path.join(self.cartella, "persone", anna + ".json")
+        self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.join(self.cartella, "persone", "p.json")).st_mode & 0o777, 0o600)
+        self.assertEqual([n for n in os.listdir(os.path.join(self.cartella, "persone")) if n.endswith(".tmp")], [])
+        # strato vuoto: si torna all'originale
+        self.assertEqual(self.da(v, "POST", "interfaccia/personale", {"modifiche": {}})[1]["personale"]["modifiche"], {})
+
+    def test_2_valori_assurdi(self):
+        prima = self.samuele("GET", "interfaccia")[1]["personale"]["modifiche"]
+        brutte = [
+            # colori: solo #rrggbb o un nome della tavolozza
+            {"div.x": {"colore": "red"}}, {"div.x": {"colore": "#fff"}}, {"div.x": {"colore": "#12345g"}},
+            {"div.x": {"sfondo": "url(javascript:alert(1))"}}, {"div.x": {"sfondo": "#123456;}body{display:none"}},
+            {"div.x": {"colore": "var(--accent)"}}, {"div.x": {"colore": ""}}, {"div.x": {"colore": 255}},
+            # indirizzi: la forma rigida, niente selettori liberi
+            {"div{}": {"nascosto": True}}, {"body > div": {"nascosto": True}}, {'a[href="x"]': {"nascosto": True}},
+            {"<script>": {"nascosto": True}}, {"#view": {"nascosto": True}}, {"main#view h2.h2:0": {"nascosto": True}},
+            {"div." + "a" * 400: {"nascosto": True}}, {" ".join(["div"] * 8): {"nascosto": True}},
+            {"div.a.b.c.d.e": {"nascosto": True}}, {"div[onclick=x]": {"nascosto": True}},
+            {"div[a=x y]": {"nascosto": True}}, {"DIV": {"nascosto": True}}, {"div\n": {"nascosto": True}},
+            {"main#view  h2": {"nascosto": True}}, {" div": {"nascosto": True}}, {"div[v=a][a=b]": {"nascosto": True}},
+            {"div:has(x)": {"nascosto": True}}, {"div#1x": {"nascosto": True}}, {"": {"nascosto": True}},
+            {"body": {"nascosto": True}}, {"html": {"colore": "rosso"}}, {"div.x body:2": {"nascosto": True}},
+            {"main#view style": {"nascosto": True}}, {"head.x": {"nascosto": True}},
+            # proprietà e valori
+            {"div.x": {"testo": "x" * 81}}, {"div.x": {"testo": ["x"]}}, {"div.x": {"grandezza": 69}},
+            {"div.x": {"grandezza": 201}}, {"div.x": {"grandezza": "120"}}, {"div.x": {"grandezza": True}},
+            {"div.x": {"grandezza": 120.5}}, {"div.x": {"nascosto": "si"}}, {"div.x": {"nascosto": 1}},
+            {"div.x": {"ordine": 21}}, {"div.x": {"ordine": 1.5}}, {"div.x": {"onclick": "x"}}, {"div.x": {}},
+            {"div.x": "nascosto"}, [], "tutto",
+        ]
+        for m in brutte:
+            st, j = self.samuele("POST", "interfaccia/personale", {"modifiche": m})
+            self.assertEqual(st, 400, (m, j))
+            self.assertTrue(j["errore"], m)
+        self.assertEqual(self.samuele("POST", "interfaccia/personale", "non un oggetto")[0], 400)
+        self.assertEqual(self.samuele("GET", "interfaccia")[1]["personale"]["modifiche"], prima)
+        # al più 500 modifiche per livello (ogni proprietà di ogni elemento conta una)
+        molte = {"div.x%d" % i: {"nascosto": True} for i in range(500)}
+        self.assertEqual(self.samuele("POST", "interfaccia/personale", {"modifiche": molte})[0], 200)
+        molte["div.y"] = {"grandezza": 100}
+        self.assertEqual(self.samuele("POST", "interfaccia/personale", {"modifiche": molte})[0], 400)
+        due = {"div.x%d" % i: {"nascosto": True, "grandezza": 120} for i in range(251)}
+        self.assertEqual(self.samuele("POST", "interfaccia/personale", {"modifiche": due})[0], 400)
+        st, _, b = richiesta(self.s.porta, "POST", "/api/extra/interfaccia/personale",
+                             json.dumps({"modifiche": {}, "x": "y" * (2 * 1024 * 1024)}).encode("utf-8"))
+        self.assertEqual(st, 413)
+        # un testo con HTML resta testo: si salva com'è (l'app lo scrive come testo); spazi e caratteri di controllo no
+        buone = {"main#view[v=home] h2.h2[sez=i-piu-ascoltati]": {"testo": "<img src=x onerror=alert(1)>"},
+                 "span.l:2": {"testo": " Ciao\n\tmondo\u0000 \u202e! "}, "button#npFav": {"colore": "#FFAA00"},
+                 "div.x": {"sfondo": "accento", "colore": "originale", "testo": ""}, "body main#view[v=home]": {"grandezza": 90},
+                 "nav#tabs div.in button.bodyx": {"nascosto": True}}
+        st, h, b = richiesta(self.s.porta, "POST", "/api/extra/interfaccia/personale", {"modifiche": buone})
+        self.assertEqual(st, 200, b)
+        self.assertIn("application/json", h["Content-Type"])
+        j = self.leggi(b)["personale"]["modifiche"]
+        self.assertEqual(j["main#view[v=home] h2.h2[sez=i-piu-ascoltati]"]["testo"], "<img src=x onerror=alert(1)>")
+        self.assertEqual(j["span.l:2"]["testo"], "Ciao mondo !")
+        self.assertEqual(j["button#npFav"]["colore"], "#ffaa00")
+        self.assertEqual(j["div.x"], {"sfondo": "accento", "colore": "originale", "testo": ""})
+        self.samuele("POST", "interfaccia/personale", {"modifiche": prima})
+
+    def test_3_base_bozza_e_pubblica(self):
+        anna, v = self.invitato("Bea")
+        self.da(v, "POST", "interfaccia/personale", {"modifiche": {"span#miniT": {"colore": "verde"}}})
+        base = {"main#view[v=home] h1.lt": {"testo": "Benvenuti"}, "nav#tabs button[tab=search]": {"nascosto": True}}
+        st, j = self.samuele("POST", "interfaccia/bozza", {"modifiche": base})
+        self.assertEqual((st, j["bozza"]["modifiche"]), (200, base), j)
+        # la bozza la vede solo Samuele finché non la pubblica
+        j = self.samuele("GET", "interfaccia")[1]
+        self.assertEqual(j["bozza"]["modifiche"], base)
+        self.assertEqual(self.samuele("GET", "interfaccia/bozza")[1]["bozza"]["modifiche"], base)
+        prima = j["base"]["versione"]
+        self.assertEqual(self.da(v, "GET", "interfaccia")[1]["base"]["versione"], prima)
+        # bozza, pubblicazione e versioni: solo Samuele (gli invitati non arrivano nemmeno alla rotta)
+        for metodo, p in (("GET", "interfaccia/bozza"), ("POST", "interfaccia/bozza"), ("DELETE", "interfaccia/bozza"),
+                          ("POST", "interfaccia/pubblica"), ("GET", "interfaccia/versioni"),
+                          ("POST", "interfaccia/versioni/1/ripristina"), ("GET", "interfaccia/altro")):
+            st, j = self.da(v, metodo, p, {"modifiche": {}} if metodo == "POST" else None)
+            self.assertEqual((st, j["errore"]), (403, "Non disponibile per gli invitati"), (metodo, p))
+            st, j = self.casa(metodo, p, {"modifiche": {}} if metodo == "POST" else None)
+            self.assertEqual(st, 403 if p != "interfaccia/altro" else 404, (metodo, p, j))
+        # Pubblica: la bozza diventa la base di tutti, le personalizzazioni restano
+        st, j = self.samuele("POST", "interfaccia/pubblica")
+        self.assertEqual(st, 200, j)
+        self.assertEqual((j["base"]["versione"], j["base"]["modifiche"]), (prima + 1, base))
+        self.assertIsNone(self.samuele("GET", "interfaccia")[1]["bozza"])
+        j = self.da(v, "GET", "interfaccia")[1]
+        self.assertEqual((j["base"]["versione"], j["base"]["modifiche"]), (prima + 1, base))
+        self.assertGreater(j["base"]["pubblicato"], 0)
+        self.assertEqual(j["personale"]["modifiche"], {"span#miniT": {"colore": "verde"}})
+        self.assertEqual(self.da(v, "GET", "interfaccia/base")[1]["base"]["modifiche"], base)
+        st, j = self.samuele("POST", "interfaccia/pubblica")
+        self.assertEqual(st, 409, j)
+        # una bozza si può anche buttare
+        self.samuele("POST", "interfaccia/bozza", {"modifiche": {"div.x": {"nascosto": True}}})
+        self.assertEqual(self.samuele("DELETE", "interfaccia/bozza"), (200, {"ok": True}))
+        self.assertIsNone(self.samuele("GET", "interfaccia")[1]["bozza"])
+        self.assertEqual(self.samuele("GET", "interfaccia")[1]["base"]["modifiche"], base)
+        # valori assurdi anche nella bozza
+        self.assertEqual(self.samuele("POST", "interfaccia/bozza", {"modifiche": {"div.x": {"colore": "red"}}})[0], 400)
+        # la scrittura chiede la stessa origine, come le altre
+        st, j = self.samuele("POST", "interfaccia/bozza", {"modifiche": {}}, intest={"Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+        st, j = self.samuele("POST", "interfaccia/personale", {"modifiche": {}}, intest={"Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+
+    def test_4_ultime_dieci_versioni(self):
+        self.samuele("DELETE", "interfaccia/bozza")
+        for i in range(12):
+            self.assertEqual(self.samuele("POST", "interfaccia/bozza", {"modifiche": {"div.v%d" % i: {"grandezza": 110}}})[0], 200)
+            self.assertEqual(self.samuele("POST", "interfaccia/pubblica")[0], 200)
+        st, j = self.samuele("GET", "interfaccia/versioni")
+        self.assertEqual(st, 200)
+        vv = j["versioni"]
+        self.assertEqual(len(vv), 10)
+        self.assertEqual([x["versione"] for x in vv], sorted((x["versione"] for x in vv), reverse=True))
+        self.assertEqual(j["attuale"], vv[0]["versione"])
+        self.assertEqual(vv[0]["n"], 1)
+        vecchia = vv[-1]["versione"]
+        # tornare a una versione vecchia la pubblica di nuovo (come versione nuova, così si può tornare anche indietro)
+        self.samuele("POST", "interfaccia/bozza", {"modifiche": {}})
+        st, j = self.samuele("POST", "interfaccia/versioni/%d/ripristina" % vecchia)
+        self.assertEqual(st, 409, j)   # prima si pubblica o si butta la bozza
+        self.samuele("DELETE", "interfaccia/bozza")
+        st, j = self.samuele("POST", "interfaccia/versioni/%d/ripristina" % vecchia)
+        self.assertEqual(st, 200, j)
+        self.assertEqual(j["base"]["versione"], vv[0]["versione"] + 1)
+        self.assertEqual(j["base"]["modifiche"], {"div.v2": {"grandezza": 110}})
+        self.assertEqual(self.samuele("POST", "interfaccia/versioni/%d/ripristina" % (vecchia - 1))[0], 404)
+        self.assertEqual(self.samuele("POST", "interfaccia/versioni/%d/ripristina" % j["base"]["versione"])[0], 409)
+        self.assertEqual(self.samuele("POST", "interfaccia/versioni/x/ripristina")[0], 404)
+        f = os.path.join(self.cartella, "base.json")
+        self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+
+    def test_5_file_rovinato_o_scritto_a_mano(self):
+        f = os.path.join(self.cartella, "base.json")
+        with open(f, encoding="utf-8") as x:
+            buono = x.read()
+        try:
+            # voci scritte a mano con valori assurdi: non arrivano all'app
+            d = json.loads(buono)
+            d["base"]["modifiche"] = {"div.ok": {"nascosto": True}, "div{}": {"nascosto": True},
+                                      "div.no": {"colore": "red", "grandezza": 150}}
+            with open(f, "w", encoding="utf-8") as x:
+                json.dump(d, x)
+            self.assertEqual(self.samuele("GET", "interfaccia")[1]["base"]["modifiche"],
+                             {"div.ok": {"nascosto": True}, "div.no": {"grandezza": 150}})
+            # un file che non si legge: l'app si apre com'è e il file non si sovrascrive
+            with open(f, "w", encoding="utf-8") as x:
+                x.write("{rotto")
+            st, j = self.samuele("GET", "interfaccia")
+            self.assertEqual((st, j["base"]["modifiche"]), (200, {}))
+            self.assertEqual(self.samuele("POST", "interfaccia/bozza", {"modifiche": {}})[0], 503)
+            with open(f, encoding="utf-8") as x:
+                self.assertEqual(x.read(), "{rotto")
+        finally:
+            with open(f, "w", encoding="utf-8") as x:
+                x.write(buono)
+
+    def test_6_permessi_invitato(self):
+        _, v = self.invitato("Carla")
+        for metodo, p in (("GET", "/api/extra/interfaccia"), ("GET", "/api/extra/interfaccia/base"),
+                          ("POST", "/api/extra/interfaccia/personale"), ("GET", "/musica/api/extra/interfaccia")):
+            h = dict(FUNNEL, Cookie="am_accesso=" + v, Origin=self.ORIGINE)
+            st, _, b = richiesta(self.s.porta, metodo, p, {"modifiche": {}} if metodo == "POST" else None, intest=h)
+            self.assertEqual(st, 200, (metodo, p, b[:200]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

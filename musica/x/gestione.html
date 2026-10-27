@@ -108,6 +108,14 @@ details.rimp summary{color:var(--link);cursor:pointer}
       <p class="small" style="margin:16px 4px 0">Dispositivi nella rete Tailscale</p>
       <div class="list" id="rdisp"></div>
     </div>
+  <div id="uiSezione">
+    <h2 class="h2">Interfaccia</h2>
+    <div class="card">
+      <p class="sub" id="uiStato">Leggo la base…</p>
+      <div class="btns"><button class="btn pri" id="uiModifica">Modifica la base</button><button class="btn" id="uiPubblica" hidden>Pubblica</button><button class="btn" id="uiButta" hidden>Butta la bozza</button></div>
+      <p class="small">La base è come appare Atlante Musica a tutti; poi ognuno la cambia per sé con «Modifica interfaccia» in Altro (anche tu). La bozza la vedi solo tu finché non tocchi «Pubblica». Per tornare all'app originale: «Modifica la base», tocca il numero delle modifiche per toglierle tutte, «Fatto» e «Pubblica».</p>
+    </div>
+    <div class="list" id="uiVersioni" hidden></div>
   </div>
 </div>
 <script src="kit.js"></script>
@@ -483,6 +491,57 @@ ascolti();
 })();
 // quante cose aspettano in «Da controllare» (brani e richieste di film)
 api('io').then(io => { const n = ((io.nuove || {}).da_controllare || 0) + ((io.nuove || {}).film || 0); $('nControllo').hidden = !n; $('nControllo').textContent = n; }, () => {});
+</script>
+<script>
+'use strict';
+// ----- Interfaccia: la base per tutti (bozza, Pubblica, ultime 10 versioni). L'editor è nell'app: «Modifica la base» -----
+(function () {
+  const {$, esc, toast, api} = AX;
+  let attesa = '', attesaT = 0;
+  const conta = m => Object.values(m || {}).reduce((k, x) => k + Object.keys(x).length, 0);
+  const modifiche = k => k === 1 ? '1 modifica' : k + ' modifiche';
+  const data = t => t ? new Date(t * 1000).toLocaleString('it-IT', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+  // doppio tocco per Pubblica, Butta e Ripristina: niente finestre di conferma
+  function chiedi(cosa, b, testo) {
+    if (attesa === cosa) { attesa = ''; clearTimeout(attesaT); return true; }
+    attesa = cosa; b.textContent = testo; clearTimeout(attesaT); attesaT = setTimeout(() => { attesa = ''; disegna(); }, 4000);
+    return false;
+  }
+  function avvisaApp() { try { if (AX.host && AX.host.interfacciaRicarica) AX.host.interfacciaRicarica(); } catch (e) {} }
+  async function disegna() {
+    let j, v;
+    try { [j, v] = await Promise.all([api('interfaccia'), api('interfaccia/versioni')]); }
+    catch (e) { $('uiStato').textContent = 'Non riesco a leggere l\'interfaccia: ' + e.message; return; }
+    const b = j.base, z = j.bozza;
+    $('uiStato').textContent = (b.versione ? 'Base pubblicata: versione ' + b.versione + ' del ' + data(b.pubblicato) + ', ' + modifiche(conta(b.modifiche)) + '.' :
+      'Base: l\'app originale, senza modifiche.') + (z ? ' Bozza non pubblicata: ' + modifiche(conta(z.modifiche)) + ' (la vedi solo tu).' : '');
+    $('uiModifica').textContent = z ? 'Continua la bozza' : 'Modifica la base';
+    $('uiPubblica').hidden = $('uiButta').hidden = !z;
+    $('uiPubblica').textContent = 'Pubblica'; $('uiButta').textContent = 'Butta la bozza';
+    $('uiVersioni').hidden = !v.versioni.length;
+    $('uiVersioni').innerHTML = v.versioni.map(x => '<div class="row"><span class="tx"><b>Versione ' + x.versione + '</b><span>' + esc(data(x.pubblicato)) + ' · ' + modifiche(x.n) + '</span></span>' +
+      (x.versione === v.attuale ? '<span class="pill ok">pubblicata</span>' : '<button class="btn sm" data-v="' + x.versione + '">Ripristina</button>') + '</div>').join('');
+    $('uiVersioni').querySelectorAll('[data-v]').forEach(bt => bt.onclick = async () => {
+      if (!chiedi('r' + bt.dataset.v, bt, 'Tocca ancora')) return;
+      try { const r = await api('interfaccia/versioni/' + bt.dataset.v + '/ripristina', {method:'POST'}); toast('Ora tutti vedono la versione ' + bt.dataset.v + ' (ripubblicata come ' + r.base.versione + ')'); avvisaApp(); }
+      catch (e) { toast(e.message); }
+      disegna();
+    });
+  }
+  $('uiModifica').onclick = () => { if (AX.host && AX.host.interfaccia) AX.host.interfaccia('base'); else toast('Apri la Gestione dall\'app Atlante Musica'); };
+  $('uiPubblica').onclick = async () => {
+    if (!chiedi('pubblica', $('uiPubblica'), 'Tocca ancora: la vedranno tutti')) return;
+    try { const r = await api('interfaccia/pubblica', {method:'POST'}); toast('Pubblicata: tutti vedono la versione ' + r.base.versione); avvisaApp(); } catch (e) { toast(e.message); }
+    disegna();
+  };
+  $('uiButta').onclick = async () => {
+    if (!chiedi('butta', $('uiButta'), 'Tocca ancora per buttarla')) return;
+    try { await api('interfaccia/bozza', {method:'DELETE'}); toast('Bozza buttata'); avvisaApp(); } catch (e) { toast(e.message); }
+    disegna();
+  };
+  window.uiAggiorna = disegna;   // l'app la chiama quando, finita la base, torna qui
+  disegna();
+})();
 </script>
 </body>
 </html>

@@ -7944,6 +7944,299 @@ def _proxy_media(h, r, sock, url, lun):
         h.wfile.write(b)
 
 
+# ----- interfaccia: strato di modifiche sopra l'app (base di Samuele, personale di ciascuno) -----
+#
+# L'app si disegna come sempre (l'originale); sopra vanno la base di Samuele e lo strato personale di chi la usa: per
+# ogni proprietà di un elemento vale il livello più in alto. Qui gli strati si tengono e si controllano, li applica l'app.
+# Un elemento si indica con il suo «indirizzo» (UI_INDIRIZZO) e le proprietà sono poche, con valori in una forma rigida:
+# niente CSS né HTML liberi, così un valore assurdo non arriva mai alle app degli altri.
+#
+#   GET    interfaccia                         {chi, base, personale}; a Samuele anche la bozza
+#   GET    interfaccia/base                    {base}: la base pubblicata, per tutti
+#   POST   interfaccia/personale {modifiche}   sostituisce lo strato personale di chi lo chiede
+#   GET/POST/DELETE interfaccia/bozza          (Samuele) la bozza della base, che vede solo lui
+#   POST   interfaccia/pubblica                (Samuele) la bozza diventa la base di tutti, come versione nuova
+#   GET    interfaccia/versioni                (Samuele) le ultime 10 versioni pubblicate
+#   POST   interfaccia/versioni/<n>/ripristina (Samuele) una versione vecchia torna la base (come versione nuova)
+
+UI = None                         # Interfaccia, preparata alla prima richiesta (cartella interfaccia/ nella cache)
+UI_MAX = 500                      # modifiche per livello: ogni proprietà di ogni elemento ne conta una
+UI_VERSIONI = 10
+UI_TESTO_MAX = 80
+UI_INDIRIZZO_MAX = 400
+UI_CORPO_MAX = 1024 * 1024        # 500 modifiche con indirizzi e testi lunghi stanno in meno di 300 KB
+UI_GRANDEZZA = (70, 200)          # per cento
+UI_ORDINE = 20                    # posti di cui un elemento si sposta, prima (-) o dopo (+), tra quelli del suo gruppo
+# colori per nome: l'app li traduce (quelli del tema cambiano con chiaro e scuro); «originale» toglie il colore di sotto
+UI_TAVOLOZZA = ("originale", "accento", "principale", "secondario", "fondo", "fondo2", "rosso", "arancione", "giallo",
+                "verde", "menta", "azzurro", "blu", "viola", "rosa", "marrone", "grigio", "nero", "bianco")
+UI_COLORE = re.compile(r"#[0-9a-f]{6}")
+# indirizzo: da 1 a 7 pezzi separati da uno spazio, dal contenitore con un id fino all'elemento. Ogni pezzo: tag, #id,
+# al più 4 classi, poi [a=…][tab=…][v=…][k=…][sez=…] in quest'ordine (data-a, data-tab, data-v, data-k dei riquadri di
+# Altro, sezione della pagina); in fondo, solo per l'elemento, la posizione tra i fratelli uguali (:2)
+_UI_VAL = r"[A-Za-z0-9_-]{1,40}"
+_UI_PEZZO = (r"[a-z][a-z0-9]{0,9}(?:#[A-Za-z][A-Za-z0-9_-]{0,39})?(?:\.[A-Za-z][A-Za-z0-9_-]{0,29}){0,4}" +
+             "".join(r"(?:\[%s=%s\])?" % (n, _UI_VAL) for n in ("a", "tab", "v", "k", "sez")))
+UI_INDIRIZZO = re.compile(r"%s(?: %s){0,6}(?::[1-9][0-9]?)?" % (_UI_PEZZO, _UI_PEZZO))
+UI_NON_ELEMENTI = re.compile(r"(?:^| )(?:html|head|body|script|style|link|meta|title)(?:[#.\[:]|$)[^ ]*$")   # mai l'elemento cambiato
+UI_CONTROLLO = re.compile("[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")   # anche i segni che girano il testo
+
+
+def _ui_valore(p, v):
+    """(True, valore pulito) oppure (False, perché no)."""
+    if p == "testo":   # "" = il testo originale, anche sopra quello della base
+        if not isinstance(v, str):
+            return False, "Testo non valido"
+        t = " ".join(UI_CONTROLLO.sub(" ", v).split())
+        return (True, t) if len(t) <= UI_TESTO_MAX else (False, "Testo troppo lungo: al più %d caratteri" % UI_TESTO_MAX)
+    if p in ("colore", "sfondo"):
+        c = v.lower() if isinstance(v, str) else ""
+        if c in UI_TAVOLOZZA or UI_COLORE.fullmatch(c):
+            return True, c
+        return False, "Colore non valido: serve #rrggbb o un colore della tavolozza"
+    if p == "grandezza":   # 100 = la grandezza originale
+        if type(v) is int and UI_GRANDEZZA[0] <= v <= UI_GRANDEZZA[1]:
+            return True, v
+        return False, "Grandezza non valida: da %d a %d per cento" % UI_GRANDEZZA
+    if p == "nascosto":    # False = visibile, anche se la base lo nasconde
+        return (True, v) if type(v) is bool else (False, "«Nascosto» vale vero o falso")
+    if p == "ordine":      # 0 = al suo posto
+        if type(v) is int and -UI_ORDINE <= v <= UI_ORDINE:
+            return True, v
+        return False, "Spostamento non valido: al più %d posti" % UI_ORDINE
+    return False, "Proprietà sconosciuta: si cambiano testo, colore, sfondo, grandezza, nascosto e ordine"
+
+
+def convalida_modifiche(m, severa=True):
+    """Le modifiche di un livello, {indirizzo: {proprietà: valore}}, controllate. Con severa=False (un file scritto a
+    mano sul Mac mini) le voci sbagliate si tolgono invece di rifiutare tutto."""
+    def no(testo):
+        if severa:
+            raise ErroreExtra(400, testo)
+
+    if not isinstance(m, dict):
+        no("Modifiche non valide: serve un oggetto {indirizzo: {proprietà: valore}}")
+        return {}
+    fuori, n = {}, 0
+    for ind, props in m.items():
+        if not isinstance(ind, str) or len(ind) > UI_INDIRIZZO_MAX or not UI_INDIRIZZO.fullmatch(ind) or UI_NON_ELEMENTI.search(ind):
+            no("Indirizzo di un elemento non valido")
+            continue
+        if not isinstance(props, dict) or not props:
+            no("Modifica non valida: servono le proprietà dell'elemento")
+            continue
+        x = {}
+        for p, v in props.items():
+            ok, val = _ui_valore(p, v)
+            if ok:
+                x[p] = val
+            else:
+                no(val)
+        if not x:
+            continue
+        n += len(x)
+        if n > UI_MAX:
+            no("Troppe modifiche: al più %d per livello" % UI_MAX)
+            break
+        fuori[ind] = x
+    return fuori
+
+
+def _ui_numero(v):
+    return v if type(v) in (int, float) and v >= 0 else 0
+
+
+class Interfaccia:
+    """Strati dell'interfaccia sul Mac mini: base.json (base pubblicata, bozza di Samuele, ultime versioni) e
+    persone/<chi>.json (lo strato personale: «p» per Samuele, l'id per un invitato). File 0600, scritti per intero.
+    Le personalizzazioni di una persona revocata restano finché Samuele non le toglie."""
+
+    def __init__(self, cartella):
+        self.cartella = cartella
+        self.blocco = threading.Lock()
+
+    def _file(self, chi=None):
+        if chi is None:
+            return os.path.join(self.cartella, "base.json")
+        if not re.fullmatch(r"p|[0-9a-f]{16}", chi or ""):
+            raise ErroreExtra(400, "Persona non valida")
+        return os.path.join(self.cartella, "persone", chi + ".json")
+
+    @staticmethod
+    def _leggi(file):
+        """(dati, leggibile): un file che manca è vuoto; uno che non si legge non va sovrascritto."""
+        try:
+            with open(file, encoding="utf-8") as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            return {}, True
+        except (OSError, ValueError):
+            return {}, False
+        return (d, True) if isinstance(d, dict) else ({}, False)
+
+    @staticmethod
+    def _scrivi(file, d, leggibile=True):
+        if not leggibile:
+            print("Atlante: %s non si legge: lo lascio com'è" % file, flush=True)
+            raise ErroreExtra(503, "Il file dell'interfaccia sul Mac mini non si legge: non lo sovrascrivo")
+        os.makedirs(os.path.dirname(file), mode=0o700, exist_ok=True)
+        tmp = "%s.%d.tmp" % (file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, file)
+
+    def _base(self):
+        d, ok = self._leggi(self._file())
+        b = d.get("base") if isinstance(d.get("base"), dict) else {}
+        z = d.get("bozza") if isinstance(d.get("bozza"), dict) else None
+        versioni = [{"versione": x["versione"], "pubblicato": _ui_numero(x.get("pubblicato")),
+                     "modifiche": convalida_modifiche(x.get("modifiche"), False)}
+                    for x in (d.get("versioni") if isinstance(d.get("versioni"), list) else [])
+                    if isinstance(x, dict) and type(x.get("versione")) is int and x["versione"] > 0][:UI_VERSIONI]
+        return {"base": {"modifiche": convalida_modifiche(b.get("modifiche") or {}, False),
+                         "versione": b["versione"] if type(b.get("versione")) is int else 0,
+                         "pubblicato": _ui_numero(b.get("pubblicato"))},
+                "bozza": None if z is None else {"modifiche": convalida_modifiche(z.get("modifiche") or {}, False),
+                                                 "aggiornato": _ui_numero(z.get("aggiornato"))},
+                "versioni": versioni}, ok
+
+    def leggi(self, chi, samuele):
+        with self.blocco:
+            d, _ = self._base()
+            p, _ = self._leggi(self._file(chi))
+        r = {"chi": chi, "base": d["base"],
+             "personale": {"modifiche": convalida_modifiche(p.get("modifiche") or {}, False),
+                           "aggiornato": _ui_numero(p.get("aggiornato"))}}
+        if samuele:
+            r["bozza"] = d["bozza"]
+        return r
+
+    def base(self):
+        with self.blocco:
+            return self._base()[0]["base"]
+
+    def personale(self, chi, modifiche):
+        m = convalida_modifiche(modifiche)
+        with self.blocco:
+            f = self._file(chi)
+            x = {"modifiche": m, "aggiornato": time.time()}
+            self._scrivi(f, x, self._leggi(f)[1])
+            return x
+
+    def bozza(self):
+        """La bozza della base (None se non c'è)."""
+        with self.blocco:
+            return self._base()[0]["bozza"]
+
+    def salva_bozza(self, modifiche):
+        m = convalida_modifiche(modifiche)
+        with self.blocco:
+            d, ok = self._base()
+            d["bozza"] = {"modifiche": m, "aggiornato": time.time()}
+            self._scrivi(self._file(), d, ok)
+            return d["bozza"]
+
+    def scarta(self):
+        with self.blocco:
+            d, ok = self._base()
+            if d["bozza"] is not None:
+                d["bozza"] = None
+                self._scrivi(self._file(), d, ok)
+
+    @staticmethod
+    def _pubblica(d, modifiche):
+        v = max([d["base"]["versione"]] + [x["versione"] for x in d["versioni"]]) + 1
+        ora = time.time()
+        d["base"] = {"modifiche": modifiche, "versione": v, "pubblicato": ora}
+        d["versioni"] = ([{"versione": v, "pubblicato": ora, "modifiche": modifiche}] + d["versioni"])[:UI_VERSIONI]
+        return d["base"]
+
+    def pubblica(self):
+        with self.blocco:
+            d, ok = self._base()
+            if d["bozza"] is None:
+                raise ErroreExtra(409, "Non c'è una bozza da pubblicare: prima «Modifica la base»")
+            b = self._pubblica(d, d["bozza"]["modifiche"])
+            d["bozza"] = None
+            self._scrivi(self._file(), d, ok)
+            return b
+
+    def versioni(self):
+        with self.blocco:
+            d, _ = self._base()
+        return {"attuale": d["base"]["versione"],
+                "versioni": [{"versione": x["versione"], "pubblicato": x["pubblicato"],
+                              "n": sum(len(p) for p in x["modifiche"].values())} for x in d["versioni"]]}
+
+    def ripristina(self, n):
+        with self.blocco:
+            d, ok = self._base()
+            x = next((x for x in d["versioni"] if x["versione"] == n), None)
+            if x is None:
+                raise ErroreExtra(404, "Versione non più tenuta: restano le ultime %d" % UI_VERSIONI)
+            if d["bozza"] is not None:
+                raise ErroreExtra(409, "C'è una bozza non pubblicata: pubblicala o buttala, poi torna a una versione")
+            if n == d["base"]["versione"]:
+                raise ErroreExtra(409, "È già la base pubblicata")
+            b = self._pubblica(d, x["modifiche"])
+            self._scrivi(self._file(), d, ok)
+            return b
+
+
+def _interfaccia():
+    global UI
+    if UI is None:
+        UI = Interfaccia(os.path.join(_cart("cache"), "interfaccia"))
+    return UI
+
+
+def _rotte_interfaccia(h, metodo, resto, corpo):
+    """Strati dell'interfaccia: la base pubblicata la leggono tutti, il proprio strato personale lo cambia ognuno
+    (Samuele e la rete di casa: «p», come per i dispositivi), la bozza e le versioni sono solo di Samuele."""
+    def solo(*metodi):
+        if metodo not in metodi:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+
+    samuele, ui = _chi_e(h)["ruolo"] == "proprietario", _interfaccia()
+    if metodo == "POST":
+        try:
+            n = int(h.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n > UI_CORPO_MAX:
+            raise ErroreExtra(413, "Troppe modifiche in una volta")
+    if not resto:
+        solo("GET")
+        return _json(h, ui.leggi(_di(h), samuele))
+    if resto == ["base"]:
+        solo("GET")
+        return _json(h, {"base": ui.base()})
+    if resto == ["personale"]:
+        solo("POST")
+        return _json(h, {"personale": ui.personale(_di(h), corpo.get("modifiche"))})
+    if resto[0] in ("bozza", "pubblica", "versioni") and not samuele:
+        raise ErroreExtra(403, "Solo Samuele cambia la base dell'interfaccia")
+    if resto == ["bozza"]:
+        solo("GET", "POST", "DELETE")
+        if metodo == "DELETE":
+            ui.scarta()
+            return _json(h, {"ok": True})
+        return _json(h, {"bozza": ui.salva_bozza(corpo.get("modifiche")) if metodo == "POST" else ui.bozza()})
+    if resto == ["pubblica"]:
+        solo("POST")
+        return _json(h, {"base": ui.pubblica()})
+    if resto == ["versioni"]:
+        solo("GET")
+        return _json(h, ui.versioni())
+    if len(resto) == 3 and resto[0] == "versioni" and resto[2] == "ripristina":
+        solo("POST")
+        if not re.fullmatch(r"[1-9][0-9]{0,8}", resto[1]):
+            raise ErroreExtra(404, "Versione sconosciuta")
+        return _json(h, {"base": ui.ripristina(int(resto[1]))})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/interfaccia/%s" % "/".join(resto))
+
+
 # ----- richieste HTTP -----
 
 def _leggi_corpo(h):
@@ -8054,6 +8347,8 @@ def _instrada(h, metodo, parti, corpo):
         _json(h, CL.classifiche_app() if CL else {"classifiche": []})
     elif cosa == "tematiche":   # playlist di Atlante e playlist con l'IA
         _tematiche(h, metodo, resto, corpo)
+    elif cosa == "interfaccia":
+        _rotte_interfaccia(h, metodo, resto, corpo)
     elif cosa == "inviti" and not resto:
         solo("GET", "POST")
         _inviti(h, metodo, corpo)
@@ -9456,7 +9751,8 @@ PERMESSE_INVITATI = re.compile(
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
     r"|extra/(?:io|inviti|idee|classifiche|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
     # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria: ognuno i suoi
-    r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?)"
+    r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?"
+    r"|interfaccia(?:/base|/personale)?)"   # la base pubblicata e il proprio strato personale (non bozza né versioni)
     r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?"
     r"|extra/tematiche(?:/[^/]+){0,2})$")   # playlist di Atlante: anche gli invitati le ascoltano, creano e condividono
 # la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
