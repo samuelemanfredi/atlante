@@ -41,6 +41,13 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | DELETE | `audiolibro/<id>` | `{ok:true}` |
 | GET | `ia` | `{attiva:bool, modelli:[...], modello}` |
 | POST | `ia` `{prompt, sistema, json:bool, modello}` | `{testo}` — IA locale (Ollama su `localhost:11434`), tempo massimo 180 s |
+| GET | `tematiche` | `{gruppi:[{id,nome,playlist:[{id,nome,descrizione,n,durata,copertine}]}], stato:{attivo,fatti,totale,ora}, ia:{rimaste,al_giorno}}` — Playlist di Atlante fatte dal Mac (anche per gli invitati); le vuote non ci sono |
+| GET | `tematiche/<id>` | `{id,nome,descrizione,n,brani:[id del catalogo]}` (404 se vuota o sconosciuta) |
+| GET | `tematiche/ritmi` | `{ritmi:{id:[bpm,regolarita,energia,modo]}, buonumore:[[id,peso]]}` — per «Per ritmo» e «Mettimi di buonumore» (l'app lo tiene per quando non c'è rete); modo 1 maggiore, -1 minore, 0 incerto |
+| GET | `tematiche/campione` | `{stato, brani:[{titolo,artista,anno,generi,fonte,italiano,bpm,energia,regolarita,tonalita,playlist}]}` — solo Samuele: controllo a mano dei dati dei brani |
+| POST | `tematiche/ia` `{richiesta}` oppure `{su_misura:true, ascolti:[{id,n,fav}]}` | `{nome,criteri,riassunto,brani,durata,note,rimaste}` — anteprima: l'IA traduce la richiesta in criteri, il Mac sceglie i brani dalla libreria; una richiesta all'IA alla volta, 20 al giorno per persona (429) |
+| POST | `tematiche/condivise` `{nome,brani,locale}` | `{id,n}` — «Condividi in Atlante» (la stessa `locale` di nuovo la aggiorna) |
+| DELETE | `tematiche/condivise/<id>` | `{ok:true}` — solo chi l'ha condivisa o Samuele |
 | GET | `dispositivo` | `{nome, sistema, versione, avvio, memoria:{totale,libera}, dischi:[{nome,percorso,totale,libero}], pulizia:[{nome,percorso,dimensione}]}` |
 
 ## API dell'app che ospita (`AX.player`, oppure `parent.AM`)
