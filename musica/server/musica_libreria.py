@@ -915,7 +915,11 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 #   POST   musica {id,...} o {url}     scarica il brano nella cartella della musica scaricata (MP3, tag) -> {id}
 #   GET    musica                      elenco degli scaricamenti (`brano` = id nel catalogo quando è in libreria)
 #   POST   musica/<id>/annulla         ferma lo scaricamento; uno finito esce dall'elenco (il brano resta)
-#   GET    voci                       voci di sintesi del Mac, prima le italiane
+#   GET    dispositivi                 dispositivi con l'app aperta (sentiti negli ultimi 60 s) e cosa suonano
+#   POST   dispositivi/<id>/stato      {nome,tipo,stato} ogni pochi secondi -> {comandi:[...]} in attesa
+#   GET    dispositivi/<id>/comandi?attesa=25  attesa lunga: i comandi appena arrivano
+#   POST   dispositivi/<id>/comando    {azione,...} per quel dispositivo (telecomando)
+#   GET    voci                      voci di sintesi del Mac, prima le italiane
 #   POST   audiolibro {...}            ogni capitolo diventa un m4a con `say` -> {id}
 #   GET    audiolibro                  elenco
 #   GET    audiolibro/file/<id>/<n>    capitolo n (da 0), con Range
@@ -1848,6 +1852,110 @@ def _annulla_musica(id_):
         coda.rimuovi(id_)   # esce dall'elenco: il brano resta nella libreria
 
 
+# ----- dispositivi: telecomando tra i dispositivi con l'app aperta (come Spotify Connect) -----
+#
+# Ogni app aperta (iPhone, Mac…) manda il suo stato ogni pochi secondi e tiene aperta un'«attesa lunga» per i comandi:
+# un altro dispositivo vede cosa suona e la comanda (riproduci, pausa, avanti, posizione, volume) o le passa la sua
+# musica (azione «suona» con la coda). Tutto in memoria: chi non si fa sentire da DISP_VIVO secondi sparisce.
+
+DISP_VIVO = 60           # secondi: oltre, il dispositivo non compare più nell'elenco
+DISP_MAX = 30            # dispositivi ricordati (i più vecchi escono)
+DISP_CORPO = 32 * 1024   # stato o comando, in JSON
+COMANDI_MAX = 50         # comandi in attesa per dispositivo
+COMANDO_SCADE = 30       # secondi: un comando non consegnato in tempo si scarta («riproduci» dieci minuti dopo no)
+ATTESA_MAX = 25          # secondi dell'attesa lunga (dietro Tailscale una richiesta ferma più a lungo può essere chiusa)
+AZIONI = ("toggle", "play", "pause", "next", "prev", "seek", "volume", "suona")
+TIPI_DISP = ("iphone", "ipad", "android", "mac", "pc")
+ID_DISP = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+class Dispositivi:
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.d = {}   # id -> {nome, tipo, stato, visto, comandi:[(creato, comando)]}
+
+    @staticmethod
+    def _misura(o, cosa):
+        if not isinstance(o, dict):
+            raise ErroreExtra(400, "%s non valido: serve un oggetto" % cosa)
+        if len(json.dumps(o, ensure_ascii=False)) > DISP_CORPO:
+            raise ErroreExtra(413, "%s troppo grande" % cosa)
+
+    def _vivo(self, x, ora):
+        return ora - x["visto"] <= DISP_VIVO
+
+    def _prendi(self, x, ora):
+        """Comandi ancora validi, tolti dalla coda (consegnati una volta sola)."""
+        c = [cmd for creato, cmd in x["comandi"] if ora - creato <= COMANDO_SCADE]
+        x["comandi"] = []
+        return c
+
+    def stato(self, id_, corpo):
+        if not ID_DISP.match(id_ or ""):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        stato = corpo.get("stato") or {}
+        self._misura(stato, "Stato")
+        nome = " ".join(str(corpo.get("nome") or "").split())[:40] or "Dispositivo"
+        tipo = corpo.get("tipo") if corpo.get("tipo") in TIPI_DISP else "pc"
+        ora = time.time()
+        with self.cond:
+            x = self.d.get(id_)
+            if x is None:
+                x = self.d[id_] = {"comandi": []}
+            x.update(nome=nome, tipo=tipo, stato=stato, visto=ora)
+            if len(self.d) > DISP_MAX:   # escono quelli sentiti meno di recente (mai quello appena arrivato)
+                for v in sorted(self.d, key=lambda k: self.d[k].get("visto", 0))[:len(self.d) - DISP_MAX]:
+                    del self.d[v]
+            return self._prendi(x, ora)
+
+    def elenco(self):
+        ora = time.time()
+        with self.cond:
+            return [{"id": i, "nome": x["nome"], "tipo": x["tipo"], "fa": round(ora - x["visto"], 1), "stato": x["stato"]}
+                    for i, x in sorted(self.d.items(), key=lambda kv: -kv[1]["visto"])
+                    if "nome" in x and self._vivo(x, ora)]
+
+    def comando(self, id_, corpo):
+        self._misura(corpo, "Comando")
+        if corpo.get("azione") not in AZIONI:
+            raise ErroreExtra(400, "Azione non valida: %s" % ", ".join(AZIONI))
+        ora = time.time()
+        with self.cond:
+            x = self.d.get(id_)
+            if x is None or "nome" not in x or not self._vivo(x, ora):
+                raise ErroreExtra(404, "Dispositivo non raggiungibile: l'app su quel dispositivo è chiusa?")
+            x["comandi"] = (x["comandi"] + [(ora, dict(corpo))])[-COMANDI_MAX:]
+            self.cond.notify_all()
+
+    def attendi(self, id_, secondi):
+        """Comandi per il dispositivo appena ce n'è uno (al più `secondi`); intanto il dispositivo risulta vivo."""
+        if not ID_DISP.match(id_ or ""):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        fine = time.time() + max(0.0, min(float(secondi), ATTESA_MAX))
+        with self.cond:
+            while True:
+                ora = time.time()
+                x = self.d.get(id_)
+                if x is not None:
+                    x["visto"] = ora
+                    c = self._prendi(x, ora)
+                    if c:
+                        return c
+                if ora >= fine:
+                    return []
+                self.cond.wait(fine - ora)
+
+
+DISP = Dispositivi()
+
+
+def _attesa(h):
+    try:
+        return float((parse_qs(urlsplit(h.path).query).get("attesa") or ["0"])[0])
+    except ValueError:
+        raise ErroreExtra(400, "Attesa non valida")
+
+
 # ----- voci e audiolibri con `say` -----
 
 _VOCI = {"t": 0.0, "say": "", "voci": []}
@@ -2539,6 +2647,19 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "musica" and len(resto) == 2 and resto[1] == "annulla":
         solo("POST")
         _annulla_musica(resto[0])
+        _json(h, {"ok": True})
+    elif cosa == "dispositivi" and not resto:
+        solo("GET")
+        _json(h, {"dispositivi": DISP.elenco()})
+    elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "stato":
+        solo("POST")
+        _json(h, {"comandi": DISP.stato(resto[0], corpo)})
+    elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comandi":
+        solo("GET")
+        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h))})
+    elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comando":
+        solo("POST")
+        DISP.comando(resto[0], corpo)
         _json(h, {"ok": True})
     elif cosa == "voci" and not resto:
         solo("GET")
