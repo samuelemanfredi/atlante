@@ -2876,7 +2876,14 @@ function uiRiordina(p, L) {   // L: [{el, d}] (null: torna come l'ha disegnato l
     const mosse = [];
     for (const {el, d} of L) { const i = orig.findIndex(u => u.els.indexOf(el) >= 0); if (i >= 0 && d && !mosse.some(m => m[0] === i)) mosse.push([i, d]); }
     mosse.sort((a, b) => a[0] - b[0]);
-    for (const [i, d] of mosse) { const u = orig[i], k = tgt.indexOf(u); tgt.splice(k, 1); tgt.splice(Math.max(0, Math.min(tgt.length, k + d)), 0, u); }
+    // si contano i posti tra quelli che si vedono: i pulsanti che l'app tiene nascosti (hidden) non fanno perdere un tocco
+    const vede = u => u.els.some(e => !e.hidden);
+    for (const [i, d] of mosse) {
+      const u = orig[i]; let j = tgt.indexOf(u), passi = Math.abs(d);
+      tgt.splice(j, 1);
+      if (d < 0) { while (passi && j > 0) { j--; if (vede(tgt[j])) passi--; } } else { while (passi && j < tgt.length) { if (vede(tgt[j])) passi--; j++; } }
+      tgt.splice(j, 0, u);
+    }
   }
   const uguale = tgt.every((u, i) => u === orig[i]);
   if (/flex|grid/.test(getComputedStyle(p).display)) {   // contenitori flex e grid: order, senza toccare l'HTML
