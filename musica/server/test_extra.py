@@ -5200,5 +5200,160 @@ class TestMixApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+# ----- grande libreria (50 000 brani e più): catalogo compresso e con ETag, niente riletture inutili -----
+
+def scrivi_mp3(percorso, titolo, artista, album=""):
+    """MP3 piccolissimo con i tag ID3v2.3 (come quello del finto ffmpeg)."""
+    def frame(fid, testo):
+        d = b"\x01" + testo.encode("utf-16")
+        return fid.encode() + len(d).to_bytes(4, "big") + b"\x00\x00" + d
+    corpo = b"".join(frame(f, v) for f, v in (("TIT2", titolo), ("TPE1", artista), ("TALB", album)) if v)
+    n = len(corpo)
+    os.makedirs(os.path.dirname(percorso), exist_ok=True)
+    with open(percorso, "wb") as f:
+        f.write(b"ID3\x03\x00\x00" + bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo)
+        f.write((b"\xff\xfb\x90\x00" + bytes(413)) * 3)
+
+
+class TestCatalogoGrande(unittest.TestCase):
+    """api/musica/catalogo: gzip a chi lo accetta, ETag e 304 quando l'app ha già quello uguale."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-catalogo-")
+        cls.c = prepara_cartelle(cls.base)
+        for i in range(3):
+            scrivi_mp3(os.path.join(cls.c["musica"], "Artista %d" % i, "Brano %d.mp3" % i), "Brano %d" % i, "Artista %d" % i, "Album")
+        cls.s = Server(cls.base, cls.c).avvia()
+        aspetta(lambda: len(cls.s.json("GET", "/api/musica/catalogo")["brani"]) == 3, 20)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_gzip_etag_304(self):
+        import gzip
+        st, h, b = self.s.get("/api/musica/catalogo")
+        self.assertEqual(st, 200)
+        self.assertIsNone(h.get("Content-Encoding"))
+        semplice = json.loads(b.decode("utf-8"))
+        self.assertEqual(len(semplice["brani"]), 3)
+        self.assertTrue(semplice["aggiornato"])
+        etag = h["ETag"]
+        self.assertRegex(etag, r'^W/"[0-9a-f]{16,}"$')
+        self.assertEqual(h["Cache-Control"], "private, no-cache")   # il browser lo tiene, ma chiede sempre al Mac
+        self.assertIn("Accept-Encoding", h["Vary"])
+        st, h, z = self.s.get("/api/musica/catalogo", intest={"Accept-Encoding": "gzip, deflate, br"})
+        self.assertEqual((st, h["Content-Encoding"], h["ETag"], int(h["Content-Length"])), (200, "gzip", etag, len(z)))
+        self.assertEqual(json.loads(gzip.decompress(z).decode("utf-8")), semplice)
+        self.assertIsNone(self.s.get("/api/musica/catalogo", intest={"Accept-Encoding": "gzip;q=0"})[1].get("Content-Encoding"))
+        for inm in (etag, etag[2:], 'W/"altro", ' + etag):   # confronto debole, anche in un elenco
+            st, h, b = self.s.get("/api/musica/catalogo", intest={"If-None-Match": inm, "Accept-Encoding": "gzip"})
+            self.assertEqual((st, b, h["ETag"]), (304, b"", etag), inm)
+        self.assertEqual(self.s.get("/api/musica/catalogo", intest={"If-None-Match": 'W/"altro"'})[0], 200)
+        st, h, b = richiesta(self.s.porta, "HEAD", "/api/musica/catalogo")
+        self.assertEqual((st, b, h["ETag"]), (200, b"", etag))
+        # in HTTP/1.1 (a una risposta HTTP/1.0 Chrome non manda mai If-None-Match), e la connessione si chiude
+        c = http.client.HTTPConnection("127.0.0.1", self.s.porta, timeout=10)
+        try:
+            c.request("GET", "/api/musica/catalogo", headers={"If-None-Match": etag})
+            r = c.getresponse()
+            self.assertEqual((r.version, r.status, r.read(), r.getheader("Connection")), (11, 304, b"", "close"))
+        finally:
+            c.close()
+
+    def test_etag_cambia_solo_se_cambia_il_catalogo(self):
+        etag = self.s.get("/api/musica/catalogo")[1]["ETag"]
+        agg = self.s.json("GET", "/api/musica/catalogo")["aggiornato"]
+        time.sleep(0.01)
+        self.s.json("GET", "/api/musica/aggiorna")   # riletto, niente di nuovo: «aggiornato» cambia, l'ETag no
+        st, h, b = self.s.get("/api/musica/catalogo")
+        self.assertEqual(h["ETag"], etag)
+        self.assertGreater(json.loads(b.decode("utf-8"))["aggiornato"], agg)
+        self.assertEqual(self.s.get("/api/musica/catalogo", intest={"If-None-Match": etag})[0], 304)
+        scrivi_mp3(os.path.join(self.c["musica"], "Nuovo", "Nuovo.mp3"), "Nuovo", "Nuovo")
+        self.assertEqual(self.s.json("GET", "/api/musica/aggiorna")["brani"], 4)
+        st, h, b = self.s.get("/api/musica/catalogo", intest={"If-None-Match": etag})
+        self.assertEqual(st, 200)
+        self.assertNotEqual(h["ETag"], etag)
+        self.assertEqual(len(json.loads(b.decode("utf-8"))["brani"]), 4)
+        os.unlink(os.path.join(self.c["musica"], "Nuovo", "Nuovo.mp3"))
+        self.s.json("GET", "/api/musica/aggiorna")
+        self.assertEqual(self.s.get("/api/musica/catalogo")[1]["ETag"], etag)   # tornato com'era: lo stesso ETag
+
+
+class TestLibreriaGrande(unittest.TestCase):
+    """La libreria nello stesso processo: indice riscritto solo se cambia, brano scaricato senza rileggere il disco."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_grande", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-grande-")
+        self.musica = os.path.join(self.base, "musica")
+        for i in range(3):
+            scrivi_mp3(os.path.join(self.musica, "Raccolta", "%d.mp3" % i), "Brano %d" % i, "Artista", "Raccolta")
+        self.lib = self.m.Libreria([self.musica], os.path.join(self.base, "cache"))
+        self.lib.scansiona()
+
+    def tearDown(self):
+        self.m.LIB = None
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def impronta(self):
+        st = os.stat(self.lib.file_indice)
+        return st.st_ino, st.st_mtime_ns
+
+    def test_indice_riscritto_solo_se_cambia(self):
+        prima = self.impronta()
+        self.assertEqual(self.lib.scansiona(), 3)
+        self.assertEqual(self.impronta(), prima)   # niente di nuovo: con 50 000 brani sono 26 MB in meno ogni 10 minuti
+        scrivi_mp3(os.path.join(self.musica, "Altro.mp3"), "Altro", "Altro")
+        self.assertEqual(self.lib.scansiona(), 4)
+        dopo = self.impronta()
+        self.assertNotEqual(dopo, prima)
+        os.unlink(os.path.join(self.musica, "Altro.mp3"))
+        self.assertEqual(self.lib.scansiona(), 3)
+        self.assertNotEqual(self.impronta(), dopo)   # un brano in meno: si riscrive
+        with open(self.lib.file_indice, encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)["brani"]), 3)
+
+    def test_brano_scaricato_senza_rileggere_il_disco(self):
+        self.m.LIB = self.lib
+        letture, prima = self.lib.letture, self.impronta()
+        nuovo = os.path.join(self.musica, "Raccolta", "Ospite - Nuovo.mp3")
+        scrivi_mp3(nuovo, "Nuovo", "Ospite", "Raccolta")
+        with unittest.mock.patch.object(self.m.os, "walk", side_effect=AssertionError("rilettura di tutto il disco")):
+            i = self.m._in_libreria(nuovo)
+        self.assertRegex(i, r"^[0-9a-f]{16}$")
+        self.assertEqual(self.lib.letture, letture)
+        cat = {b["id"]: b for b in self.lib.catalogo()["brani"]}
+        self.assertEqual((cat[i]["title"], cat[i]["artist"], cat[i]["album"]), ("Nuovo", "Ospite", "Raccolta"))
+        self.assertTrue(all(b.get("compilation") for b in cat.values()))   # stesso album, artisti diversi: ora è una raccolta
+        self.assertEqual(self.m._in_libreria(nuovo), i)                    # già dentro: lo stesso id
+        # la lettura dopo tiene lo stesso id e salva l'indice (anche se il file non è nuovo per lei)
+        self.assertEqual(self.lib.scansiona(), 4)
+        self.assertEqual(self.lib.percorsi[i], nuovo)
+        self.assertNotEqual(self.impronta(), prima)
+        # una libreria letta da zero gli dà lo stesso id (dopo un riavvio senza indice)
+        altra = self.m.Libreria([self.musica], os.path.join(self.base, "cache2"))
+        altra.scansiona()
+        self.assertEqual(altra.percorsi[i], nuovo)
+
+    def test_fuori_dalla_libreria_si_rilegge(self):
+        self.m.LIB = self.lib
+        fuori = os.path.join(self.base, "fuori", "x.mp3")
+        nascosto = os.path.join(self.musica, ".nascosta", "y.mp3")
+        for p in (fuori, nascosto):
+            scrivi_mp3(p, "X", "Y")
+            self.assertEqual(self.m._in_libreria(p), "", p)   # come prima: la rilettura non lo trova
+        self.assertEqual(len(self.lib.brani), 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

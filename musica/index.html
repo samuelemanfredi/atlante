@@ -765,10 +765,16 @@ function fetchT(url, opt, ms) {
 async function loadServer() {
   if (!/^https?:$/.test(location.protocol) || /claude\.ai$/.test(location.hostname)) return false;
   srvLast = Date.now();
-  let j = null;
+  let j = null, et = '';
   try {
-    const r = await fetchT(API + 'catalogo', {cache:'no-store'}, 8000);
-    if (r.ok && (r.headers.get('content-type') || '').indexOf('json') >= 0) j = await r.json();
+    // no-cache: il browser chiede al Mac se il catalogo è cambiato (ETag) e, se no, non lo riscarica
+    const r = await fetchT(API + 'catalogo', {cache:'no-cache'}, 8000);
+    if (r.ok && (r.headers.get('content-type') || '').indexOf('json') >= 0) {
+      et = r.headers.get('etag') || '';
+      // lo stesso catalogo già messo in libreria da quando l'app è aperta: niente da rifare (grande libreria)
+      if (et && et === CATET) { try { r.body && r.body.cancel().catch(() => {}); } catch (e) {} SRV = true; clearTimeout(scanTimer); scanTimer = SRVSCAN ? setTimeout(() => reconnect(true), 5000) : 0; scaricaTutto(); return true; }
+      j = await r.json();
+    }
   } catch (e) {}
   if (!j || !Array.isArray(j.brani)) { SRV = false; return false; }
   SRV = true; SRVN = j.brani.length; SRVURL = typeof j.indirizzo === 'string' ? j.indirizzo : '';
@@ -790,7 +796,7 @@ async function loadServer() {
       // la copertina già salvata sul telefono resta, a meno che sul Mac non sia cambiata (Gestione → Contenuti)
       compilation:!!b.compilation, cover: old && old.cover && !old.cover.startsWith('s:') && (!b.cover || old.cover === 'm' + b.cover.replace(/\.\w+$/, '')) ? old.cover : (b.cover ? 's:' + b.cover : null)});
     delete m.gone;
-    if (!old || JSON.stringify(old) !== JSON.stringify(m)) put.push(m);
+    if (!old || diversi(old, m)) put.push(m);
     T.set(id, m);
     if (old && old.cover && old.cover !== m.cover && m.cover && saved.has(id)) keepCover(m);   // copertina nuova anche offline
   }
@@ -822,8 +828,9 @@ async function loadServer() {
   }
   oldIds();
   if (put.length) rematch(put.filter(t => T.has(t.id)));   // brani nuovi o cambiati: forse sono quelli che mancavano alle playlist importate
-  nuoviGemelli();
+  if (put.length || del.length) nuoviGemelli();   // catalogo uguale: i doppioni sono quelli di prima (grande libreria)
   scaricaTutto();
+  CATET = et;
   clCarica();
   return true;
 }
@@ -1248,10 +1255,66 @@ function artists() {
   for (const t of T.values()) { const n = primary(t); let a = m.get(n); if (!a) { a = {name:n, tracks:[], cover:null}; m.set(n, a); } a.tracks.push(t); if (!a.cover && t.cover) a.cover = t.cover; }
   return [...m.values()].sort((a, b) => (a.name === UNK_ART) - (b.name === UNK_ART) || coll.compare(a.name, b.name));
 }
-const songs = () => [...T.values()].sort((a, b) => coll.compare(a.title, b.title));
+const songs = () => braniOrdinati();   // ordinati una volta sola (grande libreria)
 const albumByKey = k => albums().find(a => a.key === k);
 const plTracks = p => p.ids.map(id => T.get(id)).filter(Boolean);
 const coverUrl = k => k && k.startsWith('u:') ? k.slice(2) : k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
+
+/* ---------- grande libreria (50 000 brani e più) ---------- */
+// Con decine di migliaia di brani ordinare tutto con il Collator costa (50 ms sul Mac, di più sull'iPhone) e lo facevano
+// la Home, «Brani», «Preferiti» e la ricerca a ogni lettera: l'ordine si rifà solo quando cambiano i brani o un titolo.
+let ORD = null;   // {tr: i brani in ordine di titolo, ti: i loro titoli quando si è ordinato}
+function braniOrdinati() {
+  if (ORD && ORD.tr.length === T.size) {
+    let ok = true;
+    for (let i = 0; i < ORD.tr.length && ok; i++) { const t = ORD.tr[i]; ok = T.get(t.id) === t && t.title === ORD.ti[i]; }
+    if (ok) return ORD.tr.slice();
+  }
+  const tr = [...T.values()].sort((a, b) => coll.compare(a.title, b.title));
+  ORD = {tr, ti:tr.map(t => t.title)};
+  return tr.slice();
+}
+// ricerca: il testo di ogni brano (minuscole, senza accenti) si prepara una volta, non a ogni lettera per tutti i brani
+const CERCA = new WeakMap();   // brano -> {a, b, c: titolo, artista, album da cui è fatto; n: il testo per la ricerca}
+const cercaNorm = s => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+function cercaBrano(t) {
+  let x = CERCA.get(t);
+  if (!x || x.a !== t.title || x.b !== t.artist || x.c !== t.album) CERCA.set(t, x = {a:t.title, b:t.artist, c:t.album, n:cercaNorm(t.title + ' ' + t.artist + ' ' + t.album)});
+  return x.n;
+}
+const NOMI = new Map();   // nomi di artisti, album e playlist già preparati per la ricerca
+function cercaNome(s) { let n = NOMI.get(s); if (n === undefined) { if (NOMI.size > 200000) NOMI.clear(); NOMI.set(s, n = cercaNorm(s)); } return n; }
+// i primi n che vanno bene, senza guardare tutti gli altri (la ricerca ne mostra 50)
+function primi(a, n, ok) { const o = []; for (const x of a) { if (o.length >= n) break; if (ok(x)) o.push(x); } return o; }
+// una voce del catalogo cambiata? Campo per campo: JSON.stringify di tutte e due, per 50 000 brani, costava il doppio
+function diversi(a, b) { for (const k in b) if (a[k] !== b[k]) return true; for (const k in a) if (!(k in b)) return true; return false; }
+// ETag dell'ultimo catalogo messo in libreria in questa apertura: se il Mac risponde con lo stesso non c'è niente da rifare
+let CATET = '';
+// la griglia degli Album: con le classifiche sono decine di migliaia di copertine. Oltre GRANDE album si disegna a righe
+// (una riga = le copertine che stanno in larghezza), solo quelle vicine allo schermo, come le liste dei brani
+const GRANDE = 2000;
+let gridCols = 0;
+function colonneGriglia() {   // come la regola .grid: 2 colonne fino a 420 px, altrimenti colonne da almeno 150 px (spazio 16)
+  if (matchMedia('(max-width:420px)').matches) return 2;
+  const v = $('view'), cs = v && getComputedStyle(v), w = v ? v.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) : innerWidth;
+  return Math.max(1, Math.floor((w + 16) / 166) || 1);
+}
+function grigliaAlbum(al) {
+  if (al.length <= GRANDE) { gridCols = 0; return '<div class="grid">' + chunk(al, a => tile(a)) + '</div>'; }
+  const n = gridCols = colonneGriglia(), righe = [];
+  for (let i = 0; i < al.length; i += n) righe.push(al.slice(i, i + n));
+  return chunk(righe, r => '<div class="grid" style="grid-template-columns:repeat(' + n + ',minmax(0,1fr));padding-bottom:22px">' + r.map(tile).join('') + '</div>', true);
+}
+addEventListener('resize', () => { if (gridCols && curRoute().v === 'albums' && colonneGriglia() !== gridCols) render(true); });   // iPhone girato
+// la coda salvata (am-play, ogni 4 s mentre suona): con «Riproduzione casuale» di 50 000 brani erano due elenchi da un
+// milione di caratteri, riscritti ogni 4 s e quasi tutto lo spazio che Safari dà alla pagina (5 MB, moduli di «Altro»
+// compresi). Se ne salvano CODA_MAX attorno al brano in ascolto: riaprendo l'app la coda continua da lì.
+const CODA_MAX = 2000;
+function codaDaSalvare() {
+  if (S.queue.length <= CODA_MAX) return {queue:S.queue, orig:S.orig, qi:S.qi};
+  const da = Math.max(0, Math.min(S.qi - 100, S.queue.length - CODA_MAX)), queue = S.queue.slice(da, da + CODA_MAX), dentro = new Set(queue);
+  return {queue, orig:S.orig.filter(id => dentro.has(id)), qi:S.qi - da};
+}
 
 /* ---------- pezzi di interfaccia ---------- */
 function art(key, cls) {
@@ -1428,7 +1491,7 @@ const pages = {
   },
   albums() {
     const al = albums().sort((a, b) => (a.name === UNK_ALB) - (b.name === UNK_ALB) || coll.compare(a.name, b.name));
-    return topBar() + '<h1 class="lt">Album</h1>' + (al.length ? '<div class="grid">' + chunk(al, a => tile(a)) + '</div>' : emptyState());
+    return topBar() + '<h1 class="lt">Album</h1>' + (al.length ? grigliaAlbum(al) : emptyState());
   },
   artists() {
     const ar = artists();
@@ -1500,12 +1563,11 @@ function searchResults() {
     return '<h2 class="h2" style="margin-top:12px">Sfoglia</h2><div class="lrows">' + ['playlists:plist:Playlist', 'artists:person:Artisti', 'albums:album:Album', 'songs:songs:Brani'].map(s => { const [v, i, t] = s.split(':'); return '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(i) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>'; }).join('') + '</div>' +
       '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + rec.map(tile).join('') + '</div>';
   }
-  const norm = s => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const words = n.split(/\s+/);
-  const hit = s => { const x = norm(s); return words.every(w => x.indexOf(w) >= 0); };
-  const ar = artists().filter(a => hit(a.name)).slice(0, 6);
-  const al = albums().filter(a => hit(a.name + ' ' + a.artist)).slice(0, 8);
-  const tr = songs().filter(t => hit(t.title + ' ' + t.artist + ' ' + t.album)).slice(0, 50);
+  const hitN = x => words.every(w => x.indexOf(w) >= 0), hit = s => hitN(cercaNome(s));   // testi già preparati (grande libreria)
+  const ar = primi(artists(), 6, a => hit(a.name));
+  const al = primi(albums(), 8, a => hit(a.name + ' ' + a.artist));
+  const tr = primi(songs(), 50, t => hitN(cercaBrano(t)));
   const pl = P.filter(p => hit(p.name));
   let h = '';
   if (ar.length) h += '<h2 class="h2" style="margin-top:12px">Artisti</h2>' + ar.map(a => '<button class="trk" data-a="go" data-v="artist" data-k="' + esc(a.name) + '">' + art(a.cover, 'av') + '<span class="rt"><span class="tx"><span class="t1">' + esc(a.name) + '</span><span class="t2">Artista</span></span></span></button>').join('');
@@ -1611,7 +1673,7 @@ function markCur() {
 }
 
 /* ---------- riproduzione ---------- */
-function saveState() { ls.set('am-play', {queue:S.queue, orig:S.orig, qi:S.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:au.currentTime || 0}); }
+function saveState() { const c = codaDaSalvare(); ls.set('am-play', {queue:c.queue, orig:c.orig, qi:c.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:au.currentTime || 0}); }
 async function getFile(id) {
   if (memFiles.has(id)) return memFiles.get(id);
   try { const f = await dbGet('files', id); if (f) return f; } catch (e) {}

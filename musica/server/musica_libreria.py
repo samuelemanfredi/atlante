@@ -47,6 +47,7 @@ import array
 import cmath
 import collections
 import getpass
+import gzip
 import hashlib
 import hmac
 import html
@@ -620,9 +621,11 @@ class Libreria:
         usati = {v["id"] for v in tenute} | {self.vecchie[p]["id"] for p in letti if p in self.vecchie}
         nuovi, percorsi = {}, {}
         a_pezzi, t_pezzo = not self.brani and not self.ultima, time.time()   # prima lettura: catalogo man mano
+        riletti = getattr(self, "_sporco", False)   # brani aggiunti da _aggiungi_brano dopo l'ultimo indice salvato
         for p, st, firma in trovati:
             v = self.vecchie.get(p)
             if not v or v.get("_f") != firma or v.get("_v") != VERSIONE:
+                riletti = True
                 nuova = self._voce(p, st, firma)
                 nuova["id"] = v["id"] if v else self._id_nuovo(p, nuova, sparite.get(firma), usati)
                 v = nuova
@@ -634,11 +637,18 @@ class Libreria:
                     self.brani, self.percorsi = dict(nuovi), dict(percorsi)
         comp = self._compilation(nuovi.values())
         indice = list(nuovi.values()) + tenute
+        # niente riletto e gli stessi file di prima: l'indice sul disco è già questo (con 50 000 brani sono 26 MB da
+        # riscrivere ogni 10 minuti per niente)
+        uguale = (not riletti and len(indice) == len(self.vecchie) and all(v["_p"] in self.vecchie for v in indice)
+                  and os.path.isfile(self.file_indice))
         self._mancanti = set(self.cartelle) - set(radici_ok)
         with self.blocco:
             self.brani, self.percorsi, self.compilation = nuovi, percorsi, comp
             self.vecchie = {v["_p"]: v for v in indice}
             self.ultima = time.time()
+        if uguale:
+            return len(nuovi)
+        self._sporco = True   # finché l'indice non è salvato davvero (disco pieno?): la prossima lettura ci riprova
         fd, tmp = tempfile.mkstemp(dir=self.cache, prefix="indice.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -650,6 +660,7 @@ class Libreria:
             except OSError:
                 pass
             raise
+        self._sporco = False
         return len(nuovi)
 
     @staticmethod
@@ -850,7 +861,7 @@ def gestisci(h):
     h._musica_risposto = False
     try:
         if cosa == "catalogo":
-            _json(h, LIB.catalogo())
+            _manda_catalogo(h)   # pronto, compresso e con ETag (vedi «grande libreria»)
         elif cosa == "aggiorna":
             _json(h, {"brani": LIB.scansiona()})
         elif cosa == "file":
@@ -922,6 +933,120 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 
     threading.Thread(target=ciclo, daemon=True).start()
     return LIB
+
+
+# ----- grande libreria: 50 000 brani e più -----
+# Con 50 000 brani il catalogo è un JSON di 12 MB: si prepara una volta sola quando cambia (non a ogni richiesta), va
+# compresso (gzip, 1,8 MB) a chi lo accetta e con un ETag, così l'app che ha già quello uguale riceve un 304 vuoto
+# invece di riscaricarlo. L'ETag non dipende dal valore di «aggiornato» (cambia a ogni lettura del disco, ogni 10 minuti)
+# ma solo dal fatto che sia 0 (il Mac sta ancora leggendo il disco): è un ETag «debole», W/"…".
+
+_BLOCCO_CATALOGO = threading.Lock()
+
+
+def _risposta_catalogo(lib):
+    """(corpo JSON, lo stesso compresso, ETag), rifatti solo quando cambiano brani, compilation, lettura, videoclip o
+    i contenuti decisi in Gestione (correzioni e brani tolti)."""
+    clip = frozenset()
+    if CLIP:
+        pronti = CLIP.pronti()
+        with CLIP.blocco:
+            clip = frozenset(pronti.items())
+    with _BLOCCO_CATALOGO:   # più telefoni insieme: lo si prepara una volta sola
+        c = getattr(lib, "_risposta", None)
+        with lib.blocco:
+            brani, comp, ultima = lib.brani, lib.compilation, lib.ultima
+        contenuti = (json.dumps(CORR.tutte(), sort_keys=True) if CORR else "", frozenset(TOLTI.ids()) if TOLTI else frozenset())
+        # (con una cartella mancante tornata, catalogo() rilegge prima il disco)
+        if (c and c[0] is brani and c[1] is comp and c[2] == ultima and c[3] == clip and c[4] == INDIRIZZO
+                and c[6] == contenuti and not any(os.path.isdir(r) for r in lib._mancanti)):
+            return c[5]
+        o = lib.catalogo()
+        compatto = lambda x: json.dumps(x, ensure_ascii=False, separators=(",", ":")).encode("utf-8")   # noqa: E731
+        senza = {k: v for k, v in o.items() if k != "aggiornato"}
+        etag = 'W/"%s"' % hashlib.sha1(compatto(senza) + (b"1" if o.get("aggiornato") else b"0")).hexdigest()[:20]
+        corpo = compatto(o)
+        r = (corpo, gzip.compress(corpo, 6), etag)
+        lib._risposta = (brani, comp, ultima, clip, INDIRIZZO, r, contenuti)
+        return r
+
+
+def _stesso_etag(intestazione, etag):
+    """If-None-Match: uno degli ETag dell'elenco è questo (confronto debole, come vuole HTTP per If-None-Match), o «*»."""
+    nudo = lambda e: e.strip()[2:] if e.strip().startswith("W/") else e.strip()   # noqa: E731
+    voci = [x for x in (intestazione or "").split(",") if x.strip()]
+    return any(x.strip() == "*" or nudo(x) == nudo(etag) for x in voci)
+
+
+def _accetta_gzip(intestazione):
+    for parte in (intestazione or "").split(","):
+        nome, _, parametri = parte.partition(";")
+        if nome.strip().lower() in ("gzip", "x-gzip"):
+            m = re.search(r"q\s*=\s*([0-9.]+)", parametri)
+            try:
+                return not m or float(m.group(1)) > 0
+            except ValueError:
+                return False
+    return False
+
+
+def _manda_catalogo(h):
+    corpo, compresso, etag = _risposta_catalogo(LIB)
+    h._musica_risposto = True
+    # in HTTP/1.1: a una risposta HTTP/1.0 Chrome non chiede mai «è cambiato?» con l'ETag (che è di HTTP/1.1). Conta dal
+    # Mac stesso e dalla rete di casa; dietro tailscale serve il browser vede comunque HTTP/1.1 o 2. Poi si chiude.
+    h.protocol_version, h.close_connection = "HTTP/1.1", True
+    dati = b""
+    if _stesso_etag(h.headers.get("If-None-Match"), etag):
+        h.send_response(304)   # l'app ha già questo catalogo: niente da scaricare
+    else:
+        gz = _accetta_gzip(h.headers.get("Accept-Encoding"))
+        dati = compresso if gz else corpo
+        h.send_response(200)
+        h.send_header("Content-Type", "application/json; charset=utf-8")
+        if gz:
+            h.send_header("Content-Encoding", "gzip")
+        h.send_header("Content-Length", str(len(dati)))
+    h.send_header("ETag", etag)
+    h.send_header("Cache-Control", "private, no-cache")   # il browser può tenerlo, ma chiede sempre al Mac se è cambiato
+    h.send_header("Vary", "Accept-Encoding")
+    h.send_header("Connection", "close")
+    h.end_headers()
+    if h.command != "HEAD" and dati:
+        h.wfile.write(dati)
+
+
+def _aggiungi_brano(lib, percorso):
+    """Un file appena scaricato entra nel catalogo da solo, senza rileggere tutto il disco: con 50 000 brani una lettura
+    intera costa secondi (di più dal disco USB) e riscriveva un indice di 26 MB a ogni brano scaricato. L'indice si
+    salva alla prossima lettura (ogni 10 minuti); se il Mac si spegne prima, il file si rilegge e ha lo stesso id.
+    Restituisce l'id, o "" se il file non è uno che la lettura del disco prenderebbe (allora si rilegge come prima)."""
+    p = os.path.abspath(percorso)
+    nome = os.path.basename(p)
+    if nome.startswith(".") or os.path.splitext(nome)[1].lower() not in ESTENSIONI:
+        return ""
+    radice = next((r for r in lib.cartelle if _dentro(p, r) and os.path.isdir(r)), None)
+    if not radice or any(x.startswith(".") for x in os.path.relpath(os.path.dirname(p), radice).split(os.sep) if x != "."):
+        return ""   # fuori dalla libreria, o in una cartella nascosta che la lettura salta
+    with lib.blocco_lettura:   # nessuna lettura del disco a metà: indice e catalogo non cambiano sotto le mani
+        try:
+            st = os.stat(p)
+        except OSError:
+            return ""
+        firma = "%d:%d" % (st.st_size, int(st.st_mtime))
+        v = lib.vecchie.get(p)
+        if v and v.get("_f") == firma and v.get("_v") == VERSIONE and lib.percorsi.get(v["id"]) == p:
+            return v["id"]   # già nel catalogo (una lettura appena finita l'ha visto)
+        voce = lib._voce(p, st, firma)
+        voce["id"] = v["id"] if v else lib._id_nuovo(p, voce, None, {x["id"] for x in lib.vecchie.values()})
+        brani, percorsi = dict(lib.brani), dict(lib.percorsi)
+        brani[voce["id"]], percorsi[voce["id"]] = voce, p
+        comp = lib._compilation(brani.values())   # un album con un artista in più può diventare una raccolta
+        with lib.blocco:
+            lib.brani, lib.percorsi, lib.compilation = brani, percorsi, comp
+        lib.vecchie[p] = voce
+        lib._sporco = True   # la prossima lettura salva l'indice anche se per lei non è cambiato niente
+        return voce["id"]
 
 
 # ---------- moduli extra (pagine in x/): API sotto api/extra/ ----------
@@ -1761,6 +1886,9 @@ def _in_libreria(percorso):
     prima che il file ci fosse: allora se ne fa un'altra)."""
     if LIB is None:
         return ""
+    i = _aggiungi_brano(LIB, percorso)   # di solito basta questo, senza rileggere tutto il disco (grande libreria)
+    if i:
+        return i
     for _ in range(2):
         LIB.scansiona()
         with LIB.blocco:
