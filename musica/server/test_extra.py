@@ -26,7 +26,7 @@ QUI =os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(QUI, "musica_libreria.py")
 
 FINTO_YTDLP = r'''
-import json, os, sys, time
+import json, os, re, sys, time
 a = sys.argv[1:]
 if "--version" in a:
     print("2099.01.01")
@@ -35,6 +35,8 @@ url = a[-1]
 nome = url.rstrip("/").rsplit("/", 1)[-1]
 with open(os.path.join(os.environ["FINTO_DIR"], "ytdlp-%s.json" % nome), "w") as f:
     json.dump({"args": a, "pid": os.getpid()}, f)
+with open(os.path.join(os.environ["FINTO_DIR"], "chiamate.log"), "a") as f:
+    f.write(nome + "\n")
 home = [v[5:] for i, v in enumerate(a) if i and a[i - 1] == "-P" and v.startswith("home:")][0]
 stampe = [v for i, v in enumerate(a) if i and a[i - 1] in ("--print", "-O")]
 
@@ -42,23 +44,51 @@ def stampa(quando, **campi):
     for s in stampe:
         w, _, t = s.partition(":")
         if w == quando:
-            for k, v in campi.items():
-                t = t.replace("%%(%s)s" % k, v)
+            # «%(a,b)s»: il primo dei campi che c'è (quelli che non ci sono restano scritti com'erano, come «NA»)
+            t = re.sub(r"%\(([\w,]+)\)s", lambda m: next((campi[x] for x in m.group(1).split(",") if x in campi),
+                                                       m.group(0)), t)
             print(t, flush=True)
 
 print("[youtube] %s: Downloading webpage" % nome, flush=True)
-if nome == "errore":
+if "errore" in nome:
     print("ERROR: [youtube] errore: Video non disponibile", flush=True)
     sys.exit(1)
 stampa("before_dl", title="Video di prova")
 print("[download]   0.0% of   10.00MiB at    1.00MiB/s ETA 00:10", flush=True)
 print("[download]  42.0% of   10.00MiB at    1.00MiB/s ETA 00:05", flush=True)
-time.sleep(60 if nome == "lento" else 1.5)
+time.sleep(60 if "lento" in nome else 1.5)
 p = os.path.join(home, "Video di prova [%s].%s" % (nome, "m4a" if "-x" in a else "mp4"))
 with open(p, "wb") as f:
     f.write(bytes(range(256)) * 4)
 print("[download] 100% of   10.00MiB in 00:00:01 at 10.00MiB/s", flush=True)
 stampa("after_move", filepath=p)
+'''
+
+# ffmpeg finto: scrive un MP3 piccolissimo con i tag ID3v2.3 ricevuti (-metadata), così la libreria li legge davvero
+FINTO_FFMPEG = r'''
+import json, os, struct, sys
+a = sys.argv[1:]
+ingressi = [a[i + 1] for i, v in enumerate(a) if v == "-i"]
+if not ingressi or not all(os.path.isfile(p) for p in ingressi):
+    sys.stderr.write("ingresso mancante\n")
+    sys.exit(1)
+tag = {}
+for i, v in enumerate(a):
+    if v == "-metadata" and i + 1 < len(a):
+        k, _, x = a[i + 1].partition("=")
+        tag[k] = x
+with open(os.path.join(os.environ["FINTO_DIR"], "ffmpeg.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"args": a, "tag": tag}) + "\n")
+
+def frame(fid, testo):
+    d = b"\x01" + testo.encode("utf-16")
+    return fid.encode() + struct.pack(">I", len(d)) + b"\x00\x00" + d
+
+corpo = b"".join(frame(f, tag[k]) for f, k in (("TIT2", "title"), ("TPE1", "artist"), ("TALB", "album")) if tag.get(k))
+n = len(corpo)
+with open(a[-1], "wb") as f:
+    f.write(b"ID3\x03\x00\x00" + bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo)
+    f.write((b"\xff\xfb\x90\x00" + bytes(413)) * 10)   # dieci fotogrammi MPEG da 128 kbit/s
 '''
 
 FINTO_SAY = r'''
@@ -94,6 +124,72 @@ with open(out, "wb") as f:
 
 def quote(s):
     return _quote(s, safe="")
+
+
+# ----- YouTube finto: risposte con la stessa struttura di youtubei/v1/search (ridotta all'essenziale) -----
+
+def _brano_ytm(vid, titolo, artisti, album, durata, explicit):
+    corse = []
+    for a in artisti:
+        corse += [{"text": a, "navigationEndpoint": {"browseEndpoint": {"browseId": "UC" + a}}}, {"text": " e "}]
+    corse = corse[:-1] + [{"text": " • "}, {"text": album}, {"text": " • "}, {"text": durata}]
+    return {"musicResponsiveListItemRenderer": {
+        "flexColumns": [
+            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [
+                {"text": titolo, "navigationEndpoint": {"watchEndpoint": {"videoId": vid}}}]}}},
+            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": corse}}},
+            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "3,3 Mld riproduzioni"}]}}}],
+        "badges": [{"musicInlineBadgeRenderer": {"icon": {"iconType": "MUSIC_EXPLICIT_BADGE"}}}] if explicit else [],
+        "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+            {"url": "https://yt3.googleusercontent.com/c-%s=w60-h60-s-l90-rj" % vid, "width": 60},
+            {"url": "https://yt3.googleusercontent.com/c-%s=w120-h120-s-l90-rj" % vid, "width": 120}]}}},
+        "overlay": {"musicItemThumbnailOverlayRenderer": {"content": {"musicPlayButtonRenderer": {
+            "playNavigationEndpoint": {"watchEndpoint": {"videoId": vid}}}}}}}}
+
+
+def _video_yt(vid, titolo, canale, durata):
+    v = {"videoId": vid, "title": {"runs": [{"text": titolo}]}, "ownerText": {"runs": [{"text": canale}]},
+         "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/%s/hq720.jpg" % vid}]}}
+    if durata:
+        v["lengthText"] = {"simpleText": durata}
+    return {"videoRenderer": v}
+
+
+RISPOSTA_YTM = {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
+    "sectionListRenderer": {"contents": [{"musicShelfRenderer": {"contents": [
+        _brano_ytm("NoExplicit1", "Without Me", ["Eminem"], "The Eminem Show", "4:50", False),
+        _brano_ytm("tqxRidAWER8", "Without Me", ["Eminem"], "The Eminem Show", "4:51", True),
+        _brano_ytm("RadioEdit01", "Shake That (Radio Edit)", ["Eminem", "Nate Dogg"], "Curtain Call", "4:35", True),
+        _brano_ytm("D1I1x2pYMK0", "Kill You", ["Eminem"], "The Marshall Mathers LP", "1:04:25", True),
+        _brano_ytm("tqxRidAWER8", "Without Me", ["Eminem"], "The Eminem Show", "4:51", True)]}}]}}}}]}}}
+RISPOSTA_YT = {"contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {"sectionListRenderer": {"contents": [
+    {"itemSectionRenderer": {"contents": [
+        _video_yt("YVkUvmDQ3HY", "Eminem - Without Me (Official Music Video)", "EminemMusic", "4:58"),
+        _video_yt("LiveLiveLiv", "Eminem radio 24/7", "Radio", None),
+        _video_yt("fsG39JgqTmo", "Without Me [HD]", "Eminem - Topic", "4:51")]}}]}}}}}
+
+
+class FintoYouTube(http.server.BaseHTTPRequestHandler):
+    richieste = []
+
+    def do_POST(self):
+        corpo = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        FintoYouTube.richieste.append((self.path, corpo))
+        if corpo.get("query") == "rotto":
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        musica = corpo.get("context", {}).get("client", {}).get("clientName") == "WEB_REMIX"
+        dati = json.dumps(RISPOSTA_YTM if musica else RISPOSTA_YT).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def log_message(self, *x):
+        pass
 
 
 def porta_libera():
@@ -138,10 +234,12 @@ class Server:
         env = dict(os.environ)
         env["PATH"] = self.c["bin"] + os.pathsep + env.get("PATH", "")
         env["FINTO_DIR"] = self.c["finto"]
+        if self.c.get("youtubei"):
+            env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         self.log = open(os.path.join(self.base, "server-%d.log" % self.porta), "wb")
         self.p = subprocess.Popen([sys.executable, "-I", SERVER, self.c["musica"], "--porta", str(self.porta),
                                    "--cache", self.c["cache"], "--app", self.c["app"], "--video-dir", self.c["video"],
-                                   "--libri-dir", self.c["libri"],
+                                   "--libri-dir", self.c["libri"], "--musica-dir", self.c["scaricati"],
                                    "--ia-indirizzo", "http://127.0.0.1:%d" % self.c["porta_ollama"]],
                                   env=env, stdout=self.log, stderr=subprocess.STDOUT)
 
@@ -188,12 +286,13 @@ def prepara_cartelle(base):
     c = {k: os.path.join(base, k) for k in ("musica", "cache", "app", "video", "libri", "bin", "finto")}
     for p in c.values():
         os.makedirs(p, exist_ok=True)
+    c["scaricati"] = os.path.join(base, "scaricati")   # non c'è ancora: la crea il primo scaricamento
     os.makedirs(os.path.join(c["app"], "x"))
     for nome, testo in (("index.html", "<!doctype html><title>app</title>"), ("x/prova.html", "<!doctype html><p>x"),
                         ("x/kit.css", "body{}")):
         with open(os.path.join(c["app"], nome), "w", encoding="utf-8") as f:
             f.write(testo)
-    for nome, codice in (("yt-dlp", FINTO_YTDLP), ("say", FINTO_SAY)):
+    for nome, codice in (("yt-dlp", FINTO_YTDLP), ("say", FINTO_SAY), ("ffmpeg", FINTO_FFMPEG)):
         p = os.path.join(c["bin"], nome)
         with open(p, "w", encoding="utf-8") as f:
             f.write("#!%s\n%s" % (sys.executable, codice))
@@ -207,11 +306,15 @@ class TestExtra(unittest.TestCase):
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="atlante-extra-")
         cls.c = prepara_cartelle(cls.base)
+        cls.yt = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoYouTube)
+        threading.Thread(target=cls.yt.serve_forever, daemon=True).start()
+        cls.c["youtubei"] = "http://127.0.0.1:%d" % cls.yt.server_address[1]
         cls.s = Server(cls.base, cls.c).avvia()
 
     @classmethod
     def tearDownClass(cls):
         cls.s.ferma()
+        cls.yt.shutdown()
         shutil.rmtree(cls.base, ignore_errors=True)
 
     def lavoro(self, tipo, id_):
@@ -402,6 +505,125 @@ class TestExtra(unittest.TestCase):
         l = self.finito("video", id_)
         self.assertEqual(l["stato"], "errore")
         self.assertIn("Video non disponibile", l["errore"])
+
+    # ----- musica da internet -----
+
+    def chiamate_ytdlp(self, nome):
+        try:
+            with open(os.path.join(self.c["finto"], "chiamate.log")) as f:
+                return [r.strip() for r in f].count(nome)
+        except OSError:
+            return 0
+
+    def ffmpeg_ultimo(self):
+        with open(os.path.join(self.c["finto"], "ffmpeg.log"), encoding="utf-8") as f:
+            return json.loads(f.read().strip().splitlines()[-1])
+
+    def test_musica_cerca_youtube_music(self):
+        j = self.s.json("GET", "/api/extra/musica/cerca?q=" + quote("eminem  without me"))
+        self.assertEqual(j["fonte"], "ytm")
+        r = j["risultati"]
+        # doppione tolto; explicit prima, censurate (la copia senza «E» e la «Radio Edit») in fondo, il resto in ordine
+        self.assertEqual([x["id"] for x in r], ["tqxRidAWER8", "D1I1x2pYMK0", "NoExplicit1", "RadioEdit01"])
+        self.assertEqual([x["censurata"] for x in r], [False, False, True, True])
+        self.assertEqual(r[0], {"id": "tqxRidAWER8", "titolo": "Without Me", "artista": "Eminem", "album": "The Eminem Show",
+                                "durata": 291, "copertina": "https://yt3.googleusercontent.com/c-tqxRidAWER8=w544-h544-s-l90-rj",
+                                "explicit": True, "censurata": False})
+        self.assertEqual(r[1]["durata"], 3865)
+        self.assertEqual(r[3]["artista"], "Eminem e Nate Dogg")
+        percorso, corpo = FintoYouTube.richieste[-1]
+        self.assertEqual(percorso, "/youtubei/v1/search?prettyPrint=false")
+        self.assertEqual(corpo["query"], "eminem without me")   # spazi in più tolti
+        self.assertEqual(corpo["context"]["client"]["clientName"], "WEB_REMIX")
+        self.assertEqual(corpo["context"]["client"]["hl"], "it")
+        self.assertTrue(corpo["params"])   # filtro «Brani»
+
+    def test_musica_cerca_youtube(self):
+        r = self.s.json("GET", "/api/extra/musica/cerca?fonte=yt&q=eminem")["risultati"]
+        self.assertEqual([(x["id"], x["artista"], x["titolo"]) for x in r],
+                         [("YVkUvmDQ3HY", "Eminem", "Without Me"), ("fsG39JgqTmo", "Eminem", "Without Me")])   # niente dirette
+        self.assertEqual(r[0]["copertina"], "https://i.ytimg.com/vi/YVkUvmDQ3HY/mqdefault.jpg")
+        self.assertEqual(r[0]["durata"], 298)
+        self.assertNotIn("params", FintoYouTube.richieste[-1][1])
+
+    def test_musica_cerca_errori(self):
+        self.assertIn("errore", self.s.json("GET", "/api/extra/musica/cerca?q=%20", codice=400))
+        self.assertIn("errore", self.s.json("GET", "/api/extra/musica/cerca?q=x&fonte=spotify", codice=400))
+        # YouTube non risponde e anche la riserva (yt-dlp) non trova niente
+        self.assertIn("YouTube non risponde", self.s.json("GET", "/api/extra/musica/cerca?q=rotto", codice=502)["errore"])
+        self.assertIn("errore", self.s.json("POST", "/api/extra/musica/cerca?q=x", {}, codice=405))
+
+    def test_musica_ascolta(self):
+        st, h, b = self.s.get("/api/extra/musica/ascolta/Ascolto0001", tempo=40)
+        self.assertEqual((st, len(b)), (200, 1024), b[:200])
+        self.assertIn(h["Content-Type"], ("audio/mp4", "video/mp4"))
+        a = self.argomenti_ytdlp("watch?v=Ascolto0001")["args"]
+        self.assertEqual(a[-2:], ["--", "https://music.youtube.com/watch?v=Ascolto0001"])
+        self.assertEqual(a[a.index("-f") + 1], "ba[ext=m4a]/ba/b")
+        # la seconda volta (anche a pezzi) dalla cache: yt-dlp non riparte
+        st, h, b = self.s.get("/api/extra/musica/ascolta/Ascolto0001", intest={"Range": "bytes=10-19"})
+        self.assertEqual((st, b), (206, bytes(range(10, 20))))
+        self.assertEqual(self.chiamate_ytdlp("watch?v=Ascolto0001"), 1)
+        self.assertEqual(self.s.get("/api/extra/musica/ascolta/corto")[0], 400)
+        self.assertEqual(self.s.get("/api/extra/musica/ascolta/errore00000")[0], 502)
+
+    def test_musica_scarica(self):
+        brano = {"id": "Scarica0001", "titolo": "Without Me", "artista": "Eminem", "album": "The Eminem Show",
+                 "copertina": "https://127.0.0.1/copertina.jpg", "explicit": True}
+        id_ = self.s.json("POST", "/api/extra/musica", brano)["id"]
+        self.assertEqual(self.s.json("POST", "/api/extra/musica", brano)["id"], id_)   # due tocchi: un lavoro solo
+        l = self.finito("musica", id_, 40)
+        self.assertEqual(l["stato"], "fatto", l)
+        self.assertEqual(l["nome"], "Eminem - Without Me.mp3")
+        self.assertEqual((l["yt"], l["url"]), ("Scarica0001", "https://music.youtube.com/watch?v=Scarica0001"))
+        self.assertTrue(l["brano"], l)
+        self.assertNotIn("_percorso", l)
+        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Eminem - Without Me.mp3")))
+        self.assertEqual([n for n in os.listdir(self.c["scaricati"]) if n.startswith(".")], [])
+        f = self.ffmpeg_ultimo()
+        self.assertEqual(f["tag"]["title"], "Without Me")
+        self.assertEqual(f["tag"]["purl"], "https://music.youtube.com/watch?v=Scarica0001")
+        self.assertEqual(f["tag"]["ITUNESADVISORY"], "1")
+        self.assertEqual(f["args"][f["args"].index("-q:a") + 1], "0")   # MP3 alla qualità massima, come il Cloud
+        # nella libreria, con i tag giusti
+        cat = self.s.json("GET", "/api/musica/catalogo")["brani"]
+        b = [x for x in cat if x["id"] == l["brano"]]
+        self.assertEqual([(x["title"], x["artist"], x["album"]) for x in b], [("Without Me", "Eminem", "The Eminem Show")])
+        # di nuovo lo stesso brano a lavoro finito: niente doppione
+        self.assertEqual(self.s.json("POST", "/api/extra/musica", brano)["id"], id_)
+        self.assertEqual(self.chiamate_ytdlp("watch?v=Scarica0001"), 1)
+        # un brano con lo stesso nome ma un altro video: file accanto, non sopra
+        l2 = self.finito("musica", self.s.json("POST", "/api/extra/musica", dict(brano, id="Scarica0002"))["id"], 40)
+        self.assertEqual(l2["nome"], "Eminem - Without Me (2).mp3")
+        # tolto dall'elenco: il brano resta nella libreria
+        self.assertEqual(self.s.json("POST", "/api/extra/musica/%s/annulla" % id_), {"ok": True})
+        self.assertIsNone(self.lavoro("musica", id_))
+        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], "Eminem - Without Me.mp3")))
+        self.assertEqual(self.s.json("GET", "/api/extra/stato")["musica_dir"], self.c["scaricati"])
+
+    def test_musica_link(self):
+        # un link di un altro sito: titolo dalla pagina
+        l = self.finito("musica", self.s.json("POST", "/api/extra/musica", {"url": "https://soundcloud.com/x/brano1"})["id"], 40)
+        self.assertEqual((l["stato"], l["nome"], l["yt"]), ("fatto", "Video di prova.mp3", ""), l)
+        self.assertEqual(self.ffmpeg_ultimo()["tag"]["purl"], "https://soundcloud.com/x/brano1")
+        # un link di YouTube vale come un brano della ricerca
+        l = self.finito("musica", self.s.json("POST", "/api/extra/musica", {"url": "https://youtu.be/Collegato01?si=abc"})["id"], 40)
+        self.assertEqual((l["stato"], l["yt"]), ("fatto", "Collegato01"), l)
+        self.assertEqual(l["titolo"], "Video di prova")
+
+    def test_musica_annulla_ed_errori(self):
+        id_ = self.s.json("POST", "/api/extra/musica", {"url": "https://example.com/m/lento"})["id"]
+        self.assertTrue(aspetta(lambda: (self.lavoro("musica", id_) or {}).get("progresso", 0) > 0, 15))
+        self.assertEqual(self.s.json("POST", "/api/extra/musica/%s/annulla" % id_), {"ok": True})
+        l = self.finito("musica", id_, 15)
+        self.assertEqual((l["stato"], l["errore"]), ("errore", "Annullato"))
+        l = self.finito("musica", self.s.json("POST", "/api/extra/musica", {"url": "https://example.com/m/errore"})["id"])
+        self.assertEqual(l["stato"], "errore")
+        self.assertIn("Video non disponibile", l["errore"])
+        for corpo in ({}, {"id": "corto"}, {"url": "ftp://example.com/x"}, {"url": "non un link"}):
+            self.assertIn("errore", self.s.json("POST", "/api/extra/musica", corpo, codice=400), corpo)
+        self.s.json("POST", "/api/extra/musica", {"id": "Scarica0001"}, codice=403, intest={"Origin": "http://cattivo.example"})
+        self.s.json("POST", "/api/extra/musica/nessuno/annulla", codice=404)
 
     # ----- voci e audiolibri -----
 
