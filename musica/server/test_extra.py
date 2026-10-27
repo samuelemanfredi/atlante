@@ -69,6 +69,9 @@ FINTO_FFMPEG = r'''
 import json, os, struct, sys
 a = sys.argv[1:]
 ingressi = [a[i + 1] for i, v in enumerate(a) if v == "-i"]
+if a and a[-1] == "-":
+    sys.stderr.write("audio grezzo non disponibile\n")
+    sys.exit(1)
 if not ingressi or not all(os.path.isfile(p) for p in ingressi):
     sys.stderr.write("ingresso mancante\n")
     sys.exit(1)
@@ -226,8 +229,8 @@ def aspetta(cond, tempo=20, passo=0.05):
 
 
 class Server:
-    def __init__(self, base, cartelle):
-        self.base, self.c = base, cartelle
+    def __init__(self, base, cartelle, extra=()):
+        self.base, self.c, self.extra = base, cartelle, list(extra)
         self.porta = porta_libera()
         self.p = None
 
@@ -241,7 +244,7 @@ class Server:
         self.p = subprocess.Popen([sys.executable, "-I", SERVER, self.c["musica"], "--porta", str(self.porta),
                                    "--cache", self.c["cache"], "--app", self.c["app"], "--video-dir", self.c["video"],
                                    "--libri-dir", self.c["libri"], "--musica-dir", self.c["scaricati"],
-                                   "--ia-indirizzo", "http://127.0.0.1:%d" % self.c["porta_ollama"]],
+                                   "--ia-indirizzo", "http://127.0.0.1:%d" % self.c["porta_ollama"]] + self.extra,
                                   env=env, stdout=self.log, stderr=subprocess.STDOUT)
 
         def pronto():
@@ -747,6 +750,157 @@ class TestExtra(unittest.TestCase):
         self.assertIsInstance(j["pulizia"], list)
         for v in j["pulizia"]:
             self.assertTrue({"nome", "percorso", "dimensione"} <= set(v), v)
+
+
+def suono_finto(secondi, seme, hz=4000):
+    """Audio finto a 4 kHz: colpi casuali (circa 4 al secondo, ampiezze e lunghezze diverse) su un fondo leggero,
+    come gli attacchi di un brano vero. Stesso seme = stesso suono."""
+    import array
+    import random
+    r = random.Random(seme)
+    a = array.array("h", bytes(2 * int(secondi * hz)))
+    t = 0.0
+    while True:
+        t += r.expovariate(4.0)
+        if t >= secondi:
+            break
+        i, amp, lung = int(t * hz), r.randint(2000, 20000), r.randint(80, 400)
+        for k in range(min(lung, len(a) - i)):
+            a[i + k] = max(-32767, min(32767, a[i + k] + int(amp * (1 - k / lung) * (1 if (k // 3) % 2 else -1))))
+    for j in range(0, len(a), 7):
+        a[j] = max(-32767, min(32767, a[j] + r.randint(-150, 150)))
+    return a
+
+
+class TestVideoclip(unittest.TestCase):
+    """Allineamento brano ↔ videoclip su suoni finti e preparazione con scaricamento e audio finti."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_clip", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.brano = suono_finto(120, 1)
+
+    def tempo_video(self, mappa, t):
+        for x in mappa:
+            if x["da"] <= t < x["a"]:
+                return t + x["sp"]
+        return None
+
+    def test_introduzione_e_taglio(self):
+        b, hz = self.brano, 4000
+        video = suono_finto(7.3, 99) + b[:60 * hz] + b[80 * hz:]   # 7,3 s in più all'inizio, 20 s tagliati a metà
+        r = self.m.allinea(b, video)
+        self.assertEqual(len(r["mappa"]), 2, r)
+        for t in (2, 10, 30, 50, 57):
+            self.assertAlmostEqual(self.tempo_video(r["mappa"], t), t + 7.3, delta=0.03, msg=(t, r["mappa"]))
+        for t in (83, 90, 110, 117):
+            self.assertAlmostEqual(self.tempo_video(r["mappa"], t), t - 12.7, delta=0.03, msg=(t, r["mappa"]))
+        for t in (62, 70, 77):   # il pezzo tagliato dal video: copertina, mai un'altra scena
+            self.assertIsNone(self.tempo_video(r["mappa"], t), (t, r["mappa"]))
+        self.assertGreater(r["copertura"], 0.75)
+
+    def test_finale_diverso_e_silenzio(self):
+        import array
+        b, hz = self.brano, 4000
+        silenzio = array.array("h", bytes(2 * 20 * hz))
+        con_silenzio = b[:50 * hz] + silenzio + b[50 * hz:]   # 20 s muti in mezzo al brano
+        video = b[:50 * hz] + silenzio + b[50 * hz:100 * hz] + suono_finto(30, 5)   # finale del video diverso
+        r = self.m.allinea(con_silenzio, video)
+        self.assertAlmostEqual(self.tempo_video(r["mappa"], 20), 20, delta=0.03, msg=r["mappa"])
+        self.assertAlmostEqual(self.tempo_video(r["mappa"], 110), 110, delta=0.03, msg=r["mappa"])
+        for t in (125, 135):   # il brano finisce in un altro modo: copertina
+            self.assertIsNone(self.tempo_video(r["mappa"], t), (t, r["mappa"]))
+
+    def test_video_senza_rapporto(self):
+        r = self.m.allinea(self.brano, suono_finto(150, 42))
+        self.assertLess(r["copertura"], self.m.CLIP_COPERTURA, r)
+
+    def test_preparazione_e_scheda(self):
+        m = self.m
+        base = tempfile.mkdtemp(prefix="atlante-clip-")
+        try:
+            cart, brano = os.path.join(base, "clip"), os.path.join(base, "A - Brano.mp3")
+            with open(brano, "wb") as f:
+                f.write(b"mp3")
+            piano = os.path.join(base, "piano.json")
+            with open(piano, "w") as f:
+                json.dump({"A - Brano.mp3": {"id": "abcdefghijk"}, "B.mp3": None}, f)
+            v = m.Videoclip(piano, cart)
+            pcm = {brano: self.brano}
+            vid_pcm = suono_finto(2.5, 7) + self.brano
+
+            def scarica(vid):
+                p = os.path.join(cart, vid + ".mp4")
+                with open(p, "wb") as f:
+                    f.write(b"video")
+                pcm[p] = vid_pcm
+                return p
+            v._scarica = scarica
+            m._pcm = lambda p, ff: pcm[p]
+            m._programma = lambda n: "/bin/" + n
+            m._durata_audio = lambda p: 122.5
+            s = v.prepara("A - Brano.mp3", brano)
+            self.assertEqual(s["stato"], "pronto", s)
+            self.assertAlmostEqual(s["mappa"][0]["sp"], 2.5, delta=0.03)
+            st = os.stat(brano)
+            firma = "%d:%d" % (st.st_size, int(st.st_mtime))
+            self.assertEqual(v.pronti(), {"A - Brano.mp3": firma})
+            x = v.stato(brano, firma)
+            self.assertEqual((x["stato"], x["url"], x["durata"]), ("pronto", "clip/file/abcdefghijk.mp4", 122.5))
+            # il file del brano cambia (es. versione explicit): si riallinea, la scheda vecchia non vale più
+            self.assertEqual(v.stato(brano, "1:2")["stato"], "in coda")
+            self.assertEqual(v.stato(os.path.join(base, "B.mp3"), "1:1"), {"stato": "nessuno"})
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+
+class TestClipServer(unittest.TestCase):
+    """API dei videoclip con un brano della libreria e il suo videoclip già pronto (scheda e MP4 finti)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-clipsrv-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.brano = os.path.join(cls.c["musica"], "Artista - Brano.mp3")
+        with open(cls.brano, "wb") as f:
+            f.write(b"ID3\x03\x00\x00\x00\x00\x00\x00" + (b"\xff\xfb\x90\x00" + bytes(413)) * 20)
+        cls.clip = os.path.join(cls.base, "clip")
+        os.makedirs(cls.clip)
+        with open(os.path.join(cls.clip, "abcdefghijk.mp4"), "wb") as f:
+            f.write(bytes(range(256)) * 8)
+        st = os.stat(cls.brano)
+        cls.mappa = [{"da": 0.0, "a": 8.0, "sp": 3.25}]
+        with open(os.path.join(cls.clip, "abcdefghijk.json"), "w") as f:
+            json.dump({"id": "abcdefghijk", "nome": "Artista - Brano.mp3", "firma": "%d:%d" % (st.st_size, int(st.st_mtime)),
+                       "stato": "pronto", "mappa": cls.mappa, "durata_video": 11.5}, f)
+        cls.piano = os.path.join(cls.base, "videoclip-piano.json")
+        with open(cls.piano, "w") as f:
+            json.dump({"Artista - Brano.mp3": {"id": "abcdefghijk"}}, f)
+        cls.s = Server(cls.base, cls.c, ["--clip-piano", cls.piano, "--clip-dir", cls.clip]).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_pronto(self):
+        cat = aspetta(lambda: self.s.json("GET", "/api/musica/catalogo")["brani"], 20)
+        self.assertEqual(len(cat), 1, cat)
+        self.assertIs(cat[0].get("clip"), True)
+        j = self.s.json("GET", "/api/extra/clip/" + cat[0]["id"])
+        self.assertEqual(j, {"stato": "pronto", "url": "clip/file/abcdefghijk.mp4", "mappa": self.mappa, "durata": 11.5})
+        st, h, b = self.s.get("/api/extra/clip/file/abcdefghijk.mp4", intest={"Range": "bytes=0-9"})
+        self.assertEqual((st, b, h["Content-Type"]), (206, bytes(range(10)), "video/mp4"))
+        a = self.s.json("GET", "/api/extra/clip")
+        self.assertEqual((a["attivo"], a["totale"], a["pronti"], a["auto"]), (True, 1, 1, False))
+
+    def test_errori(self):
+        self.assertIn("errore", self.s.json("GET", "/api/extra/clip/nessuno", codice=404))
+        for n in ("../x.mp4", "corto.mp4", "abcdefghijk.mov", "zzzzzzzzzzz.mp4"):
+            self.assertEqual(self.s.get("/api/extra/clip/file/" + quote(n))[0], 404, n)
 
 
 class TestDispositiviTempi(unittest.TestCase):

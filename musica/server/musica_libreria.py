@@ -39,13 +39,17 @@ Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale fun
 Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
 """
 import argparse
+import array
+import collections
 import getpass
 import hashlib
 import hmac
 import http.client
 import ipaddress
 import json
+import math
 import mimetypes
+import operator
 import os
 import platform
 import queue
@@ -723,12 +727,15 @@ class Libreria:
     def catalogo(self):
         if any(os.path.isdir(r) for r in self._mancanti):   # disco ricollegato: si rilegge subito (con l'indice è veloce)
             self.rileggi_presto(subito=True, attendi=5)
+        pronti = CLIP.pronti() if CLIP else {}
         with self.blocco:
             pubblici = []
             for b in self.brani.values():
                 x = {k: v for k, v in b.items() if not k.startswith("_")}
                 if b["id"] in self.compilation:
                     x["compilation"] = True   # solo quando è vero: il catalogo di 10 000 brani resta leggero
+                if pronti and pronti.get(os.path.basename(b["_p"])) == b.get("_f"):
+                    x["clip"] = True          # videoclip scaricato e allineato con questo file
                 pubblici.append(x)
         o = {"brani": pubblici, "aggiornato": int(self.ultima * 1000)}
         if INDIRIZZO:
@@ -915,6 +922,9 @@ def avvia(cartelle, cache, intervallo=600, indirizzo=""):
 #   POST   musica {id,...} o {url}     scarica il brano nella cartella della musica scaricata (MP3, tag) -> {id}
 #   GET    musica                      elenco degli scaricamenti (`brano` = id nel catalogo quando è in libreria)
 #   POST   musica/<id>/annulla         ferma lo scaricamento; uno finito esce dall'elenco (il brano resta)
+#   GET    clip/<id brano>             videoclip del brano: {stato, url, mappa, durata} (se va preparato entra in coda)
+#   GET    clip/file/<ID YouTube>.mp4  il videoclip (con Range)
+#   GET    clip                        avanzamento della preparazione dei videoclip
 #   GET    dispositivi                 dispositivi con l'app aperta (sentiti negli ultimi 60 s) e cosa suonano
 #   POST   dispositivi/<id>/stato      {nome,tipo,stato} ogni pochi secondi -> {comandi:[...]} in attesa
 #   GET    dispositivi/<id>/comandi?attesa=25  attesa lunga: i comandi appena arrivano
@@ -1957,6 +1967,413 @@ def _attesa(h):
         raise ErroreExtra(400, "Attesa non valida")
 
 
+# ----- videoclip sincronizzati con i brani -----
+#
+# Nel lettore dell'app, al posto della copertina, il videoclip ufficiale del brano, muto: si sente il file della
+# libreria (per esempio la versione explicit) e il video lo segue istante per istante. I videoclip non hanno sempre gli
+# stessi tempi del brano (introduzione, finale diverso, pezzi tagliati): l'allineamento confronta gli attacchi del suono
+# (inviluppo ogni 10 ms) del brano e del video a finestre di 10 s e ne ricava una mappa a tratti «video = brano + sp».
+# Dove nessun tratto è sicuro si mostra la copertina: meglio niente video che un video fuori sincrono.
+# Elenco dei videoclip: un JSON {nome del file: {"id": ID YouTube}} (--clip-piano / ATLANTE_CLIP_PIANO); i video
+# (MP4 fino a 1080p, H.264, con il loro audio che serve all'allineamento) e le mappe in --clip-dir / ATLANTE_CLIP_DIR.
+
+CLIP_HZ = 4000            # campioni al secondo per il confronto: bastano per cassa, rullante e voce
+CLIP_PASSO = 40           # campioni per punto dell'inviluppo (10 ms)
+CLIP_GROSSO = 5           # punti fini per punto grossolano (50 ms) nella prima ricerca
+CLIP_FINESTRA = 10.0      # secondi di brano per ogni confronto
+CLIP_OGNI = 15.0          # secondi tra l'inizio di una finestra e la successiva
+CLIP_RITARDO = 60.0       # secondi massimi di differenza cercati (introduzioni lunghe dei videoclip)
+CLIP_SOGLIA = 0.45        # correlazione minima di una finestra
+CLIP_STACCO = 0.08        # di quanto il ritardo migliore deve battere il secondo (lontano più di 1 s)
+CLIP_STESSO = 0.12        # secondi: finestre con ritardi così vicini sono lo stesso tratto
+CLIP_COPERTURA = 0.5      # parte del brano che i tratti devono coprire
+CLIP_PROVA = 4.0          # secondi delle prove che cercano i bordi dei tratti
+CLIP_SOGLIA_BORDO = 0.35  # correlazione minima di una prova di bordo
+CLIP_SPAZIO_MIN = 50 * 1024 ** 3
+CLIP_RIPROVA = 86400      # un videoclip non riuscito per un errore temporaneo si riprova dopo un giorno
+ID_CLIP = re.compile(r"^([A-Za-z0-9_-]{11})\.mp4$")
+
+
+def _inviluppo(pcm):
+    """Attacchi del suono ogni 10 ms: di quanto cresce l'energia (in scala logaritmica) rispetto al punto prima."""
+    n, en = CLIP_PASSO, []
+    for i in range(0, len(pcm) - n + 1, n):
+        q = pcm[i:i + n]
+        en.append(math.log1p(sum(map(operator.mul, q, q)) / n))
+    return [max(0.0, en[i] - en[i - 1]) if i else 0.0 for i in range(len(en))]
+
+
+def _riduci(x, k):
+    return [sum(x[i:i + k]) / k for i in range(0, len(x) - k + 1, k)]
+
+
+def _prefissi(v):
+    p, p2, s, s2 = [0.0], [0.0], 0.0, 0.0
+    for x in v:
+        s += x
+        s2 += x * x
+        p.append(s)
+        p2.append(s2)
+    return p, p2
+
+
+def _correlazioni(w, v, inizio, da, a, p, p2):
+    """Correlazione normalizzata della finestra w con v[inizio+L : inizio+L+len(w)] per L da `da` ad `a` (escluso)."""
+    m = len(w)
+    mw = sum(w) / m
+    wc = [x - mw for x in w]
+    dw = math.sqrt(sum(x * x for x in wc))
+    out = []
+    for L in range(da, a):
+        s = inizio + L
+        if dw <= 1e-9 or s < 0 or s + m > len(v):
+            out.append(-1.0)
+            continue
+        somma = p[s + m] - p[s]
+        var = (p2[s + m] - p2[s]) - somma * somma / m
+        out.append(sum(map(operator.mul, wc, v[s:s + m])) / (dw * math.sqrt(var)) if var > 1e-9 else -1.0)
+    return out
+
+
+def _coincide(fb, fv, t, sp):
+    """I 4 s del brano da t coincidono con il video spostato di sp? (prova dei bordi dei tratti)"""
+    i, m = int(round(t * 100)), int(CLIP_PROVA * 100)
+    j = i + int(round(sp * 100))
+    if i < 0 or j < 0 or i + m > len(fb) or j + m > len(fv):
+        return False
+    w, v = fb[i:i + m], fv[j:j + m]
+    mw, mv = sum(w) / m, sum(v) / m
+    dw = math.sqrt(sum((x - mw) ** 2 for x in w))
+    dv = math.sqrt(sum((x - mv) ** 2 for x in v))
+    if dw <= 1e-9 or dv <= 1e-9:
+        return False
+    return sum((x - mw) * (y - mv) for x, y in zip(w, v)) / (dw * dv) >= CLIP_SOGLIA_BORDO
+
+
+def allinea(pcm_brano, pcm_video):
+    """Mappa a tratti dal tempo del brano al tempo del video: {mappa:[{da, a, sp}], copertura, finestre}.
+    Per ogni finestra di 10 s del brano il ritardo migliore (prima ogni 50 ms su ±60 s, poi ogni 10 ms vicino al
+    migliore), solo se netto; le finestre con lo stesso ritardo diventano un tratto (almeno due finestre)."""
+    fb, fv = _inviluppo(pcm_brano), _inviluppo(pcm_video)
+    gb, gv = _riduci(fb, CLIP_GROSSO), _riduci(fv, CLIP_GROSSO)
+    pg, pg2 = _prefissi(gv)
+    pf, pf2 = _prefissi(fv)
+    hz_f, hz_g = 100, 100 // CLIP_GROSSO
+    durata, durata_v = len(fb) / hz_f, len(fv) / hz_f
+    mg, mf, rg = int(CLIP_FINESTRA * hz_g), int(CLIP_FINESTRA * hz_f), int(CLIP_RITARDO * hz_g)
+    finestre, t = [], 0.0
+    while t + CLIP_FINESTRA <= durata + 1e-9:
+        ig = int(round(t * hz_g))
+        w = gb[ig:ig + mg]
+        if len(w) == mg and max(w) - min(w) > 1e-6:   # le finestre mute non dicono niente
+            c = _correlazioni(w, gv, ig, -rg, rg + 1, pg, pg2)
+            b = max(range(len(c)), key=c.__getitem__)
+            secondo = max([c[j] for j in range(len(c)) if abs(j - b) > hz_g] or [-1.0])
+            if c[b] >= CLIP_SOGLIA and c[b] - secondo >= CLIP_STACCO:
+                lg = (b - rg) * CLIP_GROSSO   # ritardo in punti fini
+                i_f = int(round(t * hz_f))
+                cf = _correlazioni(fb[i_f:i_f + mf], fv, i_f, lg - 10, lg + 11, pf, pf2)
+                bf = max(range(len(cf)), key=cf.__getitem__)
+                finestre.append({"t": t, "sp": round((lg - 10 + bf) / hz_f, 2), "c": round(c[b], 3)})
+        t += CLIP_OGNI
+    gruppi = []
+    for f in finestre:
+        g = gruppi[-1] if gruppi else None
+        if g and abs(g["sp"][-1] - f["sp"]) <= CLIP_STESSO and f["t"] - g["fine"] <= 2 * CLIP_OGNI + 1e-9:
+            g["sp"].append(f["sp"])
+            g["fine"] = f["t"]
+        else:
+            gruppi.append({"inizio": f["t"], "fine": f["t"], "sp": [f["sp"]]})
+    gruppi = [g for g in gruppi if len(g["sp"]) >= 2]   # una finestra sola può essere una somiglianza per caso
+    mappa, limite = [], 0.0
+    for k, g in enumerate(gruppi):
+        sp = sorted(g["sp"])[len(g["sp"]) // 2]
+        # i confini veri (taglio, introduzione, finale diverso) si cercano con prove di 4 s ogni secondo al ritardo del
+        # tratto: il bordo si restringe se la prova non coincide (finestra a cavallo di un taglio), si allarga finché coincide
+        sx = max(limite, -sp)
+        dx = min(durata, durata_v - sp, gruppi[k + 1]["inizio"] if k + 1 < len(gruppi) else durata)
+        da, a = max(sx, g["inizio"]), min(dx, g["fine"] + CLIP_FINESTRA)
+        while da + CLIP_PROVA <= a and not _coincide(fb, fv, da, sp):
+            da += 1.0
+        while da - 1.0 >= sx and _coincide(fb, fv, da - 1.0, sp):
+            da -= 1.0
+        while a - CLIP_PROVA >= da and not _coincide(fb, fv, a - CLIP_PROVA, sp):
+            a -= 1.0
+        while a + 1.0 <= dx and _coincide(fb, fv, a + 1.0 - CLIP_PROVA, sp):
+            a += 1.0
+        if a - da >= CLIP_FINESTRA:
+            mappa.append({"da": round(da, 2), "a": round(a, 2), "sp": sp})
+            limite = a
+    copertura = sum(x["a"] - x["da"] for x in mappa) / durata if durata else 0.0
+    return {"mappa": mappa, "copertura": round(copertura, 3), "finestre": finestre, "durata": round(durata, 2)}
+
+
+def _pcm(percorso, ff):
+    """Audio di un file (brano o video) a CLIP_HZ, mono, 16 bit."""
+    r = subprocess.run([ff, "-v", "error", "-nostdin", "-i", percorso, "-vn", "-ac", "1", "-ar", str(CLIP_HZ),
+                        "-f", "s16le", "-"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       env=_ambiente(), timeout=600)
+    if r.returncode != 0 or not r.stdout:
+        raise RuntimeError("audio non leggibile: %s" % r.stderr.decode("utf-8", "replace").strip()[-200:])
+    a = array.array("h")
+    a.frombytes(r.stdout[:len(r.stdout) // 2 * 2])
+    if sys.byteorder == "big":
+        a.byteswap()
+    return a
+
+
+class Videoclip:
+    """Elenco dei videoclip, coda di preparazione (scaricamento + allineamento, uno alla volta) e mappe pronte."""
+
+    def __init__(self, piano, cartella, auto=False, prima=""):
+        self.file_piano, self.dir, self.auto, self.prima = piano, cartella, auto, prima
+        self.blocco = threading.Lock()
+        self.piano, self.piano_m = {}, None
+        self.richiesti = collections.deque()   # chiesti dall'app: passano davanti a tutto
+        self.ora = ""                           # nome del brano in preparazione
+        self.sveglia = threading.Event()
+        self._pronti = None                     # {nome del file: firma del file audio allineato}
+        self.avviato = False
+
+    def leggi_piano(self):
+        try:
+            m = os.path.getmtime(self.file_piano)
+        except OSError:
+            return self.piano
+        if m != self.piano_m:
+            try:
+                with open(self.file_piano, encoding="utf-8") as f:
+                    d = json.load(f)
+                self.piano = {n: v["id"] for n, v in d.items()
+                              if isinstance(v, dict) and isinstance(v.get("id"), str) and ID_YT.match(v["id"])}
+                self.piano_m = m
+            except (OSError, ValueError, AttributeError):
+                pass
+        return self.piano
+
+    def _scheda(self, vid):
+        try:
+            with open(os.path.join(self.dir, vid + ".json"), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def pronti(self):
+        with self.blocco:
+            if self._pronti is None:
+                self._pronti = {}
+                try:
+                    for e in os.scandir(self.dir):
+                        if e.name.endswith(".json"):
+                            s = self._scheda(e.name[:-5])
+                            if s and s.get("stato") == "pronto" and s.get("nome"):
+                                self._pronti[s["nome"]] = s.get("firma")
+                except OSError:
+                    pass
+            return self._pronti
+
+    def stato(self, percorso, firma):
+        """Per un brano della libreria: com'è il suo videoclip (e lo mette in coda se va preparato)."""
+        nome = os.path.basename(percorso)
+        vid = self.leggi_piano().get(nome)
+        if not vid:
+            return {"stato": "nessuno"}
+        s = self._scheda(vid) or {}
+        if s.get("nome") == nome and s.get("firma") == firma:
+            if s.get("stato") == "pronto" and os.path.isfile(os.path.join(self.dir, vid + ".mp4")):
+                return {"stato": "pronto", "url": "clip/file/%s.mp4" % vid, "mappa": s.get("mappa", []),
+                        "durata": s.get("durata_video", 0)}
+            if s.get("stato") == "non allineato":
+                return {"stato": "non allineato"}
+            if s.get("stato") == "errore" and (s.get("permanente") or time.time() - s.get("quando", 0) < CLIP_RIPROVA):
+                return {"stato": "errore", "errore": s.get("errore", "")}
+        self.chiedi(nome)
+        return {"stato": "in preparazione" if self.ora == nome else "in coda"}
+
+    def chiedi(self, nome):
+        with self.blocco:
+            if nome != self.ora and nome not in self.richiesti:
+                self.richiesti.appendleft(nome)   # l'ultimo chiesto (il brano che si ascolta adesso) prima di tutti
+        self.avvia()
+        self.sveglia.set()
+
+    def avanzamento(self):
+        p = self.leggi_piano()
+        try:
+            libero = shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir)).free
+        except OSError:
+            libero = 0
+        return {"attivo": bool(p), "auto": self.auto, "totale": len(p), "pronti": len(self.pronti()),
+                "in_coda": len(self.richiesti), "ora": self.ora, "spazio_libero_gb": round(libero / 1024 ** 3, 1)}
+
+    def avvia(self):
+        with self.blocco:
+            if self.avviato:
+                return
+            self.avviato = True
+        threading.Thread(target=self._lavora, daemon=True).start()
+
+    def _ordine(self):
+        """Tutti i videoclip in ordine di preparazione: prima quelli della playlist indicata (Brani preferiti)."""
+        p = self.leggi_piano()
+        primi = []
+        if self.prima and os.path.isdir(self.prima):
+            try:
+                for e in sorted(os.scandir(self.prima), key=lambda e: e.name):
+                    n = os.path.basename(os.path.realpath(e.path)) if e.is_symlink() else e.name
+                    if n in p and n not in primi:
+                        primi.append(n)
+            except OSError:
+                pass
+        visti = set(primi)
+        return primi + [n for n in sorted(p) if n not in visti]
+
+    def _da_fare(self, nome, percorsi):
+        vid = self.leggi_piano().get(nome)
+        percorso = percorsi.get(nome)
+        if not vid or not percorso:
+            return False
+        try:
+            st = os.stat(percorso)
+        except OSError:
+            return False
+        s = self._scheda(vid) or {}
+        if s.get("nome") == nome and s.get("firma") == "%d:%d" % (st.st_size, int(st.st_mtime)):
+            if s.get("stato") in ("pronto", "non allineato"):
+                return False
+            if s.get("stato") == "errore" and (s.get("permanente") or time.time() - s.get("quando", 0) < CLIP_RIPROVA):
+                return False
+        return True
+
+    def _lavora(self):
+        ordine, i, rifatto = [], 0, 0
+        while True:
+            nome = None
+            percorsi = {os.path.basename(p): p for p in (dict(LIB.percorsi) if LIB else {}).values()}
+            with self.blocco:
+                while self.richiesti and not nome:
+                    n = self.richiesti.popleft()
+                    if self._da_fare(n, percorsi):
+                        nome = n
+            if not nome and self.auto:
+                if time.time() - rifatto > 3600:   # l'elenco può cambiare (brani nuovi): si rifà ogni ora
+                    ordine, i, rifatto = self._ordine(), 0, time.time()
+                while i < len(ordine) and not nome:
+                    if self._da_fare(ordine[i], percorsi):
+                        nome = ordine[i]
+                    i += 1
+            if not nome:
+                self.sveglia.wait(600)
+                self.sveglia.clear()
+                continue
+            try:
+                if shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir)).free < CLIP_SPAZIO_MIN:
+                    print("Videoclip: meno di 50 GB liberi, mi fermo", flush=True)
+                    self.sveglia.wait(3600)
+                    self.sveglia.clear()
+                    continue
+            except OSError:
+                self.sveglia.wait(600)   # disco scollegato
+                self.sveglia.clear()
+                continue
+            self.ora = nome
+            try:
+                self.prepara(nome, percorsi[nome])
+            except Exception as e:   # noqa: BLE001  un videoclip che non va non ferma gli altri
+                print("Videoclip: %s non riuscito: %s" % (nome, e), flush=True)
+            finally:
+                self.ora = ""
+            time.sleep(1)
+
+    def _scarica(self, vid):
+        yt, ff = _programma("yt-dlp"), _programma("ffmpeg")
+        if not yt or not ff:
+            raise RuntimeError("servono yt-dlp e ffmpeg sul Mac")
+        tmp = tempfile.mkdtemp(prefix="clip-", dir=_cartella_tmp())
+        try:
+            info = {}
+            for client in ("", "mweb"):
+                args = [yt, "--newline", "--no-playlist", "--no-mtime", "-P", "home:" + tmp, "-P", "temp:" + tmp,
+                        "-o", "%(id)s.%(ext)s", "--ffmpeg-location", ff, "--print", "after_move:[atlante] file %(filepath)s"]
+                args += _formato("video", "1080", True)
+                if client:
+                    args += ["--extractor-args", "youtube:player_client=" + client]
+                info = _esegui_ytdlp(args + ["--", "https://www.youtube.com/watch?v=" + vid])
+                if info["file"]:
+                    break
+            if not info["file"]:
+                raise RuntimeError(info.get("errore") or "scaricamento non riuscito")
+            dest = os.path.join(self.dir, vid + ".mp4")
+            shutil.move(info["file"], dest + ".tmp")
+            os.replace(dest + ".tmp", dest)
+            return dest
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def prepara(self, nome, percorso):
+        """Scarica il videoclip (se non c'è già) e lo allinea con il file del brano; scrive la scheda <ID>.json."""
+        vid = self.leggi_piano()[nome]
+        if not os.path.isdir(self.dir):
+            if not os.path.isdir(os.path.dirname(self.dir)):
+                raise RuntimeError("cartella dei videoclip non raggiungibile: %s" % self.dir)
+            os.makedirs(self.dir, exist_ok=True)
+        st = os.stat(percorso)
+        scheda = {"id": vid, "nome": nome, "firma": "%d:%d" % (st.st_size, int(st.st_mtime)), "quando": int(time.time())}
+        video = os.path.join(self.dir, vid + ".mp4")
+        try:
+            if not os.path.isfile(video):
+                video = self._scarica(vid)
+            ff = _programma("ffmpeg")
+            if not ff:
+                raise RuntimeError("serve ffmpeg sul Mac")
+            r = allinea(_pcm(percorso, ff), _pcm(video, ff))
+            scheda.update(mappa=r["mappa"], copertura=r["copertura"], finestre=len(r["finestre"]),
+                          durata_video=round(_durata_audio(video) or 0, 2))
+            scheda["stato"] = "pronto" if r["copertura"] >= CLIP_COPERTURA else "non allineato"
+        except Exception as e:   # noqa: BLE001
+            testo = str(e)
+            scheda.update(stato="errore", errore=testo[:300],
+                          permanente=bool(re.search(r"Sign in to confirm your age|Video unavailable|Private video|"
+                                                    r"removed|copyright|not available in your country", testo, re.I)))
+        with open(os.path.join(self.dir, vid + ".json.tmp"), "w", encoding="utf-8") as f:
+            json.dump(scheda, f, ensure_ascii=False)
+        os.replace(os.path.join(self.dir, vid + ".json.tmp"), os.path.join(self.dir, vid + ".json"))
+        with self.blocco:
+            if self._pronti is not None:
+                if scheda["stato"] == "pronto":
+                    self._pronti[nome] = scheda["firma"]
+                else:
+                    self._pronti.pop(nome, None)
+        print("Videoclip: %s → %s (copertura %s)" % (nome, scheda["stato"], scheda.get("copertura", "-")), flush=True)
+        return scheda
+
+
+CLIP = None
+
+
+def _clip_brano(id_):
+    if not CLIP:
+        raise ErroreExtra(404, "Videoclip non attivi su questo Mac")
+    p = LIB.percorsi.get(id_) if LIB else None
+    if not p:
+        raise ErroreExtra(404, "Brano non trovato")
+    try:
+        st = os.stat(p)
+    except OSError:
+        raise ErroreExtra(404, "File del brano non raggiungibile")
+    return CLIP.stato(p, "%d:%d" % (st.st_size, int(st.st_mtime)))
+
+
+def _clip_file(h, nome):
+    m = ID_CLIP.match(nome or "")
+    if not CLIP or not m:
+        raise ErroreExtra(404, "Videoclip non trovato")
+    p = os.path.join(CLIP.dir, m.group(1) + ".mp4")
+    if not os.path.isfile(p):
+        raise ErroreExtra(404, "Videoclip non ancora scaricato")
+    _invia_file(h, p, "video/mp4", {"X-Content-Type-Options": "nosniff"})
+
+
 # ----- voci e audiolibri con `say` -----
 
 _VOCI = {"t": 0.0, "say": "", "voci": []}
@@ -2649,6 +3066,15 @@ def _instrada(h, metodo, parti, corpo):
         solo("POST")
         _annulla_musica(resto[0])
         _json(h, {"ok": True})
+    elif cosa == "clip" and not resto:
+        solo("GET")
+        _json(h, CLIP.avanzamento() if CLIP else {"attivo": False})
+    elif cosa == "clip" and len(resto) == 2 and resto[0] == "file":
+        solo("GET")
+        _clip_file(h, resto[1])
+    elif cosa == "clip" and len(resto) == 1:
+        solo("GET")
+        _json(h, _clip_brano(resto[0]))
     elif cosa == "dispositivi" and not resto:
         solo("GET")
         _json(h, {"dispositivi": DISP.elenco()})
@@ -3155,7 +3581,7 @@ def _imposta_password(file):
 
 
 def main():
-    global ACC
+    global ACC, CLIP
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -3171,6 +3597,15 @@ def main():
     # mentre un argomento che non conosce la farebbe uscire subito (e l'aggiornamento automatico tornerebbe indietro)
     ap.add_argument("--musica-dir", default=os.environ.get("ATLANTE_MUSICA_DIR") or CONF["musica_dir"],
                     help="dove salvare i brani scaricati da internet (fa parte della libreria; anche ATLANTE_MUSICA_DIR)")
+    # videoclip sincronizzati: anche da variabili d'ambiente (nel LaunchAgent una versione vecchia del server le ignora)
+    ap.add_argument("--clip-piano", default=os.environ.get("ATLANTE_CLIP_PIANO", ""),
+                    help="JSON {nome del file del brano: {\"id\": ID YouTube}} dei videoclip (anche ATLANTE_CLIP_PIANO)")
+    ap.add_argument("--clip-dir", default=os.environ.get("ATLANTE_CLIP_DIR") or "~/Movies/Atlante Videoclip",
+                    help="dove tenere videoclip e mappe di allineamento (anche ATLANTE_CLIP_DIR)")
+    ap.add_argument("--clip-auto", action="store_true", default=os.environ.get("ATLANTE_CLIP_AUTO") == "1",
+                    help="prepara in sottofondo tutti i videoclip, uno alla volta (anche ATLANTE_CLIP_AUTO=1)")
+    ap.add_argument("--clip-prima", default=os.environ.get("ATLANTE_CLIP_PRIMA", ""),
+                    help="cartella (playlist) i cui brani si preparano per primi (anche ATLANTE_CLIP_PRIMA)")
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
@@ -3194,6 +3629,11 @@ def main():
     avvia(cartelle, a.cache, indirizzo=indirizzo)
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
                 ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
+    if a.clip_piano:
+        CLIP = Videoclip(os.path.abspath(os.path.expanduser(a.clip_piano)), os.path.abspath(os.path.expanduser(a.clip_dir)),
+                         auto=a.clip_auto, prima=os.path.abspath(os.path.expanduser(a.clip_prima)) if a.clip_prima else "")
+        if a.clip_auto:
+            CLIP.avvia()
     app = os.path.abspath(a.app)
     https = bool(a.cert)
     host_sicuro = urlsplit(indirizzo).netloc.lower()
