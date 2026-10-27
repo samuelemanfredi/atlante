@@ -1815,5 +1815,416 @@ class TestPersone(unittest.TestCase):
             self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
 
 
+
+# ----- brani ascoltati: classifiche e consigli tra le persone -----
+
+BRANI_FINTI = ["%016x" % (0xa0000 + i) for i in range(41)]   # id del catalogo (16 cifre esadecimali)
+
+
+class _Scritto:
+    def __init__(self):
+        self.b = b""
+
+    def write(self, x):
+        self.b += x
+
+
+class FintaRisposta(FintaRichiesta):
+    """FintaRichiesta che raccoglie anche la risposta (codice e JSON): le rotte si chiamano senza un server."""
+
+    def __init__(self, ip, intest=None, percorso="/api/extra/ascoltati"):
+        super().__init__(ip, intest, percorso)
+        self.wfile, self.codice = _Scritto(), None
+
+    def send_response(self, codice):
+        self.codice = codice
+
+    def send_header(self, k, v):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def risposta(self):
+        return json.loads(self.wfile.b.decode("utf-8"))
+
+
+class TestAscoltati(unittest.TestCase):
+    """Brani ascoltati per persona e giorno (Ascoltati), con persone e ascolti finti: soglia delle 3 persone, tetto per
+    persona, nomi solo con la condivisione accesa e spariti allo spegnimento, revoca, cancellazione dei propri ascolti."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_ascoltati", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-ascoltati-")
+        self.file = os.path.join(self.base, "cache", "ascoltati.json")
+        self.nomi = {"p": "Samuele", "anna": "Anna", "bruno": "Bruno", "carla": "Carla", "dario": "Dario", "elena": "Elena"}
+        self.cat = {b: {"id": b, "title": "Brano %d" % i, "artist": "Artista %d" % i, "album": "Album", "cover": "c%d.jpg" % i}
+                    for i, b in enumerate(BRANI_FINTI)}
+        self.a = self.nuovo()
+
+    def tearDown(self):
+        self.a.salva()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def nuovo(self):
+        return self.m.Ascoltati(self.file, persone=lambda: set(self.nomi), nome=lambda p: self.nomi.get(p, ""),
+                                catalogo=lambda: self.cat)
+
+    def senti(self, chi, n, volte=1, fa=0):
+        """`chi` ha ascoltato il brano numero n `volte` volte, `fa` giorni fa."""
+        return self.a.ascolta(chi, [{"brano": BRANI_FINTI[n], "giorno": self.m._asc_giorno(fa)}] * volte)
+
+    def classifica(self, quale="settimana", chi="p"):
+        return [(BRANI_FINTI.index(x["brano"]), x["ascolti"]) for x in self.a.classifiche(chi)[quale]]
+
+    def per_te(self, chi="p"):
+        return [(BRANI_FINTI.index(x["brano"]), x["da"]) for x in self.a.classifiche(chi)["per_te"]]
+
+    def test_soglia_tre_persone(self):
+        self.senti("anna", 1)
+        self.senti("bruno", 1)
+        self.assertEqual(self.classifica(), [])
+        self.assertEqual(self.classifica("mese"), [])
+        self.senti("carla", 1)
+        self.assertEqual(self.classifica(), [(1, 3)])
+        self.assertEqual(self.classifica("mese"), [(1, 3)])
+        # tutti vedono la stessa classifica, anche Samuele (che il brano non l'ha ascoltato)
+        for chi in self.nomi:
+            c = self.a.classifiche(chi)
+            self.assertEqual((c["settimana"], c["mese"]), (self.a.classifiche("anna")["settimana"], self.a.classifiche("anna")["mese"]))
+        x = self.a.classifiche("p")["settimana"][0]
+        # titolo e copertina per chi non ha il catalogo (la Gestione); chi l'ha ascoltato non si dice
+        self.assertEqual(x, {"brano": BRANI_FINTI[1], "titolo": "Brano 1", "artista": "Artista 1", "album": "Album",
+                             "copertina": "c1.jpg", "ascolti": 3})
+
+    def test_tetto_per_persona(self):
+        self.senti("anna", 2, volte=50)   # tutto il giorno lo stesso brano: conta 3
+        self.senti("bruno", 2)
+        self.senti("carla", 2)
+        for chi in ("bruno", "carla", "dario"):
+            self.senti(chi, 3, volte=2)
+        self.assertEqual(self.classifica(), [(3, 6), (2, 5)])
+        # nel mese il tetto vale settimana per settimana; più di 30 giorni fa non conta
+        self.senti("anna", 2, volte=4, fa=10)
+        self.senti("anna", 2, volte=4, fa=40)
+        self.assertEqual(self.classifica(), [(3, 6), (2, 5)])
+        self.assertEqual(self.classifica("mese"), [(2, 8), (3, 6)])
+
+    def test_ascolti_scartati(self):
+        g = self.m._asc_giorno
+        voci = [{"brano": "nonvalido", "giorno": g(0)}, {"brano": BRANI_FINTI[1], "giorno": "2026-02-31"},
+                {"brano": BRANI_FINTI[1], "giorno": g(self.m.ASCOLTATI_GIORNI)},   # più di 2 anni fa
+                {"brano": "ffffffffffffffff", "giorno": g(0)},                     # non è nel catalogo
+                {"brano": BRANI_FINTI[1], "giorno": g(-5)},                        # tra 5 giorni
+                {"brano": BRANI_FINTI[1], "giorno": g(-1)},                        # domani (fuso orario diverso): conta oggi
+                {"brano": BRANI_FINTI[1]},                                         # senza giorno: oggi
+                "testo", None, {"brano": ["x"]}]
+        self.assertEqual(self.a.ascolta("anna", voci), (2, 8))
+        self.assertEqual(self.a.classifiche("anna")["io"]["ascolti"], 2)
+        self.assertEqual(self.a.ascolta("zeta", [{"brano": BRANI_FINTI[1]}]), (0, 1))   # persona che non c'è (revocata)
+        with unittest.mock.patch.object(self.m, "ASCOLTATI_GIORNO_MAX", 5):   # un'app impazzita non riempie il file
+            self.assertEqual(self.senti("bruno", 4, volte=8), (5, 3))
+        # catalogo vuoto (il Mac sta ancora leggendo il disco): si tengono, se l'id è valido
+        self.cat.clear()
+        self.assertEqual(self.a.ascolta("carla", [{"brano": "ffffffffffffffff"}]), (1, 0))
+
+    def test_nomi_solo_con_condivisione(self):
+        for chi in ("anna", "bruno", "carla"):
+            self.senti(chi, 5)
+        self.senti("anna", 6, volte=2)
+        self.assertEqual(self.a.classifiche("p")["condivisi"], [])
+        self.assertFalse(self.a.classifiche("anna")["io"]["condivido"])
+        self.assertTrue(self.a.condividi("anna", True))
+        c = self.a.classifiche("p")["condivisi"]
+        self.assertEqual([x["nome"] for x in c], ["Anna"])
+        # anche il brano che ha ascoltato solo lei: l'ha scelto lei di farlo vedere
+        self.assertEqual([(BRANI_FINTI.index(x["brano"]), x["ascolti"]) for x in c[0]["brani"]], [(6, 2), (5, 1)])
+        self.assertEqual(self.a.classifiche("anna")["condivisi"], [])   # «Cosa ascolta Anna» non serve ad Anna
+        self.assertTrue(self.a.classifiche("anna")["io"]["condivido"])
+        self.assertFalse(self.a.condividi("anna", False))
+        self.assertEqual(self.a.classifiche("p")["condivisi"], [])
+        self.assertNotIn("Anna", json.dumps(self.a.classifiche("p")))
+        self.a.salva()
+        self.assertFalse(self.nuovo().classifiche("anna")["io"]["condivido"])
+
+    def test_per_te(self):
+        for n in (1, 2, 3, 4, 5):
+            self.senti("p", n)
+        for n in (1, 2, 3, 4, 5, 6, 7):
+            self.senti("anna", n)
+        for n in (1, 2, 3, 4, 6, 9):
+            self.senti("bruno", n)
+        for n in (30, 31, 32, 33, 6, 8):    # gusti diversi da quelli di Samuele
+            self.senti("carla", n)
+        for chi in ("dario", "elena"):
+            for n in (30, 31, 32, 33, 8, 9):
+                self.senti(chi, n)
+        # 6 (Anna, Bruno, Carla) e 9 (Bruno, Dario, Elena): da chi ha gusti simili e ascoltati da almeno 3 persone;
+        # 7 l'ha sentito solo Anna, 8 solo chi non somiglia a Samuele
+        self.assertEqual(self.per_te(), [(6, None), (9, None)])
+        self.assertTrue(self.a.condividi("anna", True))
+        self.assertEqual(self.per_te(), [(6, "Anna"), (7, "Anna"), (9, None)])
+        self.a.condividi("anna", False)
+        self.assertEqual(self.per_te(), [(6, None), (9, None)])
+        # un brano sentito dopo il calcolo esce subito dai consigli
+        self.senti("p", 6)
+        self.assertEqual(self.per_te(), [(9, None)])
+        # i consigli si ricalcolano di notte (e all'avvio): fino ad allora restano quelli
+        for n in (1, 2, 3, 4, 5, 10):
+            self.senti("dario", n)
+        self.senti("carla", 10)
+        self.senti("elena", 10)
+        self.assertEqual(self.per_te(), [(9, None)])
+        self.a.ricalcola()
+        self.assertIn((10, None), self.per_te())
+        # chi non ha ancora ascoltato niente: nessun consiglio
+        self.nomi["fabio"] = "Fabio"
+        self.assertEqual(self.per_te("fabio"), [])
+
+    def test_anche(self):
+        for chi in ("p", "anna", "bruno"):
+            self.senti(chi, 1)
+            self.senti(chi, 2)
+        self.senti("p", 3)
+        self.senti("anna", 3)       # con il brano 1 solo da 2 persone
+        self.senti("carla", 3)
+        self.senti("dario", 3)
+        self.assertEqual([BRANI_FINTI.index(x["brano"]) for x in self.a.anche(BRANI_FINTI[1])], [2])
+        self.assertEqual(self.a.anche(BRANI_FINTI[1])[0]["titolo"], "Brano 2")
+        self.assertEqual(self.a.anche(BRANI_FINTI[3]), [])
+        self.senti("elena", 4)
+        self.senti("elena", 1)
+        self.assertEqual(self.a.anche(BRANI_FINTI[4]), [])   # un brano di una persona sola non dice niente di lei
+
+    def test_revoca(self):
+        for chi in ("anna", "bruno", "carla"):
+            self.senti(chi, 7)
+        self.a.condividi("carla", True)
+        self.assertEqual(self.classifica(), [(7, 3)])
+        self.assertEqual([x["nome"] for x in self.a.classifiche("p")["condivisi"]], ["Carla"])
+        del self.nomi["carla"]   # Samuele revoca Carla
+        self.assertEqual(self.classifica(), [])
+        self.assertEqual(self.a.classifiche("p")["condivisi"], [])
+        # di notte i suoi ascolti escono anche dal file
+        self.a.pulisci()
+        self.a.salva()
+        with open(self.file, encoding="utf-8") as f:
+            self.assertNotIn("carla", f.read())
+
+    def test_cancella_i_propri(self):
+        for chi in ("anna", "bruno", "carla"):
+            self.senti(chi, 8, volte=2)
+            self.senti(chi, 9)
+        self.senti("p", 9)
+        self.senti("p", 11)
+        self.assertIn((8, None), self.per_te())
+        self.assertEqual(self.a.cancella("anna"), 3)
+        self.assertEqual(self.a.classifiche("anna")["io"]["ascolti"], 0)
+        self.assertEqual(self.classifica(), [(9, 3)])
+        self.assertNotIn((8, None), self.per_te())   # subito, senza aspettare il calcolo della notte
+        with open(self.file, encoding="utf-8") as f:   # e subito anche dal disco
+            self.assertNotIn('"anna"', f.read())
+        self.assertEqual(self.a.cancella("anna"), 0)
+
+    def test_file(self):
+        self.senti("anna", 1, volte=2)
+        self.a.condividi("anna", True)
+        self.a.salva()
+        self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(os.path.dirname(self.file)), ["ascoltati.json"])   # niente file temporanei rimasti
+        self.assertEqual(self.nuovo().classifiche("anna")["io"], {"condivido": True, "ascolti": 2, "nome": "Anna"})
+        # al più 2 anni: quello che è più vecchio esce
+        with open(self.file, encoding="utf-8") as f:
+            d = json.load(f)
+        vecchio = self.m._asc_giorno(self.m.ASCOLTATI_GIORNI + 3)
+        d["conti"]["anna"][vecchio] = {BRANI_FINTI[2]: 1}
+        with open(self.file, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        b = self.nuovo()
+        self.assertEqual(b.classifiche("anna")["io"]["ascolti"], 2)
+        b.pulisci()
+        b.salva()
+        with open(self.file, encoding="utf-8") as f:
+            self.assertNotIn(vecchio, f.read())
+        # file rovinato: si mette da parte invece di sovrascriverlo con un archivio vuoto
+        with open(self.file, "w") as f:
+            f.write("{rotto")
+        r = self.nuovo()
+        self.assertEqual(r.classifiche("anna")["io"]["ascolti"], 0)
+        self.assertTrue(os.path.exists(self.file + ".rotto"))
+
+    def test_scritture_vicine_insieme(self):
+        with unittest.mock.patch.object(self.m, "ASCOLTATI_SALVA", 0.3):
+            self.senti("anna", 1)
+            self.senti("anna", 2)   # subito dopo: va su disco poco dopo, con una scrittura sola
+            def leggi():
+                with open(self.file, encoding="utf-8") as f:
+                    return f.read()
+            self.assertIn(BRANI_FINTI[1], leggi())
+            self.assertTrue(aspetta(lambda: BRANI_FINTI[2] in leggi(), 5))
+
+    def test_casa_conta_come_samuele(self):
+        m = self.m
+        with unittest.mock.patch.object(m, "ACC", m.Accesso(os.path.join(self.base, "accesso.json"))), \
+                unittest.mock.patch.object(m, "PERS", m.Persone(os.path.join(self.base, "persone.json"))), \
+                unittest.mock.patch.object(m, "ASCOLTATI", self.a):
+            def casa(metodo, resto, corpo=None):
+                h = FintaRisposta("192.168.1.20")
+                self.assertFalse(m.controlla_accesso(h))
+                self.assertEqual(h._chi["ruolo"], "casa")
+                m._ascoltati(h, metodo, resto, corpo or {})
+                return h.codice, h.risposta()
+            self.assertEqual(casa("POST", [], {"ascolti": [{"brano": BRANI_FINTI[1]}]}), (200, {"contati": 1, "scartati": 0}))
+            self.assertEqual(self.a.classifiche("p")["io"]["ascolti"], 1)
+            st, j = casa("GET", [])
+            self.assertEqual((st, j["io"]["nome"], j["io"]["cambia"]), (200, "Samuele", False))
+            # dalla rete di casa non si cambia niente degli ascolti di Samuele
+            for metodo, resto in (("POST", ["condividi"]), ("DELETE", [])):
+                with self.assertRaises(m.ErroreExtra) as e:
+                    casa(metodo, resto, {"si": True})
+                self.assertEqual(e.exception.codice, 403)
+            self.assertEqual(self.a.classifiche("p")["io"], {"condivido": False, "ascolti": 1, "nome": "Samuele"})
+
+
+class TestAscoltatiServer(unittest.TestCase):
+    """Le rotte api/extra/ascoltati sul server di prova: invitati, Samuele, revoca, cancellazione, ascolti fatti senza rete."""
+
+    ORIGINE = "https://mac.esempio.ts.net:10000"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-ascoltati-server-")
+        cls.c = prepara_cartelle(cls.base)
+        for i in range(1, 9):
+            with open(os.path.join(cls.c["musica"], "Artista %d - Brano %d.mp3" % (i, i)), "wb") as f:
+                f.write(b"\0" * 2000)
+        cls.s = Server(cls.base, cls.c, ["--pubblico", cls.ORIGINE]).avvia()
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_ascoltati_server", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cat = aspetta(lambda: (lambda j: j if len(j["brani"]) == 8 else None)(cls.s.json("GET", "/api/musica/catalogo")))
+        cls.b = {int(x["title"].split()[-1]): x["id"] for x in cat["brani"]}
+        cls.ip = 10
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def invitato(self, nome):
+        """(persona, biscotto) di una persona invitata entrata dal suo link."""
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        TestAscoltatiServer.ip += 1
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso/invito/" + codice, b"", intest=dict(
+            FUNNEL, **{"X-Forwarded-For": "203.0.113.%d" % self.ip, "Origin": self.ORIGINE,
+                       "Content-Type": "application/x-www-form-urlencoded"}))
+        self.assertEqual(st, 200, b[:200])
+        v = [x for x in h.get_all("Set-Cookie") if x.startswith("am_accesso=")][0].split(";")[0].split("=", 1)[1]
+        return a["id"], v
+
+    def da(self, v, metodo, percorso, corpo=None, origine=None):
+        st, h, b = richiesta(self.s.porta, metodo, percorso, corpo, intest=dict(
+            FUNNEL, **{"Cookie": "am_accesso=" + v, "Origin": origine or self.ORIGINE}))
+        return st, (json.loads(b.decode("utf-8")) if b else None)
+
+    def samuele(self, metodo, percorso, corpo=None, codice=200):
+        return self.s.json(metodo, percorso, corpo, codice)
+
+    def voci(self, n, fa=0, volte=1):
+        return {"ascolti": [{"brano": self.b[n], "giorno": self.m._asc_giorno(fa)}] * volte}
+
+    def sett(self, j, n, quale="settimana"):
+        return [x["ascolti"] for x in j[quale] if x["brano"] == self.b[n]]
+
+    def test_1_invitati_e_samuele(self):
+        tre = [self.invitato(n) for n in ("Anna", "Bruno", "Carla")]
+        for _, v in tre:
+            self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(1)), (200, {"contati": 1, "scartati": 0}))
+            # ascolti fatti senza rete 12 giorni fa, arrivati adesso: contano in quel giorno
+            self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(6, fa=12))[0], 200)
+        self.assertEqual(self.samuele("POST", "/api/extra/ascoltati", {"brano": self.b[1]}), {"contati": 1, "scartati": 0})
+        st, j = self.da(tre[0][1], "GET", "/api/extra/ascoltati")
+        self.assertEqual(st, 200)
+        self.assertEqual([(x["brano"], x["titolo"], x["artista"], x["ascolti"]) for x in j["settimana"]],
+                         [(self.b[1], "Brano 1", "Artista 1", 4)])
+        self.assertEqual((self.sett(j, 6), self.sett(j, 6, "mese")), ([], [3]))
+        self.assertEqual(j["io"], {"condivido": False, "ascolti": 2, "nome": "Anna", "cambia": True})
+        # Samuele vede le stesse classifiche di tutti e, di una persona, niente (anche se lo chiede)
+        sam = self.samuele("GET", "/api/extra/ascoltati?persona=" + tre[0][0])
+        self.assertEqual((sam["settimana"], sam["mese"]), (j["settimana"], j["mese"]))
+        self.assertEqual(sam["io"], {"condivido": False, "ascolti": 1, "nome": "Samuele", "cambia": True})
+        self.assertNotIn("ascolt", json.dumps(self.samuele("GET", "/api/extra/gestione/persone")))
+
+    def test_2_rotte_permesse_agli_invitati(self):
+        pid, v = self.invitato("Elisa")
+        for metodo, p, corpo in (("GET", "/api/extra/ascoltati", None), ("POST", "/api/extra/ascoltati", {"ascolti": []}),
+                                 ("HEAD", "/api/extra/ascoltati", None),
+                                 ("GET", "/api/extra/ascoltati/anche/" + self.b[2], None),
+                                 ("POST", "/api/extra/ascoltati/condividi", {"si": False}),
+                                 ("DELETE", "/api/extra/ascoltati", None), ("GET", "/musica/api/extra/ascoltati", None)):
+            st, j = self.da(v, metodo, p, corpo)
+            self.assertEqual(st, 200, (metodo, p, j))
+        for p in ("/api/extra/ascoltatix", "/api/extra/ascoltati/anche/x/y", "/api/extra/ascoltati/tutti"):
+            self.assertEqual(self.da(v, "GET", p)[0], 403, p)
+        self.assertEqual(self.da(v, "GET", "/api/extra/ascoltati/anche/nonvalido")[0], 400)
+        self.assertEqual(self.samuele("GET", "/api/extra/ascoltati/tutti", codice=404)["errore"][:9], "Richiesta")
+        # le scritture solo dall'app, come le altre
+        self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati/condividi", {"si": True}, origine="https://altro.example")[0], 403)
+        self.assertEqual(self.da(v, "DELETE", "/api/extra/ascoltati", origine="https://altro.example")[0], 403)
+        self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", {"ascolti": [{}] * 501})[0], 413)
+
+    def test_3_condivisione_nomi_e_revoca(self):
+        (gina, vg), (ugo, vu), (lia, vl) = (self.invitato(n) for n in ("<b>Gina</b>", "Ugo", "Lia"))
+        for v in (vg, vu, vl):
+            self.da(v, "POST", "/api/extra/ascoltati", self.voci(3))
+        self.samuele("POST", "/api/extra/ascoltati", self.voci(3))
+        self.assertEqual(self.sett(self.samuele("GET", "/api/extra/ascoltati"), 3), [4])
+        self.assertEqual(self.da(vg, "POST", "/api/extra/ascoltati/condividi", {"si": True}), (200, {"condivido": True}))
+        st, j = self.da(vu, "GET", "/api/extra/ascoltati")
+        self.assertEqual([(x["nome"], [y["brano"] for y in x["brani"]]) for x in j["condivisi"]], [("<b>Gina</b>", [self.b[3]])])
+        self.assertEqual([x["nome"] for x in self.samuele("GET", "/api/extra/ascoltati")["condivisi"]], ["<b>Gina</b>"])
+        self.assertEqual(self.da(vg, "POST", "/api/extra/ascoltati/condividi", {"si": False}), (200, {"condivido": False}))
+        self.assertEqual(self.da(vu, "GET", "/api/extra/ascoltati")[1]["condivisi"], [])
+        # una persona revocata esce dalle classifiche
+        self.assertTrue(self.pers.revoca_persona(lia))
+        self.assertEqual(self.sett(self.samuele("GET", "/api/extra/ascoltati"), 3), [3])
+        self.assertTrue(self.pers.revoca_persona(ugo))
+        self.assertEqual(self.sett(self.samuele("GET", "/api/extra/ascoltati"), 3), [])
+        self.assertEqual(self.da(vl, "GET", "/api/extra/ascoltati")[0], 401)
+
+    def test_4_anche_e_per_te(self):
+        tre = [self.invitato(n) for n in ("Olga", "Piero", "Rita")]
+        for _, v in tre:
+            self.da(v, "POST", "/api/extra/ascoltati", {"ascolti": self.voci(4)["ascolti"] + self.voci(5)["ascolti"]})
+        pid, v = self.invitato("Sara")
+        self.da(v, "POST", "/api/extra/ascoltati", self.voci(4))
+        st, j = self.da(v, "GET", "/api/extra/ascoltati/anche/" + self.b[4])
+        self.assertEqual((st, [x["brano"] for x in j["brani"]]), (200, [self.b[5]]))
+        st, j = self.da(v, "GET", "/api/extra/ascoltati")
+        self.assertEqual([(x["brano"], x["da"]) for x in j["per_te"]], [(self.b[5], None)])
+
+    def test_5_cancella_i_miei(self):
+        pid, v = self.invitato("Teo")
+        self.da(v, "POST", "/api/extra/ascoltati", self.voci(7, volte=2))
+        self.assertEqual(self.da(v, "GET", "/api/extra/ascoltati")[1]["io"]["ascolti"], 2)
+        self.assertEqual(self.da(v, "DELETE", "/api/extra/ascoltati"), (200, {"ok": True, "cancellati": 2}))
+        self.assertEqual(self.da(v, "GET", "/api/extra/ascoltati")[1]["io"]["ascolti"], 0)
+        with open(os.path.join(self.c["cache"], "ascoltati.json"), encoding="utf-8") as f:
+            self.assertNotIn(pid, f.read())
+        self.assertEqual(os.stat(os.path.join(self.c["cache"], "ascoltati.json")).st_mode & 0o777, 0o600)
+        # anche Samuele i suoi
+        self.assertGreater(self.samuele("DELETE", "/api/extra/ascoltati")["cancellati"], 0)
+        self.assertEqual(self.samuele("GET", "/api/extra/ascoltati")["io"]["ascolti"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -42,6 +42,11 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | GET | `ia` | `{attiva:bool, modelli:[...], modello}` |
 | POST | `ia` `{prompt, sistema, json:bool, modello}` | `{testo}` — IA locale (Ollama su `localhost:11434`), tempo massimo 180 s |
 | GET | `dispositivo` | `{nome, sistema, versione, avvio, memoria:{totale,libera}, dischi:[{nome,percorso,totale,libero}], pulizia:[{nome,percorso,dimensione}]}` |
+| GET | `ascoltati` | `{io:{nome,condivido,ascolti,cambia}, settimana:[…], mese:[…], per_te:[{…,da}], condivisi:[{nome,brani}], soglia}` — classifiche «I più ascoltati in Atlante» (uguali per tutti; un brano solo se l'hanno ascoltato almeno `soglia` persone), «Per te» e «Cosa ascolta …» di chi condivide; ogni brano `{brano,titolo,artista,album,copertina}` |
+| POST | `ascoltati` `{ascolti:[{brano, giorno:'AAAA-MM-GG'}]}` | `{contati, scartati}` — brani del catalogo che hanno suonato davvero (anche quelli di giorni passati, fatti senza rete) |
+| POST | `ascoltati/condividi` `{si:bool}` | `{condivido}` — «Condividi i miei ascolti» (spento all'inizio) |
+| DELETE | `ascoltati` | `{ok, cancellati}` — cancella dal Mac mini i propri ascolti |
+| GET | `ascoltati/anche/<brano>` | `{brani:[…]}` — «Chi ascolta questo brano ascolta anche…» |
 
 ## API dell'app che ospita (`AX.player`, oppure `parent.AM`)
 `playExternal(items, start, from)`, `toggle()`, `next()`, `prev()`, `seek(sec)`,
