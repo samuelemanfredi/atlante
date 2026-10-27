@@ -5925,6 +5925,19 @@ class TestChatArchivio(unittest.TestCase):
             with unittest.mock.patch.object(self.m.time, "strftime", return_value="2099-01-01"):   # il giorno dopo
                 self.ch.carica_pezzo(a, al[1], "0", os.urandom(1000))
 
+    def test_limite_comune_con_i_caricamenti(self):
+        # allegati della chat, brani e film contano nello stesso conto di 20 GB al giorno (Quote dei caricamenti)
+        (a, aa, da), (b, ab, db), cid = self.coppia()
+        q = self.m.Quote(os.path.join(self.base, "quote-comune.json"), 1500)
+        with unittest.mock.patch.object(self.m, "QUOTE", q):
+            al = [self.ch.nuovo_allegato(a, {"conv": cid, "dimensione": 1000, "pezzi": 1})["id"] for _ in range(2)]
+            self.ch.carica_pezzo(a, al[0], "0", os.urandom(1000))
+            self.assertEqual(q.usati(self.m._limite(a)), 1000)
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                self.ch.carica_pezzo(a, al[1], "0", os.urandom(1000))
+            self.assertEqual(e.exception.codice, 429)
+            self.assertIn("di oggi: si riprende domani", e.exception.testo)
+
     def test_notifiche_con_la_chat_aperta(self):
         (a, aa, da), (b, ab, db), cid = self.coppia()
         mandate = []

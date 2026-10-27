@@ -536,23 +536,37 @@ function fermaMusica(ev) {
    «Carica nella libreria» (api/extra/carica…; per un video, la richiesta di consenso per i film). Qui si chiama
    POST carica {nome, dimensione, tipo, origine:'chat'} -> {id, pezzo} e poi POST carica/<id>/<n> a pezzi (byte). Finché
    quelle rotte non ci sono (404, 405, 501) o non sono permesse (403), il tasto dice «Arriva presto». */
+// «Aggiungi ad Atlante» su un contenuto ricevuto: il telefono lo decifra e lo manda ai caricamenti (rotte di
+// carica.html, CONTRATTO.md). Un brano va in «Da controllare»; un video è un film, che prima chiede il consenso di
+// Samuele: quando l'ha dato, si tocca di nuovo il tasto e il video parte. Le foto in Atlante non entrano.
 async function aggiungiAdAtlante(id) {
   const x = MSGS.find(m => m.id === id); if (!x || !x.contenuto.allegato) return;
-  const a = x.contenuto.allegato;
+  const a = x.contenuto.allegato, film = x.contenuto.tipo === 'video';
+  if (x.contenuto.tipo === 'foto') return toast('In Atlante entrano brani e film: le foto restano nella chat');
+  const nome = a.nome || (film ? 'video.mp4' : 'brano.m4a');
+  const json = async r => { try { return await r.json(); } catch (e) { return {}; } };
   try {
-    const r = await AX.fetchT(AX.API + 'carica', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({nome:a.nome || x.contenuto.tipo, dimensione:a.dimensione, tipo:a.mime, origine:'chat', film:x.contenuto.tipo === 'video'})}, 30000);
-    if ([403, 404, 405, 501].indexOf(r.status) >= 0) return toast('Arriva presto');
-    let j = {}; try { j = await r.json(); } catch (e) {}
+    // lo stesso file (nome, grandezza, data) ritrova il caricamento a metà o la richiesta del film già mandata
+    const corpo = {tipo:film ? 'film' : 'brano', nome, dimensione:a.dimensione, modificato:Math.round(+x.t || 0) || 1};   // quando è arrivato il messaggio: stesso valore a ogni tocco
+    if (film) corpo.titolo = nome.replace(/\.[^.]+$/, '');
+    const r = await AX.fetchT(AX.API + 'caricamenti', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(corpo)}, 30000);
+    const j = await json(r);
     if (!r.ok) return toast(j.errore || 'Il Mac mini ha risposto ' + r.status);
-    if (j.consenso) return toast('Richiesta mandata a Samuele: il video si carica quando la consente');
-    const b = await blobDi(a), pezzo = j.pezzo || C.PEZZO;
+    if (film && j.stato !== 'consentito' && j.stato !== 'in arrivo')
+      return toast(j.stato === 'rifiutato' ? 'Samuele non ha consentito questo film' :
+        'Richiesta mandata a Samuele: quando la consente, tocca di nuovo «Aggiungi ad Atlante»');
+    const b = await blobDi(a), pezzo = Math.min(j.pezzo || C.PEZZO, 8 * 1024 * 1024);
+    let da = j.ricevuti || 0;
     toast('Carico in Atlante…');
-    for (let n = 0; n * pezzo < b.size; n++) {
-      const q = await AX.fetchT(AX.API + 'carica/' + enc(j.id) + '/' + n, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:b.slice(n * pezzo, (n + 1) * pezzo)}, 180000);
-      if (!q.ok) { let e = {}; try { e = await q.json(); } catch (er) {} throw new Error(e.errore || 'Il Mac mini ha risposto ' + q.status); }
+    while (da < b.size) {
+      const q = await AX.fetchT(AX.API + 'caricamenti/' + enc(j.id) + '?da=' + da, {method:'PUT', headers:{'Content-Type':'application/octet-stream'}, body:b.slice(da, da + pezzo)}, 180000);
+      const e = await json(q);
+      if (q.status === 409 && isFinite(e.ricevuti)) { da = e.ricevuti; continue; }   // il Mac mini ne ha già di più: si riprende da lì
+      if (!q.ok) throw new Error(e.errore || 'Il Mac mini ha risposto ' + q.status);
+      if (e.stato === 'errore') throw new Error(e.errore || 'Il Mac mini non l\'ha accettato');
+      da = isFinite(e.ricevuti) ? e.ricevuti : da + pezzo;
     }
-    toast('Aggiunto: lo trovi in «I miei caricamenti», Samuele lo controlla prima di metterlo in Atlante');
+    toast(film ? 'Film caricato nel Cloud' : 'Aggiunto: lo trovi in «I miei caricamenti», Samuele lo controlla prima di metterlo in Atlante');
   } catch (e) { toast(e.message); }
 }
 
@@ -746,7 +760,7 @@ function bolla(x, c) {
     case 'illeggibile': dentro = '<i>Messaggio non leggibile su questo telefono (forse mandato prima che le sue chiavi ci fossero)</i>'; break;
     default: dentro = '<i>Un tipo di messaggio che questa versione dell\'app non sa mostrare</i>';
   }
-  if (!x.mio && a && a.id && (k.tipo === 'foto' || k.tipo === 'video' || k.tipo === 'audio')) az += '<button data-aggiungi="' + esc(x.id) + '">Aggiungi ad Atlante</button>';
+  if (!x.mio && a && a.id && (k.tipo === 'video' || k.tipo === 'audio')) az += '<button data-aggiungi="' + esc(x.id) + '">Aggiungi ad Atlante</button>';
   if (a && a.id && x.stato !== 'carico' && navigator.share) az += '<button data-condividi="' + esc(x.id) + '">Condividi</button>';
   const autore = c.tipo === 'gruppo' && !x.mio ? '<span class="aut">' + esc(nomeDi(x.da)) + '</span>' : '';
   const nota = (x.stato === 'errore' || x.stato === 'attesa') ? '<div class="nota-m">' + esc(x.errore || 'Non inviato') + (x.stato === 'errore' ? '<button data-riprova="' + esc(x.id) + '">Riprova</button>' : '') + '</div>' : '';

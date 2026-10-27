@@ -8526,11 +8526,14 @@ def _chat_contatto():
     return PUBBLICO or INDIRIZZO or "mailto:atlante-musica@example.com"
 
 
-# ----- PUNTO DI UNIONE con «Caricamenti»: 20 GB al giorno per persona -----
-# Brani caricati, film e allegati della chat contano insieme (spec, «Caricamenti e Da controllare»). Finché quel conto
-# comune non c'è, la chat tiene il suo (in chat.json, si azzera a mezzanotte): all'unione dei rami questa funzione deve
-# chiamare il conto comune, con lo stesso errore 429.
+# ----- 20 GB al giorno per persona, insieme ai caricamenti -----
+# Brani caricati, film e allegati della chat contano insieme (spec, «Caricamenti e Da controllare»): il conto è quello
+# comune dei caricamenti (Quote, Samuele senza limite). Senza caricamenti attivi (prove della chat da sola) la chat tiene
+# il suo, in chat.json, che si azzera a mezzanotte.
 def _chat_conta_giorno(chat, persona, byte):
+    if QUOTE is not None:
+        QUOTE.consuma(_limite(persona), byte)
+        return
     oggi = time.strftime("%Y-%m-%d")
     g = chat.dati["giorno"]
     if g.get("data") != oggi or not isinstance(g.get("byte"), dict):
