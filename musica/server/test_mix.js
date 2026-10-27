@@ -116,7 +116,7 @@ function prove(src, fatte) {
   prova('brano nuovo non pronto', () => scenarioNonPronto(src));
   prova('come prima', () => scenarioComePrima(src));
   prova('pausa in attesa', () => scenarioPausa(src));
-  prova('un lettore solo', () => scenarioUnSolo(src));
+  prova('pausa non chiesta in attesa', () => scenarioPausaNonChiesta(src));
   prova('lettore rifiutato', () => scenarioRifiutato(src));
   prova('precedente in attesa', () => scenarioPrecedente(src));
   prova('brano spostato in attesa', () => scenarioSpostato(src));
@@ -127,6 +127,7 @@ function prove(src, fatte) {
   prova('mix a fine brano con il mixer', () => scenarioFineBrano(src, true));
   prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
   prova('iOS prima del 27 senza mixer', () => versioneIOS(src));
+  prova('niente più «un lettore solo»', () => senzaUnSolo(src));
 }
 
 // tutto lo script dell'app si compila (non si esegue): un errore di battitura in qualsiasi punto si vede qui
@@ -147,6 +148,7 @@ function collegamenti(src) {
   c(/next\(\) \{ avanti\(\); \}/, 'AM.next → avanti()');
   c(/auOn\('timeupdate', saltoTick\)/, "auOn('timeupdate', saltoTick)");
   c(/auOn\('pause', saltoPausa\)/, "auOn('pause', saltoPausa)");
+  c(/auOn\('pause', xfPausa\)/, "auOn('pause', xfPausa)");
   c(/auOn\('seeking', saltoSpostato\)/, "auOn('seeking', saltoSpostato)");
   // «Precedente» e la libreria restano immediati
   vero(!/function prev\(\)[^\n]*saltaA/.test(src), 'Precedente non deve mixare');
@@ -322,7 +324,7 @@ function mondo(src, opz) {
   const env = {
     au:DECKS[0], DECKS, AUX, curId:null, curUrl:null, keptFor:null, countFor:null, userVol:1, pausaVoluta:0,
     S:{queue:brani.map(b => b.id), orig:[], qi:0, shuffle:false, repeat:'off', from:''}, T,
-    MIX:{on:true, X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, unSolo:false, prepT:0, XS:6, salto:null},
+    MIX:{on:true, X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0, XS:6, salto:null},
     BPMC:new Map(), RC:{id:null}, NEEDS_MIXER:false, API:'api/musica/', SRV:true, ls:{get:(k, d) => d, set:() => {}},
     Promise:SP, setTimeout:tempo.setTimeout, setInterval:tempo.setInterval, clearTimeout:tempo.clear, clearInterval:tempo.clear,
     performance:{now:() => W.t}, Date:{now:() => 1e12 + W.t},
@@ -344,7 +346,7 @@ function mondo(src, opz) {
       return ritardo(opz.misuraMs != null ? opz.misuraMs : 500, v);
     }
   };
-  const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev',
+  const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev', 'xfPausa',
     'mixFattore', 'rampaVel', 'pezzoQui', 'partenzaBattito', 'accorciaW', 'saltoResto', 'velocita', 'conPitch', 'gradini', 'rampaGradini', 'correzioneFase',
     'avanti', 'saltaA', 'saltoIdx', 'gridQui', 'saltoMisurato', 'saltoTick', 'saltoParti', 'saltoCarica', 'saltoVia', 'saltoSubito', 'saltoAnnulla', 'saltoPausa', 'saltoSpostato'],
   ['const wrap = ', 'const otherDeck = ', 'const SALTO = '], env, null,
@@ -352,7 +354,7 @@ function mondo(src, opz) {
   // gli eventi come auOn nell'app: contano solo quelli del lettore in uso
   tutti.forEach(el => {
     el.addEventListener('timeupdate', () => { if (el === env.au) { F.xfTick(); F.saltoTick(); } });
-    el.addEventListener('pause', () => { if (el === env.au) { if (env.MIX.act) F.xfEnd(); F.saltoPausa(); } });
+    el.addEventListener('pause', () => { if (el === env.au) { F.xfPausa(); F.saltoPausa(); } });
     el.addEventListener('seeking', () => { if (el === env.au) F.saltoSpostato(); });
     el.addEventListener('ended', () => { if (el === env.au) log.fine.push(env.curId); });
   });
@@ -506,7 +508,6 @@ function scenarioComePrima(src) {
   const casi = [
     ['in pausa', M => { M.env.pausaVoluta = 1e12 + M.ora(); M.DECKS[0].pause(); }],
     ['mix spento', M => { M.env.MIX.on = false; }],
-    ['un lettore solo', M => { M.env.MIX.unSolo = true; }],
     ['podcast', M => { M.DECKS[0].pause(); M.env.au = M.AUX; M.AUX.src = 'blob:rA'; M.AUX.play(); M.passa(0.2); }],
     ['poco tempo', M => { M.DECKS[0].currentTime = 240 - 13; }],
     ['altro lettore rifiutato', M => { M.DECKS[1]._rifiuta = true; }],
@@ -530,13 +531,14 @@ function scenarioPausa(src) {
   vero(!env.MIX.unSolo && /^pausa/.test(ultimo(log, 'mix al salto').esito), 'diario');
 }
 
-function scenarioUnSolo(src) {
+// cuffie staccate, una chiamata… mentre si aspetta il salto: il brano scelto pronto e fermo; il mix resta acceso
+function scenarioPausaNonChiesta(src) {
   const M = mondo(src), {env, log, DECKS} = M;
   M.fai(() => M.F.avanti()); M.passa(0.3);
   M.fai(() => DECKS[0].pause());   // fermato da solo appena l'altro lettore si carica
-  vero(env.MIX.unSolo, 'un lettore solo: mix spento');
-  vero(JSON.stringify(log.load) === '[[1,true]]', 'un lettore solo: cambio subito');
-  vero(ultimo(log, 'mix al salto').esito === 'un lettore solo: mix spento', 'diario');
+  vero(JSON.stringify(log.load) === '[[1,false]]', 'pausa non chiesta: brano scelto pronto, fermo (' + JSON.stringify(log.load) + ')');
+  vero(env.MIX.on && env.MIX.unSolo === undefined, 'il mix resta acceso');
+  vero(ultimo(log, 'mix al salto').esito === 'pausa non chiesta: brano nuovo pronto, fermo', 'diario');
 }
 
 function scenarioRifiutato(src) {
@@ -701,4 +703,27 @@ function versioneIOS(src) {
   vero(/function mixerInit\(\) \{\n  if \(MIX\.ctx \|\| !NEEDS_MIXER \|\| IOS_PRIMA_27 \|\|/.test(src), 'mixerInit deve restare spento prima di iOS 27');
   vero(/const IOS_PRIMA_27 = isIOS && !iosDa27\(navigator\.userAgent, novita27\(\)\);/.test(src), 'IOS_PRIMA_27');
   vero(/240405/.test(src), 'il commento con il numero del bug');
+}
+
+// «un lettore solo» tolto: una pausa non chiesta mentre si prepara il mix a fine brano va solo nel diario, e il flag
+// salvato sui dispositivi si cancella una volta
+function senzaUnSolo(src) {
+  vero(!/unSolo/.test(src), 'MIX.unSolo è ancora nell\'app');
+  vero((src.match(/am-mix-unlettore/g) || []).length === 2, 'am-mix-unlettore deve restare solo nella pulizia una tantum');
+  for (const era of [true, false, null]) {
+    const fatto = {via:[], diario:[]};
+    const env = {ls:{get:(k, d) => k === 'am-mix-unlettore' && era !== null ? era : d}, localStorage:{removeItem:k => fatto.via.push(k)}, setTimeout:f => f(), diario:e => fatto.diario.push(e)};
+    new Function('env', 'with (env) { ' + riga(src, "(function () { const era = ls.get('am-mix-unlettore'") + ' }')(env);
+    vero(fatto.via.length === (era === null ? 0 : 1), 'pulizia di am-mix-unlettore (' + era + ')');
+    vero(fatto.diario.length === (era ? 1 : 0) && (!era || fatto.diario[0] === 'un lettore solo: tolto'), 'diario della pulizia (' + era + ')');
+  }
+  // mix a fine brano: pausa da sola mentre si prepara il successivo → nel diario, il piano resta e si riprende
+  const M = mondo(src, {finebrano:true, da:240 - 41}), {env, log, DECKS} = M;
+  M.passa(1.2);
+  vero(env.MIX.plan, 'il mix a fine brano si sta preparando');
+  M.fai(() => DECKS[0].pause());
+  vero(env.MIX.plan && env.MIX.on && env.MIX.unSolo === undefined && !log.load.length, 'la pausa non spegne il mix né cambia brano');
+  vero(log.diario.some(x => x.e === 'pausa in preparazione'), 'la pausa va nel diario');
+  M.fai(() => DECKS[0].play()); M.passa(45);
+  vero(env.curId === 'rB' && log.diario.some(x => x.e === 'mix' && x.match), 'dopo la ripresa il mix a fine brano si fa');
 }

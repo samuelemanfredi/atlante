@@ -1659,7 +1659,7 @@ function checkHeard() {
 }
 auOn('timeupdate', checkHeard);
 auOn('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
-auOn('ended', () => { checkHeard(); if (MIX.on && !MIX.act) diario('fine senza mix', {unSolo:MIX.unSolo, piano:MIX.plan ? MIX.plan.st : ''}); next(true); });
+auOn('ended', () => { checkHeard(); if (MIX.on && !MIX.act) diario('fine senza mix', {piano:MIX.plan ? MIX.plan.st : ''}); next(true); });
 let countFor = null, errRun = 0;
 auOn('playing', () => {
   errRun = 0;
@@ -1695,7 +1695,10 @@ auOn('error', async () => {
    I BPM si misurano sui 30 s finali del brano in corso e sui 30 s iniziali del successivo (dal file sull'iPhone, o dal Mac
    che manda il pezzo già decodificato), una volta sola per brano. Se i ritmi non si riconoscono o sono troppo lontani,
    resta una dissolvenza normale. */
-const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, unSolo:ls.get('am-mix-unlettore', false), prepT:0};
+const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0};
+// «un lettore solo» non c'è più (vedi la pausa del lettore, più sotto): chi l'aveva salvato lo perde, una volta sola. Se
+// era acceso (il mix fermo per sempre per un falso allarme) lo si scrive nel diario
+(function () { const era = ls.get('am-mix-unlettore', null); if (era == null) return; try { localStorage.removeItem('am-mix-unlettore'); } catch (e) {} if (era) setTimeout(() => diario('un lettore solo: tolto'), 0); })();
 let userVol = 1;
 function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iPhone il volume dei lettori non si cambia: lo fa il mixer)
   const g = el._g == null ? 1 : el._g;
@@ -1792,7 +1795,7 @@ function diario(esito, extra) {
   if (typeof devInvia === 'function') devInvia(true);
 }
 function setMix(on) {
-  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else { mixerInit(); MIX.unSolo = false; ls.set('am-mix-unlettore', false); }
+  MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else mixerInit();
   updateNow(); toast(on ? 'Mix a tempo: gli ultimi ' + MIX.X + ' secondi si adattano ai BPM del brano successivo' : 'Mix a tempo disattivato');
 }
 
@@ -2013,7 +2016,7 @@ function xfLoop() { clearInterval(MIX.loop); MIX.loop = setInterval(() => { if (
 function xfTick() {
   if (MIX.act) { xfRun(); return; }
   if (MIX.salto) return;   // un salto a mano in preparazione: il mix a fine brano aspetta
-  if (!MIX.on || MIX.unSolo || au === AUX || au.paused) return;
+  if (!MIX.on || au === AUX || au.paused) return;
   const t = T.get(curId), d = au.duration, c = au.currentTime;
   if (!t || !isFinite(d) || d < 45) return;
   const j = nextIdx(), idB = j >= 0 ? S.queue[j] : null, tb = idB && T.get(idB);
@@ -2039,15 +2042,14 @@ function xfTick() {
   xfStart(P);
 }
 auOn('timeupdate', xfTick);
-auOn('pause', () => {
+auOn('pause', xfPausa);
+function xfPausa() {
   if (MIX.act) xfEnd();
-  // il brano in corso si è fermato da solo proprio mentre si preparava il successivo sull'altro lettore: questo iPhone
-  // non lascia suonare due lettori insieme. Si riprende subito e da qui i passaggi restano su un lettore solo.
-  if (MIX.plan && !au.ended && Date.now() - (MIX.prepT || 0) < 3000 && pausaVoluta < MIX.prepT) {
-    xfAbort(); MIX.unSolo = true; ls.set('am-mix-unlettore', true); diario('un lettore solo: mix spento');
-    au.play().catch(() => {});
-  }
-});
+  // Prima qui una pausa arrivata da sola mentre si preparava il successivo spegneva il mix per sempre («un lettore solo»:
+  // l'iPhone non farebbe suonare due lettori insieme). Nel sorgente di WebKit su iOS due <audio> non si fermano a vicenda
+  // (ConcurrentPlaybackNotPermitted vale solo per i video): erano falsi allarmi (cuffie staccate, chiamate). Va nel diario.
+  if (MIX.plan && !au.ended && Date.now() - pausaVoluta > 1000) diario('pausa in preparazione', {piano:MIX.plan.st, ms:MIX.prepT ? Date.now() - MIX.prepT : -1});
+}
 auOn('seeking', () => { const P = MIX.plan; if (P && P.st === 'ready' && au.currentTime < P.tR) velocita(au, 1); });
 
 /* ---------- mix al salto: lo stesso passaggio a tempo quando si passa avanti a mano ----------
@@ -2134,7 +2136,7 @@ function saltaA(j, subito, daCoda) {
     return k >= 0 ? load(k, true) : subito();
   }
   const id = S.queue[j], tb = id && TT(id), d = au.duration, c = au.currentTime;
-  if (!MIX.on || MIX.unSolo || !curId || au === AUX || au.paused || !tb || tb.ext || id === curId || !canPlay(id) || tb.duration && tb.duration < 20 ||
+  if (!MIX.on || !curId || au === AUX || au.paused || !tb || tb.ext || id === curId || !canPlay(id) || tb.duration && tb.duration < 20 ||
     otherDeck()._rifiuta || !isFinite(d) || d - c < saltoResto()) return subito();
   if (MIX.plan) xfAbort();   // il mix a fine brano che si stava preparando lascia il posto al salto
   if (MIX.act) xfAccorcia(1);   // durante una dissolvenza: quella finisce in 1 s e si salta dal brano nuovo
@@ -2226,16 +2228,10 @@ function saltoAnnulla() {
   if (X.url) URL.revokeObjectURL(X.url);
   if (X.idA === curId) velocita(au, 1);
 }
-// il brano in corso si ferma mentre si aspetta
+// il brano in corso si ferma mentre si aspetta (a mano, cuffie staccate, una chiamata…): si passa al brano scelto, fermo
 function saltoPausa() {
   const X = MIX.salto; if (!X || au.ended) return;
-  // fermato da solo appena l'altro lettore ha cominciato a caricarsi: questo iPhone non fa suonare due lettori insieme
-  if (pausaVoluta < X.t0 && X.prepT && Date.now() - X.prepT < 3000) {
-    MIX.unSolo = true; ls.set('am-mix-unlettore', true);
-    saltoSubito(X, 'un lettore solo: mix spento');
-    return;
-  }
-  saltoSubito(X, 'pausa: brano nuovo pronto, fermo', false);   // pausa durante l'attesa: si passa al brano scelto, fermo
+  saltoSubito(X, pausaVoluta >= X.t0 ? 'pausa: brano nuovo pronto, fermo' : 'pausa non chiesta: brano nuovo pronto, fermo', false);
 }
 // il brano in corso spostato a mano mentre si aspetta: i battiti misurati non valgono più, resta una dissolvenza normale
 function saltoSpostato() {
@@ -2578,7 +2574,7 @@ const inLib = t => t && t.remote && t.sid;
 
 function devStato() {   // quello che gli altri vedono di questo dispositivo
   const t = curId && TT(curId);
-  const mix = {on:MIX.on, unSolo:MIX.unSolo, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-5)};
+  const mix = {on:MIX.on, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-5)};
   if (!t) return {suona:false, vol:userVol, bloccato:DEV.bloccato, mix};
   const coda = [];   // dal brano in corso in avanti, solo quelli della libreria (gli altri non si possono spostare)
   for (let k = Math.max(0, S.qi); k < S.queue.length && coda.length < 300; k++) { const x = TT(S.queue[k]); if (inLib(x)) coda.push(x.sid); }
