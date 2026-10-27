@@ -57,6 +57,27 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | DELETE | `ascoltati` | `{ok, cancellati}` — cancella dal Mac mini i propri ascolti |
 | GET | `ascoltati/anche/<brano>` | `{brani:[…]}` — «Chi ascolta questo brano ascolta anche…» |
 
+### Chat cifrata (`chat/…`, fase 5a)
+Per Samuele (`"p"`) e per gli invitati; dalla rete di casa senza biscotto 403. Il Mac mini riceve solo cifrato (vedi
+`x/chat-cifra.js`): ognuno vede solo le sue conversazioni e solo i messaggi diretti ai suoi dispositivi, Samuele compreso.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `chat/stato` | `{io:{id,nome}, dispositivi:[{id,tipo,creato,visto,notifiche,questo}], vapid, pezzo, giorni, v}` |
+| POST | `chat/dispositivi` `{id, chiave}` | come `chat/stato` — chiave pubblica P-256 non compressa in base64url; 409 se l'id è di un altro |
+| GET | `chat/persone` | `{io, persone:[{id,nome,dispositivi:[{id,chiave,attivo}]}], bloccati:[id], v}` |
+| GET | `chat/conversazioni` | `{conversazioni:[{id,tipo:'due'\|'gruppo',membri,nome,creatore,creato,ultimo,stati:{persona:{c,l}},eventi}], v}` |
+| POST | `chat/conversazioni` `{con}` o `{nome, membri}` | `{conversazione}` — la chat a due è sempre la stessa; gruppi al più 32 persone |
+| POST / DELETE | `chat/conversazioni/<id>/membri` `{persone}` · `…/membri/<persona>` | aggiunge, toglie (chi ha creato il gruppo) o esce (sé stessi) |
+| POST | `chat/conversazioni/<id>/letto` `{seq}` | `{ok:true}` |
+| POST | `chat/messaggi` `{id, conv, disp, corpo, sale, chiavi:{disp:chiave}, allegati}` | `{seq, t}`; 409 `{mancano:[disp]}` se manca un dispositivo (chiavi cambiate), 409 `{nessuno:true}` se l'altra persona non ha ancora la chat |
+| GET | `chat/messaggi?disp=&dopo=&v=&attesa=25` | `{messaggi:[{seq,id,conv,da,disp,t,corpo,sale,chiave,allegati}], fino, altri, v}` — attesa lunga; `dopo` conferma la consegna |
+| POST | `chat/allegati` `{conv, dimensione, pezzi}` | `{id, pezzo}` — al più 200 MB in chiaro, pezzi da 8 MB (+28 byte cifrati) |
+| POST / GET | `chat/allegati/<id>/<n>` | il pezzo cifrato (`application/octet-stream`); si scarica solo se si è ricevuto il messaggio |
+| POST / DELETE | `chat/blocchi` `{persona}` · `chat/blocchi/<persona>` | `{bloccati}` |
+| POST / DELETE | `chat/push` `{disp, endpoint}` · `chat/push/<disp>` | notifiche (solo servizi di Apple, Google, Mozilla, Microsoft) |
+| GET | `chat/avvisi?disp=` | `{avvisi:[{conv,da,nome,gruppo,n,t}]}` — per il testo della notifica, letto dal service worker |
+
 ## API dell'app che ospita (`AX.player`, oppure `parent.AM`)
 `playExternal(items, start, from)`, `toggle()`, `next()`, `prev()`, `seek(sec)`,
 `now()` → `{id,title,artist,album,cover,playing,ext,t,d}` oppure `null`, `onChange(cb)` → funzione per smettere, `toast(msg)`, `close()`,
@@ -113,3 +134,4 @@ Un invitato usa anche `cerca.html`: i brani che scarica vanno in «Da controllar
 | GET | `gestione/contenuti?q=` · `gestione/contenuti/tolti` | ricerca nella libreria (senza `q` gli ultimi arrivati) · brani tolti |
 | POST | `gestione/contenuti/<id>` `{titolo, artista, album}` · PUT `…/copertina` · POST `…/ripristina` | correzione (in `correzioni.json`, il file non cambia) · copertina · via le correzioni |
 | POST | `gestione/contenuti/<id>/togli` · `gestione/contenuti/tolti/<id>/rimetti` | il file in «Tolti» (stesso disco) e fuori dal catalogo, che elenca gli id in `tolti` · di nuovo al suo posto |
+| `chat.html` | chat cifrata da telefono a telefono (a due e di gruppo): testo, foto, video, vocali, brani della libreria, letto/consegnato, Blocca, codice di sicurezza, notifiche; la cifratura è in `chat-cifra.js` (WebCrypto, provata con Deno in `server/test_chat_cifra.js`) |

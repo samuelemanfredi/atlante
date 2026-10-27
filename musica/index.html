@@ -1549,7 +1549,7 @@ const pages = {
       xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
         '<button class="xtile' + (m.k === 'gestione' && (IO.nuove || {}).youtube_bloccato ? ' xyt' : '') + '" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
           (m.k === 'gestione' && nuoveGestione() ? '<span class="xn" aria-label="cose nuove">' + nuoveGestione() + '</span>' : '') + '</button>').join('') + '</div>').join('') +
-      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: la chat e le chiamate.</p>' : '') + ascAltro();
+      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: le chiamate.</p>' : '') + ascAltro();
   },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
@@ -3106,6 +3106,16 @@ function xmodsVisibili() {
   if (IO.ruolo === 'invitato') return XINVITATI;
   return (IO.ruolo === 'proprietario' ? [XGESTIONE] : []).concat(XMODS);
 }
+/* ----- chat cifrata (fase 5a): un riquadro per tutti, anche per gli invitati; la notifica toccata apre la chat ----- */
+const XCHAT = {k:'chat', t:'Chat', d:'Messaggi cifrati da telefono a telefono', i:'💬', c:'#34c759'};
+XMODS.unshift({g:'Chat', m:[XCHAT]});
+XINVITATI[0].m.unshift(XCHAT);
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+  const d = e.data || {};
+  if (d.tipo === 'apri-chat') { setTab('altro'); openX('chat', d.conv ? '?c=' + encodeURIComponent(d.conv) : ''); }
+});
+if ('serviceWorker' in navigator) try { navigator.serviceWorker.startMessages(); } catch (e) {}
+
 async function ioCarica() {
   try {
     const r = await fetchT(XAPI + 'io', {cache:'no-store'}, 6000);
