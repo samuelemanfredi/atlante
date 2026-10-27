@@ -128,6 +128,7 @@ function prove(src, fatte) {
   prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
   prova('iOS prima del 27 senza mixer', () => versioneIOS(src));
   prova('niente più «un lettore solo»', () => senzaUnSolo(src));
+  prova('preparazione interrotta', () => preparazioneInterrotta(src));
 }
 
 // tutto lo script dell'app si compila (non si esegue): un errore di battitura in qualsiasi punto si vede qui
@@ -726,4 +727,23 @@ function senzaUnSolo(src) {
   vero(log.diario.some(x => x.e === 'pausa in preparazione'), 'la pausa va nel diario');
   M.fai(() => DECKS[0].play()); M.passa(45);
   vero(env.curId === 'rB' && log.diario.some(x => x.e === 'mix' && x.match), 'dopo la ripresa il mix a fine brano si fa');
+}
+
+// il play() muto della preparazione interrotto (AbortError): l'ascoltatore di «playing» non deve restare attaccato e
+// fermare il lettore la volta dopo che suona (alla partenza del mix, o quando lo usa un brano scelto dopo)
+function preparazioneInterrotta(src) {
+  const M = mondo(src, {finebrano:true, da:240 - 41}), {env, log, DECKS} = M, B = DECKS[1];
+  B.rifiutaUnaVolta = true;
+  let partito = 0, posB = 0;
+  M.passa(45, () => { if (!partito && env.curId === 'rB') { partito = M.ora(); } if (partito && M.ora() - partito === 3000) posB = B.currentTime; });
+  vero(partito, 'il mix non è partito');
+  vero(env.au === B && !B.paused && B.currentTime > posB + 1, 'il brano nuovo si è fermato da solo alla partenza del mix');
+  // piano annullato dopo il play() interrotto, poi quel lettore suona un brano scelto: non si deve fermare
+  const M2 = mondo(src, {finebrano:true, da:240 - 41}), B2 = M2.DECKS[1];
+  B2.rifiutaUnaVolta = true;
+  M2.passa(2.5);
+  vero(M2.env.MIX.plan && M2.env.MIX.plan.el === B2, 'il successivo si sta preparando su B');
+  M2.fai(() => M2.F.xfAbort());
+  M2.env.au = B2; B2.src = 'blob:rC'; M2.fai(() => B2.play()); M2.passa(1);
+  vero(!B2.paused && B2.currentTime > 0.5, 'il lettore si ferma per un vecchio ascoltatore della preparazione');
 }

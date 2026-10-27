@@ -1929,9 +1929,11 @@ async function xfPrepare(P) {
   if (P.url) URL.revokeObjectURL(P.url);
   P.url = f ? URL.createObjectURL(f) : null;
   velocita(el, 1); setGain(el, 0); P.el = el;
-  // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito
+  // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito.
+  // Se quel play() viene interrotto l'ascoltatore resta attaccato: agisce solo per questo piano, e si stacca quando finisce
   el.muted = true;
-  el.addEventListener('playing', () => { el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; if (MIX.plan === P) P.st = 'ready'; }, {once:true});
+  P.suona = () => { if (MIX.plan !== P) return; el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; P.st = 'ready'; };
+  el.addEventListener('playing', P.suona, {once:true});
   el.src = P.url || API + 'file/' + encodeURIComponent(tb.sid);
   MIX.prepT = Date.now();
   const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
@@ -1941,6 +1943,7 @@ function xfAbort() {
   const A = MIX.act; if (A) xfEnd();
   const P = MIX.plan; MIX.plan = null;
   if (P) {
+    if (P.el && P.suona) P.el.removeEventListener('playing', P.suona);
     if (P.el && P.el !== au) { P.el.muted = false; P.el.pause(); P.el.removeAttribute('src'); try { P.el.load(); } catch (e) {} setGain(P.el, 1); }
     if (P.url && (!P.el || P.el !== au)) URL.revokeObjectURL(P.url);
     if (P.idA === curId) velocita(au, 1);
@@ -1950,6 +1953,7 @@ function xfAbort() {
 function xfStart(P) {
   const out = au, inn = P.el;
   checkHeard();   // il brano che finisce ha suonato: si salva come sempre
+  if (P.suona) inn.removeEventListener('playing', P.suona);   // preparazione interrotta: niente pausa alla partenza
   velocita(inn, 1); conPitch(inn);
   au = inn;
   const qiA = S.qi;
@@ -2195,7 +2199,7 @@ function saltoCarica(X) {
     const el = X.el = otherDeck();
     X.url = f ? URL.createObjectURL(f) : null;
     velocita(el, 1); setGain(el, 0); el.muted = true;
-    X.suona = () => { el.pause(); el.muted = false; if (MIX.salto === X) X.pronto = true; };
+    X.suona = () => { if (MIX.salto !== X) return; el.pause(); el.muted = false; X.pronto = true; };
     el.addEventListener('playing', X.suona, {once:true});
     el.src = X.url || API + 'file/' + encodeURIComponent(tb.sid);
     X.prepT = Date.now();
