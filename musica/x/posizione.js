@@ -124,9 +124,10 @@
       st.visti.add(c.id);
       if (!primo) { avvisa(c.da.nome + ' condivide la sua posizione'); try { navigator.vibrate && navigator.vibrate(200); } catch (e) {} }
     }
-    for (const c of st.perMe) if (c.pos && (!st.aperte[c.id] || st.aperte[c.id].seq !== c.seq)) {
-      try { st.aperte[c.id] = {seq:c.seq, p:await G.Cifra.apri(c.pos, c.id, c.da.id)}; }
-      catch (e) { st.aperte[c.id] = {seq:c.seq, errore:e.message}; }
+    // una posizione nuova si riconosce dal suo id (casuale, uno per aggiornamento): i numeri ripartono se il Mac si riavvia
+    for (const c of st.perMe) if (c.pos && (!st.aperte[c.id] || st.aperte[c.id].mid !== c.pos.id)) {
+      try { st.aperte[c.id] = {mid:c.pos.id, p:await G.Cifra.apri(c.pos, c.id, c.da.id)}; }
+      catch (e) { st.aperte[c.id] = {mid:c.pos.id, errore:e.message}; }
     }
     for (const k in st.aperte) if (!st.perMe.some(c => c.id === k)) delete st.aperte[k];
     const chiusi = [...st.chiusi].filter(k => st.perMe.some(c => c.id === k));

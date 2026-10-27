@@ -2083,8 +2083,8 @@ def _attesa(h):
 # P-256 nel browser; la privata non esce dal telefono, qui arriva solo la pubblica, in <cache>/chiavi.json) e cifra ogni
 # aggiornamento con una chiave nuova, cifrata a sua volta per ciascun dispositivo dei destinatari (x/cifra.js: lo stesso
 # schema e gli stessi formati della chat, x/chat-cifra.js). Il Mac mini sa chi condivide con chi, da quando e fino a
-# quando; della posizione tiene solo l'ultimo aggiornamento cifrato, in memoria (niente su disco), e lo dimentica alla
-# scadenza o quando la condivisione si ferma.
+# quando (in <cache>/posizioni.json, così un riavvio non ferma una condivisione a metà uscita); della posizione tiene
+# solo l'ultimo aggiornamento cifrato, in memoria e mai su disco, e lo dimentica alla scadenza o quando la si ferma.
 #
 #   GET    chiavi                                 chi è in Atlante e le chiavi pubbliche dei suoi dispositivi
 #   POST   chiavi {id, chiave}                    questo dispositivo e la sua chiave pubblica (P-256 non compressa)
@@ -2281,15 +2281,48 @@ class Chiavi:
 
 
 class Posizioni:
-    """Le condivisioni della posizione, in memoria: chi, a chi, tipo, scadenza e l'ultima posizione cifrata (con la
-    chiave per ciascun dispositivo dei destinatari). Una versione per persona sveglia le attese lunghe."""
+    """Le condivisioni della posizione: chi, a chi, tipo, scadenza (anche in `file`, per i riavvii) e, solo in memoria,
+    l'ultima posizione cifrata con la chiave per ciascun dispositivo dei destinatari. Una versione per persona sveglia
+    le attese lunghe."""
 
-    def __init__(self, chiavi):
-        self.chiavi = chiavi
+    CAMPI = ("id", "da", "disp", "a", "tipo", "durata", "inizio", "scade", "seq", "t")   # quelli che vanno su disco
+
+    def __init__(self, chiavi, file=None):
+        self.chiavi, self.file = chiavi, file
         self.cond = threading.Condition()
-        self.c = {}                                   # id -> condivisione
+        self.c = self._leggi()                        # id -> condivisione
         self.ver, self.base = {}, int(time.time())    # dopo un riavvio le versioni sono diverse: i telefoni rileggono
         self.create = {}                              # persona -> istanti delle condivisioni create nell'ultima ora
+
+    def _leggi(self):
+        """Le condivisioni ancora in corso salvate prima di un riavvio, senza posizione: la rimanda il telefono che
+        condivide (gli manca il dispositivo dei destinatari: «mancano»)."""
+        if not self.file:
+            return {}
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+            ora = time.time()
+            return {k: dict({c: x[c] for c in self.CAMPI}, pos=None, ultimo=0.0) for k, x in d.items()
+                    if isinstance(x, dict) and ID_POS.match(k) and x.get("id") == k and x.get("scade", 0) > ora}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            print("Atlante: %s non si legge (%s): riparto senza condivisioni" % (self.file, e), flush=True)
+            return {}
+
+    def _salva(self):
+        if not self.file:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+            tmp = "%s.%d.tmp" % (self.file, os.getpid())
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({k: {c: x[c] for c in self.CAMPI} for k, x in self.c.items()}, f, separators=(",", ":"))
+            os.replace(tmp, self.file)
+        except OSError as e:   # un disco pieno non ferma la condivisione: si perde solo al prossimo riavvio
+            print("Atlante: condivisioni della posizione non salvate: %s" % e, flush=True)
 
     def _v(self, persona):
         return self.base + self.ver.get(persona, 0)
@@ -2306,10 +2339,14 @@ class Posizioni:
             self.cond.notify_all()
 
     def _pulisci(self, ora, vivi):
+        tolte = False
         for cid, x in list(self.c.items()):
             if x["scade"] <= ora or x["da"] not in vivi[0]:
                 del self.c[cid]
                 self._tocca([x["da"]] + x["a"])
+                tolte = True
+        if tolte:
+            self._salva()
 
     def _attesi(self, x, vivi):
         """I dispositivi che devono poter leggere la posizione: quelli attivi dei destinatari ancora in Atlante."""
@@ -2366,6 +2403,7 @@ class Posizioni:
                                "ultimo": 0.0}
             self.create[persona] = fatte + [ora]
             self._tocca([persona] + a)
+            self._salva()
             return {"condivisione": self._mia(x, vivi)}
 
     def aggiorna(self, persona, accesso, cid, corpo):
@@ -2405,6 +2443,7 @@ class Posizioni:
                 raise ErroreExtra(404, "Condivisione sconosciuta o già finita")
             del self.c[cid]
             self._tocca([persona] + x["a"])
+            self._salva()
             return {"ok": True}
 
     def elenco(self, persona, accesso, disp, v, attesa):
@@ -2435,7 +2474,7 @@ def _posizioni():
     global POSIZ
     with _POSIZ_BLOCCO:
         if POSIZ is None:
-            POSIZ = Posizioni(Chiavi(os.path.join(_cart("cache"), "chiavi.json")))
+            POSIZ = Posizioni(Chiavi(os.path.join(_cart("cache"), "chiavi.json")), os.path.join(_cart("cache"), "posizioni.json"))
         return POSIZ
 
 

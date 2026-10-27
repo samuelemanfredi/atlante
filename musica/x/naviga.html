@@ -1482,7 +1482,7 @@ body{position:fixed;inset:0}
   // api/extra/posizione), si apre qui con x/cifra.js, il segnaposto la segue e il percorso si ricalcola quando si sposta
   // di più di VERSO_METRI, al più ogni VERSO_OGNI (il servizio pubblico dei percorsi va usato con misura).
   const VERSO_METRI = 50, VERSO_OGNI = 15000;
-  const VS = {modo: '', pid: '', nome: '', tok: 0, v: 0, cid: '', seq: -1, ultima: null, rotta: null, calcolo: 0, calcolando: false,
+  const VS = {modo: '', pid: '', nome: '', tok: 0, v: 0, mid: '', ultima: null, rotta: null, calcolo: 0, calcolando: false,
     chiuso: false, primo: true, finita: false, testo: ''};
   $('top').insertAdjacentHTML('beforeend', '<div id="versoNota" class="glass" hidden style="border-radius:14px;padding:10px 12px;font-size:15px;display:flex;align-items:center;gap:8px"></div>');
   async function api(percorso, o) {   // il Mac: solo api/extra/posizione e chiavi, permesse anche agli invitati
@@ -1575,10 +1575,10 @@ body{position:fixed;inset:0}
         VS.finita = !c;
         if (c) {
           VS.nome = c.da.nome;
-          if (c.pos && (c.id !== VS.cid || c.seq !== VS.seq)) {
+          if (c.pos && c.pos.id !== VS.mid) {   // posizione nuova (un id casuale per aggiornamento)
             const p = await Cifra.apri(c.pos, c.id, c.da.id);
             if (tok !== VS.tok) return;
-            VS.cid = c.id; VS.seq = c.seq;
+            VS.mid = c.pos.id;
             versoNuova(p, c);
           }
         }
@@ -1596,7 +1596,7 @@ body{position:fixed;inset:0}
     const h = new URLSearchParams(location.hash.slice(1)), q = new URLSearchParams(location.search);
     const dove = h.get('verso') || q.get('verso') || '', nome = (h.get('nome') || q.get('nome') || '').slice(0, 40);
     const tok = ++VS.tok;
-    Object.assign(VS, {modo: '', pid: '', nome, v: 0, cid: '', seq: -1, ultima: null, rotta: null, chiuso: false, primo: true, finita: false});
+    Object.assign(VS, {modo: '', pid: '', nome, v: 0, mid: '', ultima: null, rotta: null, chiuso: false, primo: true, finita: false});
     if (!dove) { versoNota(''); return; }
     $('resume').hidden = true;
     const m = dove.match(/^(-?\d{1,2}(?:\.\d+)?),(-?\d{1,3}(?:\.\d+)?)$/);

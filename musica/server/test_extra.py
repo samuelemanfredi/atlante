@@ -2219,6 +2219,33 @@ class TestPosizioniTempi(unittest.TestCase):
         with self.piu_tardi(self.m.POS_OGNI + 0.5):
             self.assertEqual(self.pz.aggiorna("p", None, c["id"], b)["seq"], 2)
 
+    def test_riavvio(self):
+        # il server si riavvia (aggiornamento automatico, Mac mini riacceso): le condivisioni restano, le posizioni no
+        f = os.path.join(self.base, "posizioni.json")
+        pz = self.m.Posizioni(self.ch, f)
+        a = pz.crea("p", None, {"tipo": "vivo", "a": [self.anna], "durata": 3600, "disp": _pos_id(1)})["condivisione"]
+        b = pz.crea("p", None, {"tipo": "punto", "a": [self.anna], "durata": 900, "disp": _pos_id(1)})["condivisione"]
+        busta = dict(_pos_busta([_pos_id(2)]), disp=_pos_id(1))
+        pz.aggiorna("p", None, a["id"], busta)
+        self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+        with open(f, encoding="utf-8") as fh:
+            testo = fh.read()
+        self.assertNotIn(busta["corpo"], testo)   # sul disco chi, a chi e fino a quando: la posizione, nemmeno cifrata
+        self.assertNotIn(busta["chiavi"][_pos_id(2)], testo)
+        dopo = self.m.Posizioni(self.ch, f)
+        el = dopo.elenco("p", None, "", 0, 0)
+        self.assertEqual(sorted(x["id"] for x in el["mie"]), sorted([a["id"], b["id"]]))
+        self.assertTrue(all(x["mancano"] == [_pos_id(2)] for x in el["mie"]))   # il telefono che condivide la rimanda
+        self.assertIsNone(dopo.elenco(self.anna, None, _pos_id(2), 0, 0)["per_me"][0]["pos"])
+        self.assertEqual(dopo.aggiorna("p", None, a["id"], busta)["mancano"], [])
+        with self.piu_tardi(901):
+            self.assertEqual([x["id"] for x in self.m.Posizioni(self.ch, f).elenco("p", None, "", 0, 0)["mie"]], [a["id"]])
+        dopo.ferma("p", a["id"])
+        self.assertEqual([x["id"] for x in self.m.Posizioni(self.ch, f).elenco("p", None, "", 0, 0)["mie"]], [b["id"]])
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write("{rotto")
+        self.assertEqual(self.m.Posizioni(self.ch, f).elenco("p", None, "", 0, 0)["mie"], [])   # file rotto: si riparte
+
     def test_limiti(self):
         self.m.POS_ATTIVE_MAX, self.m.POS_CREATE_ORA = 2, 4
         p1 = self.crea("punto")
