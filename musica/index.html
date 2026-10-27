@@ -292,6 +292,35 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .npbot{display:flex;justify-content:space-around;margin-top:16px}
 .npbot button{width:44px;height:36px;display:grid;place-items:center;font-size:22px;opacity:.75;border-radius:8px}
 .npbot button.on{opacity:1;background:rgba(255,255,255,.18)}
+/* testo sincronizzato (karaoke), come in Apple Music: righe grandi, quella cantata accesa, le altre in ombra */
+.npl{flex:1;display:none;flex-direction:column;min-height:0}
+#np.l .npart,#np.l .npmeta{display:none}
+#np.l .npl{display:flex}
+#np.l.q .npl{display:none}
+.nplhead{display:flex;align-items:center;gap:12px;padding:6px 0 2px}
+.nplhead .art{width:48px;height:48px;border-radius:6px;background:linear-gradient(160deg,#48484a,#2c2c2e);flex:none}
+.nplhead .tx{flex:1;min-width:0}
+.nplhead b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nplhead span{display:block;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lyr{position:relative;padding:14px 8px 0;overscroll-behavior:contain;-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 7%,#000 80%,transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 7%,#000 80%,transparent 100%)}
+.lyr::after{content:"";display:block;height:58vh}   /* spazio in fondo: anche l'ultima riga sale in alto */
+.lyr .lr{display:block;width:100%;text-align:left;font-size:clamp(26px,7.4vw,34px);line-height:1.18;font-weight:800;letter-spacing:-.015em;color:rgba(255,255,255,.32);padding:10px 0;margin:0;filter:blur(1px);transform:scale(.97);transform-origin:0 50%;transition:color .4s,filter .4s,transform .5s cubic-bezier(.34,1.3,.64,1);overflow-wrap:anywhere;-webkit-tap-highlight-color:transparent}
+.lyr .lr:active{opacity:.7}
+.lyr .lr.on{color:#fff;filter:none;transform:none}
+.lyr.libero .lr{filter:none}
+.lyr .lr.on.pw{color:rgba(255,255,255,.32)}
+.lyr .lr.on.pw .w{background:linear-gradient(90deg,#fff var(--q,0%),rgba(255,255,255,.32) var(--q,0%));-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-box-decoration-break:clone;box-decoration-break:clone}
+.lyr .gap .dots{display:inline-flex;gap:9px;padding:8px 0}
+.lyr .gap i{display:block;width:11px;height:11px;border-radius:50%;background:currentColor}
+.lyr .gap.on i{animation:lyrdot 1.6s ease-in-out infinite}
+.lyr .gap.on i:nth-child(2){animation-delay:.2s}
+.lyr .gap.on i:nth-child(3){animation-delay:.4s}
+@keyframes lyrdot{0%,100%{opacity:.35;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}
+.lyr.piano .lr{font-size:22px;font-weight:600;line-height:1.35;color:rgba(255,255,255,.88);filter:none;transform:none;padding:2px 0}
+.lyrmsg{padding:40px 6px;font-size:21px;font-weight:700;line-height:1.3;opacity:.8}
+.lyrmsg small{display:block;margin-top:8px;font-size:15px;font-weight:400;opacity:.8}
+.lyrfonte{padding:26px 0 0;font-size:13px;opacity:.55}
+.npbot button{min-width:0;flex:0 1 44px}   /* un tasto in più: su un telefono stretto si stringono invece di uscire */
 
 /* schede d'azione */
 #sh{position:fixed;inset:0;z-index:80;visibility:hidden;transition:visibility 0s .3s}
@@ -4676,5 +4705,238 @@ XMODS.find(g => g.g === 'In viaggio').m.unshift({k:'posizione', t:'Condividi la 
 XINVITATI.push({g:'In viaggio', m:[{k:'posizione', t:'Condividi la posizione', d:'Dal vivo o un punto, cifrata', i:'📍', c:'#30b0c7'}]});
 </script>
 <script src="x/posizione.js" async></script>
+<script>
+'use strict';
+/* ---------- testo sincronizzato (karaoke), come in Apple Music ----------
+   Nel lettore a tutto schermo il tasto «Testo» mostra le parole del brano in grande: la riga cantata accesa, le altre in
+   ombra, e il testo scorre da solo con la musica; parola per parola quando la fonte ha i tempi delle parole. Un tocco su
+   una riga porta la musica in quel punto: sul lettore che suona (durante il mix tra due brani il testo è quello del brano
+   nuovo e il brano che esce si ferma) o, comandando un altro dispositivo, con il comando «seek» del telecomando. Scorrendo
+   il testo con il dito si legge liberamente: dopo 4 s torna alla riga cantata. Il testo lo dà il Mac (api/extra/testi:
+   dal file del brano o da LRCLIB) e resta sul telefono (IndexedDB «am-testi») per quando il Mac non risponde; senza tempi
+   si vede il testo semplice, senza testo una riga che lo dice. */
+const TESTO = {on:ls.get('am-testo', false), k:'', b:null, j:null, righe:null, riga:-2, primo:true, libero:0, raf:0, visto:0,
+  vis:false, pronto:'', chiesti:new Map(), db:null};
+const TESTO_ANTICIPO = 0.25;   // la riga si accende un attimo prima della voce: l'occhio arriva in tempo
+const TESTO_PAUSA = 4;         // prima riga dopo 4 s o più: i puntini dell'introduzione
+function testoRiga(R, t) {   // la riga del momento: l'ultima già cominciata (un attimo prima), -1 prima della prima
+  let a = 0, z = R.length - 1, i = -1;
+  t += TESTO_ANTICIPO;
+  while (a <= z) { const m = (a + z) >> 1; if (R[m].t <= t) { i = m; a = m + 1; } else z = m - 1; }
+  return i;
+}
+function testoParola(P, fine, t) {   // {i: parola che si accende (-1 prima della prima), q: quanto è accesa, da 0 a 1}
+  let i = -1;
+  while (i + 1 < P.length && P[i + 1].t <= t) i++;
+  if (i < 0) return {i:-1, q:0};
+  const a = P[i].t, z = i + 1 < P.length ? P[i + 1].t : fine;
+  return {i, q:z > a ? Math.min(1, Math.max(0, (t - a) / (z - a))) : 1};
+}
+function testoFine(R, i) {   // quando finisce la riga i: dalla fonte, se no la riga dopo (l'ultima parola dura al più 1,5 s)
+  const r = R[i], z = i + 1 < R.length ? R[i + 1].t : Infinity;
+  if (r.fine) return Math.min(r.fine, z);
+  const P = r.parole || [], u = P.length ? P[P.length - 1].t : r.t;
+  return Math.min(z, u + 1.5);
+}
+function testoRighe(j) {   // le righe da mostrare: i puntini per l'introduzione e per le pause (una sola di seguito, niente in fondo)
+  const R = (j && j.righe) || [];
+  if (!j.sincronizzato) return R;
+  const out = [];
+  for (const r of R) if (r.testo || (out.length && out[out.length - 1].testo)) out.push(r);
+  while (out.length && !out[out.length - 1].testo) out.pop();
+  if (out.length && out[0].t >= TESTO_PAUSA) out.unshift({t:0, testo:''});
+  return out;
+}
+function testoBrano() {   // il brano di cui mostrare il testo (di questo dispositivo o di quello comandato), o null
+  let b;
+  if (RC.id) {
+    const s = RC.dev && RC.dev.stato, x = s && s.brano;
+    if (!x) return null;
+    const t = x.sid && T.get('r' + x.sid);
+    b = {sid:x.sid || '', titolo:x.titolo || '', artista:x.artista || '', album:x.album || '', durata:+x.durata || 0, cover:t ? t.cover : x.copertina ? 'u:' + x.copertina : null};
+  } else {
+    const t = curId && TT(curId);
+    if (!t || t.ext) return null;   // podcast, audiolibri, radio: niente testo
+    b = {sid:inLib(t) ? t.sid : '', titolo:t.title || '', artista:t.artist || '', album:t.album || '', durata:t.duration || (isFinite(au.duration) && au.duration) || 0, cover:t.cover};
+  }
+  const d = Math.round(b.durata || 0);
+  if (b.sid) { b.url = XAPI + 'testi/' + encodeURIComponent(b.sid); b.k = 's:' + b.sid; return b; }
+  if (!b.titolo) return null;
+  b.url = XAPI + 'testi?titolo=' + encodeURIComponent(b.titolo) + '&artista=' + encodeURIComponent(b.artista) + '&album=' + encodeURIComponent(b.album) + '&durata=' + d;
+  b.k = 'q:' + [b.titolo, b.artista, b.album, d].join('|').toLowerCase();
+  return b;
+}
+const testoTempo = () => RC.id ? rcPos(RC.dev) : au.currentTime || 0;
+// tocco su una riga: la musica va lì. Sul lettore che suona adesso («au»: nel mix è quello del brano nuovo, il brano che
+// esce si ferma); comandando un altro dispositivo, il salto è un comando del telecomando. In pausa riparte da lì.
+function testoVai(t) {
+  t = Math.max(0, +t || 0);
+  if (RC.id) {
+    const s = (RC.dev && RC.dev.stato) || {};
+    rcInvia('seek', {t});
+    if (!s.suona) { rcInvia('play'); s.suona = true; }
+    return;
+  }
+  if (!curId) return;
+  if (MIX.act) xfEnd();
+  try { au.currentTime = t; } catch (e) {}
+  if (au.paused) au.play().catch(() => {});
+  tick();
+}
+
+// ----- il testo dal Mac, con una copia sul telefono -----
+function testoDB() {
+  if (!TESTO.db) TESTO.db = new Promise((ok, ko) => {
+    try { const r = indexedDB.open('am-testi', 1); r.onupgradeneeded = () => r.result.createObjectStore('testi'); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); } catch (e) { ko(e); }
+  });
+  return TESTO.db;
+}
+async function testoDalTelefono(k) {
+  try { const db = await testoDB(); return await new Promise(ok => { const q = db.transaction('testi').objectStore('testi').get(k); q.onsuccess = () => ok(q.result ? q.result.j : null); q.onerror = () => ok(null); }); } catch (e) { return null; }
+}
+async function testoSalva(k, j) { try { const db = await testoDB(); db.transaction('testi', 'readwrite').objectStore('testi').put({j, t:Date.now()}, k); } catch (e) {} }
+function testoChiedi(b) {
+  const k = b.k;
+  if (TESTO.chiesti.has(k)) return TESTO.chiesti.get(k);
+  const p = (async () => {
+    const c = await testoDalTelefono(k);
+    if (c && (c.stato === 'ok' || !SRV)) return c;   // un testo trovato non cambia; «nessuno» si richiede al Mac
+    try {
+      const r = await fetchT(b.url, {cache:'no-store'}, 25000);
+      const j = await r.json().catch(() => null);
+      if (r.ok && j && j.stato) { testoSalva(k, j); return j; }
+      if (c) return c;
+      if (r.status === 404 || r.status === 400) return {stato:'nessuno'};
+      return {stato:'errore', errore:(j && j.errore) || 'Il Mac non ha dato il testo: riprova più tardi'};
+    } catch (e) {
+      return c || {stato:'errore', errore:'Il Mac non risponde: il testo arriva dal Mac (quelli già visti restano sul telefono)'};
+    }
+  })();
+  TESTO.chiesti.set(k, p);
+  p.then(j => { if (j.stato === 'errore') setTimeout(() => { if (TESTO.chiesti.get(k) === p) TESTO.chiesti.delete(k); }, 30000); });
+  return p;
+}
+// il testo del brano che suona si prepara anche a lettore chiuso (dopo 5 s di ascolto): poi c'è subito, anche senza rete
+setInterval(() => {
+  if (!SRV || RC.id || au.paused || (au.currentTime || 0) < 5) return;
+  const b = testoBrano();
+  if (b && b.k !== TESTO.pronto) { TESTO.pronto = b.k; testoChiedi(b); }
+}, 5000);
+
+// ----- disegno e movimento -----
+function testoTesta(b) {
+  $('nplArt').outerHTML = art(b && b.cover).replace('<span class="art ', '<span id="nplArt" class="art ');
+  $('nplT').textContent = b ? b.titolo : ''; $('nplA').textContent = b ? b.artista || UNK_ART : '';
+}
+function testoDisegna(j) {
+  const L = $('lyr');
+  TESTO.j = j; TESTO.righe = null; TESTO.riga = -2; TESTO.primo = true; TESTO.libero = 0;
+  L.classList.remove('piano', 'libero');
+  const msg = (a, b) => { L.innerHTML = '<div class="lyrmsg">' + esc(a) + (b ? '<small>' + esc(b) + '</small>' : '') + '</div>'; L.scrollTop = 0; };
+  if (!j) return msg('Cerco il testo…');
+  if (j.stato === 'vuoto') return msg(RC.id || curId ? 'Nessun testo' : 'Niente in riproduzione', RC.id || curId ? 'Podcast, audiolibri e radio non hanno un testo a tempo' : '');
+  if (j.stato === 'errore') return msg('Testo non disponibile', j.errore);
+  if (j.stato === 'strumentale') return msg('Brano strumentale', 'Niente parole: solo musica');
+  const R = j.stato === 'ok' ? testoRighe(j) : [];
+  if (!R.some(r => r.testo)) return msg('Nessun testo per questo brano', 'Non c\'è nel file del brano né su LRCLIB');
+  TESTO.righe = R;
+  L.classList.toggle('piano', !j.sincronizzato);
+  const riga = (r, i) => !j.sincronizzato ? '<p class="lr">' + (r.testo ? esc(r.testo) : '&nbsp;') + '</p>' :
+    '<button class="lr' + (r.testo ? '' : ' gap') + '" data-a="testo-vai" data-i="' + i + '">' + (!r.testo ? '<span class="dots" aria-label="Pausa"><i></i><i></i><i></i></span>' :
+      r.parole ? r.parole.map(p => '<span class="w">' + esc(p.testo) + '</span>').join('') : esc(r.testo)) + '</button>';
+  L.innerHTML = R.map(riga).join('') + '<div class="lyrfonte">' + esc((j.sincronizzato ? (j.parole ? 'A tempo, parola per parola' : 'A tempo') +
+    ' · tocca una riga per andare lì' : 'Testo senza tempi') + ' · ' + (j.fonte === 'file' ? 'dal file del brano' : 'da LRCLIB')) + '</div>';
+  L.scrollTop = 0;
+}
+function testoControlla() {   // brano cambiato (anche nel passaggio del mix o sull'altro dispositivo): si chiede il suo testo
+  const b = testoBrano(), k = b ? b.k : '';
+  if (k === TESTO.k) return;
+  TESTO.k = k; TESTO.b = b; testoTesta(b);
+  if (!b) { testoDisegna({stato:'vuoto'}); return; }
+  testoDisegna(null);
+  testoChiedi(b).then(j => { if (TESTO.k === k) testoDisegna(j); });
+}
+function testoScorri(n) {   // la riga cantata a poco meno di un terzo dall'alto
+  const L = $('lyr'), top = Math.max(0, n.offsetTop - L.clientHeight * 0.28);
+  const subito = TESTO.primo || matchMedia('(prefers-reduced-motion: reduce)').matches;
+  TESTO.primo = false;
+  try { L.scrollTo({top, behavior:subito ? 'auto' : 'smooth'}); } catch (e) { L.scrollTop = top; }
+}
+function testoSegui() {
+  const R = TESTO.righe, j = TESTO.j, L = $('lyr');
+  if (!R || !j || !j.sincronizzato) return;
+  if (TESTO.libero && Date.now() > TESTO.libero) { TESTO.libero = 0; L.classList.remove('libero'); TESTO.riga = -2; }   // si torna alla riga cantata
+  const t = testoTempo(), i = testoRiga(R, t);
+  if (i !== TESTO.riga) {
+    const v = TESTO.riga >= 0 && L.children[TESTO.riga];
+    if (v) { v.classList.remove('on', 'pw'); for (const w of v.children) { w.style.removeProperty('--q'); w._q = null; } }
+    TESTO.riga = i;
+    const n = i >= 0 ? L.children[i] : null;
+    if (n) { n.classList.add('on'); if (R[i].parole) n.classList.add('pw'); }
+    if (!TESTO.libero) testoScorri(n || L.children[0]);
+  }
+  if (i < 0 || !R[i].parole) return;
+  const x = testoParola(R[i].parole, testoFine(R, i), t), W = L.children[i].children;
+  for (let k = 0; k < W.length; k++) {
+    const q = k < x.i ? 100 : k === x.i ? Math.round(x.q * 1000) / 10 : 0;
+    if (W[k]._q !== q) { W[k]._q = q; W[k].style.setProperty('--q', q + '%'); }
+  }
+}
+// a lettore aperto sul testo: a ogni fotogramma mentre la musica suona, 4 volte al secondo in pausa
+function testoGiro() {
+  TESTO.raf = 0;
+  if (!TESTO.on || !np.classList.contains('open') || document.hidden) return;
+  const ora = Date.now();
+  if (ora - TESTO.visto > 300) { TESTO.visto = ora; testoControlla(); }
+  testoSegui();
+  const suona = RC.id ? !!(RC.dev && RC.dev.stato && RC.dev.stato.suona) : !au.paused;
+  TESTO.raf = suona ? requestAnimationFrame(testoGiro) : setTimeout(testoGiro, 250);
+}
+function testoAvvia() {
+  const vis = TESTO.on && np.classList.contains('open') && !document.hidden;
+  if (vis && !TESTO.vis) { TESTO.riga = -2; TESTO.primo = true; TESTO.visto = 0; }   // di nuovo in vista: subito alla riga giusta
+  TESTO.vis = vis;
+  if (vis && !TESTO.raf) TESTO.raf = requestAnimationFrame(testoGiro);
+}
+function testoSegna() {
+  np.classList.toggle('l', TESTO.on);
+  const b = $('bTesto');
+  b.classList.toggle('on', TESTO.on);
+  b.setAttribute('aria-label', TESTO.on ? 'Testo acceso: tocca per tornare alla copertina' : 'Testo: le parole del brano, a tempo con la musica');
+  testoAvvia();
+}
+function testoCambia() {
+  TESTO.on = !TESTO.on; ls.set('am-testo', TESTO.on);
+  if (TESTO.on && np.classList.contains('q')) { np.classList.remove('q'); $('bQ').classList.remove('on'); }   // il testo prende il posto della coda
+  testoSegna();
+}
+(function testoPrepara() {
+  I.testo = '<path fill-rule="evenodd" d="M5 3.5h14A2.5 2.5 0 0 1 21.5 6v9a2.5 2.5 0 0 1-2.5 2.5h-6.9l-4.5 3.5a.8.8 0 0 1-1.3-.63V17.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5zm3.7 4.3c-1.3 0-2.2.9-2.2 2.1 0 1.1.8 1.9 1.8 1.9h.4c-.2.8-.8 1.4-1.6 1.7l.4.9c1.7-.5 2.9-1.9 2.9-3.9 0-1.6-.7-2.7-1.7-2.7zm5.4 0c-1.3 0-2.2.9-2.2 2.1 0 1.1.8 1.9 1.8 1.9h.4c-.2.8-.8 1.4-1.6 1.7l.4.9c1.7-.5 2.9-1.9 2.9-3.9 0-1.6-.7-2.7-1.7-2.7z"/>';
+  const q = $('bQ'), b = document.createElement('button');
+  b.id = 'bTesto'; b.dataset.a = 'testo'; b.innerHTML = ic('testo');
+  q.parentNode.insertBefore(b, q);
+  const v = document.createElement('div'), npq = np.querySelector('.npq');
+  v.className = 'npl';
+  v.innerHTML = '<div class="nplhead"><span class="art" id="nplArt"></span><div class="tx"><b id="nplT"></b><span id="nplA"></span></div></div><div class="qlist lyr" id="lyr"></div>';
+  npq.parentNode.insertBefore(v, npq.nextSibling);
+  // il dito sul testo: si legge liberamente (senza sfocatura) e dopo 4 s si torna alla riga cantata
+  const L = $('lyr'), libero = () => { TESTO.libero = Date.now() + 4000; L.classList.add('libero'); };
+  ['touchstart', 'touchmove', 'wheel'].forEach(n => L.addEventListener(n, libero, {passive:true}));
+  document.addEventListener('click', e => {
+    const x = e.target.closest('[data-a]'); if (!x) return;
+    const a = x.dataset.a;
+    if (a === 'testo') testoCambia();
+    else if (a === 'testo-vai') {
+      const r = TESTO.righe && TESTO.righe[+x.dataset.i];
+      if (!r || r.t == null) return;
+      testoVai(r.t);
+      TESTO.libero = 0; L.classList.remove('libero'); TESTO.riga = -2;
+    } else if (a === 'queue' && TESTO.on && np.classList.contains('q')) { TESTO.on = false; ls.set('am-testo', false); testoSegna(); }   // la coda al posto del testo
+  });
+  new MutationObserver(testoAvvia).observe(np, {attributes:true, attributeFilter:['class']});   // lettore aperto o chiuso
+  document.addEventListener('visibilitychange', testoAvvia);
+  testoSegna();
+})();
+</script>
 </body>
 </html>

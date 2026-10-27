@@ -177,3 +177,14 @@ in IndexedDB `ax-cifra`. Il Mac mini tiene in memoria solo l'ultimo aggiornament
 | DELETE | `posizione/<id>` | `{ok:true}` — solo chi l'ha avviata |
 
 Tutte rispondono 403 dalla rete di casa senza biscotto (lì non si sa chi c'è) e sono permesse agli invitati.
+## Testo sincronizzato (karaoke) nel lettore
+Il tasto «Testo» del lettore a tutto schermo (in `index.html`, blocco «testo sincronizzato») mostra le parole del brano a
+tempo con la musica, come in Apple Music: un tocco su una riga porta la musica lì (anche durante il mix e comandando un
+altro dispositivo). Il testo viene dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC LYRICS, anche in formato LRC) o da
+LRCLIB (`lrclib.net`, gratuito, senza chiave; `ATLANTE_LRCLIB` per un indirizzo diverso), chiesto dal Mac e tenuto in
+`<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Anche per gli invitati.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `testi/<id del catalogo>` | `{stato:'ok'\|'nessuno'\|'strumentale', sincronizzato, parole, fonte:'file'\|'lrclib', righe:[{t, testo, parole?:[{t,testo}], fine?}]}` — `t` in secondi (null senza tempi); 404 se il brano non c'è; 503 `{errore}` se LRCLIB non risponde e il file non ha un testo |
+| GET | `testi?titolo=&artista=&album=&durata=` | come sopra, per un brano che non è nella libreria (solo LRCLIB); 400 senza titolo |
