@@ -2616,7 +2616,8 @@ def _clip_file(h, nome):
 # candidati) con l'attesa lunga, come il telecomando. Nei gruppi (al più CHIAMATA_MAX persone) ognuno si collega con
 # ognuno: chi entra manda l'offerta a chi è già dentro, così per ogni coppia l'offerta la fa uno solo.
 # Le persone sono "p" (Samuele) o l'id di un invitato; i dispositivi sono quelli dell'app (am-dev-id), contati per
-# persona: lo stesso id per due persone sono due dispositivi diversi. Tutto in memoria: un riavvio chiude le chiamate.
+# persona: lo stesso id per due persone sono due dispositivi diversi. Tutto in memoria: dopo un riavvio il centralino
+# non sa più niente delle chiamate (i telefoni già collegati continuano da soli, e le chiamate nuove funzionano).
 
 CHIAMATA_MAX = 4              # persone in una chiamata, compresa chi chiama (ogni telefono manda il video a ciascuno)
 SQUILLO_DURATA = 40           # secondi di squillo, poi «nessuna risposta»
