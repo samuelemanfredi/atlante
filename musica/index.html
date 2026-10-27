@@ -2281,7 +2281,7 @@ const XMODS = [
 // chi è questo dispositivo per il Mac: Samuele (con la Gestione), casa (la rete di casa: come Samuele, senza Gestione) o
 // una persona invitata (ascolta e basta: dei moduli solo «Invita un amico» e «Idee»). Il Mac controlla comunque ogni richiesta.
 let IO = ls.get('am-io', {ruolo:'', persona:null});
-const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti, accessi e idee', i:'🛡️', c:'#1c1c1e'}]};
+const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti, accessi e idee', i:'🛡️', c:'#636366'}]};
 const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}, XIDEE]}];
 // quante cose nuove aspettano Samuele (richieste d'invito…): il numero sul riquadro Gestione
 const nuoveGestione = () => Object.values(IO.nuove || {}).reduce((a, n) => a + (+n || 0), 0);
