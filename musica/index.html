@@ -1644,7 +1644,7 @@ function checkHeard() {
 }
 auOn('timeupdate', checkHeard);
 auOn('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
-auOn('ended', () => { checkHeard(); next(true); });
+auOn('ended', () => { checkHeard(); if (MIX.on && !MIX.act) diario('fine senza mix', {unSolo:MIX.unSolo, piano:MIX.plan ? MIX.plan.st : ''}); next(true); });
 let countFor = null, errRun = 0;
 auOn('playing', () => {
   errRun = 0;
@@ -1729,8 +1729,10 @@ function controllaPassaggio() {
   setTimeout(() => {
     if (!curId || pausaVoluta >= t0 || !au.paused || au === AUX) return;
     const vecchio = au, pos = au.currentTime || 0, i = S.qi;
+    diario('fermo dopo il passaggio: riparto');
     const pr = au.play();
     if (pr && pr.catch) pr.catch(() => {
+      diario('ripartenza rifiutata', {altro:!!DECKS.find(el => el !== vecchio && el._sbloccato)});
       if (au !== vecchio || !au.paused || pausaVoluta >= t0) return;
       const altro = DECKS.find(el => el !== vecchio && el._sbloccato);
       if (!altro) return;
@@ -1749,6 +1751,15 @@ document.addEventListener('visibilitychange', () => {
   if (ls.get('am-mix-noweb-ko', false)) { ls.set('am-mix-noweb', true); ls.set('am-mix-noweb-ko', false); toast('La dissolvenza è stata spenta: a schermo bloccato fermava la musica. Il mix a tempo resta.', true); setTimeout(() => location.reload(), 3000); }
   else if (MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
 });
+// diario degli ultimi passaggi tra i brani (com'è andato e perché): va al Mac con lo stato del dispositivo, così da
+// lontano si vede cosa succede su un iPhone che non mixa (es. «un lettore solo» rimasto acceso)
+const DIARIO = ls.get('am-mix-diario', []);
+function diario(esito, extra) {
+  DIARIO.push(Object.assign({q:new Date().toISOString().slice(5, 19), e:esito, b:(TT(curId) || {}).title || ''}, extra || {}));
+  while (DIARIO.length > 8) DIARIO.shift();
+  ls.set('am-mix-diario', DIARIO);
+  if (typeof devInvia === 'function') devInvia(true);
+}
 function setMix(on) {
   MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else { mixerInit(); MIX.unSolo = false; ls.set('am-mix-unlettore', false); }
   updateNow(); toast(on ? 'Mix a tempo: gli ultimi ' + MIX.X + ' secondi si adattano ai BPM del brano successivo' : 'Mix a tempo disattivato');
@@ -1908,6 +1919,7 @@ function xfStart(P) {
   try { inn.preservesPitch = true; inn.webkitPreservesPitch = true; } catch (e) {}
   au = inn;
   const qiA = S.qi;
+  diario('mix', {match:!!P.match, r:Math.round((P.r || 1) * 1000) / 1000, mixer:MIX.gains.size > 0});
   const p = inn.play(); if (p && p.catch) p.catch(() => { const A = MIX.act; if (A && A.inn === inn) xfRifiutato(A); });
   // da qui il brano in corso è il nuovo (titolo, schermata di blocco, coda), come in Apple Music durante la dissolvenza
   S.qi = P.j; curId = P.idB; keptFor = null; countFor = P.idB;
@@ -1931,6 +1943,7 @@ function xfStart(P) {
 // usa più per i passaggi finché un tocco non lo sblocca.
 function xfRifiutato(A) {
   MIX.act = null;
+  diario('rifiutato');
   const {out, inn, P} = A;
   inn._sbloccato = false; inn._rifiuta = true;
   inn.pause(); inn.playbackRate = 1; inn.removeAttribute('src'); try { inn.load(); } catch (e) {}
@@ -1980,7 +1993,7 @@ function xfTick() {
     try { au.preservesPitch = true; au.webkitPreservesPitch = true; } catch (e) {}
     return;
   }
-  if (P.el.readyState < 3) { if (d - c < 3) xfAbort(); return; }   // il successivo non è ancora pronto: si aspetta il battito dopo
+  if (P.el.readyState < 3) { if (d - c < 3) { diario('successivo non pronto', {rs:P.el.readyState}); xfAbort(); } return; }   // il successivo non è ancora pronto: si aspetta il battito dopo
   if (P.match) {   // si parte sul battito: se questo è già passato da più di un decimo, si aspetta il prossimo
     const TA = 60 / P.ga.bpm, ph = wrap((c - P.ga.b0) / TA);
     if (ph > 0.1 && ph < 0.45) return;
@@ -1993,7 +2006,7 @@ auOn('pause', () => {
   // il brano in corso si è fermato da solo proprio mentre si preparava il successivo sull'altro lettore: questo iPhone
   // non lascia suonare due lettori insieme. Si riprende subito e da qui i passaggi restano su un lettore solo.
   if (MIX.plan && !au.ended && Date.now() - (MIX.prepT || 0) < 3000 && pausaVoluta < MIX.prepT) {
-    xfAbort(); MIX.unSolo = true; ls.set('am-mix-unlettore', true);
+    xfAbort(); MIX.unSolo = true; ls.set('am-mix-unlettore', true); diario('un lettore solo: mix spento');
     au.play().catch(() => {});
   }
 });
@@ -2306,12 +2319,13 @@ const inLib = t => t && t.remote && t.sid;
 
 function devStato() {   // quello che gli altri vedono di questo dispositivo
   const t = curId && TT(curId);
-  if (!t) return {suona:false, vol:userVol, bloccato:DEV.bloccato};
+  const mix = {on:MIX.on, unSolo:MIX.unSolo, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-5)};
+  if (!t) return {suona:false, vol:userVol, bloccato:DEV.bloccato, mix};
   const coda = [];   // dal brano in corso in avanti, solo quelli della libreria (gli altri non si possono spostare)
   for (let k = Math.max(0, S.qi); k < S.queue.length && coda.length < 300; k++) { const x = TT(S.queue[k]); if (inLib(x)) coda.push(x.sid); }
   return {brano:{sid:inLib(t) ? t.sid : '', titolo:t.title, artista:t.artist || '', album:t.album || '', copertina:t.cover && t.cover.startsWith('u:') ? t.cover.slice(2) : '',
     durata:isFinite(au.duration) && au.duration ? au.duration : t.duration || 0}, esterno:!inLib(t), suona:!au.paused, t:au.currentTime || 0, vol:userVol,
-    coda, da:S.from || '', shuffle:S.shuffle, repeat:S.repeat, bloccato:DEV.bloccato};
+    coda, da:S.from || '', shuffle:S.shuffle, repeat:S.repeat, bloccato:DEV.bloccato, mix};
 }
 let devUltimo = 0, devTimer = 0;
 function devInvia(subito) {
