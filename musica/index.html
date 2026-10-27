@@ -3189,10 +3189,16 @@ function uiSposta(d) {
   const v = Math.max(-UI_ORDINE, Math.min(UI_ORDINE, (uiEff().ordine || 0) + d));
   uiCambia('ordine', v);
 }
-function uiOriginale() {   // via le modifiche di questo livello all'elemento (nel personale si torna alla base)
-  const e = UIS.ed, a = UIS.ind; if (!e || !a || !e.lav[a]) return;
-  for (const p of Object.keys(e.lav[a])) e.ops.push([a, p, null]);
-  delete e.lav[a]; uiApplica(); uiBarra(); uiPannello();
+function uiOriginale() {   // via le modifiche di questo livello all'elemento: nel personale si torna alla base, e un
+  // secondo tocco copre anche quelle della base (l'elemento come nell'app originale)
+  const e = UIS.ed, a = UIS.ind; if (!e || !a) return;
+  if (e.lav[a]) { for (const p of Object.keys(e.lav[a])) e.ops.push([a, p, null]); delete e.lav[a]; }
+  else {
+    const sotto = Object.keys(uiSotto()); if (!sotto.length) return;
+    if (uiConta(e.lav) + sotto.length > UI_MAX) { toast('Al più ' + UI_MAX + ' modifiche: togline qualcuna'); return; }
+    e.lav[a] = {}; for (const p of sotto) { e.lav[a][p] = UI_NEUTRO[p]; e.ops.push([a, p, UI_NEUTRO[p]]); }
+  }
+  uiApplica(); uiBarra(); uiPannello();
 }
 function uiNome(el) {
   const t = (el.getAttribute('aria-label') || uiTestoProprio(el) || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -3235,7 +3241,7 @@ function uiPannello() {
     '<div class="ui-c">' + c + '</div>' +
     '<div class="ui-az"><button data-u="nascondi" class="' + (x.nascosto ? 'on' : '') + '"' + (prot && !x.nascosto ? ' disabled title="Resta sempre visibile"' : '') + '>' + (x.nascosto ? 'Mostra' : 'Nascondi') + '</button>' +
     '<button data-u="prima"' + (muovi ? '' : ' disabled') + '>‹ Prima</button><button data-u="dopo"' + (muovi ? '' : ' disabled') + '>Dopo ›</button>' +
-    '<button data-u="originale"' + (Object.keys(mio).length ? '' : ' disabled') + '>Originale</button><button data-u="su">Contenitore</button></div></div>';
+    '<button data-u="originale"' + (Object.keys(mio).length || Object.keys(uiSotto()).length ? '' : ' disabled') + '>Originale</button><button data-u="su">Contenitore</button></div></div>';
   // testi della pagina sempre come testo
   pan.querySelector('.ui-h b').textContent = uiNome(el);
   pan.querySelector('.ui-h small').textContent = prot ? 'Resta sempre visibile' + (dove ? ' · ' + dove : '') : dove || (e.livello === 'base' ? 'Nella base per tutti' : 'Solo per te');
