@@ -2187,6 +2187,10 @@ class TestCaricamenti(ProvaCaricamenti, unittest.TestCase):
             self.assertIn(bid, json.load(f)["brani"])
         x = [y for y in self.j(None, "GET", "/api/extra/gestione/contenuti?q=corretto")["brani"] if y["id"] == bid][0]
         self.assertEqual((x["corretto"], x["originale"]["titolo"]), (True, "Without Me"))
+        # riscrivere il valore del file non è una correzione
+        r = self.j(None, "POST", "/api/extra/gestione/contenuti/" + bid, {"titolo": "Without Me", "artista": "Eminem"})["brano"]
+        self.assertEqual((r["titolo"], r["corretto"]), ("Without Me", True))   # resta la copertina nuova
+        self.j(None, "POST", "/api/extra/gestione/contenuti/" + bid, {"titolo": "Without Me (Corretto)"})
         self.j(None, "POST", "/api/extra/gestione/contenuti/%s/ripristina" % bid, {})
         c = {x["id"]: x for x in self.catalogo()["brani"]}[bid]
         self.assertEqual((c["title"], c.get("cover")), ("Without Me", None))

@@ -102,6 +102,12 @@ details.card[open] summary::after{transform:rotate(-90deg)}
     <div class="hd" style="margin-top:22px"><h2 class="h2" style="margin:0">Scaricati</h2><button class="btn sm" id="btnAggiorna">Aggiorna</button></div>
     <div id="jobsErr" class="note" hidden></div>
     <div id="jobs"></div>
+
+    <!-- film caricati dal telefono (Carica un film) direttamente nella cartella dei film del Cloud -->
+    <div id="filmBox" hidden>
+      <h2 class="h2">Film sul Cloud</h2>
+      <div class="list" id="filmCloud"></div>
+    </div>
   </section>
 
   <!-- ===== Servizi di streaming ===== -->
@@ -609,6 +615,34 @@ details.card[open] summary::after{transform:rotate(-90deg)}
     appuntiAuto();
   });
   addEventListener('pagehide', () => { clearTimeout(poll); if (salvaCtrl) salvaCtrl.abort(); });
+})();
+</script>
+<script>
+/* Film sul Cloud: arrivati con «Carica un film» (da Samuele o, con il suo sì, da un invitato). Si guardano nel lettore
+   di questa pagina; agli invitati non compaiono (come tutto il modulo Video). */
+(function () {
+  'use strict';
+  const {$, esc} = AX;
+  const misura = n => { n = +n || 0; for (const [u, k] of [['GB', 1073741824], ['MB', 1048576], ['KB', 1024]]) if (n >= k || u === 'KB') return (Math.round(n / k * 10) / 10).toString().replace('.', ',') + ' ' + u; };
+  let F = [];
+  async function carica() {
+    try { F = (await AX.api('film', {timeout:10000})).film || []; } catch (e) { F = []; }
+    $('filmBox').hidden = !F.length;
+    $('filmCloud').innerHTML = F.map((f, i) => '<div class="row"><span class="tx"><b>' + esc(f.titolo) + '</b><span>' +
+      esc([misura(f.dimensione), f.chi_nome ? 'caricato da ' + f.chi_nome : '', new Date(f.quando * 1000).toLocaleDateString('it-IT')].filter(Boolean).join(' · ')) +
+      '</span></span><button class="btn sm pri" data-film="' + i + '">Guarda</button></div>').join('');
+  }
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-film]'); if (!b) return;
+    const f = F[+b.dataset.film]; if (!f) return;
+    const v = $('vid');
+    $('playerTit').textContent = f.titolo; $('playerBox').hidden = false;
+    v.src = AX.API + 'film/file/' + encodeURIComponent(f.nome);
+    $('playerBox').scrollIntoView({behavior:'smooth', block:'start'});
+    v.play().catch(() => {});
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) carica(); });
+  carica();
 })();
 </script>
 </body>

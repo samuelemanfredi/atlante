@@ -2871,10 +2871,18 @@ class Correzioni:
         return self.tutte().get(id_, {})
 
     def imposta(self, id_, campi, percorso):
+        """Campi nuovi; None toglie la correzione di quel campo (senza più correzioni il brano esce dal file)."""
         with self.blocco:
             x = self.d.setdefault(id_, {"campi": {}})
-            x["campi"].update({k: v for k, v in campi.items() if k in self.CAMPI and v})
+            for k, v in campi.items():
+                if k in self.CAMPI:
+                    if v:
+                        x["campi"][k] = v
+                    else:
+                        x["campi"].pop(k, None)
             x.update(quando=time.time(), percorso=percorso)
+            if not x["campi"]:
+                del self.d[id_]
             _scrivi_json(self.file, {"brani": self.d})
 
     def togli(self, id_):
@@ -3564,11 +3572,14 @@ def _brano_libreria(bid):
 
 def _correggi_brano(bid, corpo):
     p = _brano_libreria(bid)
+    with LIB.blocco:
+        orig = dict(LIB.brani.get(bid) or {})
     campi = {}
     for k, c in (("titolo", "title"), ("artista", "artist"), ("album", "album")):
-        v = " ".join(str(corpo.get(k) or "").split())[:300]
-        if v:
-            campi[c] = v
+        if k in corpo:
+            v = " ".join(str(corpo.get(k) or "").split())[:300]
+            if v:   # vuoto: resta quello del file
+                campi[c] = None if v == (orig.get(c) or "") else v   # uguale al file: nessuna correzione
     if campi:
         CORR.imposta(bid, campi, p)
     return _voce_brano(bid)

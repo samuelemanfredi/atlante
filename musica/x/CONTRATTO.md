@@ -60,3 +60,27 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | `benessere.html` | conta calorie (Open Food Facts), «Settimana» (dispendio dal calendario .ics, bilancio dieta e integratori, confronto prezzi), Trainer |
 | `strumenti.html` | ricerca del prezzo migliore, negozi per categoria, risolutore di test (crocette e domande aperte), carte fedeltà e di pagamento, gestore dispositivo |
 | `studio.html` | Atlante UCI (accesso con le proprie credenziali), notizie di ciclismo, allenamenti creati dall'IA su qualsiasi argomento, Assistente Idee |
+
+## Caricamenti, «Da controllare», film e contenuti (Gestione, parte 2)
+Moduli: `carica.html` (Carica nella libreria: brani e film, «I miei caricamenti»; per tutti, invitati compresi),
+`controllo.html` e `contenuti.html` (Gestione → Da controllare e Contenuti, solo Samuele, aperti da `gestione.html`).
+Un invitato usa anche `cerca.html`: i brani che scarica vanno in «Da controllare» e l'app ne prende una copia
+(`AM.copie()`). Ognuno vede e tocca solo i suoi caricamenti; Samuele non ha il limite giornaliero e i suoi brani entrano subito.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| POST | `caricamenti` `{tipo:'brano', nome, dimensione, modificato}` | il caricamento `{id, ricevuti, stato:'in arrivo', pezzo}`; lo stesso file (nome, dimensione, data) a metà: lo stesso, da riprendere |
+| POST | `caricamenti` `{tipo:'film', titolo, nome, dimensione, modificato}` | la richiesta `{id, stato:'richiesta'}` (di Samuele: `'consentito'`) |
+| PUT | `caricamenti/<id>?da=<byte>` (corpo: i byte, al più 8 MB) | `{ricevuti, stato}`; alla fine `fatto` (brano: `elemento`; film: `finale`) o `errore`; 409 `{ricevuti}` = riprendi da lì; 429 limite di oggi; 507 disco quasi pieno |
+| GET | `caricamenti` | `{caricamenti:[a metà e film], brani:[{id, stato:'attesa'\|'approvato'\|'scartato', origine:'caricato'\|'scaricato', titolo, artista…}], oggi:{usati, limite}\|null}` |
+| GET / DELETE | `caricamenti/<id>` | il caricamento / annulla |
+| GET | `caricamenti/<id>/file` | un mio brano di «Da controllare» (la copia per il telefono) |
+| GET | `film` · `film/file/<nome>` | film nel Cloud `{film:[{nome, titolo, dimensione, quando, chi_nome}]}` · il file (con Range) — solo Samuele |
+| GET | `gestione/controllo` | `{brani:[… tag, originali, chi_nome, doppioni]}, film:[richieste], scartati, libero, libero_film, spazio_min}` |
+| GET | `gestione/controllo/<id>/file` · `…/copertina` | ascolto (con Range) · copertina |
+| POST | `gestione/controllo/<id>` `{titolo, artista, album}` | tag corretti; PUT `…/copertina` (JPEG o PNG) copertina nuova |
+| POST | `gestione/controllo/<id>/approva` `{forza}` | `{ok, brano, nome}`; 409 `{doppioni}` se c'è già lo stesso artista e titolo |
+| POST | `gestione/controllo/<id>/scarta` · `gestione/film/<id>/consenti\|rifiuta` | `{ok:true}` |
+| GET | `gestione/contenuti?q=` · `gestione/contenuti/tolti` | ricerca nella libreria (senza `q` gli ultimi arrivati) · brani tolti |
+| POST | `gestione/contenuti/<id>` `{titolo, artista, album}` · PUT `…/copertina` · POST `…/ripristina` | correzione (in `correzioni.json`, il file non cambia) · copertina · via le correzioni |
+| POST | `gestione/contenuti/<id>/togli` · `gestione/contenuti/tolti/<id>/rimetti` | il file in «Tolti» (stesso disco) e fuori dal catalogo, che elenca gli id in `tolti` · di nuovo al suo posto |
