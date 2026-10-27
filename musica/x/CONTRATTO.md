@@ -135,3 +135,24 @@ Un invitato usa anche `cerca.html`: i brani che scarica vanno in «Da controllar
 | POST | `gestione/contenuti/<id>` `{titolo, artista, album}` · PUT `…/copertina` · POST `…/ripristina` | correzione (in `correzioni.json`, il file non cambia) · copertina · via le correzioni |
 | POST | `gestione/contenuti/<id>/togli` · `gestione/contenuti/tolti/<id>/rimetti` | il file in «Tolti» (stesso disco) e fuori dal catalogo, che elenca gli id in `tolti` · di nuovo al suo posto |
 | `chat.html` | chat cifrata da telefono a telefono (a due e di gruppo): testo, foto, video, vocali, brani della libreria, letto/consegnato, Blocca, codice di sicurezza, notifiche; la cifratura è in `chat-cifra.js` (WebCrypto, provata con Deno in `server/test_chat_cifra.js`) |
+## Chiamate vocali e video (`chiamate.html`)
+Voce e video da telefono a telefono con WebRTC, cifrati (DTLS-SRTP); il Mac mini fa solo da centralino (chi chiama chi,
+squillo su tutti i dispositivi della persona chiamata, risponde il primo; rifiutata, occupato, nessuna risposta dopo 40 s).
+Gruppi fino a 4 persone, collegati ognuno con ognuno (chi entra manda l'offerta a chi è già dentro). Per Samuele e gli
+invitati; la rete di casa senza nessuno dietro no. Le persone sono `"p"` (Samuele) o l'id dell'invitato.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `chiamate/persone` | `{io:{id,nome}, persone:[{id,nome}]}` — tutte tranne chi chiede, solo id e nome |
+| GET | `chiamate/ice` | `{iceServers:[…], turn:bool}` — STUN (`--stun`/`ATLANTE_STUN`) e, se configurato, TURN con credenziali a tempo |
+| GET | `chiamate/attendi?disp=<id>&dopo=<seq>&attesa=25` | `{seq, chiamate:[…], eventi:[{seq,tipo:'chiamata'\|'segnale',chiamata,da,segnale,dati}]}` — senza `dopo`: subito, con il `seq` da cui partire |
+| POST | `chiamate` `{a:[persone], video, disp}` | `{chiamata}` |
+| POST | `chiamate/<id>/rispondi` \| `rifiuta` \| `chiudi` `{disp}` | `{chiamata}` |
+| POST | `chiamate/<id>/aggiungi` `{a:[persone], disp}` | `{chiamata}` |
+| POST | `chiamate/<id>/segnale` `{disp, a:persona, tipo:'offerta'\|'risposta'\|'candidati'\|'stato'\|'riprova', dati}` | `{ok:true}` — solo tra chi è dentro |
+
+`chiamata` = `{id, da, da_nome, video, stato:'squilla'|'in corso'|'finita', motivo, partecipanti:[{id, nome, stato, io?, disp?, scade?}]}`
+(il proprio `disp` solo per sé). Dall'app che ospita: `AM.chiama(persona o [persone], video)` apre la chiamata in una
+cornice sopra tutto (true se è partita); oppure `x/chiamate.html?chiama=<persona>&video=1`. Notifiche ad app chiusa:
+`avviso_chiamata(persona, evento, chiamata)` in `musica_libreria.py` (eventi `arriva`, `persa`, `chiusa`); il blocco
+di una persona: `chiamata_bloccata(da, a)`.

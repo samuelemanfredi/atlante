@@ -6033,5 +6033,380 @@ class TestChatCifra(unittest.TestCase):
         self.assertGreater(letti, 8 * 1024 * 1024)   # l'allegato c'è (cifrato)
 
 
+# ----- chiamate vocali e video: il centralino sul Mac mini -----
+
+class TestCentralino(unittest.TestCase):
+    """Il centralino delle chiamate, nel processo delle prove (tempi accorciati): squillo su tutti i dispositivi della
+    persona chiamata, risponde il primo, rifiutata / occupato / nessuna risposta, linea caduta, gruppi a maglia fino a 4
+    e nessuno che si inserisce nella chiamata di altri."""
+
+    NOMI = {"p": "Samuele", "anna": "Anna", "bruno": "Bruno", "carla": "Carla", "dario": "Dario", "elio": "Elio"}
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_chiamate", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        m = self.m
+        m.SQUILLO_DURATA, m.CHIAMATA_VIVO, m.CHIAMATA_RESTA, m.CHIAMATE_ORA = 40, 60, 30, 30
+        self.avvisi, self.blocchi = [], set()
+        self.c = m.Centralino(lambda chi: self.NOMI.get(chi, ""), bloccato=lambda da, a: (da, a) in self.blocchi,
+                              avviso=lambda *a: self.avvisi.append(a))
+
+    def errore(self, codice, fn, *a):
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            fn(*a)
+        self.assertEqual(e.exception.codice, codice, e.exception.testo)
+        return e.exception.testo
+
+    def seq(self, chi, disp):
+        return self.c.attendi(chi, disp, None, 0)["seq"]
+
+    def io(self, vista, chi=None):
+        return [x for x in vista["partecipanti"] if x.get("io") or x["id"] == chi][0]
+
+    def stati(self, vista):
+        return {x["id"]: x["stato"] for x in vista["partecipanti"]}
+
+    def test_squillo_su_tutti_e_risponde_il_primo(self):
+        c = self.c
+        s1, s2 = self.seq("anna", "anna-telefono"), self.seq("anna", "anna-mac-0001")
+        presi = {}
+
+        def attendi(disp, dopo):
+            presi[disp] = c.attendi("anna", disp, dopo, 5)
+        fili = [threading.Thread(target=attendi, args=a) for a in (("anna-telefono", s1), ("anna-mac-0001", s2))]
+        for f in fili:
+            f.start()
+        time.sleep(0.2)
+        t0 = time.time()
+        v = c.chiama("p", "samuele-iphone", ["anna"], True)
+        for f in fili:
+            f.join(6)
+        self.assertLess(time.time() - t0, 2, "l'attesa lunga deve svegliarsi subito")
+        self.assertEqual((v["stato"], v["da"], v["video"], self.stati(v)), ("squilla", "p", True, {"p": "dentro", "anna": "squilla"}))
+        for disp in ("anna-telefono", "anna-mac-0001"):   # squilla su tutti e due i dispositivi di Anna
+            j = presi[disp]
+            self.assertEqual([e["tipo"] for e in j["eventi"]], ["chiamata"])
+            [x] = j["chiamate"]
+            self.assertEqual((x["id"], x["da_nome"], self.io(x)["stato"]), (v["id"], "Samuele", "squilla"))
+            self.assertAlmostEqual(self.io(x)["scade"], time.time() + 40, delta=3)
+        aspetta(lambda: self.avvisi)
+        self.assertEqual(self.avvisi, [("anna", "arriva", {"id": v["id"], "da": "p", "da_nome": "Samuele", "video": True})])
+        # risponde il telefono: il Mac vede che ha risposto un altro dispositivo e non può più rispondere
+        r = c.rispondi("anna", "anna-telefono", v["id"])
+        self.assertEqual((r["stato"], self.io(r)["stato"], self.io(r)["disp"]), ("in corso", "dentro", "anna-telefono"))
+        self.assertEqual(c.rispondi("anna", "anna-telefono", v["id"])["stato"], "in corso")   # due tocchi: niente errore
+        self.assertIn("altro dispositivo", self.errore(409, c.rispondi, "anna", "anna-mac-0001", v["id"]))
+        [x] = c.attendi("anna", "anna-mac-0001", None, 0)["chiamate"]
+        self.assertEqual((self.io(x)["stato"], self.io(x)["disp"]), ("dentro", "anna-telefono"))
+        self.assertIn("altro", self.errore(409, c.chiudi, "anna", "anna-mac-0001", v["id"]))
+        aspetta(lambda: len(self.avvisi) > 1)
+        self.assertEqual(self.avvisi[1][:2], ("anna", "chiusa"))   # la notifica sugli altri dispositivi si può togliere
+        # chi è dentro chiude: la chiamata è finita per tutti
+        f = c.chiudi("p", "samuele-iphone", v["id"])
+        self.assertEqual((f["stato"], f["motivo"], self.stati(f)), ("finita", "chiusa", {"p": "uscito", "anna": "uscito"}))
+        self.assertEqual(c.attendi("anna", "anna-telefono", None, 0)["chiamate"][0]["stato"], "finita")
+
+    def test_rifiutata_occupato_annullata(self):
+        c = self.c
+        v = c.chiama("anna", "anna-telefono", "bruno", False)
+        r = c.rifiuta("bruno", "bruno-telefono", v["id"])
+        self.assertEqual((r["stato"], r["motivo"], self.stati(r)), ("finita", "rifiutata", {"anna": "uscito", "bruno": "rifiutata"}))
+        self.assertEqual(c.attendi("anna", "anna-telefono", None, 0)["chiamate"][0]["motivo"], "rifiutata")
+        # Anna parla con Bruno: Carla che chiama Anna trova occupato, e così chi chiama Bruno
+        v = c.chiama("anna", "anna-telefono", ["bruno"], False)
+        c.rispondi("bruno", "bruno-telefono", v["id"])
+        o = c.chiama("carla", "carla-telefono", ["anna"], False)
+        self.assertEqual((o["stato"], o["motivo"], self.stati(o)["anna"]), ("finita", "occupato", "occupato"))
+        self.assertEqual(c.chiama("dario", "dario-telefono", ["bruno"], False)["motivo"], "occupato")
+        self.assertNotIn(o["id"], [x["id"] for x in c.attendi("anna", "anna-telefono", None, 0)["chiamate"]
+                                   if self.io(x)["stato"] == "squilla"])
+        self.assertIn("già in una chiamata", self.errore(409, c.chiama, "anna", "anna-telefono", ["carla"], False))
+        c.chiudi("bruno", "bruno-telefono", v["id"])
+        # chi chiama chiude prima che rispondano: annullata, e per chi era chiamato è una chiamata persa
+        v = c.chiama("carla", "carla-telefono", ["anna"], True)
+        a = c.chiudi("carla", "carla-telefono", v["id"])
+        self.assertEqual((a["stato"], a["motivo"], self.stati(a)), ("finita", "annullata", {"carla": "uscito", "anna": "annullata"}))
+        aspetta(lambda: ("anna", "persa") in [x[:2] for x in self.avvisi])
+        self.assertIn("non squilla più", self.errore(409, c.rispondi, "anna", "anna-telefono", v["id"]))
+
+    def test_nessuna_risposta_dopo_lo_squillo(self):
+        m, c = self.m, self.c
+        m.SQUILLO_DURATA = 0.5
+        s = self.seq("p", "samuele-iphone")
+        v = c.chiama("p", "samuele-iphone", ["anna"], False)
+        t0 = time.time()
+        fine = None
+        while time.time() - t0 < 5 and not fine:   # l'attesa lunga di chi chiama si sveglia alla scadenza dello squillo
+            j = c.attendi("p", "samuele-iphone", s, 5)
+            s = j["seq"]
+            fine = [x for x in j["chiamate"] if x["id"] == v["id"] and x["stato"] == "finita"]
+        self.assertTrue(fine)
+        self.assertLess(time.time() - t0, 2)
+        self.assertEqual((fine[0]["motivo"], self.stati(fine[0])["anna"]), ("nessuna risposta", "nessuna risposta"))
+        aspetta(lambda: ("anna", "persa") in [x[:2] for x in self.avvisi])
+        self.errore(409, c.rispondi, "anna", "anna-telefono", v["id"])
+        # una chiamata finita resta visibile per un po' (per dire com'è finita), poi sparisce
+        m.CHIAMATA_RESTA = 0.2
+        time.sleep(0.3)
+        self.assertEqual(c.attendi("p", "samuele-iphone", None, 0)["chiamate"], [])
+        self.errore(404, c.chiudi, "p", "samuele-iphone", v["id"])
+
+    def test_linea_caduta(self):
+        m, c = self.m, self.c
+        m.CHIAMATA_VIVO = 0.5
+        v = c.chiama("anna", "anna-telefono", ["bruno"], False)
+        c.rispondi("bruno", "bruno-telefono", v["id"])
+        for _ in range(4):   # Anna continua ad aspettare, il telefono di Bruno non si fa più sentire
+            c.attendi("anna", "anna-telefono", None, 0)
+            time.sleep(0.25)
+        [x] = c.attendi("anna", "anna-telefono", None, 0)["chiamate"]
+        self.assertEqual((x["stato"], x["motivo"], self.stati(x)), ("finita", "caduta", {"anna": "uscito", "bruno": "caduta"}))
+
+    def test_gruppo_a_maglia(self):
+        c = self.c
+        v = c.chiama("p", "samuele-iphone", ["anna", "bruno"], True)
+        self.assertEqual(self.stati(v), {"p": "dentro", "anna": "squilla", "bruno": "squilla"})
+        a = c.rispondi("anna", "anna-telefono", v["id"])
+        self.assertEqual([x["id"] for x in a["partecipanti"] if x["stato"] == "dentro" and x["id"] != "anna"], ["p"])
+        b = c.rispondi("bruno", "bruno-telefono", v["id"])
+        # chi entra manda l'offerta a chi è già dentro: Bruno a Samuele e ad Anna
+        self.assertEqual(sorted(x["id"] for x in b["partecipanti"] if x["stato"] == "dentro" and x["id"] != "bruno"), ["anna", "p"])
+        self.assertNotIn("disp", [x for x in b["partecipanti"] if x["id"] == "anna"][0])   # i dispositivi degli altri no
+        g = c.aggiungi("anna", "anna-telefono", v["id"], ["carla"])
+        self.assertEqual(self.stati(g)["carla"], "squilla")
+        self.assertIn("4", self.errore(409, c.aggiungi, "p", "samuele-iphone", v["id"], ["dario"]))
+        self.errore(409, c.aggiungi, "p", "samuele-iphone", v["id"], ["bruno"])   # già dentro
+        self.errore(409, c.aggiungi, "carla", "carla-telefono", v["id"], ["dario"])   # Carla squilla, non è dentro
+        self.assertIn("4", self.errore(409, c.chiama, "elio", "elio-telefono", ["anna", "bruno", "carla", "dario"], False))
+        # chi esce lascia gli altri in chiamata; Carla che rifiuta pure
+        self.assertEqual(c.chiudi("p", "samuele-iphone", v["id"])["stato"], "in corso")
+        r = c.rifiuta("carla", "carla-telefono", v["id"])
+        self.assertEqual((r["stato"], self.stati(r)), ("in corso", {"p": "uscito", "anna": "dentro", "bruno": "dentro", "carla": "rifiutata"}))
+        # chi è uscito può essere richiamato dentro
+        self.assertEqual(self.stati(c.aggiungi("bruno", "bruno-telefono", v["id"], "p"))["p"], "squilla")
+        c.rispondi("p", "samuele-mac-001", v["id"])
+        s = self.seq("p", "samuele-mac-001")
+        c.segnale("anna", "anna-telefono", v["id"], "p", "offerta", {"sdp": "v=0"})
+        self.assertEqual([e["da"] for e in c.attendi("p", "samuele-mac-001", s, 0)["eventi"] if e["tipo"] == "segnale"], ["anna"])
+
+    def test_segnali_e_nessuno_si_inserisce(self):
+        c = self.c
+        v = c.chiama("anna", "anna-telefono", ["bruno"], True)
+        cid = v["id"]
+        self.errore(409, c.segnale, "bruno", "bruno-telefono", cid, "anna", "offerta", {"sdp": "x"})   # squilla: non ancora dentro
+        c.rispondi("bruno", "bruno-telefono", cid)
+        sa, sb, sb2 = self.seq("anna", "anna-telefono"), self.seq("bruno", "bruno-telefono"), self.seq("bruno", "bruno-mac-0001")
+        self.assertEqual(c.segnale("bruno", "bruno-telefono", cid, "anna", "offerta", {"type": "offer", "sdp": "v=0"}), {"ok": True})
+        c.segnale("anna", "anna-telefono", cid, "bruno", "candidati", [{"candidate": "candidate:1"}])
+        j = c.attendi("anna", "anna-telefono", sa, 1)
+        [e] = [e for e in j["eventi"] if e["tipo"] == "segnale"]
+        self.assertEqual((e["chiamata"], e["da"], e["segnale"], e["dati"]), (cid, "bruno", "offerta", {"type": "offer", "sdp": "v=0"}))
+        self.assertNotIn("per", e)
+        self.assertEqual([e["segnale"] for e in c.attendi("bruno", "bruno-telefono", sb, 1)["eventi"] if e["tipo"] == "segnale"], ["candidati"])
+        # l'altro dispositivo di Bruno non riceve i segnali e non ne manda
+        self.assertEqual([e for e in c.attendi("bruno", "bruno-mac-0001", sb2, 0)["eventi"] if e["tipo"] == "segnale"], [])
+        self.errore(409, c.segnale, "bruno", "bruno-mac-0001", cid, "anna", "offerta", {"sdp": "x"})
+        # Carla non vede la chiamata e non ci entra in nessun modo: per lei non esiste
+        self.assertEqual(c.attendi("carla", "carla-telefono", None, 0)["chiamate"], [])
+        for az in (c.rispondi, c.rifiuta, c.chiudi):
+            self.errore(404, az, "carla", "carla-telefono", cid)
+        self.errore(404, c.segnale, "carla", "carla-telefono", cid, "anna", "offerta", {"sdp": "x"})
+        self.errore(404, c.aggiungi, "carla", "carla-telefono", cid, ["dario"])
+        self.errore(404, c.segnale, "anna", "anna-telefono", cid, "carla", "offerta", {"sdp": "x"})   # nemmeno ricevere
+        self.errore(404, c.segnale, "anna", "anna-telefono", cid, "anna", "offerta", {"sdp": "x"})
+        self.errore(404, c.rispondi, "carla", "carla-telefono", "nonesiste")
+        # messaggi strani
+        self.errore(400, c.segnale, "anna", "anna-telefono", cid, "bruno", "comando", {"x": 1})
+        self.errore(400, c.segnale, "anna", "anna-telefono", cid, "bruno", "offerta", "testo")
+        self.errore(413, c.segnale, "anna", "anna-telefono", cid, "bruno", "offerta", {"sdp": "x" * 70000})
+        c.chiudi("anna", "anna-telefono", cid)
+        self.errore(409, c.segnale, "bruno", "bruno-telefono", cid, "anna", "offerta", {"sdp": "x"})   # finita
+
+    def test_richieste_non_valide_e_limiti(self):
+        m, c = self.m, self.c
+        self.errore(400, c.chiama, "anna", "x", ["bruno"], False)                  # dispositivo non valido
+        self.errore(400, c.attendi, "anna", "../../etc", None, 0)
+        self.errore(400, c.chiama, "anna", "anna-telefono", [], False)
+        self.errore(400, c.chiama, "anna", "anna-telefono", ["anna"], False)       # sé stessi
+        self.errore(400, c.chiama, "anna", "anna-telefono", ["bruno", "bruno"], False)
+        self.errore(400, c.chiama, "anna", "anna-telefono", [{"id": "bruno"}], False)
+        self.errore(404, c.chiama, "anna", "anna-telefono", ["sconosciuto"], False)
+        m.CHIAMATE_ORA = 3
+        for _ in range(3):
+            c.chiudi("anna", "anna-telefono", c.chiama("anna", "anna-telefono", ["bruno"], False)["id"])
+        self.errore(429, c.chiama, "anna", "anna-telefono", ["bruno"], False)
+        self.assertEqual(c.chiama("bruno", "bruno-telefono", ["anna"], False)["stato"], "squilla")   # gli altri sì
+
+    def test_bloccato_non_squilla(self):
+        c = self.c
+        self.blocchi.add(("anna", "bruno"))   # Bruno ha bloccato Anna (lo decide la chat)
+        v = c.chiama("anna", "anna-telefono", ["bruno"], False)
+        self.assertEqual(self.stati(v), {"anna": "dentro", "bruno": "squilla"})   # per Anna squilla…
+        self.assertEqual(c.attendi("bruno", "bruno-telefono", None, 0)["chiamate"], [])   # …ma a Bruno no
+        self.errore(404, c.rispondi, "bruno", "bruno-telefono", v["id"])
+        time.sleep(0.1)
+        self.assertEqual(self.avvisi, [])
+        self.assertEqual(c.chiama("carla", "carla-telefono", ["bruno"], False)["stato"], "squilla")   # e Bruno non è occupato
+
+    def test_ice(self):
+        m = self.m
+        m.STUN, m.TURN_URL, m.TURN_SEGRETO = m.STUN_PREDEFINITO, "", ""
+        self.assertEqual(m.ice_server(), {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}], "turn": False})
+        m.TURN_URL, m.TURN_UTENTE, m.TURN_SEGRETO = "turn:mac.esempio.ts.net:3478,turns:mac.esempio.ts.net:443?transport=tcp", "atlante", "segreto di prova"
+        j = m.ice_server(ora=1700000000)
+        self.assertTrue(j["turn"])
+        t = j["iceServers"][1]
+        self.assertEqual((t["urls"], t["username"]), (["turn:mac.esempio.ts.net:3478", "turns:mac.esempio.ts.net:443?transport=tcp"],
+                                                      "%d:atlante" % (1700000000 + m.TURN_DURATA)))
+        import base64
+        import hashlib
+        import hmac
+        atteso = base64.b64encode(hmac.new(b"segreto di prova", t["username"].encode(), hashlib.sha1).digest()).decode()
+        self.assertEqual(t["credential"], atteso)   # come coturn con use-auth-secret / static-auth-secret
+        m.TURN_SEGRETO = ""   # senza segreto il ponte non si annuncia
+        self.assertFalse(m.ice_server()["turn"])
+        # configurazione: STUN da argomento o ATLANTE_STUN, indirizzi strani scartati; TURN solo dall'ambiente
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_TURN_URL": "turn:a.example:3478, http://x", "ATLANTE_TURN_SEGRETO": "s",
+                                                   "ATLANTE_TURN_UTENTE": "atl ante<>"}):
+            m._prepara_chiamate("stun:uno.example:3478, javascript:x ,stuns:due.example")
+        self.assertEqual((m.STUN, m.TURN_URL, m.TURN_UTENTE, m.TURN_SEGRETO),
+                         ("stun:uno.example:3478,stuns:due.example", "turn:a.example:3478", "atlante", "s"))
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            m._prepara_chiamate(None)
+        self.assertEqual((m.STUN, m.TURN_URL, m.TURN_SEGRETO), (m.STUN_PREDEFINITO, "", ""))
+
+    def test_chi_puo_chiamare(self):
+        m = self.m
+
+        class R:
+            pass
+        h = R()
+        h._chi = {"ruolo": "casa", "persona": None, "chiave": None}
+        self.assertEqual(self.errore(403, m._chi_chiama, h)[:13], "Le chiamate s")   # rete di casa senza nessuno: no
+        h._chi = {"ruolo": "proprietario", "persona": None, "chiave": None}
+        self.assertEqual(m._chi_chiama(h), "p")
+        h._chi = {"ruolo": "invitato", "persona": "0123456789abcdef", "chiave": "x"}
+        self.assertEqual(m._chi_chiama(h), "0123456789abcdef")
+
+
+class TestChiamateServer(unittest.TestCase):
+    """Le rotte api/extra/chiamate… sul server vero: Samuele (dal Mac) e due invitate (da Internet con il biscotto)."""
+
+    ORIGINE = {"Origin": "https://mac.esempio.ts.net:10000"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-chiamate-")
+        cls.c = prepara_cartelle(cls.base)
+        with open(os.path.join(cls.c["app"], "x", "chiamate.html"), "w", encoding="utf-8") as f:
+            f.write("<!doctype html><title>Chiamate</title>")
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_chiamate_srv", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def entra(self, nome, ip):
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso/invito/" + codice, b"",
+                             intest=dict(FUNNEL, **{"X-Forwarded-For": ip, "Content-Type": "application/x-www-form-urlencoded",
+                                                    "Origin": self.ORIGINE["Origin"]}))
+        self.assertEqual(st, 200, b[:300])
+        v = [x for x in h.get_all("Set-Cookie") if x.startswith("am_accesso=")][0].split(";")[0].split("=", 1)[1]
+        return a["id"], v
+
+    def come(self, biscotto, metodo, p, corpo=None, origine=True):
+        h = dict(FUNNEL, Cookie="am_accesso=" + biscotto)
+        if origine:
+            h.update(self.ORIGINE)
+        st, _, b = richiesta(self.s.porta, metodo, p, corpo, intest=h)
+        return st, (json.loads(b.decode("utf-8")) if b else None)
+
+    def samuele(self, metodo, p, corpo=None):
+        st, _, b = richiesta(self.s.porta, metodo, p, corpo)
+        return st, (json.loads(b.decode("utf-8")) if b else None)
+
+    def test_chiamata_da_internet(self):
+        ila, vi = self.entra("Ilaria", "203.0.113.200")
+        luca, vl = self.entra("Luca", "203.0.113.201")
+        # chi si può chiamare: tutti tranne sé, solo id e nome
+        st, j = self.come(vi, "GET", "/api/extra/chiamate/persone")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["io"], {"id": ila, "nome": "Ilaria"})
+        self.assertIn({"id": "p", "nome": "Samuele"}, j["persone"])
+        self.assertIn({"id": luca, "nome": "Luca"}, j["persone"])
+        self.assertNotIn(ila, [x["id"] for x in j["persone"]])
+        self.assertTrue(all(set(x) == {"id", "nome"} for x in j["persone"]), j)
+        st, j = self.samuele("GET", "/api/extra/chiamate/persone")
+        self.assertEqual(j["io"], {"id": "p", "nome": "Samuele"})
+        self.assertNotIn("p", [x["id"] for x in j["persone"]])
+        st, j = self.come(vi, "GET", "/api/extra/chiamate/ice")
+        self.assertEqual((st, j["iceServers"][0]["urls"], j["turn"]), (200, ["stun:stun.l.google.com:19302"], False))
+        # la pagina e le rotte delle chiamate sono permesse agli invitati
+        for metodo, p in (("GET", "/x/chiamate.html"), ("GET", "/api/extra/chiamate/attendi?disp=ilaria-tel-01"),
+                          ("POST", "/api/extra/chiamate/abc/chiudi")):
+            st, _, b = richiesta(self.s.porta, metodo, p, {} if metodo == "POST" else None,
+                                 intest=dict(FUNNEL, Cookie="am_accesso=" + vi, **self.ORIGINE))
+            self.assertNotIn(st, (401, 403), (metodo, p, b[:200]))
+        # Samuele ha l'app aperta su due dispositivi; Ilaria lo chiama in video
+        s1 = self.samuele("GET", "/api/extra/chiamate/attendi?disp=samuele-iphone-1")[1]["seq"]
+        presi = {}
+        f = threading.Thread(target=lambda: presi.update(j=self.samuele(
+            "GET", "/api/extra/chiamate/attendi?disp=samuele-iphone-1&dopo=%d&attesa=10" % s1)[1]))
+        f.start()
+        time.sleep(0.3)
+        si = self.come(vi, "GET", "/api/extra/chiamate/attendi?disp=ilaria-tel-01")[1]["seq"]
+        st, j = self.come(vi, "POST", "/api/extra/chiamate", {"a": ["p"], "video": True, "disp": "ilaria-tel-01"})
+        self.assertEqual(st, 200, j)
+        cid = j["chiamata"]["id"]
+        f.join(12)
+        [x] = presi["j"]["chiamate"]
+        self.assertEqual((x["id"], x["da"], x["da_nome"], x["video"]), (cid, ila, "Ilaria", True))
+        # Luca non la vede e non ci entra
+        self.assertEqual(self.come(vl, "GET", "/api/extra/chiamate/attendi?disp=luca-tel-0001")[1]["chiamate"], [])
+        for az in ("rispondi", "rifiuta", "chiudi"):
+            self.assertEqual(self.come(vl, "POST", "/api/extra/chiamate/%s/%s" % (cid, az), {"disp": "luca-tel-0001"})[0], 404, az)
+        self.assertEqual(self.come(vl, "POST", "/api/extra/chiamate/%s/segnale" % cid,
+                                   {"disp": "luca-tel-0001", "a": "p", "tipo": "offerta", "dati": {"sdp": "x"}})[0], 404)
+        # risponde l'iPhone di Samuele; dal Mac non si risponde più
+        st, j = self.samuele("POST", "/api/extra/chiamate/%s/rispondi" % cid, {"disp": "samuele-iphone-1"})
+        self.assertEqual((st, j["chiamata"]["stato"]), (200, "in corso"))
+        self.assertEqual(self.samuele("POST", "/api/extra/chiamate/%s/rispondi" % cid, {"disp": "samuele-mac-0001"})[0], 409)
+        # chi entra manda l'offerta: arriva al telefono di Ilaria
+        st, j = self.samuele("POST", "/api/extra/chiamate/%s/segnale" % cid,
+                             {"disp": "samuele-iphone-1", "a": ila, "tipo": "offerta", "dati": {"type": "offer", "sdp": "v=0"}})
+        self.assertEqual((st, j), (200, {"ok": True}))
+        j = self.come(vi, "GET", "/api/extra/chiamate/attendi?disp=ilaria-tel-01&dopo=%d&attesa=5" % si)[1]
+        self.assertEqual([(e["da"], e["segnale"]) for e in j["eventi"] if e["tipo"] == "segnale"], [("p", "offerta")])
+        # da un altro sito no; Ilaria chiude
+        self.assertEqual(self.come(vi, "POST", "/api/extra/chiamate/%s/chiudi" % cid, {"disp": "ilaria-tel-01"}, origine=False)[0], 200)
+        st, _, b = richiesta(self.s.porta, "POST", "/api/extra/chiamate", {"a": ["p"], "disp": "ilaria-tel-01"},
+                             intest=dict(FUNNEL, Cookie="am_accesso=" + vi, Origin="https://altro.example"))
+        self.assertEqual(st, 403)
+        j = self.samuele("GET", "/api/extra/chiamate/attendi?disp=samuele-iphone-1")[1]
+        self.assertEqual([(x["stato"], x["motivo"]) for x in j["chiamate"]], [("finita", "chiusa")])
+        # richieste sbagliate
+        self.assertEqual(self.samuele("GET", "/api/extra/chiamate/attendi?disp=samuele-iphone-1&dopo=x")[0], 400)
+        self.assertEqual(self.samuele("GET", "/api/extra/chiamate")[0], 405)
+        self.assertEqual(self.samuele("POST", "/api/extra/chiamate/persone", {})[0], 405)
+        self.assertEqual(self.samuele("GET", "/api/extra/chiamate/niente")[0], 404)
+        # una persona revocata sparisce dall'elenco e non chiama più
+        self.pers.revoca_persona(luca)
+        self.assertNotIn(luca, [x["id"] for x in self.come(vi, "GET", "/api/extra/chiamate/persone")[1]["persone"]])
+        self.assertEqual(self.come(vl, "GET", "/api/extra/chiamate/persone")[0], 401)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
