@@ -44,6 +44,7 @@ import collections
 import getpass
 import hashlib
 import hmac
+import html
 import http.client
 import ipaddress
 import json
@@ -3305,11 +3306,12 @@ ACCESSO_TENTATIVI_TUTTI = 25      # e da tutti gli indirizzi insieme
 ACCESSO_FINESTRA = 15 * 60
 # senza biscotto passano solo la pagina della password e quello che serve per installare l'app (manifest, icone),
 # e solo nella cartella principale dell'app: nessun altro indirizzo che finisca allo stesso modo (api/…/icon-1.png)
-LIBERI = re.compile(r"^/(accesso|manifest\.webmanifest|icon-(?:maskable-)?\d+\.png|apple-touch-icon(?:-precomposed)?\.png"
-                    r"|favicon\.ico)$")
+LIBERI = re.compile(r"^/(accesso|accesso/invito/[A-Za-z0-9_-]{8,64}|manifest\.webmanifest|icon-(?:maskable-)?\d+\.png"
+                    r"|apple-touch-icon(?:-precomposed)?\.png|favicon\.ico)$")
 RETI_TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 # persone invitate da Samuele: ognuna entra con il suo link (vedi Persone)
 PERS = None                       # Persone, preparato da main()
+PROPRIETARI = set()               # login Tailscale di Samuele (ATLANTE_PROPRIETARI); vuoto: tutta la rete Tailscale
 INVITO_DURATA = 7 * 86400         # un link d'invito non usato scade dopo una settimana
 COLLEGAMENTO_DURATA = 15 * 60     # codice per l'app sulla schermata Home dell'iPhone (biscotti separati da Safari)
 COLLEGAMENTO_ALFABETO = "ACDEFGHJKMNPQRTUVWXY3479"   # niente lettere e cifre che si confondono (0/O, 1/I, 5/S…)
@@ -3386,8 +3388,10 @@ class Accesso:
             return False
         return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), sale, n), atteso)
 
-    def biscotto(self):
-        corpo = "%d.%s" % (int(time.time()) + ACCESSO_DURATA, secrets.token_hex(8))
+    def biscotto(self, rnd=None):
+        """Biscotto nuovo; `rnd` (la parte casuale di quello di prima) lo rinnova restando lo stesso dispositivo, che così
+        nella Gestione non compare due volte e una revoca resta valida."""
+        corpo = "%d.%s" % (int(time.time()) + ACCESSO_DURATA, rnd if re.fullmatch(r"[0-9a-f]{16}", rnd or "") else secrets.token_hex(8))
         with self.blocco:
             k = self._segreto()
         return corpo + "." + hmac.new(k, corpo.encode("ascii"), hashlib.sha256).hexdigest()
@@ -3795,13 +3799,42 @@ def _ip_cliente(h):
 
 
 def _biscotto_valido(h):
+    """("p", scadenza, parte casuale, None) per il biscotto della password, ("o", scadenza, dispositivo, persona) per un
+    invitato; None se manca, è falso, scaduto o revocato."""
     for parte in (h.headers.get("Cookie") or "").split(";"):
         k, _, v = parte.strip().partition("=")
-        if k == ACCESSO_BISCOTTO:
-            s = ACC.scadenza(v.strip())
-            if s:
-                return s
-    return 0
+        if k != ACCESSO_BISCOTTO:
+            continue
+        v = v.strip()
+        if v.startswith("o."):
+            c = PERS.chi(v) if PERS else None
+            if c:
+                return "o", c[2], c[1], c[0]
+            continue
+        s = ACC.scadenza(v)
+        if s:
+            rnd = v.split(".")[1]
+            if PERS is None or not PERS.revocato("p:" + rnd):
+                return "p", s, rnd, None
+    return None
+
+
+def _proprietario_rete(h):
+    """Il Mac stesso o Samuele dalla rete Tailscale (con ATLANTE_PROPRIETARI, solo quei login): non serve il biscotto.
+    La rete di casa no: lì si ascolta, ma senza diventare Samuele."""
+    if h.headers.get("Tailscale-Funnel-Request") is not None:
+        return False
+    vicino = _ip(h.client_address[0])
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:
+        return vicino is not None and (vicino.is_loopback or (_ip_tailscale(vicino) and not PROPRIETARI))
+    if vicino is None or not vicino.is_loopback:
+        return False
+    login = (h.headers.get("Tailscale-User-Login") or "").strip().lower()
+    if login:
+        return not PROPRIETARI or login in PROPRIETARI
+    ultimo = _ip(xff.split(",")[-1])
+    return ultimo is not None and (ultimo.is_loopback or (_ip_tailscale(ultimo) and not PROPRIETARI))
 
 
 def _set_cookie(h, valore):
@@ -3852,6 +3885,9 @@ input{font:inherit;color:inherit;width:100%;min-height:50px;padding:12px 14px;bo
 input:focus{outline:2px solid var(--accent)}
 button{font:inherit;font-weight:600;min-height:50px;border:0;border-radius:12px;background:var(--accent);color:#fff;cursor:pointer}
 .nome{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.o{margin-top:30px}
+.codice{display:inline-block;font:700 30px/1.2 ui-monospace,Menlo,monospace;letter-spacing:4px;color:var(--fg)}
+a.btn{display:flex;align-items:center;justify-content:center;min-height:50px;border-radius:12px;background:var(--accent);color:#fff;font-weight:600;text-decoration:none}
 </style>
 </head>
 <body>
@@ -3863,12 +3899,30 @@ button{font:inherit;font-weight:600;min-height:50px;border:0;border-radius:12px;
 </body>
 </html>
 """
-_MODULO_ACCESSO = """<p>@M</p>
+# chi è entrato con un invito da Safari scrive qui il codice di collegamento nell'app sulla schermata Home (sull'iPhone
+# ha i biscotti separati da Safari)
+_MODULO_CODICE = """<p>@M</p>
+<p>Hai un invito? Scrivi il codice di collegamento.</p>
+<form method="post" action="@Raccesso">
+<input type="text" name="codice" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="9" placeholder="Codice di collegamento" aria-label="Codice di collegamento" required>
+<button type="submit">Collega</button>
+</form>"""
+_MODULO_ACCESSO = _MODULO_CODICE + """
+<p class="o">Sei Samuele? Entra con la password.</p>
 <form method="post" action="@Raccesso">
 <input class="nome" type="text" name="nome" autocomplete="username" value="Atlante Musica" tabindex="-1" aria-hidden="true">
-<input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required autofocus>
+<input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required>
 <button type="submit">Entra</button>
 </form>"""
+_MODULO_INVITO = """<p>@M</p>
+<form method="post" action="">
+<button type="submit">Entra</button>
+</form>"""
+_INVITO_FATTO = """<p>@M</p>
+<p><a class="btn" href="@R./">Apri Atlante Musica</a></p>
+<p class="o">Vuoi l'app sulla schermata Home? In Safari tocca Condividi e poi «Aggiungi alla schermata Home». Alla prima
+apertura scrivi questo codice (vale 15 minuti):</p>
+<p><b class="codice">@K</b></p>"""
 # dalla rete Tailscale (o dal Mac): si sceglie la password per Internet, senza Terminale. Per cambiarla serve quella di adesso
 _MODULO_NUOVA = """<p>@M</p>
 <form method="post" action="@Raccesso">
@@ -3899,6 +3953,89 @@ def _scrivi_pagina_accesso(h, codice, messaggio, errore=False, modulo=True, inte
     h.end_headers()
     if h.command != "HEAD":
         h.wfile.write(corpo)
+
+
+def _nome_pagina(nome):
+    return html.escape(nome).replace("@", "&#64;")   # i segnaposto delle pagine (@M, @R…) restano dove sono
+
+
+def _troppi_tentativi(h, w, **k):
+    return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
+                                  True, intestazioni=[("Retry-After", str(w))], **k)
+
+
+def _leggi_modulo(h):
+    """Corpo di un modulo POST (al più 4 KB): (byte, campi) o None se è troppo grande."""
+    try:
+        n = int(h.headers.get("Content-Length") or 0)
+    except ValueError:
+        n = -1
+    if not 0 <= n <= 4096:
+        h.close_connection = True
+        return None
+    dati = h.rfile.read(n) if n else b""
+    try:
+        return dati, parse_qs(dati.decode("utf-8"), max_num_fields=10)
+    except (UnicodeDecodeError, ValueError):
+        return dati, {}
+
+
+def _usa_collegamento(h, codice):
+    """Codice di collegamento scritto nell'app sulla schermata Home: il dispositivo entra come la persona invitata."""
+    modulo = _MODULO_ACCESSO if ACC.ha_password() else _MODULO_CODICE
+    if not _stessa_origine(h):
+        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True, modulo=modulo)
+    ip = _ip_cliente(h)
+    w = ACC.attesa(ip)
+    if w:
+        return _troppi_tentativi(h, w, modulo=modulo)
+    did = PERS.usa_collegamento(codice, tipo_da_agente(h.headers.get("User-Agent"))) if PERS else None
+    if not did:
+        ACC.sbagliata(ip)
+        print("Atlante: codice di collegamento sbagliato da %s" % ip, flush=True)
+        return _scrivi_pagina_accesso(h, 401, "Codice sbagliato o scaduto.", True, modulo=modulo)
+    ACC.riuscita(ip)
+    h._biscotto = _set_cookie(h, PERS.biscotto(did))
+    return _rimanda(h, _verso(h, "./"))
+
+
+def _pagina_invito(h, codice, samuele):
+    """Link d'invito. GET: chi invita e il tasto «Entra» — WhatsApp e Messaggi aprono i link per l'anteprima, quindi
+    leggere la pagina non usa l'invito. POST (il tocco su «Entra»): l'invito si usa, il dispositivo riceve il biscotto
+    della persona e il codice per l'app sulla schermata Home."""
+    morto = "Questo invito non vale più: chiedi a Samuele un link nuovo."
+    if h.command not in ("GET", "HEAD", "POST"):
+        h.close_connection = True
+        return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True, modulo=False)
+    if h.command == "POST" and _leggi_modulo(h) is None:
+        return _scrivi_pagina_accesso(h, 413, "Richiesta non valida.", True, modulo=False)
+    info = PERS.leggi_invito(codice) if PERS else None
+    if h.command != "POST":
+        if info is None:
+            return _scrivi_pagina_accesso(h, 410, morto, modulo=False)
+        if samuele:
+            return _scrivi_pagina_accesso(h, 200, "Questo è l'invito per %s: aprilo dal suo telefono. Tu sei già dentro "
+                                          "come Samuele." % _nome_pagina(info["nome"]), modulo=False)
+        return _scrivi_pagina_accesso(h, 200, "Ciao %s! Samuele ti ha invitato ad ascoltare la sua musica."
+                                      % _nome_pagina(info["nome"]), modulo=_MODULO_INVITO)
+    if not _stessa_origine(h):
+        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True, modulo=False)
+    if samuele:   # Samuele che prova il link resta Samuele, e l'invito resta per chi deve riceverlo
+        return _scrivi_pagina_accesso(h, 409, "Questo invito è per un'altra persona: tu sei già dentro come Samuele.",
+                                      True, modulo=False)
+    ip = _ip_cliente(h)
+    w = ACC.attesa(ip)
+    if w:
+        return _troppi_tentativi(h, w, modulo=False)
+    did = PERS.usa_invito(codice, tipo_da_agente(h.headers.get("User-Agent"))) if info else None
+    if not did:
+        ACC.sbagliata(ip)
+        return _scrivi_pagina_accesso(h, 410, morto, True, modulo=False)
+    h._biscotto = _set_cookie(h, PERS.biscotto(did))
+    k, _ = PERS.collegamento(info["persona"])
+    print("Atlante: %s è entrato con l'invito" % info["nome"], flush=True)
+    return _scrivi_pagina_accesso(h, 200, "Sei dentro, %s!" % _nome_pagina(info["nome"]),
+                                  modulo=_INVITO_FATTO.replace("@K", k))
 
 
 def _nuova_password(h, dati):
@@ -3937,31 +4074,29 @@ def _nuova_password(h, dati):
                                   "dalla rete Tailscale nessuna differenza.<br><br><a href=\"@R./\">Apri Atlante Musica</a>", modulo=False)
 
 
-def _pagina_accesso(h, entrato, fidato):
+def _pagina_accesso(h, entrato, samuele):
     """GET: la pagina con la password (o l'app, per chi è già dentro). POST: controlla la password.
-    Dalla rete Tailscale o dal Mac: scelta della password, se non c'è ancora (o con ?cambia, per cambiarla)."""
-    dati = b""
+    Samuele (dalla rete Tailscale o dal Mac): scelta della password, se non c'è ancora (o con ?cambia, per cambiarla)."""
+    dati, campi = b"", {}
     if h.command == "POST":
-        try:
-            n = int(h.headers.get("Content-Length") or 0)
-        except ValueError:
-            n = -1
-        if not 0 <= n <= 4096:
-            h.close_connection = True
+        letto = _leggi_modulo(h)
+        if letto is None:
             return _scrivi_pagina_accesso(h, 413, "Richiesta non valida.", True)
-        dati = h.rfile.read(n)
+        dati, campi = letto
     elif h.command not in ("GET", "HEAD"):
         h.close_connection = True
         return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True)
-    if fidato and (not ACC.ha_password() or "cambia" in parse_qs(urlsplit(h.path).query, keep_blank_values=True)
+    if samuele and (not ACC.ha_password() or "cambia" in parse_qs(urlsplit(h.path).query, keep_blank_values=True)
                    or b"nuova=" in dati):
         return _nuova_password(h, dati)
     if entrato:
         return _rimanda(h, _verso(h, "./"))
+    if h.command == "POST" and "codice" in campi:
+        return _usa_collegamento(h, campi["codice"][0])
     attiva = ACC.ha_password()
-    if not attiva:
+    if not attiva:   # senza password entra solo chi ha un invito (con il codice di collegamento)
         return _scrivi_pagina_accesso(h, 403 if h.command == "POST" else 200, "L'accesso da Internet non è ancora attivo: "
-                                      "la password si sceglie aprendo questa pagina con Tailscale acceso.", modulo=False)
+                                      "la password si sceglie aprendo questa pagina con Tailscale acceso.", modulo=_MODULO_CODICE)
     if h.command != "POST":
         return _scrivi_pagina_accesso(h, 200, "Da Internet la musica del Mac è protetta da una password.")
     if not _stessa_origine(h):
@@ -3971,10 +4106,7 @@ def _pagina_accesso(h, entrato, fidato):
     if w:
         return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
                                       True, intestazioni=[("Retry-After", str(w))])
-    try:
-        pw = parse_qs(dati.decode("utf-8"), max_num_fields=10).get("password", [""])[0]
-    except (UnicodeDecodeError, ValueError):
-        pw = ""
+    pw = campi.get("password", [""])[0]
     if pw and ACC.giusta(pw):
         ACC.riuscita(ip)
         h._biscotto = _set_cookie(h, ACC.biscotto())
@@ -3989,17 +4121,35 @@ def controlla_accesso(h):
     rimando lì o 401 per chi arriva da Internet senza biscotto valido. Se no la richiesta prosegue; quando serve, la
     risposta porta un biscotto nuovo (h._biscotto, scritto da end_headers)."""
     h._biscotto = None
+    h._chi = {"ruolo": "proprietario", "persona": None, "chiave": None}
     if ACC is None:
         return False
     p = unquote(urlsplit(h.path).path)
     libero = LIBERI.match(p)
-    scad = _biscotto_valido(h)
-    fidato = _fidato(h)
-    entrato = bool(scad) or fidato
-    if entrato and (not scad or scad - time.time() < ACCESSO_DURATA - ACCESSO_RINNOVO):
-        h._biscotto = _set_cookie(h, ACC.biscotto())
+    b = _biscotto_valido(h)
+    samuele = (b is not None and b[0] == "p") or (b is None and _proprietario_rete(h))
+    if b is not None and b[0] == "o":
+        h._chi = {"ruolo": "invitato", "persona": b[3], "chiave": b[2]}
+    elif samuele:
+        h._chi = {"ruolo": "proprietario", "persona": None, "chiave": "p:" + b[2] if b else None}
+    elif _fidato(h):
+        h._chi = {"ruolo": "casa", "persona": None, "chiave": None}   # rete di casa: niente biscotto, niente Gestione
+    else:
+        h._chi = None
+    entrato = h._chi is not None
+    vecchio = not b or b[1] - time.time() < ACCESSO_DURATA - ACCESSO_RINNOVO
+    if b is not None and b[0] == "o":
+        if vecchio:
+            h._biscotto = _set_cookie(h, PERS.biscotto(b[2]))
+    elif samuele and vecchio:
+        h._biscotto = _set_cookie(h, ACC.biscotto(b[2] if b else None))
+    if PERS is not None and h._chi and h._chi["chiave"]:
+        PERS.visto(h._chi["chiave"], tipo_da_agente(h.headers.get("User-Agent")))
     if libero and libero.group(1) == "accesso":
-        _pagina_accesso(h, entrato, fidato)
+        _pagina_accesso(h, entrato, samuele)
+        return True
+    if libero and libero.group(1).startswith("accesso/invito/"):
+        _pagina_invito(h, libero.group(1).rsplit("/", 1)[1], samuele)
         return True
     if entrato or libero:
         return False
@@ -4038,7 +4188,7 @@ def _imposta_password(file):
 
 
 def main():
-    global ACC, CLIP, PERS
+    global ACC, CLIP, PERS, PROPRIETARI
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -4076,6 +4226,8 @@ def main():
         ap.error("serve almeno una cartella di musica")
     ACC = Accesso(file_accesso)
     PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
+    # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
+    PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"

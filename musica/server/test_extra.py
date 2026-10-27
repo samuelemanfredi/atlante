@@ -12,6 +12,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -1102,6 +1103,12 @@ class TestAccesso(unittest.TestCase):
         cls.c = prepara_cartelle(cls.base)
         cls.s = Server(cls.base, cls.c).avvia()
         cls.file = os.path.join(cls.c["cache"], "accesso.json")
+        # le persone si preparano da qui, sullo stesso file del server (che lo rilegge quando cambia)
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_accesso", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
 
     @classmethod
     def tearDownClass(cls):
@@ -1141,7 +1148,8 @@ class TestAccesso(unittest.TestCase):
         st, h, b = self.da_fuori("GET", "/accesso")
         self.assertEqual(st, 200)
         self.assertIn("non è ancora attivo", b.decode("utf-8"))
-        self.assertNotIn("<form", b.decode("utf-8"))
+        self.assertNotIn('name="password"', b.decode("utf-8"))
+        self.assertIn('name="codice"', b.decode("utf-8"))   # chi ha un invito entra anche senza password
         st, h, b = self.entra("qualsiasi-cosa", "203.0.113.1")
         self.assertEqual(st, 403)
         self.assertIsNone(self.biscotto(h))
@@ -1290,6 +1298,143 @@ class TestAccesso(unittest.TestCase):
         self.assertGreater(int(h["Retry-After"]), 0)
         self.assertIsNone(self.biscotto(h))
         self.assertEqual(self.entra("password per i tentativi", "198.51.100.10")[0], 303)   # un altro indirizzo sì
+
+    # ----- invitati: link d'invito, codice per l'app sulla Home, revoca -----
+
+    ORIGINE = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:10000"}
+    IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15"
+
+    def invitato(self, nome="Anna", ip="203.0.113.60"):
+        """Persona invitata che entra dal suo link: (persona, biscotto, pagina dopo «Entra»)."""
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip=ip,
+                                 extra=dict(self.ORIGINE, **{"User-Agent": self.IPHONE}))
+        self.assertEqual(st, 200, b[:300])
+        v = (self.biscotto(h) or "").split(";")[0].split("=", 1)[-1]
+        self.assertTrue(v.startswith("o."), self.biscotto(h))
+        return a["id"], v, b.decode("utf-8")
+
+    def test_6_invito_da_fuori(self):
+        a = self.pers.crea("Anna")
+        codice, _ = self.pers.invito(a["id"])
+        for _ in range(3):   # WhatsApp e Messaggi aprono il link per l'anteprima: non deve consumarlo
+            st, h, b = self.da_fuori("GET", "/accesso/invito/" + codice, extra={"Sec-Fetch-Mode": "navigate"})
+            self.assertEqual(st, 200)
+            self.assertIn("Ciao Anna", b.decode("utf-8"))
+            self.assertIn('<form method="post"', b.decode("utf-8"))
+            self.assertIsNone(self.biscotto(h))
+        # Samuele che apre il link per provarlo non diventa Anna e non lo consuma
+        st, h, b = self.dal_tailscale("GET", "/accesso/invito/" + codice)
+        self.assertIn("già dentro", b.decode("utf-8"))
+        self.assertEqual(self.dal_tailscale("POST", "/accesso/invito/" + codice, b"")[0], 409)
+        self.assertEqual(self.da_fuori("POST", "/accesso/invito/" + codice, b"",
+                                       extra={"Origin": "https://altro.example"})[0], 403)
+        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip="203.0.113.61",
+                                 extra=dict(self.ORIGINE, **{"User-Agent": self.IPHONE}))
+        t = b.decode("utf-8")
+        self.assertEqual(st, 200)
+        self.assertIn("Sei dentro", t)
+        self.assertRegex(t, r'<b class="codice">[ACDEFGHJKMNPQRTUVWXY3479]{6}</b>')
+        v = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        self.assertTrue(v.startswith("o."))
+        self.assertIn("HttpOnly", self.biscotto(h))
+        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip="203.0.113.61", extra=self.ORIGINE)
+        self.assertEqual(st, 410)
+        self.assertIn("non vale più", b.decode("utf-8"))
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=v)[0], 200)
+        self.assertEqual(self.da_fuori("GET", "/accesso/invito/nonesiste12345678")[0], 410)
+        self.assertEqual([y["tipo"] for x in self.pers.elenco()["persone"] if x["id"] == a["id"] for y in x["dispositivi"]],
+                         ["iphone"])
+
+    def test_7_collegamento_app_home(self):
+        pid, v, t = self.invitato("Bruno", ip="203.0.113.70")
+        codice = re.search(r'<b class="codice">(\w{6})</b>', t).group(1)
+        corpo = ("codice=" + codice[:3].lower() + "-" + codice[3:]).encode("utf-8")
+        st, h, b = self.da_fuori("POST", "/accesso", corpo, ip="203.0.113.71", extra=self.ORIGINE)
+        self.assertEqual((st, h["Location"]), (303, "./"))
+        v2 = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        self.assertTrue(v2.startswith("o.") and v2 != v)
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=v2)[0], 200)
+        st, h, b = self.da_fuori("POST", "/accesso", corpo, ip="203.0.113.72", extra=self.ORIGINE)
+        self.assertEqual(st, 401)
+        self.assertIn("Codice sbagliato o scaduto", b.decode("utf-8"))
+        for i in range(5):
+            self.assertEqual(self.da_fuori("POST", "/accesso", b"codice=ZZZZZ%d" % i, ip="198.51.100.77",
+                                           extra=self.ORIGINE)[0], 401)
+        st, h, b = self.da_fuori("POST", "/accesso", b"codice=" + self.pers.collegamento(pid)[0].encode(),
+                                 ip="198.51.100.77", extra=self.ORIGINE)
+        self.assertEqual(st, 429)
+        self.assertGreater(int(h["Retry-After"]), 0)
+
+    def test_8_password_cambiata_invitati_restano(self):
+        self.assertEqual(self.imposta("password dell'ottava prova")[0], 0)
+        st, h, b = self.entra("password dell'ottava prova", "203.0.113.80")
+        p = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        pid, o, t = self.invitato("Carla", ip="203.0.113.81")
+        self.assertEqual(self.imposta("password dell'ottava prova, nuova")[0], 0)
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=p)[0], 401)
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=o)[0], 200)
+
+    def test_9_revoca_immediata(self):
+        pid, v, t = self.invitato("Dario", ip="203.0.113.90")
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=v)[0], 200)
+        did = v.split(".")[2]
+        self.assertTrue(self.pers.revoca_dispositivo(did))
+        st, h, b = self.da_fuori("GET", "/api/musica/catalogo", biscotto=v)
+        self.assertEqual((st, h["X-Atlante-Accesso"]), (401, "richiesto"))
+
+    def test_9b_nome_nella_pagina(self):
+        a = self.pers.crea("<script>x</script>")
+        st, h, b = self.da_fuori("GET", "/accesso/invito/" + self.pers.invito(a["id"])[0])
+        self.assertIn("&lt;script&gt;x&lt;/script&gt;", b.decode("utf-8"))
+        self.assertNotIn("<script>x", b.decode("utf-8"))
+
+
+class FintaRichiesta:
+    """Quanto basta di BaseHTTPRequestHandler per controlla_accesso (indirizzi che dal Mac non si possono fingere)."""
+
+    def __init__(self, ip, intest=None, percorso="/"):
+        self.client_address, self.headers, self.path, self.command = (ip, 50000), dict(intest or {}), percorso, "GET"
+        self.connection = None
+
+
+class TestRuoli(unittest.TestCase):
+    """Chi è una richiesta: Samuele (Mac, Tailscale, password), casa (rete di casa) o invitato."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_ruoli", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.base = tempfile.mkdtemp(prefix="atlante-ruoli-")
+        cls.m.ACC = cls.m.Accesso(os.path.join(cls.base, "accesso.json"))
+        cls.m.PERS = cls.m.Persone(os.path.join(cls.base, "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def ruolo(self, ip, intest=None):
+        h = FintaRichiesta(ip, intest)
+        self.assertFalse(self.m.controlla_accesso(h))
+        return h._chi["ruolo"], h._biscotto
+
+    def test_casa_senza_biscotto(self):
+        ruolo, biscotto = self.ruolo("192.168.1.20")
+        self.assertEqual(ruolo, "casa")
+        self.assertIsNone(biscotto)   # dalla rete di casa si ascolta, ma senza diventare Samuele
+
+    def test_mac_e_tailscale(self):
+        self.assertEqual(self.ruolo("127.0.0.1")[0], "proprietario")
+        self.assertIsNotNone(self.ruolo("127.0.0.1")[1])
+        ts = {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"}
+        self.assertEqual(self.ruolo("127.0.0.1", ts)[0], "proprietario")
+        with unittest.mock.patch.object(self.m, "PROPRIETARI", {"samuele@example.com"}):
+            self.assertEqual(self.ruolo("127.0.0.1", ts)[0], "proprietario")
+            altro = dict(ts, **{"Tailscale-User-Login": "anna@example.com"})
+            self.assertEqual(self.ruolo("127.0.0.1", altro), ("casa", None))
 
 
 class TestPersone(unittest.TestCase):
