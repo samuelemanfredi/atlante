@@ -2007,10 +2007,13 @@ def _gestione(h, metodo, resto, corpo):
     if metodo not in ("GET", "POST", "DELETE"):
         raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
     if resto == ["persone"] and metodo == "GET":
-        el = PERS.elenco()
+        el, mio = PERS.elenco(), _chi_e(h)["chiave"]
         for x in el["persone"]:
             if x.get("da"):
                 x["da_nome"] = PERS.nome(x["da"])
+        for x in el["tuoi"]:
+            if x["id"] == mio:
+                x["attuale"] = True   # questo non si revoca da qui (409): la Gestione lo segna
         return _json(h, el)
     if resto == ["persone"] and metodo == "POST":
         persona = PERS.crea(corpo.get("nome"))
@@ -3314,7 +3317,10 @@ def _instrada(h, metodo, parti, corpo):
         solo("GET")
         chi = getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None}
         pid = chi.get("persona")
-        _json(h, {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None})
+        r = {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None}
+        if chi["ruolo"] == "proprietario" and PERS:   # il riquadro Gestione mostra quante cose nuove aspettano Samuele
+            r["nuove"] = {"richieste": sum(1 for x in PERS.richieste() if x["stato"] == "attesa")}
+        _json(h, r)
     elif cosa == "dispositivi" and not resto:
         solo("GET")
         _json(h, {"dispositivi": DISP.elenco(_di(h))})
@@ -3433,6 +3439,7 @@ DISPOSITIVI_PERSONA = 10          # oltre, esce quello visto meno di recente
 RICHIESTE_ATTESA_MAX = 5          # inviti chiesti da un invitato e non ancora decisi da Samuele
 NOME_PERSONA_MAX = 40
 VISTO_OGNI = 60                   # l'ultimo accesso dei dispositivi va su disco al più ogni minuto
+INVITO_GRAZIA = 120               # un invito appena usato rientra nello stesso dispositivo (doppio tocco su «Entra»)
 
 
 class Accesso:
@@ -3578,6 +3585,16 @@ def tipo_da_agente(ua):
     return "mac" if "Macintosh" in ua else "pc"
 
 
+def browser_da_agente(ua):
+    """Il browser dallo User-Agent, per riconoscere i dispositivi nella Gestione (Chrome su iPhone scrive «CriOS»…)."""
+    ua = ua or ""
+    for segno, nome in (("Edg", "Edge"), ("SamsungBrowser", "Samsung Internet"), ("OPR/", "Opera"), ("CriOS", "Chrome"),
+                        ("FxiOS", "Firefox"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari")):
+        if segno in ua:
+            return nome
+    return "Altro"
+
+
 class Persone:
     """Persone invitate, in <cache>/persone.json (lo legge solo il proprietario), con un segreto suo per firmare i loro
     biscotti: cambiare la password di Samuele non fa uscire gli invitati. Dei link d'invito e dei codici di collegamento
@@ -3588,8 +3605,10 @@ class Persone:
         self.file = file
         self.blocco = threading.Lock()
         self.dati, self.mtime = {}, None
-        self.visti = {}      # chiave -> (tipo, istante): l'ultimo accesso, su disco al più ogni VISTO_OGNI
+        self.visti = {}      # chiave -> (tipo, istante, via, browser): l'ultimo accesso, su disco al più ogni VISTO_OGNI
         self.salvato = 0.0
+        self.usati = {}      # impronta di un invito appena usato -> (dispositivo, istante, indirizzo)
+        self.rotto = False   # il file non si legge: niente scritture, o lo si sovrascriverebbe con un archivio vuoto
 
     def _aggiorna(self):
         try:
@@ -3597,14 +3616,22 @@ class Persone:
         except OSError:
             m = None
         if m != self.mtime:
-            d = {}
+            d, rotto = {}, False
             if m is not None:
                 try:
                     with open(self.file, encoding="utf-8") as f:
                         d = json.load(f)
                 except (OSError, ValueError):
-                    d = {}
-            self.dati, self.mtime = (d if isinstance(d, dict) else {}), m
+                    rotto = True
+                if not isinstance(d, dict):
+                    rotto = True
+            if rotto:   # si tiene quello che c'era in memoria; il file lo si guarda di nuovo quando cambia
+                if not self.rotto:
+                    print("Atlante: %s non si legge: lo lascio com'è e non scrivo più finché non torna leggibile" % self.file,
+                          flush=True)
+                self.rotto, self.mtime = True, m
+            else:
+                self.rotto, self.dati, self.mtime = False, d, m
         d = self.dati
         for k in ("persone", "inviti", "collegamenti", "dispositivi", "tuoi", "richieste"):
             if not isinstance(d.get(k), dict):
@@ -3614,16 +3641,19 @@ class Persone:
         return d
 
     def _scrivi(self, d):
+        if self.rotto:
+            raise ErroreExtra(503, "L'archivio delle persone sul Mac mini non si legge: non lo sovrascrivo")
         ora = time.time()
         for k in ("inviti", "collegamenti"):
             d[k] = {h: x for h, x in d[k].items() if x.get("scade", 0) > ora}
         for r in d["richieste"].values():   # invito scaduto: il codice in chiaro non serve più
             if r.get("invito") and r["invito"] not in d["inviti"]:
                 r.pop("codice", None)
-        for c, (tipo, t) in self.visti.items():
+        for c, (tipo, t, via, browser) in self.visti.items():
             x = d["dispositivi"].get(c) or (d["tuoi"].setdefault(c, {}) if c.startswith("p:") and c not in d["revocati"] else None)
             if x is not None:
-                x.update(tipo=tipo, visto=t)
+                x.setdefault("creato", t)
+                x.update({k: v for k, v in (("tipo", tipo), ("visto", t), ("via", via), ("browser", browser)) if v})
         self.salvato = ora
         os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
         tmp = "%s.%d.tmp" % (self.file, os.getpid())
@@ -3658,7 +3688,7 @@ class Persone:
         ora = time.time()
         suoi = [k for k, x in d["dispositivi"].items() if x.get("persona") == pid]
         if len(suoi) >= DISPOSITIVI_PERSONA:
-            vecchio = min(suoi, key=lambda k: self.visti.get(k, (0, d["dispositivi"][k].get("visto", 0)))[1])
+            vecchio = min(suoi, key=lambda k: self.visti.get(k, (0, d["dispositivi"][k].get("visto", 0)))[1])   # (…, istante, …)
             del d["dispositivi"][vecchio]
             self.visti.pop(vecchio, None)
         did = secrets.token_hex(8)
@@ -3688,12 +3718,18 @@ class Persone:
                 return None
             return {"persona": x["persona"], "nome": d["persone"][x["persona"]]["nome"]}
 
-    def usa_invito(self, codice, tipo):
+    def usa_invito(self, codice, tipo, ip=None):
         h = _impronta(str(codice or ""))
         with self.blocco:
             d = self._aggiorna()
+            ora = time.time()
+            self.usati = {k: v for k, v in self.usati.items() if ora - v[1] <= INVITO_GRAZIA}
             x = d["inviti"].get(h)
-            if not x or x["scade"] <= time.time() or x["persona"] not in d["persone"]:
+            if not x or x["scade"] <= ora or x["persona"] not in d["persone"]:
+                # doppio tocco su «Entra» o pagina rimandata subito dopo: lo stesso telefono riceve lo stesso dispositivo
+                u = self.usati.get(h)
+                if u and ip and u[2] == ip and u[0] in d["dispositivi"]:
+                    return u[0]
                 return None
             del d["inviti"][h]
             for r in d["richieste"].values():
@@ -3702,7 +3738,12 @@ class Persone:
                     r["stato"] = "usata"
             did = self._dispositivo(d, x["persona"], tipo)
             self._scrivi(d)
+            self.usati[h] = (did, ora, ip)
             return did
+
+    def persona_di(self, did):
+        with self.blocco:
+            return (self._aggiorna()["dispositivi"].get(did) or {}).get("persona")
 
     def collegamento(self, pid):
         with self.blocco:
@@ -3750,13 +3791,19 @@ class Persone:
             return None
         return pid, m.group(2), scad
 
-    def visto(self, chiave, tipo):
+    def visto(self, chiave, tipo, via=None, browser=None):
+        """Ultimo accesso di un dispositivo (con da dove arriva: «tailscale» o «internet», e il browser): in memoria, su
+        disco al più ogni VISTO_OGNI. Non solleva mai: un disco pieno non deve far cadere la richiesta."""
         with self.blocco:
-            self.visti[chiave] = (tipo if tipo in TIPI_DISP else "pc", time.time())
+            self.visti[chiave] = (tipo if tipo in TIPI_DISP else "pc", time.time(), via, browser)
             if len(self.visti) > 5000:   # moltissime chiavi diverse (biscotti falsi non arrivano qui): si salva e si riparte
                 self.visti = dict(list(self.visti.items())[-1000:])
             if time.time() - self.salvato >= VISTO_OGNI:
-                self._scrivi(self._aggiorna())
+                try:
+                    self._scrivi(self._aggiorna())
+                except (ErroreExtra, OSError) as e:
+                    self.salvato = time.time()   # si riprova fra un minuto, non a ogni richiesta
+                    print("Atlante: ultimo accesso non salvato: %s" % e, flush=True)
 
     def revoca_persona(self, pid):
         with self.blocco:
@@ -3795,12 +3842,14 @@ class Persone:
             d = self._aggiorna()
 
             def visto(k, x):
-                return self.visti.get(k, (x.get("tipo", "pc"), x.get("visto", 0)))
+                tipo, t, via, browser = self.visti.get(k, (None, None, None, None))
+                return {"id": k, "tipo": tipo or x.get("tipo", "pc"), "visto": t or x.get("visto", 0),
+                        "via": via or x.get("via", ""), "browser": browser or x.get("browser", ""),
+                        "creato": x.get("creato") or t or x.get("visto", 0)}
 
             disp = {}
             for k, x in d["dispositivi"].items():
-                tipo, t = visto(k, x)
-                disp.setdefault(x.get("persona"), []).append({"id": k, "tipo": tipo, "visto": t})
+                disp.setdefault(x.get("persona"), []).append(visto(k, x))
             tuoi = {k: dict(x) for k, x in d["tuoi"].items()}
             for k in self.visti:
                 if k.startswith("p:"):
@@ -3810,8 +3859,7 @@ class Persone:
                             **({"da": x["da"]} if x.get("da") else {}))
                        for p, x in sorted(d["persone"].items(), key=lambda kv: kv[1]["creato"])]
             return {"persone": persone,
-                    "tuoi": sorted(({"id": k, "tipo": visto(k, x)[0], "visto": visto(k, x)[1]}
-                                    for k, x in tuoi.items() if k not in d["revocati"]), key=lambda y: -y["visto"])}
+                    "tuoi": sorted((visto(k, x) for k, x in tuoi.items() if k not in d["revocati"]), key=lambda y: -y["visto"])}
 
     def richiedi(self, da_pid, nome):
         with self.blocco:
@@ -4028,7 +4076,7 @@ _MODULO_ACCESSO = _MODULO_CODICE + """
 <button type="submit">Entra</button>
 </form>"""
 _MODULO_INVITO = """<p>@M</p>
-<form method="post" action="">
+<form method="post" action="" onsubmit="this.querySelector('button').disabled=true">
 <button type="submit">Entra</button>
 </form>"""
 _INVITO_FATTO = """<p>@M</p>
@@ -4112,7 +4160,13 @@ def _usa_collegamento(h, codice):
     return _rimanda(h, _verso(h, "./"))
 
 
-def _pagina_invito(h, codice, samuele):
+def _gia_dentro(h, pid):
+    """Chi è già entrato e riapre il link (o lo rimanda con «indietro»): niente errore, il link dell'app e un codice nuovo."""
+    k, _ = PERS.collegamento(pid)
+    return _scrivi_pagina_accesso(h, 200, "Sei già dentro, %s!" % _nome_pagina(PERS.nome(pid)), modulo=_INVITO_FATTO.replace("@K", k))
+
+
+def _pagina_invito(h, codice, samuele, chi=None):
     """Link d'invito. GET: chi invita e il tasto «Entra» — WhatsApp e Messaggi aprono i link per l'anteprima, quindi
     leggere la pagina non usa l'invito. POST (il tocco su «Entra»): l'invito si usa, il dispositivo riceve il biscotto
     della persona e il codice per l'app sulla schermata Home."""
@@ -4123,9 +4177,10 @@ def _pagina_invito(h, codice, samuele):
     if h.command == "POST" and _leggi_modulo(h) is None:
         return _scrivi_pagina_accesso(h, 413, "Richiesta non valida.", True, modulo=False)
     info = PERS.leggi_invito(codice) if PERS else None
+    invitato = chi["persona"] if chi and chi["ruolo"] == "invitato" else None
     if h.command != "POST":
         if info is None:
-            return _scrivi_pagina_accesso(h, 410, morto, modulo=False)
+            return _gia_dentro(h, invitato) if invitato else _scrivi_pagina_accesso(h, 410, morto, modulo=False)
         if samuele:
             return _scrivi_pagina_accesso(h, 200, "Questo è l'invito per %s: aprilo dal suo telefono. Tu sei già dentro "
                                           "come Samuele." % _nome_pagina(info["nome"]), modulo=False)
@@ -4140,14 +4195,17 @@ def _pagina_invito(h, codice, samuele):
     w = ACC.attesa(ip)
     if w:
         return _troppi_tentativi(h, w, modulo=False)
-    did = PERS.usa_invito(codice, tipo_da_agente(h.headers.get("User-Agent"))) if info else None
+    did = PERS.usa_invito(codice, tipo_da_agente(h.headers.get("User-Agent")), ip)
     if not did:
+        if invitato:   # già dentro (pagina rimandata più tardi): non è un tentativo sbagliato
+            return _gia_dentro(h, invitato)
         ACC.sbagliata(ip)
         return _scrivi_pagina_accesso(h, 410, morto, True, modulo=False)
+    pid = PERS.persona_di(did)
     h._biscotto = _set_cookie(h, PERS.biscotto(did))
-    k, _ = PERS.collegamento(info["persona"])
-    print("Atlante: %s è entrato con l'invito" % info["nome"], flush=True)
-    return _scrivi_pagina_accesso(h, 200, "Sei dentro, %s!" % _nome_pagina(info["nome"]),
+    k, _ = PERS.collegamento(pid)
+    print("Atlante: %s è entrato con l'invito" % PERS.nome(pid), flush=True)
+    return _scrivi_pagina_accesso(h, 200, "Sei dentro, %s!" % _nome_pagina(PERS.nome(pid)),
                                   modulo=_INVITO_FATTO.replace("@K", k))
 
 
@@ -4240,7 +4298,10 @@ def controlla_accesso(h):
     p = unquote(urlsplit(h.path).path)
     libero = LIBERI.match(p)
     b = _biscotto_valido(h)
-    samuele = (b is not None and b[0] == "p") or (b is None and _proprietario_rete(h))
+    rete = _proprietario_rete(h)
+    if rete and b is not None and b[0] == "o":
+        b = None   # Samuele dalla sua rete Tailscale resta Samuele anche con il biscotto di un invito provato da lui
+    samuele = rete or (b is not None and b[0] == "p")
     if b is not None and b[0] == "o":
         h._chi = {"ruolo": "invitato", "persona": b[3], "chiave": b[2]}
     elif samuele:
@@ -4257,12 +4318,13 @@ def controlla_accesso(h):
     elif samuele and vecchio:
         h._biscotto = _set_cookie(h, ACC.biscotto(b[2] if b else None))
     if PERS is not None and h._chi and h._chi["chiave"]:
-        PERS.visto(h._chi["chiave"], tipo_da_agente(h.headers.get("User-Agent")))
+        ua = h.headers.get("User-Agent")
+        PERS.visto(h._chi["chiave"], tipo_da_agente(ua), "tailscale" if _fidato(h) else "internet", browser_da_agente(ua))
     if libero and libero.group(1) == "accesso":
         _pagina_accesso(h, entrato, samuele)
         return True
     if libero and libero.group(1).startswith("accesso/invito/"):
-        _pagina_invito(h, libero.group(1).rsplit("/", 1)[1], samuele)
+        _pagina_invito(h, libero.group(1).rsplit("/", 1)[1], samuele, h._chi)
         return True
     if entrato or libero:
         return False
@@ -4445,6 +4507,10 @@ def main():
             q = unquote(p)
             if not PREFISSO.match(q) and not EXTRA.match(q) and (p.endswith("/") or p.endswith((".html", ".js", ".css", ".webmanifest"))):
                 self.send_header("Cache-Control", "no-cache")
+            if not PREFISSO.match(q) and not EXTRA.match(q) and (p.endswith("/") or p.endswith(".html") or LIBERI.match(q)):
+                # la Gestione (e ogni pagina) non si apre dentro un altro sito, che potrebbe far toccare i tasti a Samuele
+                self.send_header("X-Frame-Options", "SAMEORIGIN")
+                self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
             b = getattr(self, "_biscotto", None)   # accesso da Internet: biscotto nuovo o rinnovato
             if b:
                 self._biscotto = None

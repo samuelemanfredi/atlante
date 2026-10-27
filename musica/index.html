@@ -187,6 +187,7 @@ body.xnav #mini{display:none}
 body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .xgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
 .xnote{color:var(--fg2);font-size:15px;margin:4px 4px 18px}
+.xtile .xn{position:absolute;top:10px;right:10px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--accent);color:#fff;font-size:13px;font-weight:700;line-height:22px;text-align:center}
 .xtile{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:14px;background:var(--bg2);text-align:left;min-height:118px}
 .xtile .xi{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px}
 .xtile b{font-weight:600;font-size:16px}
@@ -873,8 +874,19 @@ const sulTel = id => saved.has(id) || !!gemelloSalvato(id);
 let TUTTO = ls.get('am-tutto', true);
 const TOLTI = new Set(ls.get('am-tolti', []));   // tolti a mano dall'iPhone: non si risalvano da soli (finché non si tocca «Scarica»)
 const AUTO = new Set(ls.get('am-auto', []));     // messi in coda da «Scarica tutta la musica»: escono dalla coda se lo si spegne
+// «Scarica tutto» scelto a mano (acceso o spento) su questo telefono, o solo il valore di partenza
+function tuttoScelto() { try { return localStorage.getItem('am-tutto') !== null; } catch (e) { return true; } }
+// spento senza avvisi (invitato appena arrivato): via dalla coda i brani messi lì da «Scarica tutto»
+function tuttoSpento() {
+  TUTTO = false; ls.set('am-tutto', false);
+  for (let k = DLQ.length - 1; k >= 0; k--) if (AUTO.has(DLQ[k])) DLQ.splice(k, 1);
+  AUTO.clear(); ls.set('am-auto', []); ls.set('am-dlq', DLQ); dlPill();
+}
 function scaricaTutto() {
   if (!TUTTO || !DB || !SRV || SRVSCAN || !SRVN || Date.now() - ls.get('am-pieno', 0) < 86400000) return;
+  // finché non si sa chi è questo telefono (prima apertura, il Mac non ha ancora risposto a «chi sono»), niente
+  // download di tutta la libreria: se fosse un invitato si riempirebbe il telefono senza averlo chiesto
+  if (!IO.ruolo && !tuttoScelto()) return;
   const q = new Set(DLQ), inPl = new Set(); P.forEach(p => p.ids.forEach(x => inPl.add(x)));
   for (const x of AUTO) if (!q.has(x)) AUTO.delete(x);
   const tr = [...T.values()].filter(t => t.remote && !saved.has(t.id) && !TOLTI.has(t.id) && !q.has(t.id) && dlCur !== t.id && !grabbing.has(t.id));
@@ -1413,7 +1425,8 @@ const pages = {
   altro() {
     return '<div class="top"><span></span></div><h1 class="lt">Altro</h1>' +
       xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
-        '<button class="xtile" data-a="xopen" data-k="' + m.k + '"><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span></button>').join('') + '</div>').join('') +
+        '<button class="xtile" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
+          (m.k === 'gestione' && nuoveGestione() ? '<span class="xn" aria-label="cose nuove">' + nuoveGestione() + '</span>' : '') + '</button>').join('') + '</div>').join('') +
       (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, idee, la tua interfaccia e la chat.</p>' : '');
   },
   search() {
@@ -2266,6 +2279,8 @@ const XMODS = [
 let IO = ls.get('am-io', {ruolo:'', persona:null});
 const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, inviti e accessi', i:'🛡️', c:'#1c1c1e'}]};
 const XINVITATI = [{g:'Per te', m:[{k:'inviti', t:'Invita un amico', d:'Chiedi a Samuele un invito', i:'✉️', c:'#007aff'}]}];
+// quante cose nuove aspettano Samuele (richieste d'invito…): il numero sul riquadro Gestione
+const nuoveGestione = () => Object.values(IO.nuove || {}).reduce((a, n) => a + (+n || 0), 0);
 function xmodsVisibili() {
   if (IO.ruolo === 'invitato') return XINVITATI;
   return (IO.ruolo === 'proprietario' ? [XGESTIONE] : []).concat(XMODS);
@@ -2274,12 +2289,11 @@ async function ioCarica() {
   try {
     const r = await fetchT(XAPI + 'io', {cache:'no-store'}, 6000);
     if (!r.ok) return;
-    const j = await r.json(), prima = IO.ruolo;
-    IO = {ruolo:j.ruolo || '', persona:j.persona || null}; ls.set('am-io', IO);
+    const j = await r.json(), prima = JSON.stringify(IO);
+    IO = {ruolo:j.ruolo || '', persona:j.persona || null, nuove:j.nuove || null}; ls.set('am-io', IO);
     // un invitato non si ritrova migliaia di brani sul telefono senza averlo chiesto: «Scarica tutto» lo accende lui
-    let scelto = true; try { scelto = localStorage.getItem('am-tutto') !== null; } catch (e) {}
-    if (IO.ruolo === 'invitato' && !scelto) { TUTTO = false; ls.set('am-tutto', false); }
-    if (prima !== IO.ruolo) render(true);
+    if (IO.ruolo === 'invitato' && !tuttoScelto()) tuttoSpento();
+    if (prima !== JSON.stringify(IO)) render(true);
   } catch (e) {}
 }
 const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entrano in libreria né in «Brani»

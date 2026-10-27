@@ -1343,7 +1343,8 @@ class TestAccesso(unittest.TestCase):
         v = self.biscotto(h).split(";")[0].split("=", 1)[1]
         self.assertTrue(v.startswith("o."))
         self.assertIn("HttpOnly", self.biscotto(h))
-        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip="203.0.113.61", extra=self.ORIGINE)
+        # usato: da un altro telefono non vale più (dallo stesso, subito dopo, sì: vedi test_9g)
+        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip="203.0.113.62", extra=self.ORIGINE)
         self.assertEqual(st, 410)
         self.assertIn("non vale più", b.decode("utf-8"))
         self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=v)[0], 200)
@@ -1422,7 +1423,8 @@ class TestAccesso(unittest.TestCase):
         st, h, b = self.da_fuori("GET", "/api/extra/io", biscotto=v)
         self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "invitato", "persona": {"id": pid, "nome": "Elena"}})
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io")
-        self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "proprietario", "persona": None})
+        io = json.loads(b.decode("utf-8"))
+        self.assertEqual((io["ruolo"], io["persona"], sorted(io["nuove"])), ("proprietario", None, ["richieste"]))
 
     def test_9e_dispositivi_per_persona(self):
         pid, v, t = self.invitato("Franca", ip="203.0.113.110")
@@ -1514,6 +1516,55 @@ class TestAccesso(unittest.TestCase):
         self.assertEqual(samuele("DELETE", "/api/extra/gestione/dispositivi/" + chiave), {"ok": True})
         self.assertEqual(self.da_fuori("GET", "/api/extra/io", biscotto=p)[0], 401)
 
+    def test_9g_doppio_tocco_su_entra(self):
+        a = self.pers.crea("Ivo")
+        codice, _ = self.pers.invito(a["id"])
+        intest = dict(self.ORIGINE, **{"User-Agent": self.IPHONE})
+        v = []
+        for _ in range(2):   # due tocchi su «Entra» dallo stesso telefono: dentro tutte e due le volte, stesso dispositivo
+            st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip="203.0.113.130", extra=intest)
+            self.assertEqual(st, 200, b[:200])
+            v.append(self.biscotto(h).split(";")[0].split("=", 1)[1])
+        self.assertEqual(v[0].split(".")[2], v[1].split(".")[2])
+        self.assertIn('onsubmit=', self.da_fuori("GET", "/accesso/invito/" + self.pers.invito(a["id"])[0])[2].decode("utf-8"))
+        # più tardi, con la pagina rimandata (indietro e di nuovo «Entra»): chi è già dentro lo vede, e non conta come errore
+        for _ in range(6):
+            st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip="203.0.113.131", biscotto=v[1], extra=intest)
+            self.assertEqual(st, 200)
+            self.assertIn("già dentro", b.decode("utf-8"))
+        st, h, b = self.da_fuori("GET", "/accesso/invito/" + codice, biscotto=v[1])
+        self.assertIn("già dentro", b.decode("utf-8"))
+        nuovo = self.pers.invito(a["id"])[0]
+        self.assertEqual(self.da_fuori("POST", "/accesso/invito/" + nuovo, b"", ip="203.0.113.131", extra=intest)[0], 200)
+
+    def test_9h_gestione_riconosce_i_dispositivi(self):
+        self.assertEqual(self.imposta("password della prova dispositivi")[0], 0)
+        st, h, b = self.da_fuori("POST", "/accesso", b"nome=Atlante+Musica&password=password+della+prova+dispositivi",
+                                 ip="203.0.113.140", extra=dict(self.ORIGINE, **{"User-Agent": self.IPHONE + " Version/18.0 Mobile/15E148 Safari/604.1"}))
+        self.assertEqual(st, 303)
+        p = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        chiave = "p:" + p.split(".")[1]
+        st, h, b = self.da_fuori("GET", "/api/extra/gestione/persone", biscotto=p,
+                                 extra={"User-Agent": self.IPHONE + " Version/18.0 Mobile/15E148 Safari/604.1"})
+        tuoi = {x["id"]: x for x in json.loads(b.decode("utf-8"))["tuoi"]}
+        self.assertEqual((tuoi[chiave]["via"], tuoi[chiave]["browser"], tuoi[chiave]["tipo"], tuoi[chiave].get("attuale")),
+                         ("internet", "Safari", "iphone", True))
+        self.assertTrue(all(not x.get("attuale") for k, x in tuoi.items() if k != chiave))
+
+    def test_9i_numeri_nuovi_nella_gestione(self):
+        pid, v, t = self.invitato("Lia", ip="203.0.113.150")
+        st, h, b = self.da_fuori("POST", "/api/extra/inviti", {"nome": "Amico di Lia"}, biscotto=v, extra={"Origin": self.ORIGINE["Origin"]})
+        self.assertEqual(st, 200)
+        io = json.loads(richiesta(self.s.porta, "GET", "/api/extra/io")[2].decode("utf-8"))
+        self.assertGreaterEqual(io["nuove"]["richieste"], 1)
+        self.assertNotIn("nuove", json.loads(self.da_fuori("GET", "/api/extra/io", biscotto=v)[2].decode("utf-8")))
+
+    def test_9j_pagine_non_incorniciabili(self):
+        for p in ("/", "/index.html", "/x/inviti.html", "/accesso"):
+            st, h, b = self.da_fuori("GET", p)
+            self.assertEqual(h["X-Frame-Options"], "SAMEORIGIN", p)
+            self.assertIn("frame-ancestors 'self'", h["Content-Security-Policy"], p)
+
 
 class FintaRichiesta:
     """Quanto basta di BaseHTTPRequestHandler per controlla_accesso (indirizzi che dal Mac non si possono fingere)."""
@@ -1549,6 +1600,15 @@ class TestRuoli(unittest.TestCase):
         ruolo, biscotto = self.ruolo("192.168.1.20")
         self.assertEqual(ruolo, "casa")
         self.assertIsNone(biscotto)   # dalla rete di casa si ascolta, ma senza diventare Samuele
+
+    def test_tailscale_vince_sul_biscotto_invitato(self):
+        a = self.m.PERS.crea("Ospite")
+        did = self.m.PERS.usa_invito(self.m.PERS.invito(a["id"])[0], "iphone")
+        intest = {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com",
+                  "Cookie": "am_accesso=" + self.m.PERS.biscotto(did)}
+        ruolo, biscotto = self.ruolo("127.0.0.1", intest)
+        self.assertEqual(ruolo, "proprietario")
+        self.assertFalse(biscotto.split("=", 1)[1].startswith("o."))   # il telefono torna di Samuele
 
     def test_mac_e_tailscale(self):
         self.assertEqual(self.ruolo("127.0.0.1")[0], "proprietario")
@@ -1693,6 +1753,52 @@ class TestPersone(unittest.TestCase):
         self.assertEqual([x["stato"] for x in self.p.richieste_di(anna) if x["id"] == attesa[0]["id"]], ["rifiutata"])
         self.assertEqual(len(self.p.elenco()["persone"]), prima)
 
+    def test_doppio_tocco(self):
+        a = self.p.crea("Anna")
+        codice, _ = self.p.invito(a["id"])
+        d1 = self.p.usa_invito(codice, "iphone", "203.0.113.5")
+        self.assertIsNotNone(d1)
+        # il secondo tocco su «Entra» (o la pagina ricaricata) poco dopo, dallo stesso indirizzo: lo stesso dispositivo
+        self.assertEqual(self.p.usa_invito(codice, "iphone", "203.0.113.5"), d1)
+        self.assertIsNone(self.p.usa_invito(codice, "iphone", "198.51.100.1"))   # da un altro indirizzo no
+        self.assertEqual(self.p.persona_di(d1), a["id"])
+        with self.piu_tardi(121):
+            self.assertIsNone(self.p.usa_invito(codice, "iphone", "203.0.113.5"))
+        self.assertEqual(len([x for x in self.p.elenco()["persone"][0]["dispositivi"]]), 1)
+
+    def test_file_rotto(self):
+        pid, did = self.entrata()
+        b = self.p.biscotto(did)
+        with open(self.file, "w", encoding="utf-8") as f:
+            f.write("{rotto")
+        self.assertEqual(self.p.chi(b)[0], pid)   # in memoria resta quello di prima
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.p.crea("Bruno")
+        self.assertEqual(e.exception.codice, 503)
+        with self.piu_tardi(self.m.VISTO_OGNI + 1):
+            self.p.visto(did, "iphone")   # non solleva: l'accesso della richiesta non cade
+        with open(self.file, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "{rotto")   # il file rotto non viene sovrascritto con un archivio vuoto
+        nuovo = self.m.Persone(self.file)   # un processo che parte con il file rotto non lo svuota
+        with self.assertRaises(self.m.ErroreExtra):
+            nuovo.crea("Carla")
+        with open(self.file, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "{rotto")
+
+    def test_dispositivi_riconoscibili(self):
+        pid, did = self.entrata()
+        with self.piu_tardi(self.m.VISTO_OGNI + 1):
+            self.p.visto("p:00112233aabbccdd", "iphone", "tailscale", "Safari")
+            self.p.visto(did, "android", "internet", "Chrome")
+        tuo = self.p.elenco()["tuoi"][0]
+        self.assertEqual((tuo["id"], tuo["tipo"], tuo["via"], tuo["browser"]), ("p:00112233aabbccdd", "iphone", "tailscale", "Safari"))
+        self.assertGreater(tuo["creato"], 0)
+        d = self.p.elenco()["persone"][0]["dispositivi"][0]
+        self.assertEqual((d["via"], d["browser"]), ("internet", "Chrome"))
+        self.assertGreater(d["creato"], 0)
+        # e restano dopo la scrittura su disco, letti da un altro processo
+        self.assertEqual(self.m.Persone(self.file).elenco()["tuoi"][0]["browser"], "Safari")
+
     def test_tipo_da_agente(self):
         for ua, tipo in (("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", "iphone"),
                          ("Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X)", "ipad"),
@@ -1700,6 +1806,13 @@ class TestPersone(unittest.TestCase):
                          ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15", "mac"),
                          ("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "pc"), ("", "pc")):
             self.assertEqual(self.m.tipo_da_agente(ua), tipo, ua)
+        for ua, nome in (("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1", "Safari"),
+                         ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/130.0 Mobile/15E148 Safari/604.1", "Chrome"),
+                         ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 FxiOS/130.0 Mobile/15E148 Safari/605.1.15", "Firefox"),
+                         ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0 Safari/537.36 Edg/130.0", "Edge"),
+                         ("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36", "Chrome"),
+                         ("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0", "Firefox"), ("curl/8", "Altro")):
+            self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
 
 
 if __name__ == "__main__":

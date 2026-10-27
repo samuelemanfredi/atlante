@@ -46,6 +46,15 @@ AX.header('Gestione');
 const TIPI = {iphone:'iPhone', ipad:'iPad', android:'Telefono Android', mac:'Mac', pc:'Computer'};
 let aperta = '';   // persona con i dettagli aperti
 let QRLIB = null;
+// come riconoscere un dispositivo: «iPhone · Safari · da Tailscale · dal 27/10/2026», e quello che si sta usando
+function descrivi(d) {
+  return (TIPI[d.tipo] || 'Dispositivo') + (d.browser && d.browser !== 'Altro' ? ' · ' + d.browser : '');
+}
+function dettagli(d) {
+  return (d.via === 'tailscale' ? 'da Tailscale' : d.via === 'internet' ? 'da Internet' : '') +
+    (d.creato ? (d.via ? ' · ' : '') + 'dal ' + new Date(d.creato * 1000).toLocaleDateString('it-IT') : '') +
+    ' · ultimo accesso ' + quando(d.visto);
+}
 
 function quando(t) {
   if (!t) return 'mai';
@@ -60,9 +69,10 @@ function messaggio(nome, link) {
   return 'Ciao ' + nome + '! Ti ho invitato su Atlante Musica, la mia libreria musicale. Apri questo link sul telefono e sei dentro: ' +
     'puoi ascoltare tutto e salvare i brani sul telefono.\n' + link;
 }
+// qrcode-generator 1.4.4 (MIT) tenuta in x/qrcode.js: nella Gestione niente codice da altri siti
 async function caricaQR() {
   if (QRLIB) return QRLIB;
-  await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); });
+  await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = 'qrcode.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); });
   return (QRLIB = window.qrcode);
 }
 function cartaLink(nome, link, scade) {
@@ -112,7 +122,7 @@ async function disegna() {
   $('plist').innerHTML = el.persone.map(p => {
     const ult = Math.max(0, ...p.dispositivi.map(d => d.visto));
     const det = p.id !== aperta ? '' : '<div class="det">' +
-      (p.dispositivi.length ? p.dispositivi.map(d => '<div class="dev"><span class="tx"><b>' + (TIPI[d.tipo] || 'Dispositivo') + '</b><span class="small">Ultimo accesso: ' + quando(d.visto) + '</span></span><button class="btn sm" data-rd="' + d.id + '">Revoca</button></div>').join('') :
+      (p.dispositivi.length ? p.dispositivi.map(d => '<div class="dev"><span class="tx"><b>' + esc(descrivi(d)) + '</b><span class="small">' + esc(dettagli(d)) + '</span></span><button class="btn sm" data-rd="' + d.id + '">Revoca</button></div>').join('') :
         '<p class="small">Nessun dispositivo collegato, per ora.</p>') +
       '<div class="btns"><button class="btn sm" data-nl="' + p.id + '">Nuovo link</button><button class="btn sm danger" data-rp="' + p.id + '">Revoca ' + esc(p.nome) + '</button></div><div data-box></div></div>';
     return '<button class="row" data-p="' + p.id + '"><span class="av">' + esc(p.nome.slice(0, 1)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b><span>' +
@@ -132,7 +142,8 @@ async function disegna() {
     try { await api('gestione/persone/' + p.id, {method:'DELETE'}); toast('Accesso di ' + p.nome + ' revocato'); aperta = ''; } catch (e) { toast(e.message); }
     disegna();
   });
-  $('tlist').innerHTML = el.tuoi.length ? el.tuoi.map(d => '<div class="row"><span class="tx"><b>' + (TIPI[d.tipo] || 'Dispositivo') + '</b><span>Ultimo accesso: ' + quando(d.visto) + '</span></span><button class="btn sm" data-rd="' + esc(d.id) + '">Revoca</button></div>').join('') :
+  $('tlist').innerHTML = el.tuoi.length ? el.tuoi.map(d => '<div class="row"><span class="tx"><b>' + esc(descrivi(d)) + (d.attuale ? ' <span class="pill ok">questo</span>' : '') + '</b><span>' + esc(dettagli(d)) + '</span></span>' +
+    (d.attuale ? '' : '<button class="btn sm" data-rd="' + esc(d.id) + '">Revoca</button>') + '</div>').join('') :
     '<div class="row"><span class="tx"><span>Nessuno, per ora: compaiono appena si collegano.</span></span></div>';
   $('tlist').querySelectorAll('[data-rd]').forEach(b => b.onclick = () => revocaDisp(b.dataset.rd));
 }
