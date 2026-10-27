@@ -126,6 +126,7 @@ function prove(src, fatte) {
   prova('mix a fine brano senza mixer', () => scenarioFineBrano(src, false));
   prova('mix a fine brano con il mixer', () => scenarioFineBrano(src, true));
   prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
+  prova('iOS prima del 27 senza mixer', () => versioneIOS(src));
 }
 
 // tutto lo script dell'app si compila (non si esegue): un errore di battitura in qualsiasi punto si vede qui
@@ -672,4 +673,32 @@ function scenarioSaltoCambi(src) {
   vero(dopo.length <= 3, 'dissolvenza del salto con il mixer: al più una correzione ogni 2 s (' + JSON.stringify(dopo) + ')');
   vero(dopo.length >= 1, 'serviva una correzione dei battiti');
   vero(Math.max.apply(null, err) < 0.16 && Math.max.apply(null, err.slice(-25)) < 0.08, 'battiti agganciati anche con poche correzioni (' + Math.max.apply(null, err) + ', alla fine ' + Math.max.apply(null, err.slice(-25)) + ')');
+}
+
+// iOS prima del 27: niente mixer. La versione dallo User-Agent (bloccato a 18_6 da iOS 26) o dalle novità di Safari 27
+function versioneIOS(src) {
+  const F = carica(src, ['iosDa27'], [], {});
+  const casi = [
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148', true, false, 'app Home su iOS 17'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1', true, false, 'Safari iOS 18.5'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1', true, false, 'Safari iOS 18.6'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1', true, false, 'Safari iOS 26'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Mobile/15E148 Safari/604.1', true, false, 'Safari iOS 26 (18_7)'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1', false, true, 'Safari iOS 27'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 26_0_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0.7339.122 Mobile/15E148 Safari/604.1', true, false, 'Chrome iOS 26'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/150.0 Mobile/15E148 Safari/604.1', false, true, 'Chrome iOS 27'],
+    ['Mozilla/5.0 (iPad; CPU OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1', true, false, 'iPad iOS 26'],
+    ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15', true, false, 'iPad «desktop» 26'],
+    ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15', false, true, 'iPad «desktop» 27']];
+  for (const [ua, vecchio, nuovo, nome] of casi) {
+    vero(F.iosDa27(ua, false) === !vecchio && F.iosDa27(ua, true) === !vecchio, nome + ': la versione si legge dallo User-Agent');
+    vero(!vecchio === nuovo, nome);
+  }
+  // app sulla schermata Home da iOS 26: nessuna versione, decidono le novità di Safari 27
+  for (const ua of ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)'])
+    vero(F.iosDa27(ua, true) === true && F.iosDa27(ua, false) === false, 'app Home bloccata a 18_6: decidono le novità');
+  vero(/function mixerInit\(\) \{\n  if \(MIX\.ctx \|\| !NEEDS_MIXER \|\| IOS_PRIMA_27 \|\|/.test(src), 'mixerInit deve restare spento prima di iOS 27');
+  vero(/const IOS_PRIMA_27 = isIOS && !iosDa27\(navigator\.userAgent, novita27\(\)\);/.test(src), 'IOS_PRIMA_27');
+  vero(/240405/.test(src), 'il commento con il numero del bug');
 }

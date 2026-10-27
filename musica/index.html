@@ -1706,8 +1706,24 @@ function setGain(el, g) { el._g = g; if (MIX.gains.has(el)) { const n = MIX.gain
 // iPhone e iPad: il volume dei lettori è fisso, la dissolvenza passa da un piccolo mixer (Web Audio). Si prepara al primo
 // tocco (serve un gesto) e con la sessione audio «playback», che lo lascia suonare anche a schermo bloccato.
 const NEEDS_MIXER = isIOS;
+// iOS prima del 27: un lettore collegato al mixer non cambia davvero velocità (bug WebKit 240405, corretto in Safari 27:
+// l'accelerazione non si sente, il brano va a scatti e scivola rispetto a currentTime). Lì il mixer resta spento, come
+// con am-mix-noweb: la velocità cambia davvero e il passaggio è una rampa a tempo con un taglio sul battito, senza
+// dissolvenza (con il mixer non si avrebbe né l'una né l'altra).
+// Quale iOS: dal 26 Safari scrive per sempre «OS 18_6» nello User-Agent (WebKit 298260) e la versione vera è quella di
+// Safari, «Version/NN»; le app sulla schermata Home non hanno neanche quella: lì decidono due novità di Safari 27.
+function iosDa27(ua, novita) {
+  const os = /(?:iPhone|CPU) OS (\d+)_(\d+)/.exec(ua), ver = /Version\/(\d+)/.exec(ua);
+  if (os && !(+os[1] === 18 && +os[2] >= 6)) return +os[1] >= 27;   // prima del blocco, o un browser che dice il vero
+  if (ver) return +ver[1] >= 27;   // Safari: la sua versione è quella di iOS
+  return !!novita;
+}
+function novita27() {   // in Safari 27: «width: stretch» e i ReadableStream da scorrere con for await
+  try { return CSS.supports('width', 'stretch') && typeof ReadableStream === 'function' && Symbol.asyncIterator in ReadableStream.prototype; } catch (e) { return false; }
+}
+const IOS_PRIMA_27 = isIOS && !iosDa27(navigator.userAgent, novita27());
 function mixerInit() {
-  if (MIX.ctx || !NEEDS_MIXER || !MIX.on || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
+  if (MIX.ctx || !NEEDS_MIXER || IOS_PRIMA_27 || !MIX.on || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
   try {
     if (navigator.audioSession) navigator.audioSession.type = 'playback';
     else return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
