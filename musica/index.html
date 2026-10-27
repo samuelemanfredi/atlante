@@ -1734,6 +1734,7 @@ function mixerInit() {
     DECKS.forEach(el => { const g = ctx.createGain(); ctx.createMediaElementSource(el).connect(g); g.connect(ctx.destination); MIX.gains.set(el, g); applyVol(el); });
     MIX.ctx = ctx; ctx.resume().catch(() => {});
     ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && !au.paused && au !== AUX) ctx.resume().catch(() => {}); });
+    ctx.addEventListener('statechange', () => diario('mixer', {stato:ctx.state, nascosta:document.hidden}));   // ogni cambio nel diario
   } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
 }
 addEventListener('pointerdown', () => { mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {}); }, {capture:true, passive:true});
@@ -1790,10 +1791,42 @@ document.addEventListener('visibilitychange', () => {
 const DIARIO = ls.get('am-mix-diario', []);
 function diario(esito, extra) {
   DIARIO.push(Object.assign({q:new Date().toISOString().slice(5, 19), e:esito, b:(TT(curId) || {}).title || ''}, extra || {}));
-  while (DIARIO.length > 8) DIARIO.shift();
+  while (DIARIO.length > 30) DIARIO.shift();   // al Mac vanno le ultime 15 (devStato)
   ls.set('am-mix-diario', DIARIO);
   if (typeof devInvia === 'function') devInvia(true);
 }
+// ----- diario dei passaggi: più voci per capire da lontano perché il mix si blocca sull'iPhone -----
+// all'apertura: che cosa è (browser o app sulla schermata Home), come si è aperta e se il mixer si accenderà
+function diarioAvvio() {
+  let nav = '', app = false;
+  try { nav = ((performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {}).type || ''; } catch (e) {}
+  try { app = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; } catch (e) {}
+  diario('avvio', {ua:String(navigator.userAgent || '').slice(0, 200), app, nav,
+    mixer:!NEEDS_MIXER ? '' : IOS_PRIMA_27 ? 'no: iOS prima del 27' : ls.get('am-mix-noweb', false) ? 'no: spento' : 'sì'});
+}
+setTimeout(diarioAvvio, 0);   // dopo tutto lo script (diario usa cose definite più avanti)
+// com'è il brano nuovo quando parte il mix: pagina nascosta, mixer, quanto è caricato, da dove arriva, lettore sbloccato
+function mixInfo(el, P) {
+  let buf = 0; try { const b = el.buffered; for (let i = 0; i < b.length; i++) buf += b.end(i) - b.start(i); } catch (e) {}
+  return {nascosta:!!document.hidden, ctx:MIX.ctx ? MIX.ctx.state : 'no', rs:el.readyState, buf:Math.round(buf * 10) / 10, da:P.url ? 'file' : 'rete', sbl:!!el._sbloccato};
+}
+// attese e ripartenze del brano nuovo durante il passaggio, con i ms dalla partenza (al più 6 voci per passaggio)
+function osservaNuovo(el, W) {
+  const t0 = performance.now(); let n = 0;
+  const f = e => { if (n++ < 6) diario('nuovo ' + e.type, {ms:Math.round(performance.now() - t0)}); };
+  el.addEventListener('waiting', f); el.addEventListener('playing', f);
+  setTimeout(() => { el.removeEventListener('waiting', f); el.removeEventListener('playing', f); }, (W + 10) * 1000);
+}
+// una pausa che nessuno ha chiesto (non il tasto, la schermata di blocco, le cuffie con il loro tasto o un comando):
+// cuffie staccate, chiamate, l'iPhone che ferma l'audio… con lo stato del mix in quel momento
+function diarioPausa() {
+  if (au.ended || Date.now() - pausaVoluta < 1000 || !au.getAttribute('src')) return;
+  diario('pausa', {t:Math.round(au.currentTime || 0), nascosta:!!document.hidden, ctx:MIX.ctx ? MIX.ctx.state : 'no',
+    piano:MIX.plan ? MIX.plan.st : '', prep:MIX.plan && MIX.prepT ? Date.now() - MIX.prepT : undefined, salto:!!MIX.salto, dissolvenza:!!MIX.act});
+}
+auOn('pause', diarioPausa);
+function diarioPagina() { diario('pagina', {nascosta:!!document.hidden, suona:!au.paused}); }   // schermo bloccato o app in secondo piano
+document.addEventListener('visibilitychange', diarioPagina);
 function setMix(on) {
   MIX.on = on; ls.set('am-mix', on); if (!on) xfAbort(); else mixerInit();
   updateNow(); toast(on ? 'Mix a tempo: gli ultimi ' + MIX.X + ' secondi si adattano ai BPM del brano successivo' : 'Mix a tempo disattivato');
@@ -1932,11 +1965,11 @@ async function xfPrepare(P) {
   // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito.
   // Se quel play() viene interrotto l'ascoltatore resta attaccato: agisce solo per questo piano, e si stacca quando finisce
   el.muted = true;
-  P.suona = () => { if (MIX.plan !== P) return; el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; P.st = 'ready'; };
+  P.suona = () => { if (MIX.plan !== P) return; el.pause(); try { el.currentTime = P.startB; } catch (e) {} el.muted = false; P.st = 'ready'; diario('pronto', {ms:Date.now() - MIX.prepT}); };
   el.addEventListener('playing', P.suona, {once:true});
   el.src = P.url || API + 'file/' + encodeURIComponent(tb.sid);
-  MIX.prepT = Date.now();
-  const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
+  MIX.prepT = Date.now(); diario('preparo', {da:P.url ? 'file' : 'rete'});
+  const pr = el.play(); if (pr && pr.catch) pr.catch(e => { diario('prep rifiutata', {err:(e && e.name) || String(e)}); el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
 }
 function xfAbort() {
   saltoAnnulla();   // anche il salto a mano in attesa (si è scelto un altro brano, mix spento…)
@@ -1957,14 +1990,15 @@ function xfStart(P) {
   velocita(inn, 1); conPitch(inn);
   au = inn;
   const qiA = S.qi;
-  diario(P.salto ? 'mix al salto' : 'mix', Object.assign({match:!!P.match, r:Math.round((P.r || 1) * 1000) / 1000, mixer:MIX.gains.size > 0}, P.salto));
+  diario(P.salto ? 'mix al salto' : 'mix', Object.assign({match:!!P.match, r:Math.round((P.r || 1) * 1000) / 1000, mixer:MIX.gains.size > 0}, mixInfo(inn, P), P.salto));
   const p = inn.play(); if (p && p.catch) p.catch(() => { const A = MIX.act; if (A && A.inn === inn) xfRifiutato(A); });
   // da qui il brano in corso è il nuovo (titolo, schermata di blocco, coda), come in Apple Music durante la dissolvenza
   S.qi = P.j; curId = P.idB; keptFor = null; countFor = P.idB;
   const outUrl = curUrl; curUrl = P.url; P.url = null;
   if (typeof dropOrph === 'function') dropOrph(); updateNow(); saveState(); markCur();
   const W = P.W || Math.max(2, (out.duration - out.currentTime) / Math.max(0.5, out.playbackRate));   // al salto: MIX.XS secondi
-  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P, qiA};
+  MIX.act = {out, inn, outUrl, t0:performance.now(), W, P, qiA, innDa:inn.currentTime || 0};
+  osservaNuovo(inn, W);
   controllaPassaggio();
   MIX.plan = null;
   if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); xfEnd(); return; }   // iPhone senza mixer: niente dissolvenza, taglio sul battito
@@ -1994,7 +2028,9 @@ function xfRifiutato(A) {
 }
 function xfEnd() {
   const A = MIX.act; if (!A) return; MIX.act = null;
-  const out = A.out;
+  const out = A.out, s = (performance.now() - A.t0) / 1000;
+  // quanto è andato avanti il brano nuovo durante la dissolvenza (se molto meno del tempo passato, era fermo o a scatti)
+  if (s >= 0.5) diario('fine mix', {avanzato:Math.round(((A.inn.currentTime || 0) - A.innDa) * 10) / 10, s:Math.round(s * 10) / 10});
   out.pause(); velocita(out, 1); out.removeAttribute('src'); try { out.load(); } catch (e) {}
   setGain(out, 1); setGain(A.inn, 1);
   if (A.outUrl) URL.revokeObjectURL(A.outUrl);
@@ -2027,7 +2063,7 @@ function xfTick() {
   if (!tb || idB === curId || !canPlay(idB) || tb.duration && tb.duration < 30) { if (MIX.plan) xfAbort(); return; }
   let P = MIX.plan;
   if (P && (P.idA !== curId || P.idB !== idB)) { xfAbort(); P = null; }
-  if (!P) { if (d - c > 40 || d - c < MIX.X + 2 || otherDeck()._rifiuta) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(() => { if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
+  if (!P) { if (d - c > 40 || d - c < MIX.X + 2 || otherDeck()._rifiuta) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(e => { diario('prep errore', {err:(e && e.name) || String(e)}); if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
   if (P.st !== 'ready') return;
   if (c < P.tR) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
   if (c < P.tS) {   // accelera o rallenta piano verso i BPM del successivo (forma a S; con il mixer a gradini)
@@ -2051,8 +2087,8 @@ function xfPausa() {
   if (MIX.act) xfEnd();
   // Prima qui una pausa arrivata da sola mentre si preparava il successivo spegneva il mix per sempre («un lettore solo»:
   // l'iPhone non farebbe suonare due lettori insieme). Nel sorgente di WebKit su iOS due <audio> non si fermano a vicenda
-  // (ConcurrentPlaybackNotPermitted vale solo per i video): erano falsi allarmi (cuffie staccate, chiamate). Va nel diario.
-  if (MIX.plan && !au.ended && Date.now() - pausaVoluta > 1000) diario('pausa in preparazione', {piano:MIX.plan.st, ms:MIX.prepT ? Date.now() - MIX.prepT : -1});
+  // (ConcurrentPlaybackNotPermitted vale solo per i video): erano falsi allarmi (cuffie staccate, chiamate). Ora resta
+  // solo nel diario (voce «pausa», con lo stato della preparazione).
 }
 auOn('seeking', () => { const P = MIX.plan; if (P && P.st === 'ready' && au.currentTime < P.tR) velocita(au, 1); });
 
@@ -2199,11 +2235,11 @@ function saltoCarica(X) {
     const el = X.el = otherDeck();
     X.url = f ? URL.createObjectURL(f) : null;
     velocita(el, 1); setGain(el, 0); el.muted = true;
-    X.suona = () => { if (MIX.salto !== X) return; el.pause(); el.muted = false; X.pronto = true; };
+    X.suona = () => { if (MIX.salto !== X) return; el.pause(); el.muted = false; X.pronto = true; diario('pronto', {ms:Date.now() - X.prepT, salto:true}); };
     el.addEventListener('playing', X.suona, {once:true});
     el.src = X.url || API + 'file/' + encodeURIComponent(tb.sid);
-    X.prepT = Date.now();
-    const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.muted = false; if (MIX.salto === X) X.pronto = true; });
+    X.prepT = Date.now(); diario('preparo', {da:X.url ? 'file' : 'rete', salto:true});
+    const pr = el.play(); if (pr && pr.catch) pr.catch(e => { diario('prep rifiutata', {err:(e && e.name) || String(e), salto:true}); el.muted = false; if (MIX.salto === X) X.pronto = true; });
   }, () => { if (MIX.salto === X) saltoSubito(X, 'brano non disponibile: cambio subito'); });
 }
 // si parte: il resto è il passaggio del mix a fine brano (xfStart / xfRun), con la dissolvenza lunga MIX.XS secondi
@@ -2578,7 +2614,7 @@ const inLib = t => t && t.remote && t.sid;
 
 function devStato() {   // quello che gli altri vedono di questo dispositivo
   const t = curId && TT(curId);
-  const mix = {on:MIX.on, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-5)};
+  const mix = {on:MIX.on, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-15)};
   if (!t) return {suona:false, vol:userVol, bloccato:DEV.bloccato, mix};
   const coda = [];   // dal brano in corso in avanti, solo quelli della libreria (gli altri non si possono spostare)
   for (let k = Math.max(0, S.qi); k < S.queue.length && coda.length < 300; k++) { const x = TT(S.queue[k]); if (inLib(x)) coda.push(x.sid); }

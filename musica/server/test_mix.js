@@ -129,6 +129,7 @@ function prove(src, fatte) {
   prova('iOS prima del 27 senza mixer', () => versioneIOS(src));
   prova('niente più «un lettore solo»', () => senzaUnSolo(src));
   prova('preparazione interrotta', () => preparazioneInterrotta(src));
+  prova('diario dei passaggi', () => diarioPiuRicco(src));
 }
 
 // tutto lo script dell'app si compila (non si esegue): un errore di battitura in qualsiasi punto si vede qui
@@ -305,14 +306,15 @@ function mondo(src, opz) {
     get buffered() { const d = this.readyState >= 3 ? this.duration : 0; return {length:d ? 1 : 0, start:() => 0, end:() => d}; }
     addEventListener(ev, fn, o) { (this._l[ev] = this._l[ev] || []).push({fn, once:!!(o && o.once)}); }
     removeEventListener(ev, fn) { this._l[ev] = (this._l[ev] || []).filter(x => x.fn !== fn); }
-    emit(ev) { const l = (this._l[ev] || []).slice(); this._l[ev] = (this._l[ev] || []).filter(x => !x.once); l.forEach(x => x.fn({target:this})); }
+    emit(ev) { const l = (this._l[ev] || []).slice(); this._l[ev] = (this._l[ev] || []).filter(x => !x.once); l.forEach(x => x.fn({target:this, type:ev})); }
     getAttribute(a) { return a === 'src' ? this._src : null; }
     removeAttribute(a) { if (a === 'src') this._src = null; }
     load() { this.pause(); Object.assign(this, {readyState:0, currentTime:0, duration:NaN, ended:false, _vuole:false}); const u = this._src, f = file(u); if (f) tempo.setTimeout(() => { if (this._src !== u) return; this.duration = f.dur; this.readyState = 4; this.emit('loadedmetadata'); this._forse(); }, f.ms); }
     set src(u) { this._src = u; this.load(); }
     get src() { return this._src || ''; }
     play() { if (this.rifiuta) return SP.reject(new Error('NotAllowedError')); if (this.rifiutaUnaVolta) { this.rifiutaUnaVolta = false; const e = new Error('interrotto'); e.name = 'AbortError'; return SP.reject(e); } if (this.paused) { this.paused = false; this.ended = false; this._vuole = true; this.emit('play'); this._forse(); } return SP.resolve(); }
-    _forse() { if (!this.paused && this._vuole && this.readyState >= 3) { this._vuole = false; this._da = W.t + (opz.latenza != null ? opz.latenza : 20); this.emit('playing'); } }
+    // «playing» arriva dopo, come nel browser (non dentro play())
+    _forse() { if (!this.paused && this._vuole && this.readyState >= 3) { this._vuole = false; this._da = W.t + (opz.latenza != null ? opz.latenza : 20); tempo.setTimeout(() => { if (!this.paused) this.emit('playing'); }, 0); } }
     pause() { if (!this.paused) { this.paused = true; this.emit('pause'); } }
     avanza(dt) {
       if (this.paused || this.readyState < 3 || this._vuole || W.t < this._da) return;
@@ -347,7 +349,7 @@ function mondo(src, opz) {
       return ritardo(opz.misuraMs != null ? opz.misuraMs : 500, v);
     }
   };
-  const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev', 'xfPausa',
+  const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev', 'xfPausa', 'diarioPausa', 'mixInfo', 'osservaNuovo',
     'mixFattore', 'rampaVel', 'pezzoQui', 'partenzaBattito', 'accorciaW', 'saltoResto', 'velocita', 'conPitch', 'gradini', 'rampaGradini', 'correzioneFase',
     'avanti', 'saltaA', 'saltoIdx', 'gridQui', 'saltoMisurato', 'saltoTick', 'saltoParti', 'saltoCarica', 'saltoVia', 'saltoSubito', 'saltoAnnulla', 'saltoPausa', 'saltoSpostato'],
   ['const wrap = ', 'const otherDeck = ', 'const SALTO = '], env, null,
@@ -355,7 +357,7 @@ function mondo(src, opz) {
   // gli eventi come auOn nell'app: contano solo quelli del lettore in uso
   tutti.forEach(el => {
     el.addEventListener('timeupdate', () => { if (el === env.au) { F.xfTick(); F.saltoTick(); } });
-    el.addEventListener('pause', () => { if (el === env.au) { F.xfPausa(); F.saltoPausa(); } });
+    el.addEventListener('pause', () => { if (el === env.au) { F.xfPausa(); F.saltoPausa(); F.diarioPausa(); } });
     el.addEventListener('seeking', () => { if (el === env.au) F.saltoSpostato(); });
     el.addEventListener('ended', () => { if (el === env.au) log.fine.push(env.curId); });
   });
@@ -724,7 +726,8 @@ function senzaUnSolo(src) {
   vero(env.MIX.plan, 'il mix a fine brano si sta preparando');
   M.fai(() => DECKS[0].pause());
   vero(env.MIX.plan && env.MIX.on && env.MIX.unSolo === undefined && !log.load.length, 'la pausa non spegne il mix né cambia brano');
-  vero(log.diario.some(x => x.e === 'pausa in preparazione'), 'la pausa va nel diario');
+  const pa = ultimo(log, 'pausa');
+  vero(pa && pa.piano && pa.salto === false && pa.dissolvenza === false && typeof pa.t === 'number', 'la pausa va nel diario, con lo stato della preparazione: ' + JSON.stringify(pa));
   M.fai(() => DECKS[0].play()); M.passa(45);
   vero(env.curId === 'rB' && log.diario.some(x => x.e === 'mix' && x.match), 'dopo la ripresa il mix a fine brano si fa');
 }
@@ -746,4 +749,47 @@ function preparazioneInterrotta(src) {
   M2.fai(() => M2.F.xfAbort());
   M2.env.au = B2; B2.src = 'blob:rC'; M2.fai(() => B2.play()); M2.passa(1);
   vero(!B2.paused && B2.currentTime > 0.5, 'il lettore si ferma per un vecchio ascoltatore della preparazione');
+  // lo stesso nel salto a mano
+  const M3 = mondo(src), B3 = M3.DECKS[1];
+  B3.rifiutaUnaVolta = true;
+  M3.fai(() => M3.F.avanti()); M3.passa(10);
+  vero(M3.env.curId === 'rB' && M3.env.au === B3 && !B3.paused && B3.currentTime > 4, 'salto: il brano nuovo si è fermato da solo alla partenza');
+}
+
+function diarioPiuRicco(src) {
+  // 30 voci sul dispositivo, le ultime 15 al Mac
+  const env = {DIARIO:[], ls:{set() {}}, TT:() => ({title:'X'}), curId:'r1'};
+  const F = carica(src, ['diario'], [], env);
+  for (let i = 0; i < 40; i++) F.diario('v' + i, {i});
+  vero(env.DIARIO.length === 30 && env.DIARIO[0].e === 'v10' && env.DIARIO[29].i === 39, 'il diario tiene 30 voci');
+  vero(/diario:DIARIO\.slice\(-15\)\}/.test(src), 'al Mac vanno 15 voci');
+  vero(/ctx\.addEventListener\('statechange', \(\) => diario\('mixer'/.test(src), 'una voce a ogni cambio di stato del mixer');
+  vero(/document\.addEventListener\('visibilitychange', diarioPagina\)/.test(src) && /auOn\('pause', diarioPausa\)/.test(src) && /setTimeout\(diarioAvvio, 0\)/.test(src), 'voci pagina, pausa e avvio');
+  // avvio
+  const voci = [], env2 = {navigator:{userAgent:'U'.repeat(300), standalone:true}, matchMedia:() => ({matches:false}), performance:{getEntriesByType:() => [{type:'reload'}]},
+    NEEDS_MIXER:true, IOS_PRIMA_27:true, ls:{get:(k, d) => d}, diario:(e, x) => voci.push(Object.assign({e}, x))};
+  carica(src, ['diarioAvvio'], [], env2).diarioAvvio();
+  const v = voci[0];
+  vero(v && v.e === 'avvio' && v.ua.length === 200 && v.app === true && v.nav === 'reload' && v.mixer === 'no: iOS prima del 27', 'voce avvio: ' + JSON.stringify(v));
+  // un mix a fine brano: preparo, pronto, mix (con lo stato del brano nuovo), nuovo playing, fine mix
+  const M = mondo(src, {finebrano:true, da:240 - 41}), {log} = M;
+  M.passa(45);
+  const pr = ultimo(log, 'preparo'), po = ultimo(log, 'pronto'), mx = ultimo(log, 'mix'), np = ultimo(log, 'nuovo playing'), fm = ultimo(log, 'fine mix');
+  vero(pr && pr.da === 'file', 'voce preparo: ' + JSON.stringify(pr));
+  vero(po && typeof po.ms === 'number' && po.ms >= 60 && po.ms < 400, 'voce pronto con i ms: ' + JSON.stringify(po));
+  vero(mx && mx.nascosta === false && mx.ctx === 'no' && mx.rs === 4 && mx.buf === 200 && mx.da === 'file' && mx.sbl === false, 'voce mix: ' + JSON.stringify(mx));
+  vero(np && np.ms >= 0 && np.ms < 100 && np.b === 'Brano B', 'voce nuovo playing: ' + JSON.stringify(np));
+  vero(fm && Math.abs(fm.avanzato - fm.s) < 0.3 && fm.s > 5, 'voce fine mix: ' + JSON.stringify(fm));
+  // preparazione rifiutata: il nome dell'errore
+  const M2 = mondo(src, {finebrano:true, da:240 - 41}); M2.DECKS[1].rifiutaUnaVolta = true; M2.passa(3);
+  const rf = ultimo(M2.log, 'prep rifiutata');
+  vero(rf && rf.err === 'AbortError', 'voce prep rifiutata: ' + JSON.stringify(rf));
+  // pausa voluta: nessuna voce «pausa»; pausa a fine brano: nessuna voce
+  const M3 = mondo(src); M3.env.pausaVoluta = 1e12 + M3.ora(); M3.fai(() => M3.DECKS[0].pause());
+  vero(!M3.log.diario.some(x => x.e === 'pausa'), 'la pausa chiesta non va nel diario come «pausa»');
+  // salto: preparo e pronto anche lì
+  const M4 = mondo(src); M4.fai(() => M4.F.avanti()); M4.passa(10);
+  vero(M4.log.diario.some(x => x.e === 'preparo' && x.salto) && M4.log.diario.some(x => x.e === 'pronto' && x.salto), 'voci preparo e pronto del salto');
+  const ms = ultimo(M4.log, 'mix al salto');
+  vero(ms && ms.rs === 4 && ms.da === 'file' && ms.esito === 'a tempo', 'voce mix al salto: ' + JSON.stringify(ms));
 }
