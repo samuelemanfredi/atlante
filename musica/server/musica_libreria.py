@@ -3428,6 +3428,552 @@ def _clip_file(h, nome):
     _invia_file(h, p, "video/mp4", {"X-Content-Type-Options": "nosniff"})
 
 
+# ----- testi sincronizzati (karaoke): dal file del brano o da LRCLIB -----
+#
+#   GET testi/<id del catalogo>                     il testo di un brano della libreria
+#   GET testi?titolo=&artista=&album=&durata=       il testo di un brano che non è nella libreria (importato sul telefono)
+#
+# Risposta: {stato:'ok'|'nessuno'|'strumentale', sincronizzato, parole, fonte:'file'|'lrclib', righe:[{t, testo,
+# parole?:[{t, testo}], fine?}]}: t in secondi dall'inizio del brano (null se il testo non ha i tempi), «parole» quando
+# la fonte ha i tempi di ogni parola, «fine» quando sa quando finisce la riga. Prima il testo dentro il file (ID3 SYLT e
+# USLT, MP4 ©lyr, FLAC LYRICS; anche scritto in formato LRC), poi LRCLIB (lrclib.net: gratuito, senza chiave), chiesto
+# dal Mac una richiesta alla volta e tenuto in <cache>/testi/: un testo trovato resta per sempre, «nessun testo» si
+# richiede dopo una settimana, un errore di rete non si ricorda sul disco (si riprova dopo un minuto). Un testo a tempo
+# di LRCLIB vale solo se la sua durata coincide con quella del brano (±3 s): con un'altra versione (il videoclip con
+# un'introduzione più lunga) le righe arriverebbero fuori tempo, quindi resta il testo senza tempi.
+
+TESTI_LRCLIB = "https://lrclib.net"
+TESTI_TEMPO = 10                  # secondi per ogni richiesta a LRCLIB
+TESTI_NESSUNO = 7 * 86400         # «nessun testo»: dopo una settimana si richiede (LRCLIB cresce)
+TESTI_ERRORE = 60                 # LRCLIB non risponde: per un minuto non si richiede
+TESTI_SCARTO = 3.0                # secondi di differenza ammessi tra la durata del brano e quella del testo a tempo
+TESTI_PAUSA = 1.5                 # LRCLIB «occupato» (429, 5xx: capita, la volta dopo risponde): si riprova dopo 1,5 s
+TESTI_MAX = 2 * 1024 * 1024
+_TESTI_BLOCCO = threading.Lock()  # una richiesta a LRCLIB alla volta
+_TESTI_ERRORI = {}                # chiave del brano → quando LRCLIB non ha risposto
+
+_LRC_TEMPO = re.compile(r"\[(\d{1,3}):(\d{1,2}(?:[.:,]\d{1,3})?)\]")
+_LRC_PAROLA = re.compile(r"<(\d{1,3}):(\d{1,2}(?:[.:,]\d{1,3})?)>")
+_LRC_META = re.compile(r"^\[([a-z#]+)\s*:(.*)\]$", re.I)
+_LRC_RIGA = re.compile(r"^\s*\[\d{1,3}:\d{1,2}")
+
+
+def _lrc_secondi(m, s):
+    sec, _, fr = s.replace(",", ".").replace(":", ".").partition(".")
+    return int(m) * 60 + int(sec) + (int(fr) / 10 ** len(fr) if fr else 0)
+
+
+def _spazi(s):
+    return re.sub(r"\s+", " ", str(s or ""))
+
+
+def _riga(t, testo, parole=None, fine=None):
+    r = {"t": round(max(0.0, t), 3), "testo": testo}
+    if parole and len(parole) > 1:
+        r["parole"] = [{"t": round(max(0.0, a), 3), "testo": x} for a, x in parole]
+    if fine is not None and fine > t:
+        r["fine"] = round(fine, 3)
+    return r
+
+
+def _pezzi_riga(pezzi):
+    """[(tempo, testo)] delle parole di una riga: spazi semplici, niente spazi ai due capi della riga, niente pezzi vuoti."""
+    v = [[a, _spazi(x)] for a, x in pezzi if _spazi(x).strip()]
+    if v:
+        v[0][1], v[-1][1] = v[0][1].lstrip(), v[-1][1].rstrip()
+    return [(a, x) for a, x in v]
+
+
+def leggi_lrc(testo):
+    """Righe di un testo LRC, in ordine di tempo: più tempi sulla stessa riga (il ritornello), [offset:±ms], i tempi delle
+    parole <mm:ss.xx> (LRC «enhanced»). Le righe senza tempo non contano; [] se il testo non ha tempi."""
+    spost, righe = 0.0, []
+    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        r = r.strip().lstrip("﻿")
+        tempi = []
+        while True:
+            m = _LRC_TEMPO.match(r)
+            if not m:
+                break
+            tempi.append(_lrc_secondi(*m.groups()))
+            r = r[m.end():].lstrip()
+        if not tempi:
+            m = _LRC_META.match(r)
+            if m and m.group(1).lower() == "offset":
+                try:   # in avanti (+) le righe arrivano prima
+                    spost = int(m.group(2).strip()) / 1000
+                except ValueError:
+                    pass
+            continue
+        pezzi, fine = _LRC_PAROLA.split(r), None
+        parole = []
+        if len(pezzi) > 1:
+            if pezzi[0].strip():
+                parole.append((tempi[0], pezzi[0]))
+            for k in range(1, len(pezzi), 3):
+                a, x = _lrc_secondi(pezzi[k], pezzi[k + 1]), pezzi[k + 2]
+                if x.strip():
+                    parole.append((a, x))
+                else:
+                    fine = a   # un tempo senza parola: dove finisce la parola prima
+            parole = _pezzi_riga(parole)
+            testo_riga = "".join(x for _, x in parole)
+        else:
+            testo_riga = _spazi(r).strip()
+        for t in tempi:
+            d = t - tempi[0] - spost   # il ritornello ripetuto: le sue parole spostate con lui
+            righe.append(_riga(t - spost, testo_riga, [(a + d, x) for a, x in parole],
+                               None if fine is None else fine + d))
+    righe.sort(key=lambda x: x["t"])
+    return righe
+
+
+def testi_semplici(testo):
+    """Le righe di un testo senza tempi: spazi in ordine, al più una riga vuota tra le strofe."""
+    righe = []
+    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        r = _spazi(r).strip()
+        if r or (righe and righe[-1]["testo"]):
+            righe.append({"t": None, "testo": r})
+    while righe and not righe[-1]["testo"]:
+        righe.pop()
+    return righe
+
+
+def _e_lrc(testo):
+    """Un testo scritto in formato LRC (come lo salvano molti programmi anche nei tag senza tempi)?"""
+    righe = [r for r in str(testo or "").splitlines() if r.strip() and not _LRC_META.match(r.strip())]
+    a_tempo = sum(1 for r in righe if _LRC_RIGA.match(r))
+    return a_tempo > 0 and a_tempo * 2 >= len(righe)
+
+
+# ----- il Lyricsfile di LRCLIB (YAML): l'unico posto dove LRCLIB ha i tempi delle parole -----
+
+_YAML_ESC = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r", "e": "\x1b",
+             "N": "\x85", "_": "\xa0", "L": " ", "P": " "}
+
+
+def _yaml_valore(v):
+    """Un valore semplice di YAML: 'tra apici', "tra virgolette" (con \\u…), senza niente; None se manca."""
+    v = v.strip()
+    m = re.match(r"'((?:[^']|'')*)'", v)
+    if m:
+        return m.group(1).replace("''", "'")
+    m = re.match(r'"((?:[^"\\]|\\.)*)"', v)
+    if m:
+        def esc(x):
+            c = x.group(1)
+            return chr(int(c[1:], 16)) if c[0] in "xuU" else _YAML_ESC.get(c, c)
+        return re.sub(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)", esc, m.group(1))
+    v = re.sub(r"\s+#.*$", "", v)
+    return None if v in ("", "~", "null") or v[:1] in "|>" else v
+
+
+def _yaml_ms(v):
+    try:
+        return int(float(_yaml_valore(v) or "x")) / 1000
+    except ValueError:
+        return None
+
+
+def leggi_lyricsfile(testo):
+    """Le righe del Lyricsfile di LRCLIB (lines: text, start_ms, end_ms, words: …), con le parole quando hanno tutte il
+    loro tempo. Si legge solo questa forma, riga per riga (niente YAML completo: la libreria standard non ce l'ha)."""
+    voci, riga, parola, liv, dentro = [], None, None, None, False
+    for raw in str(testo or "").splitlines():
+        s = raw.rstrip()
+        if not s.strip() or s.lstrip().startswith("#"):
+            continue
+        ind = len(s) - len(s.lstrip(" "))
+        s = s.strip()
+        if ind == 0 and not s.startswith("-"):
+            dentro = s.split(":", 1)[0].strip() == "lines"
+            continue
+        if not dentro:
+            continue
+        nuovo = s == "-" or s.startswith("- ")
+        if nuovo:
+            s, ind = s[1:].strip(), ind + 2
+        k, _, v = s.partition(":")
+        k = k.strip()
+        if liv is None and nuovo:
+            liv = ind
+        if liv is None:
+            continue
+        if ind <= liv:   # i campi della riga
+            if nuovo:
+                riga, parola = {"parole": []}, None
+                voci.append(riga)
+            if riga is None:
+                continue
+            if k == "text":
+                riga["testo"] = _yaml_valore(v)
+            elif k in ("start_ms", "end_ms"):
+                riga[k] = _yaml_ms(v)
+        elif riga is not None:   # una parola (dentro words:)
+            if nuovo:
+                parola = {}
+                riga["parole"].append(parola)
+            if parola is not None and k == "text":
+                parola["testo"] = _yaml_valore(v) or ""
+            elif parola is not None and k == "start_ms":
+                parola["t"] = _yaml_ms(v)
+    righe = []
+    for r in voci:
+        if r.get("start_ms") is None:
+            continue
+        p = r["parole"]
+        pezzi = _pezzi_riga([(x["t"], x.get("testo", "")) for x in p]) if p and all(x.get("t") is not None for x in p) else []
+        testo_riga = "".join(x for _, x in pezzi) if pezzi else _spazi("".join(x.get("testo", "") for x in p) if p else r.get("testo")).strip()
+        righe.append(_riga(r["start_ms"], testo_riga, pezzi, r.get("end_ms")))
+    righe.sort(key=lambda x: x["t"])
+    return righe
+
+
+# ----- testi dentro i file: ID3 (USLT, SYLT), MP4 (©lyr), FLAC (LYRICS) -----
+
+def _testi_decodifica(enc, b):
+    if enc in (1, 2):
+        return _utf16(b, enc == 2)
+    if enc == 3:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return b.decode("latin-1")
+
+
+def _testi_stringa(enc, b, i):
+    """(testo, posizione dopo il terminatore) della stringa ID3 che comincia in b[i]."""
+    if enc in (1, 2):
+        j = i
+        while j + 1 < len(b) and b[j:j + 2] != b"\x00\x00":
+            j += 2
+        return _utf16(b[i:j], enc == 2), j + 2
+    j = b.find(b"\x00", i)
+    j = len(b) if j < 0 else j
+    return _testi_decodifica(enc, b[i:j]), j + 1
+
+
+def _testi_sylt(voci):
+    """Le voci di un SYLT [(tempo, testo)] in righe: una voce per riga, oppure pezzi di riga (parole, sillabe) quando le
+    righe nuove cominciano con «\\n», come le scrivono i programmi per il karaoke."""
+    voci = [(t, x.replace("\r\n", "\n").replace("\r", "\n")) for t, x in voci]
+    a_capo = any(x.startswith("\n") for _, x in voci[1:]) or any(x.endswith("\n") for _, x in voci[:-1])
+    gruppi, chiusa = [], True
+    for t, x in voci:
+        if not a_capo or chiusa or x.startswith("\n"):
+            gruppi.append([])
+        chiusa = x.endswith("\n")
+        gruppi[-1].append((t, x.strip("\n")))
+    righe = []
+    for g in gruppi:
+        pezzi = _pezzi_riga(g)
+        righe.append(_riga(g[0][0], "".join(x for _, x in pezzi), pezzi))
+    righe.sort(key=lambda x: x["t"])
+    return righe
+
+
+def _testi_id3(f):
+    """Testi nei tag ID3: (righe a tempo da SYLT, [testi da USLT])."""
+    h = f.read(10)
+    if len(h) < 10 or h[:3] != b"ID3":
+        return [], []
+    v, fl, size = h[3], h[5], _ss32(h, 6)
+    d = f.read(size)
+    if fl & 0x80 and v < 4:
+        d = _unsync(d)
+    p = 0
+    if fl & 0x40 and v >= 3:
+        p = _ss32(d) if v == 4 else struct.unpack(">I", d[:4])[0] + 4
+    hs, sylt, uslt = (6 if v == 2 else 10), [], []
+    while p + hs <= len(d):
+        if v == 2:
+            fid, sz = d[p:p + 3].decode("latin-1"), int.from_bytes(d[p + 3:p + 6], "big")
+        else:
+            fid = d[p:p + 4].decode("latin-1")
+            sz = _ss32(d, p + 4) if v == 4 else struct.unpack(">I", d[p + 4:p + 8])[0]
+        if not re.fullmatch(r"[A-Z0-9]{3,4}", fid) or sz <= 0 or p + hs + sz > len(d):
+            break
+        fr = d[p + hs:p + hs + sz]
+        if v == 4:
+            if d[p + 9] & 0x02:
+                fr = _unsync(fr)
+            if d[p + 9] & 0x01:
+                fr = fr[4:]
+        if fid in ("USLT", "ULT") and len(fr) > 4:
+            _, i = _testi_stringa(fr[0], fr, 4)   # dopo lingua e descrizione
+            x = _testi_decodifica(fr[0], fr[i:]).replace("\x00", "")
+            if x.strip():
+                uslt.append(x)
+        elif fid in ("SYLT", "SLT") and len(fr) > 6 and not sylt and fr[4] in (1, 2) and fr[5] <= 2:
+            enc, fmt = fr[0], fr[4]
+            _, i = _testi_stringa(enc, fr, 6)
+            voci = []
+            while i < len(fr):
+                x, i = _testi_stringa(enc, fr, i)
+                if i + 4 > len(fr):
+                    break
+                n = struct.unpack(">I", fr[i:i + 4])[0]
+                i += 4
+                voci.append((n / 1000 if fmt == 2 else n * 1152 / 44100, x))   # millisecondi o fotogrammi MPEG
+            if voci:
+                sylt = _testi_sylt(voci)
+        p += hs + sz
+    return sylt, uslt
+
+
+def _testi_mp4(f):
+    """Il testo (©lyr) di un M4A/MP4, o ''."""
+    h = f.read(8)
+    if len(h) < 8 or h[4:8] != b"ftyp":
+        return ""
+    f.seek(0, 2)
+    fine, off = f.tell(), 0
+    for _ in range(200):
+        if off + 8 > fine:
+            break
+        f.seek(off)
+        b = f.read(16)
+        sz, hs = struct.unpack(">I", b[:4])[0], 8
+        if sz == 1 and len(b) >= 16:
+            sz, hs = struct.unpack(">Q", b[8:16])[0], 16
+        elif sz == 0:
+            sz = fine - off
+        if sz < 8:
+            break
+        if b[4:8] == b"moov":
+            if sz > 64_000_000:
+                return ""
+            f.seek(off + hs)
+            moov = f.read(sz - hs)
+            i = moov.find(b"\xa9lyr")
+            while i >= 4:
+                d = moov[i + 4:i - 4 + struct.unpack(">I", moov[i - 4:i])[0]]
+                if d[4:8] == b"data":
+                    return d[16:struct.unpack(">I", d[:4])[0]].decode("utf-8", "replace")
+                i = moov.find(b"\xa9lyr", i + 4)
+            return ""
+        off += sz
+    return ""
+
+
+def _testi_flac(f):
+    """[testi] dai commenti di un FLAC: SYNCEDLYRICS, LYRICS, UNSYNCEDLYRICS."""
+    if f.read(4) != b"fLaC":
+        return []
+    for _ in range(64):
+        h = f.read(4)
+        if len(h) < 4:
+            break
+        ultimo, tipo, lun = h[0] & 0x80, h[0] & 0x7F, int.from_bytes(h[1:4], "big")
+        if tipo != 4:
+            f.seek(lun, 1)
+        else:
+            d = f.read(lun)
+            p = 4 + struct.unpack("<I", d[:4])[0]
+            n, p, testi = struct.unpack("<I", d[p:p + 4])[0], p + 4, {}
+            for _ in range(n):
+                if p + 4 > len(d):
+                    break
+                lc = struct.unpack("<I", d[p:p + 4])[0]
+                k, _, v = d[p + 4:p + 4 + lc].decode("utf-8", "replace").partition("=")
+                p += 4 + lc
+                testi.setdefault(k.strip().upper(), v)
+            return [testi[k] for k in ("SYNCEDLYRICS", "LYRICS", "UNSYNCEDLYRICS") if testi.get(k, "").strip()]
+        if ultimo:
+            break
+    return []
+
+
+def _testi_risposta(righe, fonte, sincronizzato):
+    return {"stato": "ok", "sincronizzato": sincronizzato, "parole": any("parole" in r for r in righe), "fonte": fonte,
+            "righe": righe}
+
+
+def testi_dal_file(percorso):
+    """Il testo scritto dentro il file del brano (la risposta di api/extra/testi), o None."""
+    try:
+        with open(percorso, "rb") as f:
+            sylt, testi = _testi_id3(f)
+            if not sylt and not testi:
+                f.seek(0)
+                testi = [x for x in [_testi_mp4(f)] if x.strip()]
+            if not sylt and not testi:
+                f.seek(0)
+                testi = _testi_flac(f)
+    except (OSError, ValueError, struct.error, IndexError):
+        return None
+    if any(r["testo"] for r in sylt):
+        return _testi_risposta(sylt, "file", True)
+    semplici = None
+    for x in testi:
+        righe = leggi_lrc(x) if _e_lrc(x) else []
+        if any(r["testo"] for r in righe):
+            return _testi_risposta(righe, "file", True)
+        semplici = semplici or testi_semplici(x)
+    return _testi_risposta(semplici, "file", False) if semplici else None
+
+
+# ----- LRCLIB -----
+
+def _lrclib_chiedi(percorso, parametri, riprova=True):
+    """Il JSON di LRCLIB; None se non ha il brano (404). ErroreExtra 503 se non risponde. Una risposta «occupato» (429,
+    5xx) si riprova una volta; un sito che non risponde no (il telefono aspetterebbe troppo)."""
+    base = (os.environ.get("ATLANTE_LRCLIB") or TESTI_LRCLIB).rstrip("/")   # le prove usano un LRCLIB finto
+    url = base + percorso + "?" + urlencode(parametri)
+    req = urllib.request.Request(url, headers={"User-Agent": "AtlanteMusica/1.0 (%s)" % MB_CONTATTO,
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TESTI_TEMPO, context=_ssl() if url.startswith("https:") else None) as r:
+            return json.loads(r.read(TESTI_MAX).decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        if riprova and (e.code == 429 or e.code >= 500):
+            time.sleep(TESTI_PAUSA)
+            return _lrclib_chiedi(percorso, parametri, False)
+        raise ErroreExtra(503, "Il sito dei testi (LRCLIB) ha risposto con un errore (%d): riprova più tardi" % e.code)
+    except (OSError, ValueError, http.client.HTTPException):
+        raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova più tardi")
+
+
+def _lrclib_scarto(v, durata):
+    try:
+        return abs(float(v.get("duration") or 0) - durata) if durata and v.get("duration") else 0.0
+    except (TypeError, ValueError):
+        return 1e9
+
+
+def _lrclib_voce(v, durata):
+    """Quello che si tiene nella cache di una voce di LRCLIB: il testo a tempo solo se la durata coincide."""
+    if v.get("instrumental"):
+        return {"stato": "strumentale"}
+    lrc, rec = v.get("syncedLyrics") or "", {"stato": "ok", "id": v.get("id"), "durata": v.get("duration")}
+    if lrc.strip() and _lrclib_scarto(v, durata) <= TESTI_SCARTO:
+        rec["lrc"] = lrc
+        if v.get("hasWordSync") and v.get("lyricsfile"):
+            rec["lyricsfile"] = v["lyricsfile"]
+    rec["semplice"] = v.get("plainLyrics") or "\n".join(r["testo"] for r in leggi_lrc(lrc))
+    return rec if rec.get("lrc") or rec["semplice"].strip() else {"stato": "nessuno"}
+
+
+def _lrclib_stesso(v, titolo, artista):
+    """Una voce della ricerca è proprio questo brano (stesso titolo, «(Live)» e ospiti a parte, e stesso artista)?"""
+    if _cl_titolo(v.get("trackName")) != _cl_titolo(titolo):
+        return False
+    a = _cl_principale(artista)
+    return not a or a in _cl_semplice(v.get("artistName"))
+
+
+def _lrclib_cerca(titolo, artista, album, durata):
+    p = {"track_name": titolo, "artist_name": artista}
+    if album:
+        p["album_name"] = album
+    if durata:
+        p["duration"] = str(int(round(durata)))
+    v = _lrclib_chiedi("/api/get", p) if artista else None
+    v = v if isinstance(v, dict) else None
+    if v and (v.get("syncedLyrics") or v.get("instrumental")):
+        return _lrclib_voce(v, durata)
+    q = {"track_name": _titolo_pulito(titolo) or titolo}
+    if artista:
+        q["artist_name"] = _primo_artista(artista) or artista
+    trovati = _lrclib_chiedi("/api/search", q)
+    voci = [x for x in ([v] if v else []) + (trovati if isinstance(trovati, list) else [])
+            if isinstance(x, dict) and (x is v or _lrclib_stesso(x, titolo, artista))]
+    vicino = lambda x: _lrclib_scarto(x, durata)   # noqa: E731
+    for buona in ([x for x in voci if (x.get("syncedLyrics") or "").strip() and vicino(x) <= TESTI_SCARTO],
+                  [x for x in voci if x.get("instrumental") and vicino(x) <= TESTI_SCARTO],
+                  [x for x in voci if (x.get("plainLyrics") or x.get("syncedLyrics") or "").strip()]):
+        if buona:
+            return _lrclib_voce(min(buona, key=vicino), durata)
+    return {"stato": "nessuno"}
+
+
+def _testi_lrclib(titolo, artista, album, durata):
+    """La voce di LRCLIB per il brano, dalla cache del Mac se c'è."""
+    chiave = hashlib.sha1(json.dumps([_cl_semplice(artista), _cl_semplice(titolo), _cl_semplice(album),
+                                      int(round(durata or 0))]).encode("utf-8")).hexdigest()[:24]
+    file = os.path.join(_cart("cache"), "testi", chiave + ".json")
+
+    def dalla_cache():
+        rec = _leggi_json(file, None)
+        if isinstance(rec, dict) and rec.get("stato") in ("ok", "strumentale"):
+            return rec
+        if isinstance(rec, dict) and rec.get("stato") == "nessuno" and time.time() - (rec.get("quando") or 0) < TESTI_NESSUNO:
+            return rec
+        return None
+    rec = dalla_cache()
+    if rec:
+        return rec
+    if time.time() - _TESTI_ERRORI.get(chiave, 0) < TESTI_ERRORE:
+        raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova tra un minuto")
+    with _TESTI_BLOCCO:
+        rec = dalla_cache()   # un altro dispositivo l'ha appena chiesto
+        if rec:
+            return rec
+        try:
+            rec = _lrclib_cerca(titolo, artista, album, durata)
+        except ErroreExtra:
+            _TESTI_ERRORI[chiave] = time.time()
+            raise
+        _TESTI_ERRORI.pop(chiave, None)
+        rec.update(quando=int(time.time()), brano={"titolo": titolo, "artista": artista, "album": album, "durata": durata})
+        try:
+            _scrivi_json(file, rec)
+        except OSError as e:   # disco pieno: il testo si dà lo stesso, la prossima volta si richiede
+            print("Atlante: testo non salvato: %s" % e, flush=True)
+        return rec
+
+
+def _testi_da_lrclib(rec):
+    if rec.get("stato") != "ok":
+        return {"stato": rec.get("stato") or "nessuno"}
+    righe = leggi_lyricsfile(rec["lyricsfile"]) if rec.get("lyricsfile") else []
+    if not any("parole" in r for r in righe):
+        righe = leggi_lrc(rec.get("lrc"))
+    if any(r["testo"] for r in righe):
+        return _testi_risposta(righe, "lrclib", True)
+    righe = testi_semplici(rec.get("semplice"))
+    return _testi_risposta(righe, "lrclib", False) if righe else {"stato": "nessuno"}
+
+
+def testi_brano(titolo, artista, album, durata, percorso=None):
+    """Il testo del brano: a tempo dal file, a tempo da LRCLIB, senza tempi dal file, senza tempi da LRCLIB."""
+    nel_file = _con_limite(lambda: testi_dal_file(percorso), 5) if percorso else None   # disco USB bloccato: si va oltre
+    if nel_file and nel_file["sincronizzato"]:
+        return nel_file
+    try:
+        da_rete = _testi_da_lrclib(_testi_lrclib(titolo, artista, album, durata))
+    except ErroreExtra:
+        if nel_file:
+            return nel_file
+        raise
+    return da_rete if da_rete.get("sincronizzato") or not nel_file else nel_file
+
+
+def _testi(h, resto):
+    if resto:
+        bid = resto[0]
+        with LIB.blocco if LIB else threading.Lock():
+            v, p = (LIB.brani.get(bid), LIB.percorsi.get(bid)) if LIB else (None, None)
+        if not v or (TOLTI and bid in TOLTI.ids()):
+            raise ErroreExtra(404, "Brano non trovato nella libreria")
+        c = CORR.di(bid) if CORR else {}   # titolo e artista corretti da Samuele (Gestione → Contenuti)
+        return testi_brano(c.get("title") or v.get("title") or "", c.get("artist") or v.get("artist") or "",
+                           c.get("album") or v.get("album") or "", v.get("duration") or 0, p)
+    q = parse_qs(urlsplit(h.path).query)
+    campo = lambda k: (q.get(k) or [""])[0].strip()[:300]   # noqa: E731
+    try:
+        durata = max(0.0, float(campo("durata") or 0))
+    except ValueError:
+        raise ErroreExtra(400, "La durata deve essere un numero di secondi")
+    if not campo("titolo"):
+        raise ErroreExtra(400, "Serve il titolo del brano")
+    return testi_brano(campo("titolo"), campo("artista"), campo("album"), durata if math.isfinite(durata) else 0)
+
+
 # ----- classifiche e musica libera -----
 #
 # Con --classifiche (ATLANTE_CLASSIFICHE=1) il Mac mini rilegge ogni giorno le classifiche più note (Spotify tramite
@@ -10407,6 +10953,9 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "clip" and len(resto) == 1:
         solo("GET")
         _json(h, _clip_brano(resto[0]))
+    elif cosa == "testi" and len(resto) <= 1:   # il testo del brano, a tempo (karaoke): vedi la sua sezione
+        solo("GET")
+        _json(h, _testi(h, resto))
     elif cosa == "ascoltati":
         _ascoltati(h, metodo, resto, corpo)
     elif cosa == "gestione":
@@ -11867,6 +12416,8 @@ def _permesso(h):
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern +
                                r"|^/x/(?:posizione\.html|posizione\.js|cifra\.js|naviga\.html)$"
                                r"|^(?:/.*)?/api/extra/(?:chiavi|posizione(?:/[^/]+)?)$")
+# ----- testi sincronizzati: anche per gli invitati (ascoltano la musica, quindi ne vedono anche il testo) -----
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extra/testi(?:/[^/]+)?$")
 
 
 def _numero_ambiente(nome, predefinito):

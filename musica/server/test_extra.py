@@ -7010,5 +7010,355 @@ class TestPosizioneJS(unittest.TestCase):
             shutil.rmtree(base, ignore_errors=True)
 
 
+
+# ----- testi sincronizzati (karaoke): dal file del brano o da LRCLIB -----
+
+def _id3_frame(fid, dati, v=3):
+    n = len(dati)
+    dim = bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) if v == 4 else struct.pack(">I", n)
+    return fid.encode() + dim + b"\x00\x00" + dati
+
+
+def uslt(testo, enc=1):
+    """Frame USLT: testo senza tempi (UTF-16 con BOM, oppure UTF-8 con enc=3)."""
+    if enc == 3:
+        return b"\x03ita\x00" + testo.encode("utf-8")
+    return b"\x01ita" + "".encode("utf-16") + b"\x00\x00" + testo.encode("utf-16")
+
+
+def sylt(voci, fmt=2):
+    """Frame SYLT in UTF-16: (testo, tempo in ms) per ogni voce, contenuto «testo» (1)."""
+    return (b"\x01ita" + bytes([fmt, 1]) + "".encode("utf-16") + b"\x00\x00" +
+            b"".join(x.encode("utf-16") + b"\x00\x00" + struct.pack(">I", ms) for x, ms in voci))
+
+
+def mp3_con_testo(percorso, titolo, artista, album="", ms=0, frame=b"", v=3):
+    """MP3 piccolissimo con titolo, artista, album, durata (TLEN, in ms) e altri frame ID3 già pronti (USLT, SYLT)."""
+    corpo = b"".join(_id3_frame(f, b"\x01" + t.encode("utf-16"), v) for f, t in
+                     (("TIT2", titolo), ("TPE1", artista), ("TALB", album), ("TLEN", str(ms) if ms else "")) if t) + frame
+    n = len(corpo)
+    os.makedirs(os.path.dirname(percorso), exist_ok=True)
+    with open(percorso, "wb") as f:
+        f.write(b"ID3" + bytes([v, 0, 0, (n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo)
+        f.write((b"\xff\xfb\x90\x00" + bytes(413)) * 3)
+
+
+def m4a_con_testo(percorso, testo):
+    """M4A minimo con titolo e testo (©lyr) nei tag, come li scrive Musica."""
+    def scatola(t, d):
+        return struct.pack(">I", 8 + len(d)) + t + d
+
+    def dato(b):
+        return scatola(b"data", struct.pack(">I", 1) + bytes(4) + b)
+    ilst = scatola(b"ilst", scatola(b"\xa9nam", dato(b"Titolo")) + scatola(b"\xa9lyr", dato(testo.encode("utf-8"))))
+    moov = scatola(b"moov", scatola(b"mvhd", bytes(12) + struct.pack(">II", 1000, 200000) + bytes(80)) +
+                   scatola(b"udta", scatola(b"meta", bytes(4) + scatola(b"hdlr", bytes(25)) + ilst)))
+    with open(percorso, "wb") as f:
+        f.write(scatola(b"ftyp", b"M4A \0\0\0\0M4A mp42isom") + moov)
+
+
+def flac_con_testo(percorso, commenti):
+    """FLAC minimo (STREAMINFO e commenti Vorbis)."""
+    info = bytes(10) + ((44100 << 44) | (44100 * 200)).to_bytes(8, "big") + bytes(16)
+    d = struct.pack("<I", 5) + b"prova" + struct.pack("<I", len(commenti)) + b"".join(
+        struct.pack("<I", len(c.encode("utf-8"))) + c.encode("utf-8") for c in commenti)
+    with open(percorso, "wb") as f:
+        f.write(b"fLaC" + bytes([0]) + len(info).to_bytes(3, "big") + info + bytes([0x80 | 4]) + len(d).to_bytes(3, "big") + d)
+
+
+class TestTesti(unittest.TestCase):
+    """Lettura dei testi: LRC (più tempi su una riga, [offset], parole <mm:ss.xx>), il Lyricsfile di LRCLIB con le parole,
+    i testi dentro i file (ID3 USLT e SYLT, MP4 ©lyr, FLAC LYRICS) e il permesso per gli invitati."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_testi")
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_lrc_righe(self):
+        r = self.m.leggi_lrc("[ar:Ava Max]\n[ti:Kings & Queens]\n[offset:+500]\n"
+                             "[00:01.48] If all of the kings\r\n[00:04.96][01:04.5]We would pop champagne\n"
+                             "[00:08]\n[00:09:50]  To all   of the queens \nriga senza tempo\n[1:02.123]Ultima")
+        self.assertEqual([(x["t"], x["testo"]) for x in r],
+                         [(0.98, "If all of the kings"), (4.46, "We would pop champagne"), (7.5, ""),
+                          (9.0, "To all of the queens"), (61.623, "Ultima"), (64.0, "We would pop champagne")])
+        self.assertFalse(any("parole" in x for x in r))
+        self.assertEqual(self.m.leggi_lrc("[offset:-1500]\n[00:01.00]Presto"), [{"t": 2.5, "testo": "Presto"}])
+        self.assertEqual(self.m.leggi_lrc("solo testo\nsenza tempi"), [])
+        self.assertEqual(self.m.leggi_lrc(None), [])
+
+    def test_lrc_parole(self):
+        r = self.m.leggi_lrc("[00:12.00]<00:12.00>Hello <00:12.50>big  <00:13.10>world<00:14.00>\n[00:15.00]Senza parole\n"
+                             "[00:20.00]Prima <00:21.00>dopo")
+        self.assertEqual(r[0], {"t": 12.0, "testo": "Hello big world", "fine": 14.0, "parole": [
+            {"t": 12.0, "testo": "Hello "}, {"t": 12.5, "testo": "big "}, {"t": 13.1, "testo": "world"}]})
+        self.assertEqual(r[1], {"t": 15.0, "testo": "Senza parole"})
+        # il pezzo prima del primo tempo di parola comincia con la riga
+        self.assertEqual(r[2]["parole"], [{"t": 20.0, "testo": "Prima "}, {"t": 21.0, "testo": "dopo"}])
+
+    def test_testi_semplici(self):
+        self.assertEqual(self.m.testi_semplici("\n\nPrima riga\r\n  Seconda  \n\n\n\nTerza\n\n"),
+                         [{"t": None, "testo": "Prima riga"}, {"t": None, "testo": "Seconda"}, {"t": None, "testo": ""},
+                          {"t": None, "testo": "Terza"}])
+        self.assertEqual(self.m.testi_semplici("  \n "), [])
+
+    def test_lyricsfile_parole(self):
+        lf = ("version: '1.0'\nmetadata:\n  title: Prova\n  instrumental: false\nlines:\n"
+              "- text: Hello world\n  start_ms: 1000\n  end_ms: 2600\n  words:\n"
+              "  - text: 'Hello '\n    start_ms: 1000\n    end_ms: 1500\n"
+              "  - text: \"w\\u00f6rld \\\"x\\\"\"\n    start_ms: 1600\n"
+              "- text: 'It''s fine' # commento\n  start_ms: 3000\n"
+              "plain: |\n  Hello world\n  start_ms: 99\n")
+        self.assertEqual(self.m.leggi_lyricsfile(lf), [
+            {"t": 1.0, "testo": "Hello wörld \"x\"", "fine": 2.6,
+             "parole": [{"t": 1.0, "testo": "Hello "}, {"t": 1.6, "testo": "wörld \"x\""}]},
+            {"t": 3.0, "testo": "It's fine"}])
+        # rientri diversi (come negli esempi di LRCLIB); parole senza tempi: resta la riga
+        lf2 = ("metadata:\n  instrumental: false\nlines:\n  - text: ignored\n    start_ms: 12492\n    words:\n"
+               "      - text: \"Word \"\n        start_ms: 12492\n      - text: sync\n        start_ms: 12900\n"
+               "  - text: Senza\n    start_ms: 14000\n    words:\n      - text: \"Sen\"\n      - text: za\n")
+        self.assertEqual(self.m.leggi_lyricsfile(lf2), [
+            {"t": 12.492, "testo": "Word sync", "parole": [{"t": 12.492, "testo": "Word "}, {"t": 12.9, "testo": "sync"}]},
+            {"t": 14.0, "testo": "Senza"}])
+        self.assertEqual(self.m.leggi_lyricsfile("non: [yaml"), [])
+
+    def test_nei_file(self):
+        p = os.path.join(self.base, "sylt.mp3")   # SYLT a pezzi di riga (karaoke) e USLT: vince SYLT
+        voci = [("\nHel", 1000), ("lo ", 1400), ("world", 1800), ("\nSeconda riga", 4000)]
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("SYLT", sylt(voci)) + _id3_frame("USLT", uslt("Hello world")))
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["stato"], r["sincronizzato"], r["parole"], r["fonte"]), ("ok", True, True, "file"))
+        self.assertEqual(r["righe"], [
+            {"t": 1.0, "testo": "Hello world", "parole": [{"t": 1.0, "testo": "Hel"}, {"t": 1.4, "testo": "lo "},
+                                                          {"t": 1.8, "testo": "world"}]},
+            {"t": 4.0, "testo": "Seconda riga"}])
+        p = os.path.join(self.base, "sylt-righe.mp3")   # una voce per riga
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("SYLT", sylt([("Uno", 500), ("Due", 2500)])))
+        self.assertEqual(self.m.testi_dal_file(p)["righe"], [{"t": 0.5, "testo": "Uno"}, {"t": 2.5, "testo": "Due"}])
+        p = os.path.join(self.base, "uslt-lrc.mp3")   # ID3v2.4, USLT in UTF-8 scritto in formato LRC
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("USLT", uslt("[00:01.00]Uno\n[00:02.50]Due", enc=3), 4), v=4)
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["sincronizzato"], r["righe"]), (True, [{"t": 1.0, "testo": "Uno"}, {"t": 2.5, "testo": "Due"}]))
+        p = os.path.join(self.base, "uslt.mp3")
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("USLT", uslt("Riga uno\r\nRiga due")))
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["sincronizzato"], r["parole"], r["righe"]),
+                         (False, False, [{"t": None, "testo": "Riga uno"}, {"t": None, "testo": "Riga due"}]))
+        p = os.path.join(self.base, "testo.m4a")
+        m4a_con_testo(p, "[00:03.00]Tre\n[00:04.00]Quattro")
+        self.assertEqual(self.m.testi_dal_file(p)["righe"], [{"t": 3.0, "testo": "Tre"}, {"t": 4.0, "testo": "Quattro"}])
+        p = os.path.join(self.base, "testo.flac")
+        flac_con_testo(p, ["TITLE=Prova", "lyrics=Solo testo\nseconda"])
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["sincronizzato"], [x["testo"] for x in r["righe"]]), (False, ["Solo testo", "seconda"]))
+        p = os.path.join(self.base, "niente.mp3")
+        mp3_con_testo(p, "Prova", "Anna")
+        self.assertIsNone(self.m.testi_dal_file(p))
+        self.assertIsNone(self.m.testi_dal_file(os.path.join(self.base, "non-ce.mp3")))
+
+    def test_invitati(self):
+        for x in ("/api/extra/testi/abc123", "/api/extra/testi", "/musica/api/extra/testi/abc"):
+            self.assertTrue(self.m.PERMESSE_INVITATI.match(x), x)
+        self.assertFalse(self.m.PERMESSE_INVITATI.match("/api/extra/testi/a/b"))
+
+
+KINGS = {"id": 941156, "trackName": "Kings & Queens", "artistName": "Ava Max", "albumName": "Heaven & Hell", "duration": 162.0,
+         "instrumental": False, "hasWordSync": False, "plainLyrics": "If all of the kings\nWe would pop champagne",
+         "syncedLyrics": "[00:00.48] If all of the kings\n[00:03.96] We would pop champagne"}
+LRCLIB_GET = {
+    "Kings & Queens": KINGS,
+    "Parole": {"id": 2, "trackName": "Parole", "artistName": "Anna", "duration": 180.0, "instrumental": False,
+               "hasWordSync": True, "plainLyrics": "Ciao mondo", "syncedLyrics": "[00:01.00]Ciao mondo",
+               "lyricsfile": "version: '1.0'\nmetadata:\n  title: Parole\n  instrumental: false\nlines:\n- text: Ciao mondo\n"
+                             "  start_ms: 1000\n  words:\n  - text: 'Ciao '\n    start_ms: 1000\n  - text: mondo\n"
+                             "    start_ms: 1500\n"},
+    "Strumentale": {"id": 3, "trackName": "Strumentale", "artistName": "Anna", "duration": 120.0, "instrumental": True,
+                    "plainLyrics": None, "syncedLyrics": None},
+    "Occupato": {"id": 9, "trackName": "Occupato", "artistName": "Duo", "duration": 90.0, "instrumental": False,
+                 "plainLyrics": "Riprovato", "syncedLyrics": "[00:01.00]Riprovato"},
+    "Semplice nel file": {"id": 4, "trackName": "Semplice nel file", "artistName": "Anna", "duration": 150.0,
+                          "instrumental": False, "plainLyrics": "Dal sito", "syncedLyrics": "[00:05.00]Dal sito"},
+}
+LRCLIB_CERCA = {
+    # una versione lunga 30 s in più (fuori tempo), una «(Live)» con la durata giusta, un altro brano con la stessa durata
+    "Altra versione": [
+        {"id": 5, "trackName": "Altra versione", "artistName": "Duo", "duration": 230.0, "instrumental": False,
+         "syncedLyrics": "[00:01.00]Fuori tempo", "plainLyrics": "Fuori tempo"},
+        {"id": 6, "trackName": "Altra versione (Live)", "artistName": "Duo feat. X", "duration": 201.0, "instrumental": False,
+         "syncedLyrics": "[00:02.00]A tempo", "plainLyrics": "A tempo"},
+        {"id": 7, "trackName": "Un altro brano", "artistName": "Duo", "duration": 200.0, "instrumental": False,
+         "syncedLyrics": "[00:01.00]Sbagliato", "plainLyrics": "Sbagliato"}],
+    "Solo versione lunga": [
+        {"id": 8, "trackName": "Solo versione lunga", "artistName": "Duo", "duration": 260.0, "instrumental": False,
+         "syncedLyrics": "[00:01.00]Solo lunga\n[00:03.00]Seconda", "plainLyrics": None}],
+}
+
+
+class FintoLrclib(http.server.BaseHTTPRequestHandler):
+    """LRCLIB finto: /api/get e /api/search con le risposte qui sopra; ricorda ogni richiesta (percorso, parametri, agente)."""
+    chieste = []
+
+    def manda(self, stato, d):
+        dati = json.dumps(d).encode("utf-8")
+        self.send_response(stato)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoLrclib.chieste.append((u.path, q, self.headers.get("User-Agent", "")))
+        titolo = q.get("track_name", "")
+        if u.path == "/api/get":
+            if titolo == "Rotto":
+                return self.manda(500, {"code": 500, "name": "InternalError"})
+            if titolo == "Occupato" and sum(1 for x in FintoLrclib.chieste if x[1].get("track_name") == titolo) == 1:
+                return self.manda(503, {"code": 503})   # come il vero LRCLIB, ogni tanto: la volta dopo risponde
+            v = LRCLIB_GET.get(titolo)
+            if v and abs(float(q.get("duration") or 0) - v["duration"]) <= 2:
+                return self.manda(200, v)
+            return self.manda(404, {"code": 404, "name": "TrackNotFound", "message": "Failed to find specified track"})
+        if u.path == "/api/search":
+            return self.manda(200, LRCLIB_CERCA.get(titolo, []))
+        self.manda(404, {})
+
+    def log_message(self, *x):
+        pass
+
+
+class TestTestiServer(unittest.TestCase):
+    """api/extra/testi: il testo del brano dal file o da LRCLIB (finto), con la cache sul Mac; a tempo da LRCLIB solo se
+    la durata coincide; senza rete un errore chiaro (e per un minuto LRCLIB non si richiede)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-srv-")
+        cls.c = prepara_cartelle(cls.base)
+        mu = cls.c["musica"]
+        for artista, titolo, ms, album, frame in (
+                ("Ava Max", "Kings & Queens", 162696, "Heaven & Hell", b""),
+                ("Anna", "Parole", 180000, "", b""), ("Anna", "Strumentale", 120000, "", b""),
+                ("Duo", "Altra versione", 200000, "", b""), ("Duo", "Solo versione lunga", 200000, "", b""),
+                ("Nessuno", "Sconosciuto", 100000, "", b""), ("Nessuno", "Rotto", 100000, "", b""),
+                ("Duo", "Occupato", 90000, "", b""),
+                ("Anna", "Nel file", 100000, "", _id3_frame("SYLT", sylt([("Dal file", 1000)]))),
+                ("Anna", "Semplice nel file", 150000, "", _id3_frame("USLT", uslt("Dal file senza tempi"))),
+                ("Anna", "Solo nel file", 140000, "", _id3_frame("USLT", uslt("Riga uno\nRiga due")))):
+            mp3_con_testo(os.path.join(mu, "%s - %s.mp3" % (artista, titolo)), titolo, artista, album, ms, frame)
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclib)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        FintoLrclib.chieste = []
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.web.server_address[1],
+                                                   "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) >= 11 else None)(cls.s.json("GET", "/api/musica/catalogo")["brani"]),
+                        30, 0.2)
+        cls.id = {x["title"]: x["id"] for x in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiesti(self, titolo):
+        return [x for x in FintoLrclib.chieste if x[1].get("track_name") == titolo]
+
+    def chiedi(self, titolo, codice=200):
+        return self.s.json("GET", "/api/extra/testi/" + self.id[titolo], codice=codice)
+
+    def test_a_tempo_da_lrclib_e_cache(self):
+        r = self.chiedi("Kings & Queens")
+        self.assertEqual((r["stato"], r["sincronizzato"], r["parole"], r["fonte"]), ("ok", True, False, "lrclib"))
+        self.assertEqual([(x["t"], x["testo"]) for x in r["righe"]], [(0.48, "If all of the kings"), (3.96, "We would pop champagne")])
+        get = self.chiesti("Kings & Queens")
+        self.assertEqual([x[0] for x in get], ["/api/get"])
+        self.assertEqual({k: get[0][1].get(k) for k in ("track_name", "artist_name", "album_name", "duration")},
+                         {"track_name": "Kings & Queens", "artist_name": "Ava Max", "album_name": "Heaven & Hell", "duration": "163"})
+        self.assertIn("AtlanteMusica", get[0][2])
+        # la seconda volta dalla cache del Mac: a LRCLIB non si chiede più
+        self.assertEqual(self.chiedi("Kings & Queens"), r)
+        self.assertEqual(len(self.chiesti("Kings & Queens")), 1)
+        self.assertTrue([n for n in os.listdir(os.path.join(self.c["cache"], "testi")) if n.endswith(".json")])
+        # un brano che non è nella libreria (solo sul telefono): con titolo, artista e durata
+        q = self.s.json("GET", "/api/extra/testi?titolo=%s&artista=%s&durata=162.4" % (quote("Kings & Queens"), quote("Ava Max")))
+        self.assertEqual(q["righe"], r["righe"])
+        self.assertEqual(self.chiesti("Kings & Queens")[-1][1].get("duration"), "162")
+        self.assertNotIn("album_name", self.chiesti("Kings & Queens")[-1][1])
+
+    def test_parole_dal_lyricsfile(self):
+        r = self.chiedi("Parole")
+        self.assertEqual((r["sincronizzato"], r["parole"]), (True, True))
+        self.assertEqual(r["righe"], [{"t": 1.0, "testo": "Ciao mondo", "parole": [{"t": 1.0, "testo": "Ciao "},
+                                                                                   {"t": 1.5, "testo": "mondo"}]}])
+
+    def test_ricerca_a_tempo_solo_con_la_durata_giusta(self):
+        r = self.chiedi("Altra versione")
+        self.assertEqual([x[0] for x in self.chiesti("Altra versione")], ["/api/get", "/api/search"])
+        self.assertEqual(self.chiesti("Altra versione")[1][1].get("artist_name"), "Duo")
+        self.assertEqual((r["sincronizzato"], [(x["t"], x["testo"]) for x in r["righe"]]), (True, [(2.0, "A tempo")]))
+        r = self.chiedi("Solo versione lunga")   # c'è solo una versione più lunga di un minuto: il testo, senza tempi
+        self.assertEqual((r["stato"], r["sincronizzato"], r["fonte"]), ("ok", False, "lrclib"))
+        self.assertEqual(r["righe"], [{"t": None, "testo": "Solo lunga"}, {"t": None, "testo": "Seconda"}])
+
+    def test_strumentale_e_nessun_testo(self):
+        self.assertEqual(self.chiedi("Strumentale"), {"stato": "strumentale"})
+        self.assertEqual(self.chiedi("Sconosciuto"), {"stato": "nessuno"})
+        n = len(FintoLrclib.chieste)
+        self.assertEqual(self.chiedi("Sconosciuto"), {"stato": "nessuno"})   # ricordato: a LRCLIB non si richiede
+        self.assertEqual(len(FintoLrclib.chieste), n)
+
+    def test_testo_nel_file(self):
+        r = self.chiedi("Nel file")
+        self.assertEqual((r["fonte"], r["sincronizzato"], r["righe"]), ("file", True, [{"t": 1.0, "testo": "Dal file"}]))
+        self.assertEqual(self.chiesti("Nel file"), [])   # a tempo nel file: LRCLIB non serve
+        r = self.chiedi("Semplice nel file")   # nel file senza tempi, su LRCLIB a tempo: vince LRCLIB
+        self.assertEqual((r["fonte"], r["sincronizzato"], r["righe"]), ("lrclib", True, [{"t": 5.0, "testo": "Dal sito"}]))
+        r = self.chiedi("Solo nel file")   # LRCLIB non ce l'ha: quello del file, senza tempi
+        self.assertEqual((r["fonte"], r["sincronizzato"], [x["testo"] for x in r["righe"]]), ("file", False, ["Riga uno", "Riga due"]))
+
+    def test_lrclib_occupato_si_riprova(self):
+        r = self.chiedi("Occupato")   # LRCLIB a volte risponde 503 (occupato): dopo un attimo si riprova, una volta
+        self.assertEqual((r["stato"], r["sincronizzato"], r["righe"]), ("ok", True, [{"t": 1.0, "testo": "Riprovato"}]))
+        self.assertEqual([x[0] for x in self.chiesti("Occupato")], ["/api/get", "/api/get"])
+
+    def test_lrclib_non_risponde(self):
+        r = self.chiedi("Rotto", 503)
+        self.assertIn("LRCLIB", r["errore"])
+        n = len(FintoLrclib.chieste)
+        self.chiedi("Rotto", 503)   # per un minuto non lo si richiede
+        self.assertEqual(len(FintoLrclib.chieste), n)
+
+    def test_richieste_sbagliate(self):
+        self.s.json("GET", "/api/extra/testi/0123456789abcdef", codice=404)
+        self.s.json("GET", "/api/extra/testi?artista=Anna", codice=400)
+        self.s.json("GET", "/api/extra/testi?titolo=x&durata=abc", codice=400)
+        self.s.json("POST", "/api/extra/testi/" + self.id["Parole"], {}, codice=405)
+        self.s.json("GET", "/api/extra/testi/a/b", codice=404)
+
+
+class TestTestiApp(unittest.TestCase):
+    """Il testo nel lettore dell'app (riga e parola del momento, tocco su una riga: col mix e col telecomando) gira in
+    JavaScriptCore, come test_mix.js: test_testi.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_testi_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_testi.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
