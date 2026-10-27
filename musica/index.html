@@ -2309,7 +2309,7 @@ function openX(k, q) {
   if (f.getAttribute('src') !== src) f.setAttribute('src', src);
   $('xp').hidden = false; ls.set('am-x', k); document.body.classList.toggle('xnav', k === 'naviga');
 }
-function closeX() { document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); }
+function closeX() { const era = xCur; document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); if (era === 'gestione') ioCarica(); }   // i numeri del riquadro Gestione dopo averla usata
 const xSubs = new Set();
 function xNotify() { const n = AM.now(); xSubs.forEach(cb => { try { cb(n); } catch (e) {} }); }
 window.AM = {
