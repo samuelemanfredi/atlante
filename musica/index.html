@@ -2300,6 +2300,7 @@ const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entran
 const TT = id => T.get(id) || EXT.get(id);
 let xCur = '';
 function openX(k, q) {
+  if (k === 'interfaccia') { uiApri('personale'); return; }   // «Modifica interfaccia»: l'editor, non una pagina
   const m = xmodsVisibili().flatMap(g => g.m).find(x => x.k === k); if (!m) return;
   closeNP(); xCur = k;
   const f = $('xf'), src = 'x/' + k + '.html' + (q || '');
@@ -2670,6 +2671,607 @@ async function shareTrack(id) {
 }
 
 function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), sticky ? 8000 : 2400); }
+
+/* ---------- interfaccia: strato di modifiche (base di Samuele, personale di ciascuno) ----------
+   L'app si disegna come sempre (l'originale); sopra vanno la base di Samuele, uguale per tutti, e lo strato personale
+   di chi la usa: per ogni proprietà di un elemento vale il livello più in alto. Un elemento si indica con un
+   «indirizzo» fatto di id, data-a, data-tab, data-v e classi suoi e dei contenitori (più la pagina e la sezione, dal
+   titolo h2); le righe che si ripetono (brani, copertine, riquadri degli album, gruppi delle schede) non hanno posizione:
+   la modifica vale per tutte quelle uguali. Colori, sfondi, grandezza e nascosti: un foglio di stile generato, che vale
+   subito anche per le righe disegnate scorrendo le liste lunghe; testi e spostamenti: piccole correzioni dopo ogni
+   disegno della schermata (MutationObserver). I testi entrano sempre come testo; indirizzi e colori solo nella forma
+   rigida, controllata anche dal Mac mini. «?originale» nell'indirizzo apre l'app senza nessuno strato (soccorso). */
+const UI_ORIG = new URLSearchParams(location.search).has('originale');
+const UI_MAX = 500, UI_TESTO_MAX = 80, UI_ORDINE = 20;
+const UI_TAV = new Map([['accento', 'var(--accent)'], ['principale', 'var(--fg)'], ['secondario', 'var(--fg2)'], ['fondo', 'var(--bg)'], ['fondo2', 'var(--bg2)'],
+  ['rosso', '#ff3b30'], ['arancione', '#ff9500'], ['giallo', '#ffcc00'], ['verde', '#34c759'], ['menta', '#00c7be'], ['azzurro', '#32ade6'], ['blu', '#007aff'],
+  ['viola', '#af52de'], ['rosa', '#ff2d55'], ['marrone', '#a2845e'], ['grigio', '#8e8e93'], ['nero', '#000000'], ['bianco', '#ffffff']]);
+const UI_PEZZO = '[a-z][a-z0-9]{0,9}(?:#[A-Za-z][A-Za-z0-9_-]{0,39})?(?:\\.[A-Za-z][A-Za-z0-9_-]{0,29}){0,4}' + ['a', 'tab', 'v', 'k', 'sez'].map(n => '(?:\\[' + n + '=[A-Za-z0-9_-]{1,40}\\])?').join('');
+const UI_IND = new RegExp('^' + UI_PEZZO + '(?: ' + UI_PEZZO + '){0,6}(?::[1-9][0-9]?)?$');
+const UI_HEX = /^#[0-9a-f]{6}$/, UI_VAL = /^[A-Za-z0-9_-]{1,40}$/, UI_CLASSE = /^[A-Za-z][A-Za-z0-9_-]{0,29}$/, UI_ID = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+const UI_CTRL = /[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+const UI_PROP = ['testo', 'colore', 'sfondo', 'grandezza', 'nascosto', 'ordine'];
+// non si nascondono (né loro né un contenitore che li ha dentro): la via per tornare indietro, Gestione e il suo numero, Play/Pausa, chiusura del lettore
+const UI_PROT = '[data-a="xopen"][data-k="interfaccia"],[data-a="xopen"][data-k="gestione"],[data-tab="altro"],[data-a="toggle"],[data-a="closenp"],.xtile .xn';
+const UI_STATO = new Set(['on', 'cur', 'off', 'open', 'drag', 'paused', 'q', 'vid', 'show', 'hasmini', 'xnav', 'rc', 'acc']);   // classi che l'app accende e spegne
+const UI_SALTA = new Set(['vl', 'morerows']);   // contenitori delle liste lunghe: ci sono o no secondo quante righe ha la lista
+const UI_RIP = '.trk,.tile,.qrow,.art,.grp', UI_RIGA = '.trk,.tile,.qrow';   // si ripetono: niente posizione né spostamenti
+// contenuti (titoli, artisti, album, nomi, numeri che cambiano): il testo non si cambia
+const UI_CONTENUTO = '.t1,.t2,.trk .tx,.tile .n,.tile .a,.hero .ht,.hero .ha,.hero .hm,.qrow,.shead,.npqhead,#miniT,#miniA,#npT,#npA,#qFrom,.l.dv,#npDev,.smsg,.foot,.dlbar,.banner .bt,.mixcard span span,[data-a="m-topl"],[data-a^="dev-"],[data-a="m-fav"],#view[data-v="artist"] h1.lt,#view[data-v="pick"] h1.lt,.xn,#toast,#dlpill,.times,.sfield';
+const UIS = {chi:'', base:{modifiche:{}, versione:0, pubblicato:0}, personale:{modifiche:{}, aggiornato:0}, bozza:null, pend:{personale:[], bozza:[]},
+  ed:null, sel:null, ind:'', info:null, scheda:'testo', conferma:'', caricato:0};
+const uiHa = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+// ----- forma rigida (la stessa del Mac mini: convalida_modifiche) -----
+function uiValore(p, v) {   // il valore pulito, o undefined se non va
+  if (p === 'testo') { if (typeof v !== 'string') return; const t = v.replace(UI_CTRL, ' ').split(/\s+/).filter(Boolean).join(' '); return [...t].length <= UI_TESTO_MAX ? t : undefined; }
+  if (p === 'colore' || p === 'sfondo') { const c = typeof v === 'string' ? v.toLowerCase() : ''; return c === 'originale' || UI_TAV.has(c) || UI_HEX.test(c) ? c : undefined; }
+  if (p === 'grandezza') return Number.isInteger(v) && v >= 70 && v <= 200 ? v : undefined;
+  if (p === 'nascosto') return typeof v === 'boolean' ? v : undefined;
+  if (p === 'ordine') return Number.isInteger(v) && Math.abs(v) <= UI_ORDINE ? v : undefined;
+}
+function uiPulisci(m) {   // modifiche dal Mac o dalla copia sul telefono: solo quelle in forma rigida, al più 500
+  const out = {}; let n = 0;
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return out;
+  for (const a of Object.keys(m)) {
+    const pr = m[a];
+    if (a.length > 400 || !UI_IND.test(a) || !pr || typeof pr !== 'object' || Array.isArray(pr)) continue;
+    const x = {};
+    for (const p of UI_PROP) if (uiHa(pr, p)) { const v = uiValore(p, pr[p]); if (v !== undefined) x[p] = v; }
+    const k = Object.keys(x).length; if (!k) continue;
+    if (n + k > UI_MAX) break;
+    n += k; out[a] = x;
+  }
+  return out;
+}
+const uiConta = m => Object.values(m || {}).reduce((n, x) => n + Object.keys(x).length, 0);
+// indirizzo → selettore CSS (l'indirizzo è già nella forma rigida: niente da sfuggire)
+function uiCss(ind) {
+  let pos = 0; const k = ind.search(/:\d+$/);
+  if (k > 0) { pos = +ind.slice(k + 1); ind = ind.slice(0, k); }
+  const pz = ind.split(' ').map(s => s.replace(/\[(a|tab|v|k|sez)=([A-Za-z0-9_-]+)\]/g, '[data-$1="$2"]'));
+  if (pos) pz[pz.length - 1] += ':nth-child(' + pos + ' of ' + pz[pz.length - 1] + ')';
+  return pz.join(' ');
+}
+function uiTutti(sel) { try { return document.querySelectorAll(sel); } catch (e) { return []; } }
+
+// ----- indirizzo di un elemento -----
+function uiPezzo(el) {   // '' se l'elemento non dice niente (un div o uno span senza classi né dati): si salta
+  const tag = el.tagName.toLowerCase();
+  if (!/^[a-z][a-z0-9]{0,9}$/.test(tag)) return '';
+  const cl = [...el.classList].filter(c => UI_CLASSE.test(c) && !UI_STATO.has(c) && !c.startsWith('ui-'));
+  if (cl.some(c => UI_SALTA.has(c))) return '';
+  let s = tag, utile = false;
+  if (UI_ID.test(el.id || '')) { s += '#' + el.id; utile = true; } else if (cl.length) { s += cl.slice(0, 4).map(c => '.' + c).join(''); utile = true; }
+  const d = el.dataset;
+  // data-k solo per i riquadri di Altro (il nome del modulo): altrove è un contenuto (album, artista, playlist)
+  for (const [n, v] of [['a', d.a], ['tab', d.tab], ['v', d.v], ['k', d.a === 'xopen' ? d.k : ''], ['sez', d.sez]]) if (v && UI_VAL.test(v)) { s += '[' + n + '=' + v + ']'; utile = true; }
+  return utile ? s : '';
+}
+function uiIndirizzo(el) {   // {ind, rip}: rip = si ripete (niente posizione, niente spostamenti)
+  const pz = []; let x = el, ancora = false;
+  while (x && x.nodeType === 1 && x !== document.body && x !== document.documentElement) {
+    let p = uiPezzo(x);
+    if (x === el && !p) { const t = x.tagName.toLowerCase(); p = /^[a-z][a-z0-9]{0,9}$/.test(t) ? t : ''; if (!p) return null; }
+    if (p) pz.unshift(p);
+    if (p && UI_ID.test(x.id || '')) { ancora = true; break; }
+    x = x.parentElement;
+  }
+  if (!pz.length) return null;
+  // al più 7 pezzi: l'elemento, i 5 contenitori più vicini e quello con l'id
+  if (pz.length > 7) pz.splice(ancora ? 1 : 0, pz.length - 7);
+  const rip = !UI_ID.test(el.id || '') && !!(el.matches(UI_RIP) || (el.parentElement && el.parentElement.closest(UI_RIGA)));
+  let ind = pz.join(' ');
+  if (!rip && el.parentElement && !UI_ID.test(el.id || '')) {
+    const sel = uiCss(pz[pz.length - 1]); let n = 0, k = 0;
+    for (const s of el.parentElement.children) { let ok = false; try { ok = s.matches(sel); } catch (e) {} if (ok) { n++; if (s === el) k = n; } }
+    if (n > 1 && k <= 99) ind += ':' + k;
+  }
+  return ind.length <= 400 && UI_IND.test(ind) ? {ind, rip} : null;
+}
+// sezioni della pagina: ogni titolo h2 dà il nome a sé e a quello che lo segue fino al titolo dopo
+const uiSlug = s => fold(s).replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 40).replace(/-+$/, '');
+function uiSezioni(box) {
+  let sez = '';
+  for (const c of box.children) {
+    if (c.tagName === 'H2') sez = c.dataset.sez || uiSlug(c.textContent);
+    if (sez) { if (c.dataset.sez !== sez) c.dataset.sez = sez; } else if (c.dataset.sez) delete c.dataset.sez;
+  }
+}
+function uiMarca() {   // pagina (data-v su #view) e sezioni: servono al foglio di stile, prima che la pagina si veda
+  const v = $('view'), r = curRoute().v;
+  if (v.dataset.v !== r) v.dataset.v = r;
+  uiSezioni(v); const s = $('sres'); if (s) uiSezioni(s);
+}
+
+// ----- applicazione -----
+function uiLivelli() {   // dal basso in alto; mentre si modifica, il livello in lavorazione al posto del suo
+  if (UI_ORIG) return [];
+  const e = UIS.ed, base = UIS.bozza ? UIS.bozza.modifiche : UIS.base.modifiche;   // Samuele vede la sua bozza
+  if (e && e.livello === 'base') return [e.lav];
+  return [base, e ? e.lav : UIS.personale.modifiche];
+}
+function uiUnisci(L) { const out = new Map(); for (const m of L) for (const a of Object.keys(m || {})) out.set(a, Object.assign(out.get(a) || {}, m[a])); return out; }
+const uiTinta = c => UI_TAV.get(c) || c;
+const UI_FUORI = ':not(.ui-box):not(.ui-box *):not(.xn)';   // l'editor e il numero della Gestione non si toccano
+function uiFoglio(eff) {
+  const r = [];
+  for (const [a, x] of eff) {
+    const s = uiCss(a) + UI_FUORI, d = [];
+    if (x.colore && x.colore !== 'originale') d.push('color:' + uiTinta(x.colore) + '!important');
+    if (x.sfondo && x.sfondo !== 'originale') d.push('background:' + uiTinta(x.sfondo) + '!important');
+    if (x.grandezza && x.grandezza !== 100) d.push('zoom:' + x.grandezza / 100);
+    if (d.length) r.push(s + '{' + d.join(';') + '}');
+    if (x.sfondo && x.sfondo !== 'originale') r.push(uiCss(a) + ' .xn{box-shadow:0 0 0 2px #fff!important}');   // il numero resta leggibile su ogni sfondo
+    if (x.nascosto) {
+      r.push('html:not(.ui-ed) ' + s + ':not(' + UI_PROT + '):not(:has(' + UI_PROT + ')){display:none!important}');
+      r.push('html.ui-ed ' + s + '{opacity:.32!important}');   // mentre si modifica si vedono in trasparenza, per farli ricomparire
+    }
+  }
+  // il numero sul riquadro Gestione resta sopra a tutto quello che c'è nel riquadro
+  r.push('.xtile .xn{z-index:3!important;visibility:visible!important;opacity:1!important}');
+  // schede in basso: una nascosta non lascia il buco (colonne uguali, quante sono le schede visibili)
+  if (eff.size) r.push('#tabs .in{grid-template-columns:none;grid-auto-flow:column;grid-auto-columns:1fr}');
+  return r.join('\n');
+}
+let uiJs = [], uiMO = null, uiT = 0, uiScorre = 0;
+const uiTesti = new Set(), uiOrdinati = new Set();
+function uiApplica() {
+  const eff = uiUnisci(uiLivelli());
+  let st = $('ui-strato'); if (!st) { st = document.createElement('style'); st.id = 'ui-strato'; document.head.appendChild(st); }
+  const css = uiFoglio(eff); if (st.textContent !== css) st.textContent = css;
+  uiJs = [];
+  for (const [a, x] of eff) if ((x.testo && typeof x.testo === 'string') || x.ordine) uiJs.push({sel:uiCss(a), testo:x.testo || '', ordine:x.ordine || 0});
+  uiOsserva(eff.size > 0 || !!UIS.ed);
+  uiPassa();
+}
+function uiOsserva(si) {
+  if (si && !uiMO) { uiMO = new MutationObserver(uiMutato); uiMO.observe(document.body, {childList:true, subtree:true}); }
+  else if (!si && uiMO) { uiMO.disconnect(); uiMO = null; }
+}
+const UI_TICCHETTIO = new Set(['tCur', 'tRem', 'npVidMsg', 'toast', 'dlpill']);   // cambiano di continuo e non c'entrano
+function uiMutato(rs) {
+  let subito = false, dopo = false;
+  for (const r of rs) {
+    const t = r.target;
+    if (!t || t.nodeType !== 1 || UI_TICCHETTIO.has(t.id) || t.closest('.ui-box')) continue;
+    if (t.closest('.vl')) continue;   // righe disegnate scorrendo una lista lunga: lo stile lo prendono già dal foglio
+    if (t.id === 'view' || t.id === 'sres' || t.id === 'sheet' || t === document.body) subito = true; else dopo = true;
+  }
+  // pagina nuova o scheda aperta: le correzioni prima che si veda; il resto con un piccolo ritardo (e più lungo mentre si scorre)
+  if (subito) { clearTimeout(uiT); uiT = 0; uiPassa(); }
+  else if (dopo && !uiT) uiT = setTimeout(() => { uiT = 0; uiPassa(); }, Date.now() - uiScorre < 300 ? 300 : 60);
+}
+function uiTestoProprio(el) { let s = ''; for (const n of el.childNodes) if (n.nodeType === 3) s += n.data; return s.replace(/\s+/g, ' ').trim(); }
+function uiMettiTesto(el, t) {   // il testo dell'elemento (i suoi nodi di testo, le icone restano), sempre come testo
+  const ora = uiTestoProprio(el);
+  if (!ora || (el.__uiT === t && ora === t)) return;
+  if (el.__uiT == null || ora !== el.__uiT) el.__uiO = ora;   // testo scritto dall'app: è quello originale
+  let primo = true;
+  for (const n of el.childNodes) if (n.nodeType === 3 && n.data.trim()) { n.data = primo ? (/^\s/.test(n.data) ? ' ' : '') + t + (/\s$/.test(n.data) ? ' ' : '') : ''; primo = false; }
+  el.__uiT = t; uiTesti.add(el);
+}
+function uiTogliTesto(el) {   // torna il testo dell'app (se nel frattempo l'app non l'ha già riscritto lei)
+  if (el.__uiT == null) return;
+  if (el.isConnected && uiTestoProprio(el) === el.__uiT) {
+    for (const n of el.childNodes) if (n.nodeType === 3 && n.data.trim()) { n.data = (/^\s/.test(n.data) ? ' ' : '') + el.__uiO + (/\s$/.test(n.data) ? ' ' : ''); break; }
+  }
+  delete el.__uiT; delete el.__uiO; uiTesti.delete(el);
+}
+function uiUnita(p) {   // i figli a gruppi: nelle pagine le sezioni (titolo e quello che lo segue), altrove uno per uno
+  const sez = p.id === 'view' || p.id === 'sres', U = [];
+  for (const c of p.children) {
+    const z = sez ? c.dataset.sez || '' : '';
+    if (z && c.tagName !== 'H2' && U.length && U[U.length - 1].sez === z) U[U.length - 1].els.push(c); else U.push({sez:z, els:[c]});
+  }
+  return U;
+}
+function uiRiordina(p, L) {   // L: [{el, d}] (null: torna come l'ha disegnato l'app)
+  const n = p.children.length;
+  let orig = p.__uiOrig;   // l'ordine dell'app, preso prima di spostare; l'app ridisegna da capo: si riprende
+  if (!orig || orig.reduce((k, u) => k + u.els.length, 0) !== n || orig.some(u => u.els.some(e => e.parentElement !== p))) orig = p.__uiOrig = uiUnita(p);
+  const tgt = orig.slice();
+  if (L) {
+    const mosse = [];
+    for (const {el, d} of L) { const i = orig.findIndex(u => u.els.indexOf(el) >= 0); if (i >= 0 && d && !mosse.some(m => m[0] === i)) mosse.push([i, d]); }
+    mosse.sort((a, b) => a[0] - b[0]);
+    for (const [i, d] of mosse) { const u = orig[i], k = tgt.indexOf(u); tgt.splice(k, 1); tgt.splice(Math.max(0, Math.min(tgt.length, k + d)), 0, u); }
+  }
+  const uguale = tgt.every((u, i) => u === orig[i]);
+  if (/flex|grid/.test(getComputedStyle(p).display)) {   // contenitori flex e grid: order, senza toccare l'HTML
+    tgt.forEach((u, i) => u.els.forEach(e => { const o = uguale ? '' : String(i); if (e.style.order !== o) e.style.order = o; }));
+  } else {
+    const F = tgt.flatMap(u => u.els);
+    for (let i = 0; i < F.length; i++) if (p.children[i] !== F[i]) p.insertBefore(F[i], p.children[i]);
+  }
+  if (uguale) uiOrdinati.delete(p); else uiOrdinati.add(p);
+}
+function uiPassa() {   // dopo ogni disegno: pagina e sezioni, testi, spostamenti, riquadro dell'elemento scelto
+  if (UI_ORIG) return;
+  uiMarca();
+  const messi = new Set(), mosse = new Map();
+  for (const m of uiJs) for (const el of uiTutti(m.sel)) {
+    if (el.closest('.ui-box') || el.matches('.xn')) continue;
+    if (m.testo && !el.closest(UI_CONTENUTO)) { uiMettiTesto(el, m.testo); messi.add(el); }
+    if (m.ordine && !el.closest(UI_RIGA) && !el.matches(UI_RIP) && el.parentElement) {
+      // nelle pagine si sposta la sezione intera (titolo e contenuto), da qualunque suo elemento
+      const p = el.parentElement;
+      (mosse.get(p) || mosse.set(p, []).get(p)).push({el, d:m.ordine});
+    }
+  }
+  for (const el of [...uiTesti]) if (!messi.has(el)) uiTogliTesto(el);
+  for (const p of [...uiOrdinati]) if (!p.isConnected) uiOrdinati.delete(p); else if (!mosse.has(p)) uiRiordina(p, null);
+  for (const [p, L] of mosse) uiRiordina(p, L);
+  if (UIS.ed) uiSegui();
+  if (uiMO) uiMO.takeRecords();   // i cambi fatti qui non devono rifare il giro
+}
+
+// ----- copia sul telefono e Mac mini -----
+function uiCopia() { ls.set('am-ui', {chi:UIS.chi, base:UIS.base, personale:UIS.personale, bozza:UIS.bozza, pend:UIS.pend}); }
+(function uiDaCopia() {
+  const c = ls.get('am-ui', null); if (!c || typeof c !== 'object') return;
+  UIS.chi = typeof c.chi === 'string' ? c.chi : '';
+  if (c.base) UIS.base = {modifiche:uiPulisci(c.base.modifiche), versione:+c.base.versione || 0, pubblicato:+c.base.pubblicato || 0};
+  if (c.personale) UIS.personale = {modifiche:uiPulisci(c.personale.modifiche), aggiornato:+c.personale.aggiornato || 0};
+  UIS.bozza = c.bozza && typeof c.bozza === 'object' ? {modifiche:uiPulisci(c.bozza.modifiche), aggiornato:+c.bozza.aggiornato || 0} : null;
+  const p = c.pend || {}; UIS.pend = {personale:Array.isArray(p.personale) ? p.personale : [], bozza:Array.isArray(p.bozza) ? p.bozza : []};
+})();
+function uiRigioca(m, ops) {   // le modifiche fatte qui, rifatte sopra lo strato com'è adesso sul Mac (forse cambiato da un altro dispositivo)
+  const x = JSON.parse(JSON.stringify(m || {}));
+  for (const op of ops) {
+    if (!Array.isArray(op)) continue;
+    if (op[0] === '*') { for (const k of Object.keys(x)) delete x[k]; continue; }
+    const [a, p, v] = op; if (typeof a !== 'string' || UI_PROP.indexOf(p) < 0) continue;
+    const o = Object.assign({}, x[a] || {});
+    if (v === null) delete o[p]; else o[p] = v;
+    if (Object.keys(o).length) x[a] = o; else delete x[a];
+  }
+  return uiPulisci(x);
+}
+async function uiManda(liv) {   // le modifiche ancora da mandare di un livello: true se il Mac le ha
+  const sotto = liv === 'bozza' ? (UIS.bozza || UIS.base).modifiche : UIS.personale.modifiche;
+  const m = uiRigioca(sotto, UIS.pend[liv]);
+  try {
+    const r = await fetchT(XAPI + 'interfaccia/' + liv, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({modifiche:m})}, 15000);
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (r.ok && j) {
+      if (liv === 'bozza') UIS.bozza = {modifiche:uiPulisci(j.bozza.modifiche), aggiornato:j.bozza.aggiornato};
+      else UIS.personale = {modifiche:uiPulisci(j.personale.modifiche), aggiornato:j.personale.aggiornato};
+      UIS.pend[liv] = []; return true;
+    }
+    if (r.status >= 400 && r.status < 500 && r.status !== 401 && r.status !== 408 && r.status !== 429) {   // rifiutate: si tiene quello che ha il Mac
+      UIS.pend[liv] = []; toast('Il Mac mini non ha accettato le modifiche: ' + ((j && j.errore) || r.status)); return false;
+    }
+  } catch (e) {}
+  if (liv === 'bozza') UIS.bozza = {modifiche:m, aggiornato:0}; else UIS.personale = {modifiche:m, aggiornato:UIS.personale.aggiornato};
+  return false;
+}
+let uiCaricando = null;
+function uiCarica() {   // strati dal Mac mini (all'avvio, riaprendo l'app, dopo «Fatto»); le modifiche in attesa partono qui
+  if (UI_ORIG || !/^https?:$/.test(location.protocol)) return Promise.resolve(false);
+  if (uiCaricando) return uiCaricando;
+  return (uiCaricando = (async () => {
+    try {
+      const r = await fetchT(XAPI + 'interfaccia', {cache:'no-store'}, 8000);
+      if (!r.ok) return false;
+      const j = await r.json();
+      if (UIS.chi && j.chi !== UIS.chi) UIS.pend = {personale:[], bozza:[]};   // un'altra persona su questo telefono: le attese non sono sue
+      UIS.chi = String(j.chi || '');
+      UIS.base = {modifiche:uiPulisci(j.base && j.base.modifiche), versione:+(j.base && j.base.versione) || 0, pubblicato:+(j.base && j.base.pubblicato) || 0};
+      UIS.personale = {modifiche:uiPulisci(j.personale && j.personale.modifiche), aggiornato:+(j.personale && j.personale.aggiornato) || 0};
+      UIS.bozza = j.bozza ? {modifiche:uiPulisci(j.bozza.modifiche), aggiornato:+j.bozza.aggiornato || 0} : null;
+      if (!uiHa(j, 'bozza')) UIS.pend.bozza = [];   // non è Samuele: niente bozza
+      for (const liv of ['personale', 'bozza']) if (UIS.pend[liv].length) await uiManda(liv);
+      UIS.caricato = Date.now();
+      return true;
+    } catch (e) { return false; }
+    finally { uiCopia(); if (!UIS.ed) uiApplica(); uiCaricando = null; }
+  })());
+}
+
+// ----- l'editor: «Modifica interfaccia» (personale) e «Modifica la base» (Samuele, dalla Gestione) -----
+const uiScegli = () => !!UIS.ed && !UIS.ed.usa;
+const uiDentro = t => !!(t && t.closest && t.closest('.ui-box'));
+const UI_CSS = `
+html.ui-ed body{touch-action:manipulation}
+html.ui-ed body *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html.ui-ed .ui-box input{-webkit-user-select:text;user-select:text}
+html.ui-ed:not(.ui-usa) body :is(input,select,textarea,video,iframe):not(.ui-box *){pointer-events:none}
+html.ui-ed #view{padding-top:max(4px,calc(var(--uih,96px) - env(safe-area-inset-top,0px) + 4px))}
+html.ui-ed .sbox{top:var(--uih,96px)}
+html.ui-ed #np,html.ui-ed #xp{top:var(--uih,96px)}
+html.ui-ed #toast{z-index:130;bottom:auto;top:calc(var(--uih,96px) + 10px)}
+.ui-box{position:fixed;left:0;right:0;z-index:120;background:var(--sheet);color:var(--fg);font:15px/1.3 var(--font);box-shadow:0 2px 18px rgba(0,0,0,.22);-webkit-user-select:none;user-select:none}
+.ui-box *{box-sizing:border-box}
+.ui-box button{min-height:36px;padding:0 10px;border-radius:9px;color:var(--accent);font-weight:600;font-size:15px}
+.ui-box button:disabled{opacity:.32}
+.ui-box .pri{background:var(--accent);color:var(--onaccent)}
+#ui-bar{top:0;padding:calc(env(safe-area-inset-top,0px) + 6px) max(10px,env(safe-area-inset-right,0px)) 8px max(10px,env(safe-area-inset-left,0px))}
+.ui-r{display:flex;align-items:center;gap:8px;max-width:640px;margin:0 auto}
+.ui-r+.ui-r{margin-top:6px}
+.ui-r>b{flex:1;min-width:0;text-align:center;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ui-seg{display:flex;flex:1;min-width:0;background:var(--fill);border-radius:9px;padding:2px}
+.ui-seg button{flex:1;min-height:30px;padding:0 6px;border-radius:7px;color:var(--fg);font-size:14px;white-space:nowrap}
+.ui-seg button.on{background:var(--sheet);box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.ui-n{flex:none;font-size:13px;color:var(--fg2);min-height:30px!important;padding:0 6px!important}
+#ui-pan{bottom:0;border-radius:16px 16px 0 0;padding:10px max(12px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(12px,env(safe-area-inset-left,0px));max-height:55vh;overflow-y:auto;overscroll-behavior:contain}
+#ui-pan.su{bottom:auto;top:var(--uih,96px);border-radius:0 0 16px 16px;padding-bottom:12px}
+#ui-pan>div{max-width:640px;margin:0 auto}
+.ui-h{display:flex;align-items:center;gap:8px}
+.ui-h>span{flex:1;min-width:0}
+.ui-h b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ui-h small{display:block;color:var(--fg2);font-size:13px}
+.ui-x{width:36px;padding:0!important;font-size:20px!important;color:var(--fg2)!important}
+.ui-tab{margin:8px 0}
+.ui-c{min-height:44px;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.ui-c input[type=text]{flex:1;min-width:0;height:40px;border:0;border-radius:9px;background:var(--fill);color:var(--fg);font:inherit;font-size:16px;padding:0 10px;outline:none}
+.ui-c input[type=range]{flex:1;min-width:0;accent-color:var(--accent)}
+.ui-c .ui-nota{color:var(--fg2);font-size:13px;flex:1}
+.ui-sw{width:30px;height:30px;min-height:30px!important;padding:0!important;border-radius:50%!important;box-shadow:inset 0 0 0 1px rgba(127,127,127,.45)}
+.ui-sw.on{outline:3px solid var(--accent);outline-offset:2px}
+.ui-sw.ui-o{background:linear-gradient(135deg,var(--sheet) 45%,#ff3b30 45%,#ff3b30 55%,var(--sheet) 55%)!important}
+.ui-hex{position:relative;overflow:hidden;background:conic-gradient(red,yellow,lime,aqua,blue,magenta,red)!important}
+.ui-hex input{position:absolute;inset:0;opacity:0;width:100%;height:100%;border:0;padding:0}
+.ui-az{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:8px}
+.ui-az button{background:var(--fill);font-size:12.5px;line-height:1.1;min-height:44px;padding:0 3px;white-space:normal}
+.ui-az button.on{background:var(--accent);color:var(--onaccent)}
+#ui-sel{position:fixed;z-index:115;pointer-events:none;background:none!important;border:2px solid var(--accent);border-radius:6px;box-shadow:0 0 0 2px rgba(255,255,255,.8)!important;transition:left .12s,top .12s,width .12s,height .12s}
+`;
+function uiCostruisci() {   // barra in alto, pannello in basso, riquadro dell'elemento scelto
+  if (!$('ui-css')) { const s = document.createElement('style'); s.id = 'ui-css'; s.textContent = UI_CSS; document.head.appendChild(s); }
+  const bar = document.createElement('div'); bar.id = 'ui-bar'; bar.className = 'ui-box'; bar.setAttribute('role', 'toolbar');
+  bar.innerHTML = '<div class="ui-r"><button data-u="annulla">Annulla</button><b id="ui-tit"></b><button class="pri" data-u="fatto">Fatto</button></div>' +
+    '<div class="ui-r"><div class="ui-seg"><button data-u="scegli">Scegli</button><button data-u="usa">Usa l\'app</button></div><button class="ui-n" data-u="tutte" id="ui-n"></button></div>';
+  const pan = document.createElement('div'); pan.id = 'ui-pan'; pan.className = 'ui-box'; pan.hidden = true;
+  const sel = document.createElement('div'); sel.id = 'ui-sel'; sel.className = 'ui-box'; sel.hidden = true;
+  document.body.append(sel, bar, pan);
+  bar.addEventListener('click', uiTasto); pan.addEventListener('click', uiTasto);
+  pan.addEventListener('input', uiCampo); pan.addEventListener('change', uiCampo);
+  pan.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'ui-testo') { e.preventDefault(); uiTestoOk(); } });
+  // scrivendo, il pannello va in alto: la tastiera del telefono non lo copre
+  pan.addEventListener('focusin', e => { if (e.target.id === 'ui-testo') pan.classList.add('su'); });
+}
+function uiApri(livello) {   // livello: 'personale' o 'base'
+  if (UI_ORIG) { toast('Hai aperto l\'app senza modifiche (?originale): riaprila normalmente per cambiarla'); return; }
+  if (UIS.ed) return;
+  if (livello === 'base' && IO.ruolo !== 'proprietario') { toast('La base la cambia solo Samuele'); return; }
+  closeX(); closeSheet();
+  const sotto = livello === 'base' ? (UIS.bozza || UIS.base).modifiche : UIS.personale.modifiche;
+  UIS.ed = {livello, lav:JSON.parse(JSON.stringify(sotto)), ops:[], usa:false};
+  UIS.sel = null; UIS.ind = ''; UIS.conferma = '';
+  if (!$('ui-bar')) uiCostruisci();
+  document.documentElement.classList.add('ui-ed'); document.documentElement.classList.remove('ui-usa');
+  $('ui-bar').hidden = false;
+  document.documentElement.style.setProperty('--uih', $('ui-bar').getBoundingClientRect().height + 'px');
+  uiBarra(); uiPannello(); uiApplica();
+  toast(livello === 'base' ? 'Base per tutti: tocca un elemento per cambiarlo' : 'Tocca un elemento per cambiarlo');
+}
+function uiChiudi() {
+  UIS.ed = null; UIS.sel = null; UIS.ind = '';
+  document.documentElement.classList.remove('ui-ed', 'ui-usa');
+  for (const id of ['ui-bar', 'ui-pan', 'ui-sel']) { const x = $(id); if (x) x.hidden = true; }
+  uiApplica();
+}
+function uiBarra() {
+  const e = UIS.ed; if (!e) return;
+  const n = uiConta(e.lav);
+  $('ui-tit').textContent = UIS.conferma === 'annulla' ? 'Tocca ancora: butti ' + e.ops.length + (e.ops.length === 1 ? ' modifica' : ' modifiche') :
+    e.usa ? 'Usa l\'app, poi torna a «Scegli»' : (e.livello === 'base' ? 'Base per tutti · ' : '') + (UIS.sel ? 'Elemento scelto' : 'Tocca un elemento');
+  const [sc, us] = $('ui-bar').querySelectorAll('.ui-seg button');
+  sc.classList.toggle('on', !e.usa); us.classList.toggle('on', e.usa);
+  $('ui-n').textContent = UIS.conferma === 'tutte' ? 'Tocca: via tutte' : n + '/' + UI_MAX;
+  $('ui-n').disabled = !n;
+  $('ui-n').setAttribute('aria-label', n + ' modifiche in questo livello: tocca per toglierle tutte');
+}
+let uiConfT = 0;
+function uiConferma(cosa) {   // doppio tocco per le cose che buttano lavoro (niente finestre di conferma)
+  if (UIS.conferma === cosa) { UIS.conferma = ''; clearTimeout(uiConfT); return true; }
+  UIS.conferma = cosa; clearTimeout(uiConfT); uiConfT = setTimeout(() => { UIS.conferma = ''; uiBarra(); }, 4000); uiBarra(); return false;
+}
+function uiTasto(e) {
+  const b = e.target.closest('[data-u]'); if (!b || b.disabled) return;
+  const u = b.dataset.u, E = UIS.ed; if (!E) return;
+  if (u !== 'annulla' && u !== 'tutte') UIS.conferma = '';
+  switch (u) {
+    case 'annulla': if (!E.ops.length || uiConferma('annulla')) { uiChiudi(); toast('Nessuna modifica salvata'); if (E.livello === 'base') uiTornaGestione(); } break;
+    case 'fatto': uiFatto(); break;
+    case 'scegli': case 'usa':
+      E.usa = u === 'usa'; document.documentElement.classList.toggle('ui-usa', E.usa);
+      if (E.usa) { UIS.sel = null; UIS.ind = ''; }
+      uiBarra(); uiPannello(); uiSegui(); break;
+    case 'tutte': if (uiConferma('tutte')) { E.lav = {}; E.ops.push(['*']); uiApplica(); uiPannello(); toast('Tolte tutte: tocca «Fatto» per salvare'); } uiBarra(); break;
+    case 'chiudi': UIS.sel = null; UIS.ind = ''; uiPannello(); uiSegui(); uiBarra(); break;
+    case 'scheda': UIS.scheda = b.dataset.s; uiPannello(); break;
+    case 'testo-ok': uiTestoOk(); break;
+    case 'col': uiCambia(UIS.scheda === 'sfondo' ? 'sfondo' : 'colore', b.dataset.c); break;
+    case 'nascondi': uiCambia('nascosto', !uiEff().nascosto); break;
+    case 'prima': case 'dopo': uiSposta(u === 'prima' ? -1 : 1); break;
+    case 'originale': uiOriginale(); break;
+    case 'su': { let p = UIS.sel && UIS.sel.parentElement; while (p && p !== document.body && (!uiPezzo(p) || getComputedStyle(p).display === 'contents')) p = p.parentElement; if (p && p !== document.body && p.id !== 'xp') uiSeleziona(p); break; }
+  }
+}
+function uiCampo(e) {
+  const t = e.target;
+  if (t.id === 'ui-gr') { $('ui-grv').textContent = t.value + '%'; uiCambia('grandezza', +t.value); if (e.type === 'change') uiPannello(); }
+  else if (t.id === 'ui-hex' && e.type === 'change' && UI_HEX.test(t.value.toLowerCase())) uiCambia(UIS.scheda === 'sfondo' ? 'sfondo' : 'colore', t.value.toLowerCase());
+}
+// ----- scelta di un elemento: in modifica un tocco sceglie invece di agire -----
+let uiTocco = null;
+document.addEventListener('touchstart', e => { uiTocco = uiScegli() && !uiDentro(e.target) && e.touches.length === 1 ? {x:e.touches[0].clientX, y:e.touches[0].clientY, t:Date.now()} : null; }, {capture:true, passive:true});
+document.addEventListener('touchmove', e => { const c = uiTocco, p = e.touches[0]; if (c && p && Math.hypot(p.clientX - c.x, p.clientY - c.y) > 10) uiTocco = null; }, {capture:true, passive:true});
+// solo un tocco fermo sceglie (scorrere resta libero); niente clic dopo: né l'azione dell'app, né la tastiera. Il resto del
+// tocco arriva comunque ai gesti dell'app (il lettore a tutto schermo torna al suo posto se si era mosso di poco)
+document.addEventListener('touchend', e => {
+  const c = uiTocco; uiTocco = null;
+  if (!c || !uiScegli() || uiDentro(e.target) || Date.now() - c.t > 800) return;
+  e.preventDefault();
+  const p = e.changedTouches[0]; uiPunto(p.clientX, p.clientY, e.target);
+}, {capture:true, passive:false});
+document.addEventListener('click', e => {
+  if (!uiScegli() || uiDentro(e.target)) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  uiPunto(e.clientX, e.clientY, e.target);
+}, true);
+['mousedown', 'dblclick', 'contextmenu', 'submit'].forEach(n => document.addEventListener(n, e => { if (uiScegli() && !uiDentro(e.target)) { e.preventDefault(); if (n === 'submit') e.stopImmediatePropagation(); } }, true));
+addEventListener('scroll', () => { uiScorre = Date.now(); if (UIS.ed && UIS.sel) uiSeguiPresto(); }, {capture:true, passive:true});
+addEventListener('resize', () => { if (UIS.ed) { document.documentElement.style.setProperty('--uih', $('ui-bar').getBoundingClientRect().height + 'px'); uiSegui(); } });
+function uiPunto(x, y, t) {
+  t = t && t.nodeType === 1 ? t : t && t.parentElement;
+  // campi e video non ricevono tocchi mentre si sceglie (se no partirebbero tastiera e posizione del brano): si cerca
+  // quello sotto il dito dentro l'elemento toccato (non uno coperto da una scheda aperta)
+  let el = null;
+  if (t) for (const c of t.querySelectorAll('input,select,textarea,video')) {
+    if (uiDentro(c)) continue;
+    const r = c.getBoundingClientRect();
+    if (r.width && r.height && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) el = c;
+  }
+  el = el || t;
+  // icone, immagini delle copertine, il numero della Gestione: si sceglie quello che le contiene
+  while (el && el !== document.body && (!(el instanceof HTMLElement) || el.matches('img,.ph,.mosaic,.eq,.eq *,.xn,iframe') || getComputedStyle(el).display === 'contents')) el = el.parentElement;
+  if (!el || el === document.body || el === document.documentElement) return;
+  if (el.id === 'xp') { toast('Le pagine di Altro non si cambiano da qui: torna con «‹ Altro»'); return; }
+  uiSeleziona(el);
+}
+function uiSeleziona(el) {
+  const a = uiIndirizzo(el);
+  if (!a) { toast('Questo elemento non si può cambiare'); return; }
+  UIS.sel = el; UIS.ind = a.ind; UIS.info = a;
+  uiBarra(); uiPannello(); uiSegui();
+}
+let uiSegT = 0;
+function uiSeguiPresto() { if (!uiSegT) uiSegT = requestAnimationFrame(() => { uiSegT = 0; uiSegui(); }); }
+function uiSegui() {   // il riquadro sull'elemento scelto (e il pannello dalla parte dove non lo copre)
+  const box = $('ui-sel'); if (!box) return;
+  let el = UIS.sel;
+  if (el && !el.isConnected) {   // pagina ridisegnata: lo stesso elemento nella pagina nuova, se c'è
+    el = UIS.ind ? uiTutti(uiCss(UIS.ind))[0] : null;
+    UIS.sel = el || null; if (!el) { UIS.ind = ''; uiPannello(); uiBarra(); }
+  }
+  const r = el && !UIS.ed.usa ? el.getBoundingClientRect() : null;
+  box.hidden = !r || (!r.width && !r.height);
+  if (!box.hidden) Object.assign(box.style, {left:r.left - 3 + 'px', top:r.top - 3 + 'px', width:r.width + 6 + 'px', height:r.height + 6 + 'px'});
+  const pan = $('ui-pan');
+  if (r && !pan.hidden && document.activeElement !== $('ui-testo')) pan.classList.toggle('su', r.top + r.height / 2 > innerHeight * 0.55);
+}
+// ----- valori e modifiche dell'elemento scelto -----
+function uiSotto() { const e = UIS.ed; return e && e.livello === 'personale' ? ((UIS.bozza || UIS.base).modifiche[UIS.ind] || {}) : {}; }   // il livello di sotto
+function uiEff() { return Object.assign({}, uiSotto(), (UIS.ed && UIS.ed.lav[UIS.ind]) || {}); }
+const UI_NEUTRO = {testo:'', colore:'originale', sfondo:'originale', grandezza:100, nascosto:false, ordine:0};   // «come l'originale»
+function uiCambia(p, v) {   // nel livello che si modifica, per l'elemento scelto
+  const e = UIS.ed, a = UIS.ind; if (!e || !a) return;
+  v = uiValore(p, v); if (v === undefined) { toast('Valore non valido'); return; }
+  // il valore «originale» si scrive solo se serve a coprire il livello di sotto (la base, nel personale)
+  if (v === UI_NEUTRO[p] && !uiHa(uiSotto(), p)) v = undefined;
+  const x = Object.assign({}, e.lav[a] || {});
+  if (v === undefined) delete x[p]; else x[p] = v;
+  const prima = e.lav[a];
+  if (Object.keys(x).length) e.lav[a] = x; else delete e.lav[a];
+  if (uiConta(e.lav) > UI_MAX) { if (prima) e.lav[a] = prima; else delete e.lav[a]; toast('Al più ' + UI_MAX + ' modifiche: togline qualcuna'); return; }
+  const op = [a, p, v === undefined ? null : v], ult = e.ops[e.ops.length - 1];
+  if (ult && ult[0] === a && ult[1] === p) e.ops[e.ops.length - 1] = op; else e.ops.push(op);   // la grandezza trascinata conta una volta
+  uiApplica(); uiBarra();
+  if (p !== 'grandezza') uiPannello();
+}
+function uiTestoOk() {
+  const el = UIS.sel, i = $('ui-testo'); if (!el || !i) return;
+  const t = uiValore('testo', i.value) || '', orig = el.__uiO || uiTestoProprio(el);
+  uiCambia('testo', t && t !== orig ? t : '');
+  i.blur();
+}
+function uiSposta(d) {
+  let el = UIS.sel; if (!el) return;
+  // nelle pagine una sezione si sposta intera: la modifica va sul suo titolo
+  const p = el.parentElement;
+  if (p && (p.id === 'view' || p.id === 'sres') && el.dataset.sez && el.tagName !== 'H2') {
+    const h = [...p.children].find(c => c.tagName === 'H2' && c.dataset.sez === el.dataset.sez);
+    if (h) uiSeleziona(el = h);
+  }
+  const v = Math.max(-UI_ORDINE, Math.min(UI_ORDINE, (uiEff().ordine || 0) + d));
+  uiCambia('ordine', v);
+}
+function uiOriginale() {   // via le modifiche di questo livello all'elemento (nel personale si torna alla base)
+  const e = UIS.ed, a = UIS.ind; if (!e || !a || !e.lav[a]) return;
+  for (const p of Object.keys(e.lav[a])) e.ops.push([a, p, null]);
+  delete e.lav[a]; uiApplica(); uiBarra(); uiPannello();
+}
+function uiNome(el) {
+  const t = (el.getAttribute('aria-label') || uiTestoProprio(el) || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const tipo = el.matches('.trk') ? 'Riga di un brano' : el.matches('.tile') ? 'Riquadro di un album' : el.matches('.art') ? 'Copertina' : el.matches('.xtile') ? 'Riquadro' :
+    el.matches('.grp') ? 'Gruppo di una scheda' : /^H[1-3]$/.test(el.tagName) ? 'Titolo' : el.matches('input') ? 'Comando' : el.matches('button,a') ? 'Pulsante' :
+    el.id === 'view' ? 'Pagina' : el.matches('nav,section,#mini,#sheet') ? 'Riquadro' : 'Elemento';
+  return tipo + (t ? ' «' + (t.length > 32 ? t.slice(0, 31) + '…' : t) + '»' : '');
+}
+function uiPermessoTesto(el) {   // '' se il testo si può cambiare, se no il perché
+  const t = uiTestoProprio(el), orig = el.__uiO || t;
+  if (el.closest(UI_CONTENUTO)) return 'Titoli, artisti, album e nomi sono contenuti: il loro testo non si cambia.';
+  if (!t) return 'Qui non c\'è un testo suo: tocca proprio la scritta.';
+  if (/\d/.test(orig)) return 'Questo testo cambia da solo (ha dei numeri): non si cambia.';
+  return '';
+}
+function uiPannello() {
+  const pan = $('ui-pan'), e = UIS.ed; if (!pan || !e) return;
+  const el = UIS.sel;
+  pan.hidden = !el || e.usa;
+  if (pan.hidden) return;
+  const x = uiEff(), info = UIS.info || {}, mio = e.lav[UIS.ind] || {};
+  const prot = el.matches(UI_PROT) || !!el.querySelector(UI_PROT);
+  const muovi = !info.rip && !!el.parentElement && el.parentElement.children.length > 1 && !el.closest(UI_RIGA);
+  const dove = info.rip ? 'Vale per tutti quelli uguali' + (UIS.ind.startsWith('main#view') ? ' in questa pagina' : '') : UIS.ind.startsWith('main#view') ? 'Vale in questa pagina' : '';
+  const schede = [['testo', 'Testo'], ['colore', 'Colore'], ['sfondo', 'Sfondo'], ['grandezza', 'Grandezza']];
+  let c = '';
+  if (UIS.scheda === 'testo') {
+    const no = uiPermessoTesto(el);
+    c = no ? '<span class="ui-nota">' + esc(no) + '</span>' : '<input type="text" id="ui-testo" maxlength="' + UI_TESTO_MAX + '" autocomplete="off" enterkeyhint="done" aria-label="Testo nuovo"><button class="pri" data-u="testo-ok">OK</button>';
+  } else if (UIS.scheda === 'grandezza') {
+    c = '<input type="range" id="ui-gr" min="70" max="200" step="5" aria-label="Grandezza"><b id="ui-grv" style="width:48px;text-align:right"></b>';
+  } else {
+    const v = x[UIS.scheda] || 'originale';
+    c = '<button class="ui-sw ui-o' + (v === 'originale' ? ' on' : '') + '" data-u="col" data-c="originale" aria-label="Originale"></button>' +
+      [...UI_TAV.keys()].map(k => '<button class="ui-sw' + (v === k ? ' on' : '') + '" data-u="col" data-c="' + k + '" style="background:' + UI_TAV.get(k) + '" aria-label="' + k + '"></button>').join('') +
+      '<span class="ui-sw ui-hex' + (UI_HEX.test(v) ? ' on' : '') + '" role="button" aria-label="Altro colore"><input type="color" id="ui-hex"></span>';
+  }
+  pan.innerHTML = '<div><div class="ui-h"><span><b></b><small></small></span><button class="ui-x" data-u="chiudi" aria-label="Fine con questo elemento">×</button></div>' +
+    '<div class="ui-seg ui-tab">' + schede.map(([k, t]) => '<button data-u="scheda" data-s="' + k + '" class="' + (UIS.scheda === k ? 'on' : '') + (uiHa(mio, k) ? ' ui-m' : '') + '">' + t + (uiHa(mio, k) ? ' •' : '') + '</button>').join('') + '</div>' +
+    '<div class="ui-c">' + c + '</div>' +
+    '<div class="ui-az"><button data-u="nascondi" class="' + (x.nascosto ? 'on' : '') + '"' + (prot && !x.nascosto ? ' disabled title="Resta sempre visibile"' : '') + '>' + (x.nascosto ? 'Mostra' : 'Nascondi') + '</button>' +
+    '<button data-u="prima"' + (muovi ? '' : ' disabled') + '>‹ Prima</button><button data-u="dopo"' + (muovi ? '' : ' disabled') + '>Dopo ›</button>' +
+    '<button data-u="originale"' + (Object.keys(mio).length ? '' : ' disabled') + '>Originale</button><button data-u="su">Contenitore</button></div></div>';
+  // testi della pagina sempre come testo
+  pan.querySelector('.ui-h b').textContent = uiNome(el);
+  pan.querySelector('.ui-h small').textContent = prot ? 'Resta sempre visibile' + (dove ? ' · ' + dove : '') : dove || (e.livello === 'base' ? 'Nella base per tutti' : 'Solo per te');
+  const ti = $('ui-testo'); if (ti) ti.value = el.__uiT != null ? el.__uiT : uiTestoProprio(el);
+  const gr = $('ui-gr'); if (gr) { gr.value = x.grandezza || 100; $('ui-grv').textContent = (x.grandezza || 100) + '%'; }
+  const hx = $('ui-hex'); if (hx && UI_HEX.test(x[UIS.scheda] || '')) hx.value = x[UIS.scheda];
+  uiSegui();
+}
+async function uiFatto() {
+  const e = UIS.ed; if (!e) return;
+  const liv = e.livello === 'base' ? 'bozza' : 'personale';
+  uiChiudi();
+  if (!e.ops.length) { toast('Nessuna modifica'); if (liv === 'bozza') uiTornaGestione(); return; }
+  // subito sul telefono (resta anche se il Mac mini non risponde), poi al Mac rifatte sopra il suo strato com'è adesso
+  UIS.pend[liv] = UIS.pend[liv].concat(e.ops);
+  if (liv === 'bozza') UIS.bozza = {modifiche:e.lav, aggiornato:0}; else UIS.personale = {modifiche:e.lav, aggiornato:UIS.personale.aggiornato};
+  uiCopia(); uiApplica();
+  if (uiCaricando) await uiCaricando;   // un giro già partito non ha queste modifiche: se ne fa un altro
+  const ok = await uiCarica();
+  if (UIS.pend[liv].length || !ok) toast('Salvato su questo telefono: arriva al Mac mini appena risponde');
+  else toast(liv === 'bozza' ? 'Bozza salvata: la vedi solo tu finché non la pubblichi' : 'Salvato: vale su tutti i tuoi dispositivi');
+  if (liv === 'bozza') uiTornaGestione();
+}
+function uiTornaGestione() {   // finita la base si torna alla Gestione, dove c'è «Pubblica»
+  setTab('altro'); openX('gestione');
+  try { const w = $('xf').contentWindow; if (w && w.uiAggiorna) w.uiAggiorna(); } catch (err) {}
+}
+// riquadro «Modifica interfaccia» in Altro, per tutti (anche per gli invitati)
+const XINTERFACCIA = {k:'interfaccia', t:'Modifica interfaccia', d:'Colori, testi e grandezze come piace a te', i:'🎨', c:'#ff9500'};
+(XMODS.find(g => g.g === 'Per te') || XMODS[XMODS.push({g:'Per te', m:[]}) - 1]).m.push(XINTERFACCIA);
+XINVITATI[0].m.push(XINTERFACCIA);
+AM.interfaccia = livello => uiApri(livello === 'base' ? 'base' : 'personale');   // dalla Gestione: «Modifica la base»
+AM.interfacciaRicarica = () => uiCarica();                                    // dopo «Pubblica» o «Ripristina»
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Date.now() - UIS.caricato > 30000) uiCarica(); });
+addEventListener('online', () => uiCarica());
+if (!UI_ORIG) { uiApplica(); uiCarica(); }   // subito la copia sul telefono (prima del primo disegno), poi quella del Mac mini
 
 /* ---------- avvio ---------- */
 (function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; b[3].innerHTML = ic('grid') + 'Altro'; })();

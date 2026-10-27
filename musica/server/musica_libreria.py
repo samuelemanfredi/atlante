@@ -3245,7 +3245,7 @@ _UI_VAL = r"[A-Za-z0-9_-]{1,40}"
 _UI_PEZZO = (r"[a-z][a-z0-9]{0,9}(?:#[A-Za-z][A-Za-z0-9_-]{0,39})?(?:\.[A-Za-z][A-Za-z0-9_-]{0,29}){0,4}" +
              "".join(r"(?:\[%s=%s\])?" % (n, _UI_VAL) for n in ("a", "tab", "v", "k", "sez")))
 UI_INDIRIZZO = re.compile(r"%s(?: %s){0,6}(?::[1-9][0-9]?)?" % (_UI_PEZZO, _UI_PEZZO))
-UI_CONTROLLO = re.compile("[\x00-\x1f\x7f​-‏ -‮⁠-⁩﻿]")   # anche i segni che girano il testo
+UI_CONTROLLO = re.compile("[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")   # anche i segni che girano il testo
 
 
 def _ui_valore(p, v):

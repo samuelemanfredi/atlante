@@ -1946,7 +1946,7 @@ class TestInterfaccia(unittest.TestCase):
         self.assertEqual(st, 413)
         # un testo con HTML resta testo: si salva com'è (l'app lo scrive come testo); spazi e caratteri di controllo no
         buone = {"main#view[v=home] h2.h2[sez=i-piu-ascoltati]": {"testo": "<img src=x onerror=alert(1)>"},
-                 "span.l:2": {"testo": " Ciao\n\tmondo\u0000 ‮! "}, "button#npFav": {"colore": "#FFAA00"},
+                 "span.l:2": {"testo": " Ciao\n\tmondo\u0000 \u202e! "}, "button#npFav": {"colore": "#FFAA00"},
                  "div.x": {"sfondo": "accento", "colore": "originale", "testo": ""}}
         st, h, b = richiesta(self.s.porta, "POST", "/api/extra/interfaccia/personale", {"modifiche": buone})
         self.assertEqual(st, 200, b)
