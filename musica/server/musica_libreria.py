@@ -40,6 +40,7 @@ Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve 
 """
 import argparse
 import array
+import base64
 import collections
 import getpass
 import hashlib
@@ -2607,6 +2608,506 @@ def _clip_file(h, nome):
     _invia_file(h, p, "video/mp4", {"X-Content-Type-Options": "nosniff"})
 
 
+# ----- chiamate vocali e video (fasi 5b e 5c): il Mac mini fa solo da centralino -----
+#
+# Voce e video vanno da telefono a telefono con WebRTC, cifrati (DTLS-SRTP): il Mac mini non li vede e non li sente.
+# Qui c'è solo chi chiama chi: lo squillo su tutti i dispositivi della persona chiamata (risponde il primo), rifiutata,
+# occupato, nessuna risposta dopo SQUILLO_DURATA, e il passaggio dei messaggi per collegarsi (offerta, risposta,
+# candidati) con l'attesa lunga, come il telecomando. Nei gruppi (al più CHIAMATA_MAX persone) ognuno si collega con
+# ognuno: chi entra manda l'offerta a chi è già dentro, così per ogni coppia l'offerta la fa uno solo.
+# Le persone sono "p" (Samuele) o l'id di un invitato; i dispositivi sono quelli dell'app (am-dev-id), contati per
+# persona: lo stesso id per due persone sono due dispositivi diversi. Tutto in memoria: un riavvio chiude le chiamate.
+
+CHIAMATA_MAX = 4              # persone in una chiamata, compresa chi chiama (ogni telefono manda il video a ciascuno)
+SQUILLO_DURATA = 40           # secondi di squillo, poi «nessuna risposta»
+CHIAMATA_VIVO = 60            # secondi senza notizie dal dispositivo di chi è dentro: la sua linea è caduta
+CHIAMATA_RESTA = 30           # secondi in cui una chiamata finita si vede ancora (per dire com'è finita)
+CHIAMATE_ORA = 30             # chiamate (e persone aggiunte) che una persona può avviare in un'ora
+CHIAMATE_TUTTE = 100          # chiamate aperte in tutto sul Mac mini
+SEGNALE_MAX = 64 * 1024       # un messaggio per collegarsi (un'offerta è di pochi KB)
+SEGNALI_PERSONA = 500         # messaggi per collegarsi di una persona in una chiamata
+EVENTI_DURATA = 120           # secondi in cui un evento aspetta il dispositivo che lo deve prendere
+EVENTI_MAX = 5000
+TIPI_SEGNALE = ("offerta", "risposta", "candidati", "stato", "riprova")
+NOME_PROPRIETARIO = "Samuele"
+STUN_PREDEFINITO = "stun:stun.l.google.com:19302"
+STUN = STUN_PREDEFINITO       # --stun / ATLANTE_STUN (più indirizzi separati da virgole; vuoto: nessuno)
+TURN_URL = ""                 # ponte TURN (coturn): solo se c'è, da ATLANTE_TURN_URL, ATLANTE_TURN_UTENTE, ATLANTE_TURN_SEGRETO
+TURN_UTENTE = "atlante"
+TURN_SEGRETO = ""
+TURN_DURATA = 12 * 3600       # le credenziali del ponte valgono mezza giornata
+
+
+class Centralino:
+    """Il centralino delle chiamate. `nome(persona)` dà il nome di chi è in Atlante ("" se non c'è più); `bloccato(da, a)`
+    dice se `a` ha bloccato `da` (lo decide la chat: a chi ha bloccato non squilla niente, e chi chiama sente lo squillo
+    fino a «nessuna risposta», senza sapere del blocco); `avviso(persona, evento, chiamata)` è il punto per le notifiche
+    (vedi avviso_chiamata), chiamato in un filo a parte."""
+
+    def __init__(self, nome, bloccato=None, avviso=None):
+        self.cond = threading.Condition()
+        self.c = {}            # id -> {id, da, video, creata, stato, motivo, fine, p: {persona: {nome, stato, disp, dal…}}}
+        self.eventi = []       # [{seq, t, per, disp, tipo, chiamata…}] in ordine di seq
+        self.seq = int(time.time() * 1000)   # cresce anche da un avvio all'altro: un'app che aspetta non resta indietro
+        self.visti = {}        # (persona, dispositivo) -> ultima attesa
+        self.avviate = {}      # persona -> istanti delle chiamate avviate nell'ultima ora
+        self.avvisi = []       # (persona, evento, chiamata) da mandare fuori dal blocco
+        self.nome, self.bloccato, self.avviso = nome, bloccato or (lambda da, a: False), avviso
+
+    # --- controlli (fuori dal blocco: nome e bloccato leggono gli archivi delle persone e della chat) ---
+
+    @staticmethod
+    def _disp(disp):
+        if not isinstance(disp, str) or not ID_DISP.match(disp):
+            raise ErroreExtra(400, "Dispositivo non valido")
+        return disp
+
+    def _chiamati(self, a, chi):
+        a = [a] if isinstance(a, str) else a
+        if not isinstance(a, list) or not a:
+            raise ErroreExtra(400, "Chi vuoi chiamare?")
+        if len(a) > CHIAMATA_MAX:
+            raise ErroreExtra(409, "Al più %d persone in una chiamata" % CHIAMATA_MAX)
+        fuori = []
+        for x in a:
+            if not isinstance(x, str) or x == chi or x in fuori:
+                raise ErroreExtra(400, "Persona non valida")
+            if not self.nome(x):
+                raise ErroreExtra(404, "Persona sconosciuta")
+            fuori.append(x)
+        return {x: (self.nome(x), bool(self.bloccato(chi, x))) for x in fuori}
+
+    # --- dentro il blocco ---
+
+    def _evento(self, per, disp=None, **campi):
+        self.seq += 1
+        self.eventi.append(dict(campi, seq=self.seq, t=time.time(), per=per, disp=disp))
+        if len(self.eventi) > EVENTI_MAX:
+            del self.eventi[:len(self.eventi) - EVENTI_MAX]
+
+    def _cambiata(self, c):
+        """Ogni cambiamento sveglia i dispositivi di chi fa parte della chiamata: ognuno rilegge com'è."""
+        for k, x in c["p"].items():
+            if not x.get("nascosta"):
+                self._evento(k, tipo="chiamata", chiamata=c["id"])
+        self.cond.notify_all()
+
+    def _attive(self, chi, tranne=None):
+        """Le chiamate in cui `chi` è dentro o gli squilla: chi lo chiama trova occupato."""
+        return [c for c in self.c.values() if c["id"] != tranne and c["stato"] != "finita" and chi in c["p"]
+                and c["p"][chi]["stato"] in ("dentro", "squilla") and not c["p"][chi].get("nascosta")]
+
+    def _info(self, c):
+        return {"id": c["id"], "da": c["da"], "da_nome": c["p"][c["da"]]["nome"], "video": c["video"]}
+
+    def _conta(self, chi, ora, n):
+        t = [x for x in self.avviate.get(chi, []) if ora - x < 3600]
+        if len(t) + n > CHIAMATE_ORA:
+            raise ErroreExtra(429, "Troppe chiamate in un'ora: riprova più tardi")
+        self.avviate[chi] = t + [ora] * n
+
+    def _squilla(self, c, chi, nome, nascosta, ora):
+        # a chi ha bloccato non squilla niente, ma per chi chiama non è mai «occupato»: non deve capire del blocco
+        stato = "occupato" if not nascosta and self._attive(chi, tranne=c["id"]) else "squilla"
+        c["p"][chi] = {"nome": nome, "stato": stato, "disp": None, "dal": ora, "nascosta": nascosta, "segnali": 0}
+        if stato == "squilla" and not nascosta:
+            self.avvisi.append((chi, "arriva", self._info(c)))
+
+    def _sua(self, cid, chi):
+        c = self.c.get(cid) if isinstance(cid, str) else None
+        if c is None or chi not in c["p"] or c["p"][chi].get("nascosta"):
+            raise ErroreExtra(404, "Chiamata non trovata")   # per chi non ne fa parte non esiste
+        return c
+
+    def _controlla(self, c, ora, perche=None):
+        """La chiamata finisce quando resta dentro una persona sola (o nessuna) e non squilla più a nessuno."""
+        if c["stato"] == "finita":
+            return
+        dentro = [k for k, x in c["p"].items() if x["stato"] == "dentro"]
+        squillano = [k for k, x in c["p"].items() if x["stato"] == "squilla"]
+        if len(dentro) >= 2 or (dentro and squillano):
+            return
+        if c["stato"] == "in corso":
+            motivo = perche or "chiusa"
+        elif c["p"][c["da"]]["stato"] != "dentro":
+            motivo = perche or "annullata"
+        else:
+            altri = {x["stato"] for k, x in c["p"].items() if k != c["da"]}
+            motivo = altri.pop() if len(altri) == 1 else "nessuna risposta"
+        for k, x in c["p"].items():
+            if x["stato"] == "squilla":
+                x["stato"] = "annullata"
+                if not x.get("nascosta"):
+                    self.avvisi.append((k, "persa", self._info(c)))
+            elif x["stato"] == "dentro":
+                x["stato"] = "uscito"
+        c.update(stato="finita", motivo=motivo, fine=ora)
+
+    def _pulisci(self, ora):
+        """Squilli scaduti, linee cadute, chiamate finite da un po' ed eventi vecchi."""
+        for c in list(self.c.values()):
+            if c["stato"] == "finita":
+                if ora - c["fine"] > CHIAMATA_RESTA:
+                    del self.c[c["id"]]
+                continue
+            cambiata, perche = False, None
+            for k, x in c["p"].items():
+                if x["stato"] == "squilla" and ora - x["dal"] >= SQUILLO_DURATA:
+                    x["stato"], cambiata = "nessuna risposta", True
+                    if not x.get("nascosta"):
+                        self.avvisi.append((k, "persa", self._info(c)))
+                elif x["stato"] == "dentro" and ora - self.visti.get((k, x["disp"]), x["dal"]) > CHIAMATA_VIVO:
+                    x["stato"], cambiata, perche = "caduta", True, "caduta"
+            if cambiata:
+                self._controlla(c, ora, perche)
+                self._cambiata(c)
+        i = 0
+        while i < len(self.eventi) and ora - self.eventi[i]["t"] > EVENTI_DURATA:
+            i += 1
+        if i:
+            del self.eventi[:i]
+        if len(self.visti) > 2000:
+            self.visti = {k: t for k, t in self.visti.items() if ora - t <= 3 * CHIAMATA_VIVO}
+
+    def _prossima(self):
+        """Il prossimo istante in cui qualcosa scade (squillo o linea caduta): l'attesa lunga si sveglia lì."""
+        p = []
+        for c in self.c.values():
+            if c["stato"] != "finita":
+                for k, x in c["p"].items():
+                    if x["stato"] == "squilla":
+                        p.append(x["dal"] + SQUILLO_DURATA)
+                    elif x["stato"] == "dentro":
+                        p.append(self.visti.get((k, x["disp"]), x["dal"]) + CHIAMATA_VIVO + 0.01)
+        return min(p) if p else None
+
+    def _vista(self, c, chi):
+        """La chiamata vista da `chi`: dei dispositivi solo il suo (per sapere se ha risposto da qui o da un altro)."""
+        v = {"id": c["id"], "da": c["da"], "da_nome": c["p"][c["da"]]["nome"], "video": c["video"], "stato": c["stato"],
+             "motivo": c["motivo"], "creata": c["creata"], "partecipanti": []}
+        for k, x in c["p"].items():
+            y = {"id": k, "nome": x["nome"], "stato": x["stato"]}
+            if k == chi:
+                y.update(io=True, disp=x["disp"])
+                if x["stato"] == "squilla":
+                    y["scade"] = x["dal"] + SQUILLO_DURATA
+            v["partecipanti"].append(y)
+        return v
+
+    def _sue(self, chi):
+        return [self._vista(c, chi) for c in sorted(self.c.values(), key=lambda c: c["creata"])
+                if chi in c["p"] and not c["p"][chi].get("nascosta")]
+
+    def _manda(self):
+        with self.cond:
+            a, self.avvisi = self.avvisi, []
+        if a and self.avviso:
+            threading.Thread(target=self._avvisa, args=(a,), daemon=True).start()
+
+    def _avvisa(self, avvisi):
+        for x in avvisi:
+            try:
+                self.avviso(*x)
+            except Exception as e:   # noqa: BLE001  una notifica non mandata non ferma il centralino
+                print("Atlante: avviso di chiamata non mandato: %s" % e, flush=True)
+
+    # --- quello che chiedono le app ---
+
+    def attendi(self, chi, disp, dopo, secondi):
+        """Attesa lunga di un dispositivo: gli eventi per lui dopo `dopo` (squilli, cambiamenti, segnali) appena ce n'è
+        uno, al più `secondi`, e com'è ogni chiamata di cui fa parte. Senza `dopo`: subito, con il numero da cui partire.
+        Intanto il dispositivo risulta vivo (chi è dentro una chiamata e non aspetta più da CHIAMATA_VIVO è caduto)."""
+        disp = self._disp(disp)
+        fine = time.time() + max(0.0, min(float(secondi), ATTESA_MAX))
+        try:
+            with self.cond:
+                while True:
+                    ora = time.time()
+                    self.visti[(chi, disp)] = ora
+                    self._pulisci(ora)
+                    if dopo is None or dopo > self.seq:   # prima volta, o un server riavviato: si riparte da qui
+                        return {"seq": self.seq, "chiamate": self._sue(chi), "eventi": []}
+                    ev = [e for e in self.eventi if e["seq"] > dopo and e["per"] == chi and e["disp"] in (None, disp)]
+                    if ev or ora >= fine:
+                        return {"seq": self.seq, "chiamate": self._sue(chi),
+                                "eventi": [{k: v for k, v in e.items() if k not in ("per", "disp", "t")} for e in ev]}
+                    p = self._prossima()
+                    self.cond.wait(max(0.01, min(fine, p if p is not None else fine) - ora))
+        finally:
+            self._manda()
+
+    def chiama(self, chi, disp, a, video):
+        disp = self._disp(disp)
+        chiamati = self._chiamati(a, chi)
+        if len(chiamati) > CHIAMATA_MAX - 1:
+            raise ErroreExtra(409, "Al più %d persone in una chiamata" % CHIAMATA_MAX)
+        mio = self.nome(chi) or "Qualcuno"
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                if self._attive(chi):
+                    raise ErroreExtra(409, "Sei già in una chiamata (o te ne arriva una): chiudila prima")
+                if sum(1 for c in self.c.values() if c["stato"] != "finita") >= CHIAMATE_TUTTE:
+                    raise ErroreExtra(503, "Troppe chiamate aperte sul Mac mini: riprova fra poco")
+                self._conta(chi, ora, 1)
+                cid = secrets.token_hex(8)
+                c = {"id": cid, "da": chi, "video": bool(video), "creata": ora, "stato": "squilla", "motivo": "", "fine": 0,
+                     "p": {chi: {"nome": mio, "stato": "dentro", "disp": disp, "dal": ora, "segnali": 0}}}
+                self.visti[(chi, disp)] = ora
+                for x, (nome, nascosta) in chiamati.items():
+                    self._squilla(c, x, nome, nascosta, ora)
+                self.c[cid] = c
+                self._controlla(c, ora)   # tutti occupati: finita subito
+                self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def rispondi(self, chi, disp, cid):
+        disp = self._disp(disp)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                self.visti[(chi, disp)] = ora
+                if x["stato"] == "dentro":
+                    if x["disp"] == disp:
+                        return self._vista(c, chi)   # doppio tocco su «Rispondi»
+                    raise ErroreExtra(409, "Hai già risposto da un altro dispositivo")
+                if c["stato"] == "finita" or x["stato"] != "squilla":
+                    raise ErroreExtra(409, "La chiamata non squilla più")
+                if self._attive(chi, tranne=cid):
+                    raise ErroreExtra(409, "Sei già in un'altra chiamata")
+                x.update(stato="dentro", disp=disp, dal=ora)
+                c["stato"] = "in corso"
+                self.avvisi.append((chi, "chiusa", self._info(c)))   # la notifica sugli altri dispositivi si può togliere
+                self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def rifiuta(self, chi, disp, cid):
+        disp = self._disp(disp)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if x["stato"] == "dentro":
+                    raise ErroreExtra(409, "Sei dentro la chiamata: per uscire chiudila")
+                if x["stato"] == "squilla":
+                    x.update(stato="rifiutata", dal=ora)
+                    self.avvisi.append((chi, "chiusa", self._info(c)))
+                    self._controlla(c, ora)
+                    self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def chiudi(self, chi, disp, cid):
+        """Esce dalla chiamata (chi squilla e chiude, rifiuta). Una chiamata già chiusa: niente errore."""
+        disp = self._disp(disp)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if x["stato"] == "dentro":
+                    if x["disp"] != disp:
+                        raise ErroreExtra(409, "La chiamata è su un altro tuo dispositivo")
+                    x.update(stato="uscito", dal=ora)
+                    self._controlla(c, ora)
+                    self._cambiata(c)
+                elif x["stato"] == "squilla":
+                    x.update(stato="rifiutata", dal=ora)
+                    self.avvisi.append((chi, "chiusa", self._info(c)))
+                    self._controlla(c, ora)
+                    self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def aggiungi(self, chi, disp, cid, a):
+        """Chi è dentro aggiunge persone (gruppo): squillano come in una chiamata nuova."""
+        disp = self._disp(disp)
+        chiamati = self._chiamati(a, chi)
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if c["stato"] == "finita" or x["stato"] != "dentro" or x["disp"] != disp:
+                    raise ErroreExtra(409, "Si aggiungono persone solo dalla chiamata in corso")
+                presenti = [k for k, y in c["p"].items() if y["stato"] in ("dentro", "squilla")]
+                for k, (nome, _) in chiamati.items():
+                    if k in presenti:
+                        raise ErroreExtra(409, "%s è già nella chiamata" % nome)
+                if len(presenti) + len(chiamati) > CHIAMATA_MAX:
+                    raise ErroreExtra(409, "Al più %d persone in una chiamata" % CHIAMATA_MAX)
+                self._conta(chi, ora, len(chiamati))
+                for k, (nome, nascosta) in chiamati.items():
+                    self._squilla(c, k, nome, nascosta, ora)
+                self._cambiata(c)
+                return self._vista(c, chi)
+        finally:
+            self._manda()
+
+    def segnale(self, chi, disp, cid, a, tipo, dati):
+        """Un messaggio per collegarsi (offerta, risposta, candidati, stato di microfono e video) dal dispositivo di chi è
+        dentro al dispositivo da cui `a` ha risposto. Il Mac mini lo passa e basta: le chiavi della cifratura le
+        scelgono i telefoni (DTLS), e l'impronta nell'offerta non serve a nessuno per entrare."""
+        disp = self._disp(disp)
+        if tipo not in TIPI_SEGNALE:
+            raise ErroreExtra(400, "Segnale non valido: %s" % ", ".join(TIPI_SEGNALE))
+        if not isinstance(dati, (dict, list)):
+            raise ErroreExtra(400, "Segnale non valido: servono dati")
+        if len(json.dumps(dati, ensure_ascii=False)) > SEGNALE_MAX:
+            raise ErroreExtra(413, "Segnale troppo grande")
+        with self.cond:
+            ora = time.time()
+            self._pulisci(ora)
+            c = self._sua(cid, chi)
+            x = c["p"][chi]
+            if c["stato"] == "finita" or x["stato"] != "dentro":
+                raise ErroreExtra(409, "Non sei dentro questa chiamata")
+            if x["disp"] != disp:
+                raise ErroreExtra(409, "La chiamata è su un altro tuo dispositivo")
+            y = c["p"].get(a) if isinstance(a, str) and a != chi else None
+            if y is None or y["stato"] != "dentro":
+                raise ErroreExtra(404, "Questa persona non è nella chiamata")
+            x["segnali"] += 1
+            if x["segnali"] > SEGNALI_PERSONA:
+                raise ErroreExtra(429, "Troppi messaggi in questa chiamata")
+            self.visti[(chi, disp)] = ora
+            self._evento(a, y["disp"], tipo="segnale", chiamata=cid, da=chi, segnale=tipo, dati=dati)
+            self.cond.notify_all()
+        return {"ok": True}
+
+
+def avviso_chiamata(persona, evento, chiamata):
+    """Punto d'aggancio per le notifiche delle chiamate (le manda il ramo della chat, con Web Push: quando c'è, si
+    sostituisce il corpo di questa funzione). La chiama il centralino in un filo a parte, fuori dal suo blocco: può
+    fare richieste di rete. Argomenti:
+    - persona: chi riceve l'avviso ("p" = Samuele, se no l'id dell'invitato), su tutti i suoi dispositivi iscritti;
+    - evento: "arriva" (comincia a squillare: «Chiamata da Anna» o «Videochiamata da Anna»), "persa" (nessuno ha
+      risposto o chi chiamava ha chiuso: «Chiamata persa da Anna»), "chiusa" (ha risposto o rifiutato: la notifica di
+      quella chiamata si può togliere);
+    - chiamata: {"id", "da", "da_nome", "video"}. Etichetta della notifica: "chiamata-<id>", così «persa» e «chiusa»
+      prendono il posto di «arriva». Toccandola si apre l'app (./): se squilla ancora, la chiamata compare da sola
+      (l'app chiede api/extra/chiamate/attendi appena si apre); per le perse va bene ./?x=chiamate (l'elenco)."""
+    return None
+
+
+def chiamata_bloccata(da, a):
+    """True se `a` ha bloccato `da` (lo deciderà la chat con «Blocca»): allora a `a` non squilla niente."""
+    return False
+
+
+def _nome_in_atlante(chi):
+    if chi == "p":
+        return NOME_PROPRIETARIO
+    return PERS.nome(chi) if PERS is not None and isinstance(chi, str) and re.fullmatch(r"[0-9a-f]{16}", chi) else ""
+
+
+CENTRALINO = Centralino(_nome_in_atlante, bloccato=lambda da, a: chiamata_bloccata(da, a),
+                        avviso=lambda *a: avviso_chiamata(*a))
+
+
+def _chi_chiama(h):
+    """Chi chiama: "p" per Samuele, l'id per un invitato. Dalla rete di casa senza nessuno dietro non si chiama (e non
+    si ricevono le chiamate di Samuele)."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato" and chi.get("persona"):
+        return chi["persona"]
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    raise ErroreExtra(403, "Le chiamate sono per Samuele e i suoi invitati: entra con il tuo invito")
+
+
+def _persone_da_chiamare(chi):
+    """Chi si può chiamare: tutte le persone di Atlante tranne chi chiede, con id e nome e basta (niente dispositivi,
+    date, chi ha invitato chi)."""
+    tutte = [{"id": "p", "nome": NOME_PROPRIETARIO}]
+    if PERS is not None:
+        tutte += sorted(({"id": x["id"], "nome": x["nome"]} for x in PERS.elenco()["persone"]), key=lambda x: x["nome"].casefold())
+    return {"io": {"id": chi, "nome": _nome_in_atlante(chi)}, "persone": [x for x in tutte if x["id"] != chi]}
+
+
+def ice_server(ora=None):
+    """Server ICE per WebRTC: STUN (pubblico: ognuno scopre il proprio indirizzo su Internet) e, solo se configurato,
+    TURN, il ponte per le reti che non lasciano collegare due telefoni (spesso i dati mobili). Credenziali a tempo come
+    coturn con use-auth-secret: utente «scadenza:nome», password base64(HMAC-SHA1(segreto, utente)): il segreto non
+    esce dal Mac mini."""
+    servers = []
+    stun = [u for u in STUN.split(",") if u]
+    if stun:
+        servers.append({"urls": stun})
+    turn = [u for u in TURN_URL.split(",") if u] if TURN_SEGRETO else []
+    if turn:
+        utente = "%d:%s" % (int(time.time() if ora is None else ora) + TURN_DURATA, TURN_UTENTE)
+        firma = hmac.new(TURN_SEGRETO.encode("utf-8"), utente.encode("utf-8"), hashlib.sha1).digest()
+        servers.append({"urls": turn, "username": utente, "credential": base64.b64encode(firma).decode("ascii")})
+    return {"iceServers": servers, "turn": bool(turn)}
+
+
+def _prepara_chiamate(stun=None):
+    """Da main(): STUN da --stun o ATLANTE_STUN; TURN solo dalle variabili d'ambiente (il segreto non deve stare tra gli
+    argomenti, che `ps` mostra a tutti). Indirizzi che non sono stun:/stuns:/turn:/turns: si scartano."""
+    global STUN, TURN_URL, TURN_UTENTE, TURN_SEGRETO
+
+    def indirizzi(testo, forma):
+        return ",".join(u for u in (x.strip() for x in (testo or "").split(",")) if re.fullmatch(forma, u))
+
+    STUN = indirizzi(os.environ.get("ATLANTE_STUN", STUN_PREDEFINITO) if stun is None else stun, r"stuns?:[^\s,;\"'<>]+")
+    TURN_URL = indirizzi(os.environ.get("ATLANTE_TURN_URL", ""), r"turns?:[^\s,;\"'<>]+")
+    TURN_UTENTE = re.sub(r"[^A-Za-z0-9_.@-]", "", os.environ.get("ATLANTE_TURN_UTENTE", ""))[:64] or "atlante"
+    TURN_SEGRETO = os.environ.get("ATLANTE_TURN_SEGRETO", "")
+    if TURN_URL and not TURN_SEGRETO:
+        print("Atlante: ATLANTE_TURN_URL senza ATLANTE_TURN_SEGRETO: il ponte per le chiamate non si usa", flush=True)
+
+
+def _chiamate(h, metodo, resto, corpo):
+    """api/extra/chiamate…: chi si può chiamare, server ICE, attesa lunga, chiama, rispondi, rifiuta, chiudi, aggiungi
+    e segnale. Per Samuele e i suoi invitati; le scritture chiedono la stessa origine (gestisci_extra)."""
+    chi = _chi_chiama(h)
+
+    def solo(m):
+        if metodo != m:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+
+    if resto == ["persone"]:
+        solo("GET")
+        return _json(h, _persone_da_chiamare(chi))
+    if resto == ["ice"]:
+        solo("GET")
+        return _json(h, ice_server())
+    if resto == ["attendi"]:
+        solo("GET")
+        q = parse_qs(urlsplit(h.path).query)
+        dopo = (q.get("dopo") or [""])[0]
+        if dopo and not re.fullmatch(r"[0-9]{1,18}", dopo):
+            raise ErroreExtra(400, "Attesa non valida")
+        return _json(h, CENTRALINO.attendi(chi, (q.get("disp") or [""])[0], int(dopo) if dopo else None, _attesa(h)))
+    if not resto:
+        solo("POST")
+        return _json(h, {"chiamata": CENTRALINO.chiama(chi, corpo.get("disp"), corpo.get("a"), corpo.get("video"))})
+    if len(resto) == 2 and resto[1] in ("rispondi", "rifiuta", "chiudi", "aggiungi", "segnale"):
+        solo("POST")
+        cid, azione, disp = resto[0], resto[1], corpo.get("disp")
+        if azione == "segnale":
+            return _json(h, CENTRALINO.segnale(chi, disp, cid, corpo.get("a"), corpo.get("tipo"), corpo.get("dati")))
+        if azione == "aggiungi":
+            return _json(h, {"chiamata": CENTRALINO.aggiungi(chi, disp, cid, corpo.get("a"))})
+        return _json(h, {"chiamata": getattr(CENTRALINO, azione)(chi, disp, cid)})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/chiamate/%s" % "/".join(resto))
+
+
 # ----- voci e audiolibri con `say` -----
 
 _VOCI = {"t": 0.0, "say": "", "voci": []}
@@ -3360,6 +3861,8 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "dispositivo" and not resto:
         solo("GET")
         _json(h, dispositivo())
+    elif cosa == "chiamate":
+        _chiamate(h, metodo, resto, corpo)
     else:
         raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join(parti))
 
@@ -4350,9 +4853,10 @@ def controlla_accesso(h):
 # scaricamenti, IA, voci, la Gestione, i moduli di «Altro») usa le risorse del Mac mini o è di Samuele
 PERMESSE_INVITATI = re.compile(
     r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
-    r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html)$"
+    r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html|x/chiamate\.html)$"
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
-    r"|extra/(?:io|inviti|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?))$")
+    r"|extra/(?:io|inviti|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?"
+    r"|chiamate(?:/[^/]+){0,2}))$")
 
 
 def _permesso(h):
@@ -4421,6 +4925,9 @@ def main():
     ap.add_argument("--pubblico", default=os.environ.get("ATLANTE_PUBBLICO", ""),
                     help="indirizzo dell'app da Internet (tailscale funnel), es. https://mac-mini.tailnet.ts.net:10000/, "
                     "per i link d'invito (anche ATLANTE_PUBBLICO)")
+    ap.add_argument("--stun", default=os.environ.get("ATLANTE_STUN", STUN_PREDEFINITO),
+                    help="server STUN per le chiamate, separati da virgole (anche ATLANTE_STUN; il ponte TURN solo da "
+                    "ATLANTE_TURN_URL, ATLANTE_TURN_UTENTE e ATLANTE_TURN_SEGRETO)")
     ap.add_argument("--imposta-password", action="store_true", help="imposta (o cambia) la password per aprire l'app "
                     "da Internet con `tailscale funnel` e esce; la legge da tastiera o dalla prima riga dello standard input")
     a = ap.parse_args()
@@ -4434,6 +4941,7 @@ def main():
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
     PUBBLICO = a.pubblico.strip()
+    _prepara_chiamate(a.stun)
     if PUBBLICO and not PUBBLICO.endswith("/"):
         PUBBLICO += "/"
     indirizzo = a.indirizzo.strip()
