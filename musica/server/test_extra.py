@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -125,6 +126,48 @@ mvhd = bytes(12) + struct.pack(">II", 1000, len(testo) * 100) + bytes(80)
 with open(out, "wb") as f:
     f.write(scatola(b"ftyp", b"M4A \0\0\0\0M4A mp42isom") + scatola(b"moov", scatola(b"mvhd", mvhd)))
 '''
+
+
+# ffprobe finto: guarda i primi byte del file, come il vero guarda il contenuto e non il nome
+FINTO_FFPROBE = r'''
+import json, os, sys
+p = sys.argv[-1]
+with open(os.path.join(os.environ["FINTO_DIR"], "ffprobe.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+try:
+    with open(p, "rb") as f:
+        testa = f.read(16)
+except OSError:
+    sys.stderr.write("%s: No such file or directory\n" % p)
+    sys.exit(1)
+audio = {"index": 0, "codec_type": "audio", "codec_name": "mp3", "disposition": {"attached_pic": 0}}
+if testa.startswith(b"ID3") or testa.startswith(b"\xff\xfb"):
+    o = {"streams": [audio], "format": {"format_name": "mp3", "duration": "3.000000", "tags": {}}}
+elif testa.startswith(b"FILM"):
+    o = {"streams": [{"index": 0, "codec_type": "video", "codec_name": "h264", "disposition": {"attached_pic": 0}},
+                     dict(audio, index=1, codec_name="aac")],
+         "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5400.000000"}}
+elif testa.startswith(b"\x89PNG"):   # una foto (anche chiamata .mp4): un flusso video png, fermo
+    o = {"streams": [{"index": 0, "codec_type": "video", "codec_name": "png", "disposition": {"attached_pic": 0}}],
+         "format": {"format_name": "png_pipe"}}
+elif testa.startswith(b"MUTO"):   # un mp4 con il solo audio: non è un film
+    o = {"streams": [dict(audio, codec_name="aac")], "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "200.0"}}
+else:
+    sys.stderr.write("%s: Invalid data found when processing input\n" % p)
+    sys.exit(1)
+print(json.dumps(o))
+'''
+
+
+def mp3_finto(titolo, artista, album="", fotogrammi=10):
+    """Un MP3 piccolissimo con i tag ID3v2.3 (come quello del ffmpeg finto): la libreria lo legge davvero."""
+    def frame(fid, testo):
+        d = b"\x01" + testo.encode("utf-16")
+        return fid.encode() + struct.pack(">I", len(d)) + b"\x00\x00" + d
+    corpo = b"".join(frame(f, t) for f, t in (("TIT2", titolo), ("TPE1", artista), ("TALB", album)) if t)
+    n = len(corpo)
+    return (b"ID3\x03\x00\x00" + bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo +
+            (b"\xff\xfb\x90\x00" + bytes(413)) * fotogrammi)
 
 
 def quote(s):
@@ -246,7 +289,10 @@ class Server:
         self.p = subprocess.Popen([sys.executable, "-I", SERVER, self.c["musica"], "--porta", str(self.porta),
                                    "--cache", self.c["cache"], "--app", self.c["app"], "--video-dir", self.c["video"],
                                    "--libri-dir", self.c["libri"], "--musica-dir", self.c["scaricati"],
-                                   "--ia-indirizzo", "http://127.0.0.1:%d" % self.c["porta_ollama"]] + self.extra,
+                                   "--ia-indirizzo", "http://127.0.0.1:%d" % self.c["porta_ollama"],
+                                   # caricamenti: mai le cartelle vere di chi fa le prove
+                                   "--controllo-dir", self.c["controllo"], "--film-dir", self.c["film"],
+                                   "--tolti-dir", self.c["tolti"]] + self.extra,
                                   env=env, stdout=self.log, stderr=subprocess.STDOUT)
 
         def pronto():
@@ -293,12 +339,14 @@ def prepara_cartelle(base):
     for p in c.values():
         os.makedirs(p, exist_ok=True)
     c["scaricati"] = os.path.join(base, "scaricati")   # non c'è ancora: la crea il primo scaricamento
+    for k, n in (("controllo", "Da controllare"), ("film", "Film"), ("tolti", "Tolti")):
+        c[k] = os.path.join(base, n)   # anche queste le crea il primo caricamento
     os.makedirs(os.path.join(c["app"], "x"))
     for nome, testo in (("index.html", "<!doctype html><title>app</title>"), ("x/prova.html", "<!doctype html><p>x"),
                         ("x/kit.css", "body{}")):
         with open(os.path.join(c["app"], nome), "w", encoding="utf-8") as f:
             f.write(testo)
-    for nome, codice in (("yt-dlp", FINTO_YTDLP), ("say", FINTO_SAY), ("ffmpeg", FINTO_FFMPEG)):
+    for nome, codice in (("yt-dlp", FINTO_YTDLP), ("say", FINTO_SAY), ("ffmpeg", FINTO_FFMPEG), ("ffprobe", FINTO_FFPROBE)):
         p = os.path.join(c["bin"], nome)
         with open(p, "w", encoding="utf-8") as f:
             f.write("#!%s\n%s" % (sys.executable, codice))
@@ -1397,7 +1445,8 @@ class TestAccesso(unittest.TestCase):
 
     def test_9d_permessi_invitato(self):
         pid, v, t = self.invitato("Elena", ip="203.0.113.100")
-        for f in ("index.html", "sw.js", "x/kit.js", "x/kit.css", "x/inviti.html", "x/benessere.html"):
+        for f in ("index.html", "sw.js", "x/kit.js", "x/kit.css", "x/inviti.html", "x/benessere.html", "x/cerca.html",
+                  "x/carica.html", "x/controllo.html", "x/contenuti.html"):
             with open(os.path.join(self.c["app"], f), "w", encoding="utf-8") as fh:
                 fh.write("ciao")
         permesse = [("GET", "/"), ("GET", "/index.html"), ("GET", "/sw.js"), ("GET", "/x/kit.js"), ("GET", "/x/kit.css"),
@@ -1405,14 +1454,24 @@ class TestAccesso(unittest.TestCase):
                     ("GET", "/api/musica/copertina/x.jpg"), ("GET", "/api/musica/pezzo/1?da=0&durata=30"),
                     ("GET", "/api/extra/clip"), ("GET", "/api/extra/clip/file/abc.mp4"), ("GET", "/api/extra/clip/abc"),
                     ("GET", "/api/extra/dispositivi"), ("GET", "/api/extra/io"), ("GET", "/api/extra/inviti"),
-                    ("POST", "/api/extra/inviti"), ("GET", "/musica/api/musica/catalogo")]
+                    ("POST", "/api/extra/inviti"), ("GET", "/musica/api/musica/catalogo"),
+                    # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria
+                    ("GET", "/x/cerca.html"), ("GET", "/x/carica.html"), ("GET", "/api/extra/musica/cerca?q=x"),
+                    ("POST", "/api/extra/musica"), ("GET", "/api/extra/musica"), ("POST", "/api/extra/musica/x/annulla"),
+                    ("GET", "/api/extra/caricamenti"), ("POST", "/api/extra/caricamenti"),
+                    ("GET", "/api/extra/caricamenti/0123456789abcdef"), ("PUT", "/api/extra/caricamenti/0123456789abcdef"),
+                    ("DELETE", "/api/extra/caricamenti/0123456789abcdef"),
+                    ("GET", "/api/extra/caricamenti/0123456789abcdef/file")]
         for metodo, p in permesse:
             st, h, b = self.da_fuori(metodo, p, {} if metodo == "POST" else None, biscotto=v, extra=self.ORIGINE)
             self.assertNotEqual(st, 403, (metodo, p, b[:200]))
             self.assertNotEqual(st, 401, (metodo, p))
         vietate = [("GET", "/api/musica/aggiorna"), ("GET", "/api/extra/proxy?url=https://example.com/"),
-                   ("GET", "/api/extra/video"), ("POST", "/api/extra/video"), ("GET", "/api/extra/musica/cerca?q=x"),
-                   ("POST", "/api/extra/musica"), ("GET", "/api/extra/voci"), ("POST", "/api/extra/audiolibro"),
+                   ("GET", "/api/extra/video"), ("POST", "/api/extra/video"), ("GET", "/api/extra/film"),
+                   ("GET", "/api/extra/film/file/x.mp4"), ("GET", "/api/extra/gestione/controllo"),
+                   ("GET", "/api/extra/gestione/contenuti?q=x"), ("GET", "/x/controllo.html"), ("GET", "/x/contenuti.html"),
+                   ("PUT", "/api/extra/gestione/contenuti/x/copertina"),
+                   ("GET", "/api/extra/voci"), ("POST", "/api/extra/audiolibro"),
                    ("DELETE", "/api/extra/audiolibro/x"), ("POST", "/api/extra/ia"), ("GET", "/api/extra/dispositivo"),
                    ("GET", "/api/extra/stato"), ("GET", "/api/extra/gestione/persone"), ("GET", "/x/benessere.html"),
                    ("GET", "/x/"), ("GET", "/x/studio.html"), ("GET", "/musica/api/extra/stato")]
@@ -1424,7 +1483,8 @@ class TestAccesso(unittest.TestCase):
         self.assertEqual(json.loads(b.decode("utf-8")), {"ruolo": "invitato", "persona": {"id": pid, "nome": "Elena"}})
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io")
         io = json.loads(b.decode("utf-8"))
-        self.assertEqual((io["ruolo"], io["persona"], sorted(io["nuove"])), ("proprietario", None, ["richieste"]))
+        self.assertEqual((io["ruolo"], io["persona"], sorted(io["nuove"])),
+                         ("proprietario", None, ["da_controllare", "film", "richieste"]))
 
     def test_9e_dispositivi_per_persona(self):
         pid, v, t = self.invitato("Franca", ip="203.0.113.110")
@@ -1813,6 +1873,451 @@ class TestPersone(unittest.TestCase):
                          ("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36", "Chrome"),
                          ("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0", "Firefox"), ("curl/8", "Altro")):
             self.assertEqual(self.m.browser_da_agente(ua), nome, ua)
+
+
+# ----- caricamenti, «Da controllare», film sul Cloud e contenuti (Gestione, parte 2) -----
+
+ORIGINE_APP = "https://mac.esempio.ts.net:10000"
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(64)   # quanto basta perché il Mac la riconosca come immagine
+
+
+class ProvaCaricamenti:
+    """Server di prova con un invitato che entra dal suo link (come TestAccesso) e richieste da lui e da Samuele."""
+    OPZIONI = ["--spazio-min-gb", "0", "--limite-giorno-gb", "1"]
+
+    @classmethod
+    def prepara(cls, prefisso):
+        cls.base = tempfile.mkdtemp(prefix=prefisso)
+        cls.c = prepara_cartelle(cls.base)
+        with open(os.path.join(cls.c["musica"], "Eminem - Without Me.mp3"), "wb") as f:   # già nella libreria
+            f.write(mp3_finto("Without Me", "Eminem", "The Eminem Show"))
+        cls.s = Server(cls.base, cls.c, ["--pubblico", ORIGINE_APP] + cls.OPZIONI).avvia()
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_" + prefisso.strip("-"), SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cls.ip = 10
+
+    @classmethod
+    def chiudi(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def invitato(self, nome):
+        """(persona, biscotto) di una persona invitata, entrata dal suo link da Internet."""
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        type(self).ip += 1
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso/invito/" + codice, b"",
+                             intest=dict(FUNNEL, **{"X-Forwarded-For": "203.0.113.%d" % self.ip, "Origin": ORIGINE_APP,
+                                                    "Content-Type": "application/x-www-form-urlencoded"}))
+        self.assertEqual(st, 200, b[:300])
+        v = [x for x in h.get_all("Set-Cookie") if x.startswith("am_accesso=o.")][0]
+        return a["id"], v.split(";")[0].split("=", 1)[1]
+
+    def da(self, biscotto, metodo, p, corpo=None, intest=None):
+        """Richiesta: dall'invitato (con il suo biscotto, da Internet) o da Samuele (biscotto None: dal Mac)."""
+        h = dict(FUNNEL, **{"Cookie": "am_accesso=" + biscotto, "Origin": ORIGINE_APP}) if biscotto else {}
+        h.update(intest or {})
+        return richiesta(self.s.porta, metodo, p, corpo, intest=h)
+
+    def j(self, biscotto, metodo, p, corpo=None, codice=200, intest=None):
+        st, h, b = self.da(biscotto, metodo, p, corpo, intest)
+        if codice is not None:
+            self.assertEqual(st, codice, (metodo, p, b[:300]))
+        return json.loads(b.decode("utf-8")) if b else None
+
+    def pezzo(self, biscotto, id_, da, dati, codice=200):
+        return self.j(biscotto, "PUT", "/api/extra/caricamenti/%s?da=%d" % (id_, da), dati, codice,
+                      {"Content-Type": "application/octet-stream"})
+
+    def carica(self, biscotto, nome, dati, pezzi=2, modificato=1700000000000):
+        s = self.j(biscotto, "POST", "/api/extra/caricamenti", {"tipo": "brano", "nome": nome, "dimensione": len(dati),
+                                                                "modificato": modificato})
+        passo = -(-len(dati) // pezzi)
+        for da in range(s["ricevuti"], len(dati), passo):
+            s = self.pezzo(biscotto, s["id"], da, dati[da:da + passo])
+        return s
+
+    def catalogo(self):
+        return self.j(None, "GET", "/api/musica/catalogo")
+
+    def controllo(self):
+        return {x["id"]: x for x in self.j(None, "GET", "/api/extra/gestione/controllo")["brani"]}
+
+    def miei(self, biscotto):
+        return self.j(biscotto, "GET", "/api/extra/caricamenti")
+
+
+class TestCaricamenti(ProvaCaricamenti, unittest.TestCase):
+    """Brani caricati dal telefono, «Da controllare», «Cerca e scarica» degli invitati, film sul Cloud, contenuti."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.prepara("atlante-carica-")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.chiudi()
+
+    def test_1_brano_caricato_controllato_e_approvato(self):
+        pid, v = self.invitato("Anna")
+        dati = mp3_finto("Lose Yourself", "Eminem", "8 Mile")
+        s = self.j(v, "POST", "/api/extra/caricamenti", {"tipo": "brano", "nome": "lose.mp3", "dimensione": len(dati),
+                                                         "modificato": 1700000000000})
+        self.assertEqual((s["ricevuti"], s["stato"], s["pezzo"]), (0, "in arrivo", 8 * 1024 * 1024))
+        meta = len(dati) // 2
+        self.assertEqual(self.pezzo(v, s["id"], 0, dati[:meta])["ricevuti"], meta)
+        s = self.pezzo(v, s["id"], meta, dati[meta:])
+        self.assertEqual((s["stato"], s["ricevuti"]), ("fatto", len(dati)), s)
+        eid = s["elemento"]
+        # ffprobe ha controllato il file vero
+        with open(os.path.join(self.c["finto"], "ffprobe.log"), encoding="utf-8") as f:
+            self.assertIn("-show_streams", f.read())
+        mie = {x["id"]: x for x in self.miei(v)["brani"]}
+        self.assertEqual((mie[eid]["stato"], mie[eid]["titolo"], mie[eid]["origine"]), ("attesa", "Lose Yourself", "caricato"))
+        # finché non è approvato non è nella libreria di nessuno
+        self.assertNotIn("Lose Yourself", [b["title"] for b in self.catalogo()["brani"]])
+        # Samuele lo vede in Gestione → Da controllare: chi, quando, i tag letti dal file; una scheda accanto al file
+        x = self.controllo()[eid]
+        self.assertEqual((x["chi_nome"], x["origine"], x["tag"]), ("Anna", "caricato", {"titolo": "Lose Yourself",
+                                                                                      "artista": "Eminem", "album": "8 Mile"}))
+        self.assertEqual(x["doppioni"], [])
+        with open(os.path.join(self.c["controllo"], eid + ".json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["chi_nome"], "Anna")
+        self.assertEqual(self.da(None, "GET", "/api/extra/gestione/controllo/%s/file" % eid)[2], dati)   # ascolto
+        st, h, b = self.da(None, "GET", "/api/extra/gestione/controllo/%s/file" % eid, intest={"Range": "bytes=0-2"})
+        self.assertEqual((st, b), (206, b"ID3"))
+        # correzione e copertina nuova, poi Approva: un file nuovo nella cartella della musica scaricata con i tag giusti
+        self.j(None, "POST", "/api/extra/gestione/controllo/" + eid, {"titolo": "Lose Yourself (Live)", "album": "Curtain Call"})
+        self.j(None, "PUT", "/api/extra/gestione/controllo/%s/copertina" % eid, PNG, intest={"Content-Type": "image/png"})
+        self.j(None, "PUT", "/api/extra/gestione/controllo/%s/copertina" % eid, b"non un'immagine", 400,
+               intest={"Content-Type": "image/png"})
+        r = self.j(None, "POST", "/api/extra/gestione/controllo/%s/approva" % eid, {})
+        self.assertEqual(r["nome"], "Eminem - Lose Yourself (Live).mp3")
+        self.assertTrue(os.path.isfile(os.path.join(self.c["scaricati"], r["nome"])))
+        with open(os.path.join(self.c["finto"], "ffmpeg.log"), encoding="utf-8") as f:
+            ff = json.loads(f.read().strip().splitlines()[-1])
+        self.assertEqual((ff["tag"]["title"], ff["tag"]["artist"], ff["tag"]["album"]),
+                         ("Lose Yourself (Live)", "Eminem", "Curtain Call"))
+        self.assertEqual(ff["args"][ff["args"].index("-c:a") + 1], "copy")   # un MP3 resta l'MP3 di prima: niente perdita
+        self.assertEqual(len([a for a in ff["args"] if a == "-i"]), 2)       # con la copertina nuova
+        b = [x for x in self.catalogo()["brani"] if x["id"] == r["brano"]]
+        self.assertEqual([(x["title"], x["artist"], x["album"]) for x in b], [("Lose Yourself (Live)", "Eminem", "Curtain Call")])
+        self.assertEqual({x["id"]: x for x in self.miei(v)["brani"]}[eid]["stato"], "approvato")
+        self.assertNotIn(eid, self.controllo())
+        self.assertFalse(os.path.exists(os.path.join(self.c["controllo"], eid + ".mp3")))
+        self.assertTrue(os.path.isfile(os.path.join(self.c["controllo"], "Approvati", eid + ".json")))
+        self.j(None, "POST", "/api/extra/gestione/controllo/%s/approva" % eid, {}, 404)
+
+    def test_2_doppione_e_scarta(self):
+        pid, v = self.invitato("Bruno")
+        # stesso artista e titolo (maiuscole a parte) di un brano della libreria
+        eid = self.carica(v, "wm.mp3", mp3_finto("WITHOUT ME", "eminem", "Altro album"))["elemento"]
+        self.assertEqual([(d["titolo"], d["artista"]) for d in self.controllo()[eid]["doppioni"]], [("Without Me", "Eminem")])
+        r = self.j(None, "POST", "/api/extra/gestione/controllo/%s/approva" % eid, {}, 409)
+        self.assertIn("già", r["errore"])
+        self.assertEqual(r["doppioni"][0]["artista"], "Eminem")
+        self.assertTrue(self.j(None, "POST", "/api/extra/gestione/controllo/%s/approva" % eid, {"forza": True})["ok"])
+        # Scarta: va in «Scartati», non si cancella
+        e2 = self.carica(v, "x.mp3", mp3_finto("Brano brutto", "Qualcuno"))["elemento"]
+        self.assertEqual(self.j(None, "POST", "/api/extra/gestione/controllo/%s/scarta" % e2, {}), {"ok": True})
+        self.assertTrue(os.path.isfile(os.path.join(self.c["controllo"], "Scartati", e2 + ".mp3")))
+        self.assertEqual({x["id"]: x for x in self.miei(v)["brani"]}[e2]["stato"], "scartato")
+        self.assertNotIn(e2, self.controllo())
+        self.assertIn(e2, [x["id"] for x in self.j(None, "GET", "/api/extra/gestione/controllo")["scartati"]])
+        self.assertNotIn("Brano brutto", [b["title"] for b in self.catalogo()["brani"]])
+
+    def test_3_file_sbagliati_e_limiti(self):
+        pid, v = self.invitato("Carla")
+        s = self.carica(v, "finto.mp3", b"questo non e' un file audio " * 50)
+        self.assertEqual(s["stato"], "errore")
+        self.assertIn("non è un file audio", s["errore"])
+        self.assertEqual([n for n in os.listdir(self.c["controllo"]) if n.startswith(s["id"])], [])
+        self.assertEqual(os.listdir(os.path.join(self.c["controllo"], ".in arrivo")), [])
+        nuovo = {"tipo": "brano", "nome": "a.mp3", "dimensione": 1000}
+        self.j(v, "POST", "/api/extra/caricamenti", dict(nuovo, nome="programma.exe"), 400)
+        self.assertIn("200 MB", self.j(v, "POST", "/api/extra/caricamenti", dict(nuovo, dimensione=200 * 1024 * 1024 + 1), 413)["errore"])
+        self.j(v, "POST", "/api/extra/caricamenti", dict(nuovo, dimensione=0), 400)
+        self.j(v, "POST", "/api/extra/caricamenti", dict(nuovo, tipo="altro"), 400)
+        s = self.j(v, "POST", "/api/extra/caricamenti", dict(nuovo, modificato=1))
+        self.assertEqual(self.pezzo(v, s["id"], 5, b"x" * 10, 409)["ricevuti"], 0)    # pezzo fuori posto: si dice da dove
+        self.pezzo(v, s["id"], 0, b"x" * 1001, 400)                                    # più di quanto annunciato
+        self.j(v, "PUT", "/api/extra/caricamenti/%s?da=0" % s["id"], b"x", 403, {"Origin": "https://altro.example"})
+        # un altro invitato non tocca i caricamenti di Carla, Samuele nemmeno da qui
+        _, v2 = self.invitato("Dario")
+        self.pezzo(v2, s["id"], 0, b"x" * 10, 404)
+        self.j(v2, "GET", "/api/extra/caricamenti/" + s["id"], None, 404)
+        self.j(v2, "DELETE", "/api/extra/caricamenti/" + s["id"], None, 404)
+        e = self.carica(v, "ok.mp3", mp3_finto("Di Carla", "Carla"))["elemento"]
+        self.assertEqual(self.da(v, "GET", "/api/extra/caricamenti/%s/file" % e)[0], 200)
+        self.assertEqual(self.da(v2, "GET", "/api/extra/caricamenti/%s/file" % e)[0], 404)
+        # annullato: via il pezzo già arrivato
+        self.assertEqual(self.j(v, "DELETE", "/api/extra/caricamenti/" + s["id"]), {"ok": True})
+        self.j(v, "GET", "/api/extra/caricamenti/" + s["id"], None, 404)
+        # troppi caricamenti a metà
+        for i in range(10):
+            self.j(v2, "POST", "/api/extra/caricamenti", dict(nuovo, nome="b%d.mp3" % i))
+        self.assertIn("a metà", self.j(v2, "POST", "/api/extra/caricamenti", dict(nuovo, nome="b10.mp3"), 429)["errore"])
+        # le rotte della Gestione: solo Samuele
+        for metodo, rotta in (("GET", "controllo"), ("POST", "controllo/%s/approva" % e), ("POST", "controllo/%s/scarta" % e),
+                              ("GET", "contenuti?q=a"), ("POST", "film/x/consenti")):
+            self.assertEqual(self.da(v, metodo, "/api/extra/gestione/" + rotta, {} if metodo == "POST" else None)[0], 403, rotta)
+
+    def test_4_ripresa_riscegliendo_lo_stesso_file(self):
+        pid, v = self.invitato("Elena")
+        dati = mp3_finto("Ripresa", "Elena", fotogrammi=30)
+        corpo = {"tipo": "brano", "nome": "ripresa.mp3", "dimensione": len(dati), "modificato": 1700000000123}
+        s = self.j(v, "POST", "/api/extra/caricamenti", corpo)
+        self.pezzo(v, s["id"], 0, dati[:5000])
+        # il telefono si è spento: si sceglie di nuovo lo stesso file, il Mac dice da dove riprendere
+        s2 = self.j(v, "POST", "/api/extra/caricamenti", corpo)
+        self.assertEqual((s2["id"], s2["ricevuti"]), (s["id"], 5000))
+        self.assertEqual([x["id"] for x in self.miei(v)["caricamenti"]], [s["id"]])
+        self.assertEqual(self.pezzo(v, s["id"], 5000, dati[5000:])["stato"], "fatto")
+        # un file diverso con lo stesso nome (altra data) è un caricamento nuovo
+        self.assertNotEqual(self.j(v, "POST", "/api/extra/caricamenti", dict(corpo, modificato=1))["id"], s["id"])
+
+    def test_5_cerca_e_scarica_di_un_invitato(self):
+        pid, v = self.invitato("Franca")
+        brano = {"id": "Invitata001", "titolo": "Stan", "artista": "Eminem", "album": "The Marshall Mathers LP",
+                 "copertina": "https://127.0.0.1/c.jpg", "explicit": True}
+        id_ = self.j(v, "POST", "/api/extra/musica", brano)["id"]
+
+        def lavoro():
+            return {x["id"]: x for x in self.j(v, "GET", "/api/extra/musica")["lavori"]}.get(id_)
+        l = aspetta(lambda: (lambda x: x if x and x["stato"] in ("fatto", "errore") else None)(lavoro()), 40)
+        self.assertEqual(l["stato"], "fatto", (l, self.s.leggi_log()))
+        self.assertEqual(l["brano"], "")   # non nella libreria: in «Da controllare»
+        eid = l["caricamento"]
+        self.assertTrue(eid)
+        self.assertNotIn("Stan", [b["title"] for b in self.catalogo()["brani"]])
+        x = self.controllo()[eid]
+        self.assertEqual((x["origine"], x["chi_nome"], x["tag"]["titolo"]), ("scaricato", "Franca", "Stan"))
+        self.assertEqual(x["url"], "https://music.youtube.com/watch?v=Invitata001")
+        mie = {y["id"]: y for y in self.miei(v)["brani"]}
+        self.assertEqual((mie[eid]["origine"], mie[eid]["stato"]), ("scaricato", "attesa"))
+        # la copia per il suo telefono
+        st, h, b = self.da(v, "GET", "/api/extra/caricamenti/%s/file" % eid)
+        self.assertEqual((st, b[:3]), (200, b"ID3"))
+        self.assertIn("Stan", h["Content-Disposition"])
+        # gli scaricamenti degli altri non si vedono e non si annullano
+        self.assertNotIn(id_, [y["id"] for y in self.j(None, "GET", "/api/extra/musica")["lavori"]])
+        mio = self.j(None, "POST", "/api/extra/musica", dict(brano, id="DiSamuele01"))["id"]
+        self.assertNotIn(mio, [y["id"] for y in self.j(v, "GET", "/api/extra/musica")["lavori"]])
+        self.j(v, "POST", "/api/extra/musica/%s/annulla" % mio, {}, 404)
+        self.assertTrue(aspetta(lambda: {y["id"]: y for y in self.j(None, "GET", "/api/extra/musica")["lavori"]}[mio]["stato"] == "fatto", 40))
+        # un brano già nella libreria non si scarica di nuovo per «Da controllare»
+        self.assertIn("già nella libreria", self.j(v, "POST", "/api/extra/musica", dict(brano, id="DiSamuele01"), 409)["errore"])
+
+    def test_6_film(self):
+        pid, v = self.invitato("Gina")
+        dati = b"FILM" + bytes(range(256)) * 40
+        richiesta_ = {"tipo": "film", "titolo": "Il mio film: la vacanza", "nome": "vacanza.mp4", "dimensione": len(dati),
+                      "modificato": 1700000000000}
+        f = self.j(v, "POST", "/api/extra/caricamenti", richiesta_)
+        self.assertEqual((f["stato"], f["tipo"]), ("richiesta", "film"))
+        self.assertIn("consenso", self.pezzo(v, f["id"], 0, dati[:100], 409)["errore"])   # prima il sì di Samuele
+        g = {x["id"]: x for x in self.j(None, "GET", "/api/extra/gestione/controllo")["film"]}
+        self.assertEqual((g[f["id"]]["titolo"], g[f["id"]]["chi_nome"], g[f["id"]]["dimensione"]),
+                         ("Il mio film: la vacanza", "Gina", len(dati)))
+        self.assertGreaterEqual(self.j(None, "GET", "/api/extra/io")["nuove"]["film"], 1)
+        self.j(v, "POST", "/api/extra/gestione/film/%s/consenti" % f["id"], {}, 403)
+        self.assertEqual(self.j(None, "POST", "/api/extra/gestione/film/%s/consenti" % f["id"], {}), {"ok": True})
+        self.assertEqual({x["id"]: x for x in self.miei(v)["caricamenti"]}[f["id"]]["stato"], "consentito")
+        s = None
+        for da in range(0, len(dati), 4000):
+            s = self.pezzo(v, f["id"], da, dati[da:da + 4000])
+        self.assertEqual((s["stato"], s["finale"]), ("fatto", "Il mio film la vacanza.mp4"), s)
+        with open(os.path.join(self.c["film"], s["finale"]), "rb") as fh:
+            self.assertEqual(fh.read(), dati)   # direttamente nel Cloud, senza passare da «Da controllare»
+        self.assertEqual(os.listdir(os.path.join(self.c["film"], ".in arrivo")), [])
+        # Samuele li vede in «Video»; gli invitati no
+        el = {x["nome"]: x for x in self.j(None, "GET", "/api/extra/film")["film"]}
+        self.assertEqual(el[s["finale"]]["chi_nome"], "Gina")
+        st, h, b = self.da(None, "GET", "/api/extra/film/file/" + quote(s["finale"]), intest={"Range": "bytes=0-3"})
+        self.assertEqual((st, b, h["Content-Type"]), (206, b"FILM", "video/mp4"))
+        self.assertEqual(self.da(None, "GET", "/api/extra/film/file/..%2Fx.mp4")[0], 404)
+        self.assertEqual(self.da(v, "GET", "/api/extra/film")[0], 403)
+        # e non entrano nella libreria della musica
+        self.j(None, "GET", "/api/musica/aggiorna")
+        self.assertFalse([b for b in self.catalogo()["brani"] if "vacanza" in b["title"].lower()])
+        # non è un video: si toglie
+        muto = b"MUTO" + bytes(500)
+        f2 = self.j(v, "POST", "/api/extra/caricamenti", dict(richiesta_, nome="muto.mp4", dimensione=len(muto), titolo="Muto"))
+        self.j(None, "POST", "/api/extra/gestione/film/%s/consenti" % f2["id"], {})
+        s2 = self.pezzo(v, f2["id"], 0, muto)
+        self.assertEqual(s2["stato"], "errore")
+        self.assertIn("non è un video", s2["errore"])
+        f4 = self.j(v, "POST", "/api/extra/caricamenti", dict(richiesta_, nome="foto.mp4", dimensione=len(PNG), titolo="Foto"))
+        self.j(None, "POST", "/api/extra/gestione/film/%s/consenti" % f4["id"], {})
+        self.assertIn("non è un video", self.pezzo(v, f4["id"], 0, PNG)["errore"])   # una foto non è un film
+        self.assertEqual(sorted(n for n in os.listdir(self.c["film"]) if not n.startswith(".")), [s["finale"]])
+        # rifiutato: non si carica
+        f3 = self.j(v, "POST", "/api/extra/caricamenti", dict(richiesta_, titolo="No", modificato=5))
+        self.assertEqual(self.j(None, "POST", "/api/extra/gestione/film/%s/rifiuta" % f3["id"], {}), {"ok": True})
+        self.assertEqual({x["id"]: x for x in self.miei(v)["caricamenti"]}[f3["id"]]["stato"], "rifiutato")
+        self.pezzo(v, f3["id"], 0, dati[:10], 409)
+        self.j(None, "POST", "/api/extra/gestione/film/%s/consenti" % f3["id"], {}, 409)
+        # limiti
+        self.assertIn("80 GB", self.j(v, "POST", "/api/extra/caricamenti", dict(richiesta_, dimensione=80 * 1024 ** 3 + 1), 413)["errore"])
+        self.j(v, "POST", "/api/extra/caricamenti", dict(richiesta_, nome="film.mp3"), 400)
+        self.j(v, "POST", "/api/extra/caricamenti", dict(richiesta_, titolo="  "), 400)
+        # il film di Samuele non chiede il consenso a nessuno
+        self.assertEqual(self.j(None, "POST", "/api/extra/caricamenti", dict(richiesta_, titolo="Di Samuele"))["stato"], "consentito")
+
+    def test_7_contenuti_correzioni_togli_rimetti(self):
+        orig = os.path.join(self.c["musica"], "Eminem - Without Me.mp3")
+        with open(orig, "rb") as f:
+            prima = f.read()
+        r = self.j(None, "GET", "/api/extra/gestione/contenuti?q=" + quote("without EMINEM"))["brani"]
+        b = [x for x in r if x["file"] == "Eminem - Without Me.mp3"][0]
+        bid = b["id"]
+        self.assertEqual((b["titolo"], b["corretto"]), ("Without Me", False))
+        self.j(None, "POST", "/api/extra/gestione/contenuti/" + bid, {"titolo": "Without Me (Corretto)", "album": ""})
+        self.j(None, "PUT", "/api/extra/gestione/contenuti/%s/copertina" % bid, PNG, intest={"Content-Type": "image/png"})
+        c = {x["id"]: x for x in self.catalogo()["brani"]}[bid]
+        self.assertEqual((c["title"], c["artist"], c["album"]), ("Without Me (Corretto)", "Eminem", "The Eminem Show"))
+        self.assertTrue(c["cover"])
+        self.assertEqual(self.da(None, "GET", "/api/musica/copertina/" + c["cover"])[2], PNG)
+        with open(orig, "rb") as f:
+            self.assertEqual(f.read(), prima)   # il file originale non cambia
+        with open(os.path.join(self.c["cache"], "correzioni.json"), encoding="utf-8") as f:
+            self.assertIn(bid, json.load(f)["brani"])
+        x = [y for y in self.j(None, "GET", "/api/extra/gestione/contenuti?q=corretto")["brani"] if y["id"] == bid][0]
+        self.assertEqual((x["corretto"], x["originale"]["titolo"]), (True, "Without Me"))
+        self.j(None, "POST", "/api/extra/gestione/contenuti/%s/ripristina" % bid, {})
+        c = {x["id"]: x for x in self.catalogo()["brani"]}[bid]
+        self.assertEqual((c["title"], c.get("cover")), ("Without Me", None))
+        self.j(None, "POST", "/api/extra/gestione/contenuti/nonesiste12345/ripristina", {}, 404)
+        # Togli: sparisce dall'app di tutti, il file va in «Tolti»; Rimetti lo riporta con lo stesso id
+        t = self.j(None, "POST", "/api/extra/gestione/contenuti/%s/togli" % bid, {})
+        cat = self.catalogo()
+        self.assertNotIn(bid, [x["id"] for x in cat["brani"]])
+        self.assertIn(bid, cat["tolti"])
+        self.assertFalse(os.path.exists(orig))
+        tolti = self.j(None, "GET", "/api/extra/gestione/contenuti/tolti")["tolti"]
+        self.assertEqual([(x["id"], x["titolo"]) for x in tolti], [(t["tolto"], "Without Me")])
+        self.assertTrue(os.path.isfile(tolti[0]["dove"]) and tolti[0]["dove"].startswith(self.c["tolti"]))
+        self.j(None, "GET", "/api/musica/aggiorna")
+        self.assertNotIn(bid, [x["id"] for x in self.catalogo()["brani"]])   # una rilettura del disco non lo fa tornare
+        r = self.j(None, "POST", "/api/extra/gestione/contenuti/tolti/%s/rimetti" % t["tolto"], {})
+        self.assertEqual(r["brano"], bid)
+        cat = self.catalogo()
+        self.assertIn(bid, [x["id"] for x in cat["brani"]])
+        self.assertNotIn(bid, cat.get("tolti", []))
+        with open(orig, "rb") as f:
+            self.assertEqual(f.read(), prima)
+        self.j(None, "POST", "/api/extra/gestione/contenuti/tolti/%s/rimetti" % t["tolto"], {}, 404)
+
+    def test_8_pagine_e_numeri(self):
+        pid, v = self.invitato("Ivo")
+        for f in ("x/carica.html", "x/cerca.html", "x/controllo.html", "x/contenuti.html"):
+            with open(os.path.join(self.c["app"], f), "w", encoding="utf-8") as fh:
+                fh.write("<!doctype html><p>ok")
+        self.assertEqual(self.da(v, "GET", "/x/carica.html")[0], 200)
+        self.assertEqual(self.da(v, "GET", "/x/cerca.html")[0], 200)
+        self.assertEqual(self.da(v, "GET", "/x/controllo.html")[0], 403)
+        self.assertEqual(self.da(v, "GET", "/x/contenuti.html")[0], 403)
+        self.carica(v, "ivo.mp3", mp3_finto("Di Ivo", "Ivo"))
+        io = self.j(None, "GET", "/api/extra/io")
+        self.assertGreaterEqual(io["nuove"]["da_controllare"], 1)
+        self.assertNotIn("nuove", self.j(v, "GET", "/api/extra/io"))
+        # i caricamenti di Samuele entrano subito nella libreria (è lui che controlla)
+        s = self.carica(None, "mio.mp3", mp3_finto("Di Samuele", "Samuele"))
+        self.assertEqual(s["stato"], "fatto")
+        self.assertIn("Di Samuele", [b["title"] for b in self.catalogo()["brani"]])
+        self.assertIsNone(self.miei(None)["oggi"])                            # e non ha il limite giornaliero
+        self.assertEqual(self.miei(v)["oggi"]["limite"], 1024 ** 3)
+
+
+class TestCaricamentiLimiti(ProvaCaricamenti, unittest.TestCase):
+    """Limite giornaliero per persona (qui piccolissimo) e disco quasi pieno."""
+    OPZIONI = ["--spazio-min-gb", "0", "--limite-giorno-gb", "0.0001"]   # circa 107 KB al giorno
+
+    @classmethod
+    def setUpClass(cls):
+        cls.prepara("atlante-limiti-")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.chiudi()
+
+    def test_limite_giornaliero(self):
+        pid, v = self.invitato("Lia")
+        dati = mp3_finto("Lungo", "Lia", fotogrammi=200)   # circa 83 KB
+        s = self.carica(v, "lungo.mp3", dati, pezzi=1)
+        self.assertEqual(s["stato"], "fatto")
+        s = self.j(v, "POST", "/api/extra/caricamenti", {"tipo": "brano", "nome": "altro.mp3", "dimensione": len(dati)})
+        r = self.pezzo(v, s["id"], 0, dati, 429)
+        self.assertIn("di oggi: si riprende domani", r["errore"])
+        self.assertEqual(self.j(v, "GET", "/api/extra/caricamenti/" + s["id"])["ricevuti"], 0)
+        oggi = self.miei(v)["oggi"]
+        self.assertEqual((oggi["usati"], oggi["limite"]), (len(dati), int(0.0001 * 1024 ** 3)))
+        # anche «Cerca e scarica» conta: oltre il limite non parte
+        self.assertIn("di oggi", self.j(v, "POST", "/api/extra/musica", {"id": "Limite00001"}, 429)["errore"])
+        # un'altra persona ha il suo limite; Samuele non ne ha
+        _, v2 = self.invitato("Mara")
+        self.assertEqual(self.carica(v2, "lungo.mp3", dati)["stato"], "fatto")
+        self.assertEqual(self.carica(None, "a.mp3", dati)["stato"], "fatto")
+        self.assertEqual(self.carica(None, "b.mp3", mp3_finto("Lungo 2", "Lia", fotogrammi=200))["stato"], "fatto")
+
+    def test_disco_quasi_pieno(self):
+        # «--spazio-min-gb» enorme: il disco di prova è «quasi pieno»
+        s = Server(self.base, self.c, ["--pubblico", ORIGINE_APP, "--spazio-min-gb", "100000000"]).avvia()
+        try:
+            r = richiesta(s.porta, "POST", "/api/extra/caricamenti", {"tipo": "brano", "nome": "a.mp3", "dimensione": 100})
+            self.assertEqual(r[0], 507, r[2])
+            self.assertIn("liberi", json.loads(r[2].decode("utf-8"))["errore"])
+            st, h, b = richiesta(s.porta, "POST", "/api/extra/caricamenti",
+                                 {"tipo": "film", "titolo": "Grande", "nome": "g.mp4", "dimensione": 1000})
+            self.assertEqual(st, 507, b)   # Samuele: il suo film parte subito, ma lo spazio non c'è
+        finally:
+            s.ferma()
+
+
+class TestQuote(unittest.TestCase):
+    """Limite giornaliero per persona: brani, film e (in futuro) allegati della chat contano insieme."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_quote", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-quote-")
+        self.file = os.path.join(self.base, "extra", "quote.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_limite_e_giorno_dopo(self):
+        q = self.m.Quote(self.file, 100)
+        q.consuma("anna", 60)
+        q.consuma("anna", 40)
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            q.consuma("anna", 1)
+        self.assertEqual(e.exception.codice, 429)
+        self.assertIn("si riprende domani", e.exception.testo)
+        q.consuma("bruno", 100)
+        self.assertEqual((q.usati("anna"), q.resta("anna")), (100, 0))
+        self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
+        self.assertEqual(self.m.Quote(self.file, 100).usati("anna"), 100)   # resta dopo un riavvio
+        with unittest.mock.patch.object(self.m.time, "time", return_value=time.time() + 86400):
+            q.consuma("anna", 100)   # il giorno dopo si riparte
+            self.assertEqual(q.usati("anna"), 100)
+        q.consuma(None, 10 ** 12)    # Samuele: nessun limite
+
+    def test_formato_del_brano_approvato(self):
+        # MP3, M4A e FLAC: solo i tag nuovi; WAV e AIFF in FLAC (senza perdita); il resto in MP3 come il Cloud
+        for formato, atteso in (("mp3", ("copia", ".mp3", "mp3")), ("mov,mp4,m4a,3gp,3g2,mj2", ("copia", ".m4a", "ipod")),
+                                ("aac", ("copia", ".m4a", "ipod")), ("flac", ("copia", ".flac", "flac")),
+                                ("wav", ("flac", ".flac", "flac")), ("aiff", ("flac", ".flac", "flac")),
+                                ("ogg", ("mp3", ".mp3", "mp3")), ("", ("mp3", ".mp3", "mp3"))):
+            self.assertEqual(self.m._uscita(formato), atteso, formato)
 
 
 if __name__ == "__main__":
