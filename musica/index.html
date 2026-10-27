@@ -1528,11 +1528,11 @@ async function load(i, play, at) {
   }
   S.qi = i;
   xfAbort();
-  const el = t.ext ? AUX : au === AUX ? DECKS[0] : au;
+  const el = castUnLettore() ? au : t.ext ? AUX : au === AUX ? DECKS[0] : au;   // AirPlay del Mac o Chromecast: si resta sul lettore collegato
   if (el !== au) { au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} au = el; }
   if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null;
   if (t.ext) au.src = t.url;
-  else if (f) { if (!gemelloSalvato(id)) saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
+  else if (f && !castDalMac(t)) { if (!gemelloSalvato(id)) saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
   else au.src = API + 'file/' + encodeURIComponent(t.sid);   // in streaming dal Mac: si salva sull'iPhone se suona davvero (keep)
   curId = id; keptFor = null;
   seekOnLoad(at);
@@ -1593,7 +1593,7 @@ function ensureColor(key) {   // copertina del Mac non ancora salvata: il colore
 }
 let lastNowKey = '';
 function updateNow() {
-  if (RC.id) return rcMostra();   // telecomando: il brano dell'altro dispositivo
+  if (RC.id) { mediaMeta(); return rcMostra(); }   // telecomando: il brano dell'altro dispositivo (anche sulla schermata di blocco)
   const t = curId && TT(curId);
   $('mini').hidden = !t;
   document.body.classList.toggle('hasmini', !!t);
@@ -1644,21 +1644,9 @@ function tick() {
   }
   const now = Date.now();
   if (now - lastSave > 4000) { lastSave = now; saveState(); }
-  if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && d && isFinite(d) && now - lastPos > 1000) { lastPos = now; try { navigator.mediaSession.setPositionState({duration:d, position:Math.min(c, d), playbackRate:au.playbackRate || 1}); } catch (e) {} }
 }
-function mediaMeta(t) {
-  if (!('mediaSession' in navigator)) return;
-  const u = coverUrl(t.cover);
-  try { navigator.mediaSession.metadata = new MediaMetadata({title:t.title, artist:t.artist || UNK_ART, album:t.album || '', artwork:u ? [{src:new URL(u, location.href).href, sizes:'640x640', type:'image/jpeg'}] : []}); } catch (e) {}
-}
-if ('mediaSession' in navigator) {
-  const ms = navigator.mediaSession, sa = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) {} };
-  sa('play', () => au.play().catch(() => {})); sa('pause', () => { pausaVoluta = Date.now(); au.pause(); });
-  sa('previoustrack', prev); sa('nexttrack', () => next(false));
-  sa('seekto', e => { if (e.seekTime != null) au.currentTime = e.seekTime; });
-  sa('seekbackward', e => { au.currentTime = Math.max(0, au.currentTime - (e.seekOffset || 10)); });
-  sa('seekforward', e => { au.currentTime = Math.min(au.duration || 0, au.currentTime + (e.seekOffset || 10)); });
-}
+// titolo, copertina, posizione e tasti per schermata di blocco, Centro di Controllo e notifica: «controlli fuori dall'app»
+function mediaMeta(t) { try { fuoriPresto(); } catch (e) {} }
 auOn('play', () => { updateNow(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
 auOn('pause', () => { updateNow(); saveState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 auOn('timeupdate', tick);
@@ -2004,7 +1992,7 @@ function xfRun() {
 function xfLoop() { clearInterval(MIX.loop); MIX.loop = setInterval(() => { if (MIX.act) xfRun(); else if (MIX.plan) xfTick(); else clearInterval(MIX.loop); }, 40); }
 function xfTick() {
   if (MIX.act) { xfRun(); return; }
-  if (!MIX.on || MIX.unSolo || au === AUX || au.paused) return;
+  if (!MIX.on || MIX.unSolo || au === AUX || au.paused || castUnLettore()) return;   // AirPlay del Mac, Chromecast: l'altro lettore suonerebbe qui
   const t = T.get(curId), d = au.duration, c = au.currentTime;
   if (!t || !isFinite(d) || d < 45) return;
   const j = nextIdx(), idB = j >= 0 ? S.queue[j] : null, tb = idB && T.get(idB);
@@ -2537,7 +2525,7 @@ function devRender() {
   const qui = '<button data-a="dev-qui" class="' + (RC.id ? '' : 'acc') + '">' + ic('devs') + '<span class="l dv"><b>Questo dispositivo</b><small>' + esc(DEV.nome) + (t ? ' · ' + (au.paused ? '❚❚ ' : '▶︎ ') + t.title : '') + '</small></span>' + (RC.id ? '' : ic('check')) + '</button>';
   openSheet('<div class="grp scroll"><div class="smsg"><b>Riproduci su</b>' + (SRV ? 'I tuoi dispositivi con Atlante Musica aperto. Tocca un dispositivo per comandarlo o spostare la musica.' : 'Il Mac non risponde: per comandare gli altri dispositivi serve il Mac.') + '</div>' + qui +
     DEVS.map(devRiga).join('') + (DEVS.length ? '' : '<div class="smsg" style="border-bottom:0">Nessun altro dispositivo per ora: apri Atlante Musica sull\'altro dispositivo e aspetta qualche secondo.</div>') + '</div>' +
-    '<div class="grp"><button data-a="dev-nome"><span class="l">Rinomina questo dispositivo</span>' + ic('edit') + '</button></div>' + cancel);
+    castNota() + '<div class="grp"><button data-a="dev-nome"><span class="l">Rinomina questo dispositivo</span>' + ic('edit') + '</button></div>' + cancel);
 }
 function devAzioni(id) {
   const x = DEVS.find(v => v.id === id);
@@ -2661,19 +2649,221 @@ VID.el.addEventListener('click', () => {   // tocco sul video: schermo intero
 });
 vidSegna();
 
-/* ---------- AirPlay e condivisione ---------- */
+/* ---------- controlli fuori dall'app: schermata di blocco, Centro di Controllo, notifica, cuffie, auto ----------
+   Il brano in corso arriva al sistema con la Media Session: Centro di Controllo e schermata di blocco di iPhone e iPad,
+   CarPlay, cuffie, notifica di Android, tasti multimediali e «In riproduzione» di Mac e Windows.
+   Tasti: per la musica brano precedente e successivo; per podcast e audiolibri (brani di passaggio, lettore auX)
+   indietro e avanti di qualche secondo (15 sull'iPhone, che ne mostra l'icona; altrove 15 indietro e 30 avanti). Mai
+   tutti e due insieme: con i salti registrati l'iPhone mostra quelli al posto di precedente/successivo.
+   Safari tiene i tasti solo se li si registra quando un lettore è già attivo (prima li perde e mostra i salti di 15 s):
+   si registrano di nuovo a ogni partenza. E per Safari un lettore qualsiasi che si ferma (quello che finisce nel mix,
+   il videoclip muto, il silenzio che sblocca i lettori) ferma anche la Media Session: dopo ogni evento di un lettore
+   stato e posizione si rimettono da quello in uso («au», che nel mix cambia).
+   Comandando un altro dispositivo titolo, posizione e tasti sono i suoi. Lo stato resta quello di questo dispositivo
+   (dire «suona» senza musica qui prenderebbe l'audio dell'iPhone, fermando le altre app): il tasto al centro alterna. */
+const MSS = 'mediaSession' in navigator ? navigator.mediaSession : null;
+const FUORI = {modo:'', meta:'', pos:null, presto:0};
+function fuoriModo() {
+  if (RC.id) return 'rc';
+  const t = curId && TT(curId);   // una diretta (durata infinita) ha precedente/successivo come la musica
+  return t && t.ext && au.duration !== Infinity ? 'parlato' : 'musica';
+}
+function fuoriTasto(a, e) {
+  if (RC.id) {   // telecomando: il tasto va al dispositivo comandato
+    const s = (RC.dev && RC.dev.stato) || {};
+    if (a === 'play' || (a === 'pause' || a === 'stop') && s.suona) rcInvia('toggle');
+    else if (a === 'next' || a === 'prev') rcInvia(a);
+    else if (a === 'seekto' && e && isFinite(e.seekTime)) rcInvia('seek', {t:Math.max(0, +e.seekTime)});
+    return;
+  }
+  const d = au.duration, c = au.currentTime || 0;
+  const vai = t => { try { if (e && e.fastSeek && au.fastSeek) au.fastSeek(t); else au.currentTime = t; } catch (x) {} };
+  switch (a) {
+    case 'play': if (!curId) toggle(); else if (au.paused) au.play().catch(() => {}); break;
+    case 'pause': case 'stop': if (!au.paused) { pausaVoluta = Date.now(); au.pause(); } break;   // «stop» non svuota la coda
+    case 'next': next(false); break;
+    case 'prev': prev(); break;
+    case 'seekto': if (e && isFinite(e.seekTime)) vai(Math.max(0, isFinite(d) ? Math.min(+e.seekTime, d) : +e.seekTime)); break;
+    case 'indietro': vai(Math.max(0, c - ((e && e.seekOffset) || 15))); break;
+    case 'avanti': { const t = c + ((e && e.seekOffset) || 30); vai(isFinite(d) ? Math.min(t, Math.max(0, d - 0.5)) : t); break; }
+  }
+  fuoriPresto();
+}
+function fuoriAzioni() {
+  FUORI.modo = fuoriModo();
+  if (!MSS) return;
+  const parlato = FUORI.modo === 'parlato', sa = (a, f) => { try { MSS.setActionHandler(a, f); } catch (e) {} };
+  sa('play', () => fuoriTasto('play')); sa('pause', () => fuoriTasto('pause')); sa('stop', () => fuoriTasto('stop'));
+  sa('seekto', e => fuoriTasto('seekto', e));
+  sa('previoustrack', parlato ? null : () => fuoriTasto('prev')); sa('nexttrack', parlato ? null : () => fuoriTasto('next'));
+  sa('seekbackward', parlato ? e => fuoriTasto('indietro', e) : null); sa('seekforward', parlato ? e => fuoriTasto('avanti', e) : null);
+}
+function fuoriMeta() {
+  if (!MSS || typeof MediaMetadata !== 'function') return;
+  let t = null, album = '';
+  if (RC.id) { const b = RC.dev && RC.dev.stato && RC.dev.stato.brano; if (b) { t = rcBrano(b); album = 'Su ' + RC.nome; } }
+  else if (curId) { t = TT(curId) || null; album = (t && t.album) || ''; }
+  const u = t ? coverUrl(t.cover) : '', k = t ? [t.title, t.artist, album, u].join('\n') : '';
+  if (k === FUORI.meta) return;
+  FUORI.meta = k;
+  // copertina 512×512 (quella che chiede Android); senza copertina l'icona dell'app, non un riquadro vuoto
+  const img = u ? {src:new URL(u, location.href).href, sizes:'512x512'} : {src:new URL('icon-512.png?v=2', location.href).href, sizes:'512x512', type:'image/png'};
+  try { MSS.metadata = t ? new MediaMetadata({title:t.title || '', artist:t.artist || UNK_ART, album, artwork:[img]}) : null; } catch (e) {}
+}
+function fuoriStato() {
+  if (!MSS) return;
+  const v = curId && !au.paused ? 'playing' : curId || RC.id ? 'paused' : 'none';
+  try { if (MSS.playbackState !== v) MSS.playbackState = v; } catch (e) {}
+}
+// posizione: si manda quando cambia qualcosa (brano, salto, pausa, velocità del mix); in mezzo il sistema la fa avanzare da sé
+function fuoriPos(forza) {
+  if (!MSS || !MSS.setPositionState) return;
+  let d = 0, p = 0, r = 1, va = false;
+  if (RC.id) { const s = (RC.dev && RC.dev.stato) || {}; d = (s.brano && +s.brano.durata) || 0; p = rcPos(RC.dev); va = !!s.suona; }
+  else if (curId) { d = au.duration; p = au.currentTime || 0; r = au.playbackRate || 1; va = !au.paused; }
+  const ok = isFinite(d) && d > 0, ora = Date.now(), v = FUORI.pos;
+  if (!forza && (ok ? !!v && v.d === d && v.va === va && Math.abs(v.r - r) < 0.005 && ora - v.t < 10000 &&
+      Math.abs(v.p + (va ? (ora - v.t) / 1000 * v.r : 0) - p) < 0.75 : v === null)) return;
+  FUORI.pos = ok ? {d, p, r, va, t:ora} : null;
+  // brano senza durata (in caricamento, diretta): niente barra, invece di quella del brano prima
+  try { if (ok) MSS.setPositionState({duration:d, position:Math.max(0, Math.min(p, d)), playbackRate:r}); else MSS.setPositionState(); } catch (e) {}
+}
+function fuoriSync() {
+  FUORI.presto = 0;
+  if (fuoriModo() !== FUORI.modo) fuoriAzioni();
+  fuoriMeta(); fuoriStato(); fuoriPos(); castMostra();
+}
+// subito dopo l'evento (non con un timer: a schermo bloccato i timer arrivano in ritardo), una volta sola per giro
+function fuoriPresto() { if (FUORI.presto) return; FUORI.presto = 1; Promise.resolve().then(fuoriSync); }
+ALLAU.concat(VID.el).forEach(el => ['play', 'pause', 'playing', 'seeked', 'ratechange', 'durationchange', 'loadedmetadata', 'emptied', 'ended']
+  .forEach(n => el.addEventListener(n, fuoriPresto)));
+ALLAU.forEach(el => ['play', 'playing'].forEach(n => el.addEventListener(n, () => { if (el === au) fuoriAzioni(); })));
+auOn('timeupdate', () => fuoriPos());
+setInterval(fuoriSync, 1000);   // telecomando (lo stato dell'altro arriva ogni 2 s), copertine arrivate dopo
+fuoriAzioni();   // subito per Chrome e Firefox; Safari li riceve di nuovo quando un lettore parte
+
+/* ---------- AirPlay e Chromecast ----------
+   Safari (iPhone, iPad, Mac): AirPlay. Il tasto compare solo quando c'è un'uscita da scegliere (evento
+   webkitplaybacktargetavailabilitychanged). Sull'iPhone e sull'iPad AirPlay sposta tutta l'uscita audio dell'app, come
+   il Centro di Controllo: ci passano tutti e tre i lettori e anche il mixer del mix a tempo (Web Audio), quindi resta
+   tutto com'è. Sul Mac invece Safari manda ad AirPlay un lettore solo: dopo averlo scelto da qui i brani cambiano sullo
+   stesso lettore, che tiene l'altoparlante, e il mix a tempo non passa all'altro (suonerebbe dal Mac).
+   Chrome ed Edge (Android, Windows, Mac, Linux): Chromecast con la Remote Playback API, anche questa per un lettore
+   solo (stesse regole). Un file salvato sul dispositivo non si trasmette: mentre trasmette, i brani della libreria
+   arrivano dal Mac. Su Android il brano lo scarica il Chromecast stesso dall'indirizzo, e quello del Mac (rete Tailscale,
+   o con la password da Internet) non lo raggiunge: lì si trasmettono podcast e audiolibri, e il tasto spiega perché.
+   Firefox e gli altri: niente tasto; l'uscita (Bluetooth, AirPlay del Mac…) si sceglie nel sistema e l'app la segue. */
+I.ccast = '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5.5"/><path d="M3 12.6A7.4 7.4 0 0 1 10.4 20M3 16.4A3.6 3.6 0 0 1 6.6 20"/></g><circle cx="3.7" cy="19.3" r="1.4"/>';
+const CAST = {tipo:DECKS[0].webkitShowPlaybackTargetPicker ? 'airplay' : DECKS[0].remote ? 'chromecast' : '', airplay:false, macUno:false, evento:false, visto:false, chiesto:0, el:null, avviso:false};
+const rpAttivo = el => CAST.tipo === 'chromecast' && !!el.remote && el.remote.state !== 'disconnected';
+function castUnLettore() { return CAST.tipo === 'airplay' ? CAST.macUno : ALLAU.some(rpAttivo); }
+// mentre trasmette (o appena chiesto) i brani della libreria arrivano dal Mac anche se sono salvati qui
+function castDalMac(t) { return CAST.tipo === 'chromecast' && !!t && !!t.sid && !!SRV && (ALLAU.some(rpAttivo) || Date.now() - CAST.chiesto < 120000); }
+function castSorgenteOk(el) {
+  const s = el.getAttribute('src');
+  let u; try { u = new URL(el.currentSrc || s || '', location.href); } catch (e) { return false; }
+  if (!s || s === SILENZIO || !/^https?:$/.test(u.protocol)) return false;   // niente, o un file salvato qui (blob:)
+  if (DEV.tipo !== 'android') return true;   // dal computer è Chrome a mandare il brano al Chromecast
+  return u.origin !== location.origin || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(u.hostname);
+}
+function castPerche(el) {
+  const t = curId && TT(curId);
+  if (!t || !el.getAttribute('src')) return 'Fai partire un brano, poi trasmettilo con il Chromecast';
+  if (DEV.tipo === 'android') return t.ext ? 'Questo brano non si può trasmettere' : 'Da Android il Chromecast trasmette podcast e audiolibri: la musica del Mac passa dalla rete Tailscale, che il Chromecast non raggiunge. Per il televisore: «Trasmetti schermo» nell\'app Google Home';
+  if (!t.sid) return '«' + t.title + '» è solo su questo dispositivo: il Chromecast trasmette i brani della libreria del Mac';
+  return SRV ? '' : NOMAC;
+}
 function castPick() {
-  if (au.webkitShowPlaybackTargetPicker) { try { au.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso'); } return; }
-  if (au.remote) au.remote.prompt().catch(e => { if (e && e.name !== 'AbortError') toast(isIOS || /Mac/.test(navigator.platform) ? 'Scegli l\'uscita dal Centro di Controllo (icona AirPlay)' : 'Nessun dispositivo trovato per la riproduzione'); });
+  if (RC.id) { toast('Suona su ' + RC.nome + ': l\'altoparlante si sceglie su quel dispositivo'); return; }
+  const el = au;
+  if (CAST.tipo === 'airplay') {
+    try { el.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso: scegli l\'uscita dal Centro di Controllo'); return; }
+    // Mac: da qui in poi un lettore solo (Safari non sempre dice se un brano audio è su AirPlay: meglio un mix in meno
+    // che la musica che torna alle casse del Mac al brano dopo)
+    if (!isIOS) { CAST.macUno = true; if (MIX.plan && !MIX.act) xfAbort(); }
+    if (!isIOS && MIX.on && !CAST.avviso) { CAST.avviso = true; toast('Con AirPlay scelto da qui i brani cambiano senza mix a tempo. Per tenerlo, scegli l\'altoparlante dal Centro di Controllo del Mac (Suono)', true); }
+    return;
+  }
+  if (CAST.tipo !== 'chromecast') return;
+  if (!rpAttivo(el) && !castSorgenteOk(el)) {
+    const p = castPerche(el);
+    if (p) { toast(p, true); return; }
+    // brano salvato su questo computer: si riprende dal Mac dallo stesso punto, poi si può trasmettere
+    const suonava = !au.paused, pos = au.currentTime || 0;
+    CAST.chiesto = Date.now();
+    load(S.qi, false, pos).then(() => { if (suonava) au.play().catch(() => {}); });
+    toast('Il brano ora arriva dal Mac: tocca di nuovo il tasto Chromecast');
+    return;
+  }
+  let pr; try { pr = el.remote.prompt(); } catch (e) { pr = Promise.reject(e); }
+  pr.catch(e => {
+    const n = e && e.name;
+    if (n === 'NotAllowedError' || n === 'AbortError') return;   // scelta annullata
+    toast(n === 'NotFoundError' ? 'Nessun Chromecast trovato su questa rete' : n === 'NotSupportedError' ? castPerche(el) || 'Questo brano non si può trasmettere' : 'Chromecast non disponibile adesso');
+  });
 }
-function castMark() {
-  const on = !!au.webkitCurrentPlaybackTargetIsWireless || (au.remote && au.remote.state === 'connected');
-  $('bCast').classList.toggle('on', on);
+function castMostra() {
+  const b = $('bCast'); if (!b) return;
+  if (!CAST.tipo) { b.hidden = true; return; }
+  let vedi = false, on = false, ok = true;
+  if (!RC.id && CAST.tipo === 'airplay') { on = CAST.airplay; vedi = on || ALLAU.some(el => el._ap); }
+  else if (!RC.id) { on = rpAttivo(au); ok = on || castSorgenteOk(au); vedi = on || CAST.visto || (au._rp === null && ok && !!curId); }
+  if (b.hidden === vedi) b.hidden = !vedi;
+  b.classList.toggle('on', on);
+  const o = vedi && !ok ? '0.45' : ''; if (b.style.opacity !== o) b.style.opacity = o;   // c'è, ma questo brano no: il tocco spiega
+  const n = CAST.tipo === 'chromecast' ? 'ccast' : 'cast';
+  if (b.dataset.ic !== n) { b.dataset.ic = n; b.innerHTML = ic(n); }
+  const l = CAST.tipo === 'airplay' ? (on ? 'AirPlay attivo: tocca per cambiare altoparlante' : 'AirPlay: ascolta su un altoparlante, una TV o le cuffie')
+    : on ? 'Chromecast: in trasmissione, tocca per fermarla' : ok ? 'Chromecast: trasmetti questo brano' : 'Chromecast: questo brano non si può trasmettere, tocca per sapere perché';
+  if (b.getAttribute('aria-label') !== l) b.setAttribute('aria-label', l);
 }
-// tasto sempre visibile dove il browser sa scegliere l'uscita (Safari su iPhone, iPad e Mac; Chrome): l'elenco mostra anche questo dispositivo
-$('bCast').hidden = !(au.webkitShowPlaybackTargetPicker || au.remote);
-auOn('webkitcurrentplaybacktargetiswirelesschanged', castMark);
-if (au.remote) ['connect', 'connecting', 'disconnect'].forEach(n => au.remote.addEventListener(n, castMark));
+function castWireless() {   // Safari: un lettore è passato ad AirPlay o è tornato qui
+  const on = ALLAU.some(el => !!el.webkitCurrentPlaybackTargetIsWireless);
+  if (!isIOS) { if (on) CAST.macUno = true; else if (CAST.airplay) CAST.macUno = false; }   // Mac: spento AirPlay, il mix torna a due lettori
+  CAST.airplay = on; fuoriPresto();
+}
+function castGuarda(el) {   // Chrome: c'è un Chromecast per il brano di questo lettore? (null: non lo sa dire, es. Android con poca memoria)
+  el._rp = null;
+  try { el.remote.watchAvailability(v => { el._rp = !!v; if (v) CAST.visto = true; fuoriPresto(); }).catch(() => { el._rp = null; fuoriPresto(); }); } catch (e) {}
+}
+function castStato(el, n) {
+  if (n === 'connect') { CAST.el = el; CAST.chiesto = 0; if (MIX.plan && !MIX.act) xfAbort(); toast('In trasmissione sul Chromecast' + (MIX.on ? ': i brani cambiano senza mix a tempo' : '')); }
+  if (n === 'disconnect' && CAST.el === el) { CAST.el = null; if (el === au && curId) toast('Chromecast scollegato: la musica continua qui'); }
+  fuoriPresto();
+}
+function castSorgente(el) {   // brano nuovo sul lettore che trasmette
+  if (!rpAttivo(el) || !el.getAttribute('src') || castSorgenteOk(el)) return;
+  // il Chromecast non può averlo: la trasmissione si chiude (togliere e ridare il permesso la chiude) e il brano suona qui
+  const t = curId && TT(curId);
+  try { el.disableRemotePlayback = true; el.disableRemotePlayback = false; } catch (e) {}
+  castGuarda(el);
+  toast((t ? '«' + t.title + '»' : 'Questo brano') + ' non arriva al Chromecast: suona qui', true);
+}
+function castNota() {   // nella scheda «Riproduci su»: dove si scelgono altoparlanti e cuffie su questo dispositivo
+  const m = CAST.tipo === 'airplay' ? (isIOS ? 'Altoparlanti AirPlay, TV e cuffie Bluetooth: tasto AirPlay nel lettore o icona AirPlay nel Centro di Controllo. Si sposta tutto l\'audio dell\'app, mix a tempo compreso.'
+      : 'Altoparlanti AirPlay: tasto AirPlay nel lettore (poi i brani cambiano senza mix a tempo) o Centro di Controllo del Mac → Suono, che tiene anche il mix. Cuffie Bluetooth: dal Centro di Controllo.')
+    : CAST.tipo === 'chromecast' ? (DEV.tipo === 'android' ? 'Chromecast: tasto nel lettore per podcast e audiolibri; la musica del Mac passa dalla rete Tailscale, che il Chromecast non raggiunge (per il televisore: «Trasmetti schermo» nell\'app Google Home). Cuffie e altoparlanti Bluetooth: dalle impostazioni rapide del telefono.'
+      : 'Chromecast: tasto nel lettore (i brani arrivano dal Mac). Altoparlanti e cuffie: dalle impostazioni audio del computer.')
+    : 'Altoparlanti, cuffie Bluetooth e AirPlay si scelgono dalle impostazioni audio del sistema: l\'app segue l\'uscita scelta.';
+  return '<div class="grp"><div class="smsg" style="border-bottom:0"><b>Altoparlanti e cuffie</b>' + esc(m) + '</div></div>';
+}
+if (CAST.tipo === 'airplay') ALLAU.forEach(el => {
+  el._ap = !window.WebKitPlaybackTargetAvailabilityEvent;   // Safari senza l'evento: tasto sempre visibile, come prima
+  el.addEventListener('webkitplaybacktargetavailabilitychanged', e => { CAST.evento = true; el._ap = e.availability === 'available'; fuoriPresto(); });
+  el.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', castWireless);
+  // l'evento arriva quando un lettore ha un brano; se un Safari non lo manda mai, il tasto torna sempre visibile
+  el.addEventListener('loadedmetadata', () => setTimeout(() => { if (!CAST.evento) { ALLAU.forEach(x => { x._ap = true; }); fuoriPresto(); } }, 3000));
+});
+if (CAST.tipo === 'chromecast') ALLAU.forEach(el => {
+  castGuarda(el);
+  ['connecting', 'connect', 'disconnect'].forEach(n => el.remote.addEventListener(n, () => castStato(el, n)));
+  el.addEventListener('loadstart', () => castSorgente(el));
+});
+// il videoclip (muto) non va mai su AirPlay o Chromecast: sul Mac ruberebbe l'altoparlante alla musica, in Chrome avrebbe un suo tasto
+try { VID.el.disableRemotePlayback = true; VID.el.setAttribute('x-webkit-airplay', 'deny'); VID.el.setAttribute('x-webkit-wirelessvideoplaybackdisabled', ''); } catch (e) {}
+fuoriPresto();   // dopo l'avvio della pagina (il tasto qui sotto riceve la sua icona prima)
+
+/* ---------- condivisione ---------- */
 async function shareTrack(id) {
   const t = TT(id); if (!t) return;
   const who = t.artist || UNK_ART, url = 'https://music.apple.com/it/search?term=' + encodeURIComponent(t.title + ' ' + (t.artist || ''));
