@@ -3045,8 +3045,10 @@ def main():
     ap.add_argument("--chiave", help="chiave privata del certificato")
     ap.add_argument("--video-dir", default=CONF["video_dir"], help="dove salvare video e audio scaricati con yt-dlp")
     ap.add_argument("--libri-dir", default=CONF["libri_dir"], help="dove salvare gli audiolibri creati con la voce del Mac")
-    ap.add_argument("--musica-dir", default=CONF["musica_dir"], help="dove salvare i brani scaricati da internet "
-                    "(fa parte della libreria)")
+    # anche da ATLANTE_MUSICA_DIR (come ATLANTE_ASCOLTO): nel LaunchAgent una versione vecchia del server la ignora,
+    # mentre un argomento che non conosce la farebbe uscire subito (e l'aggiornamento automatico tornerebbe indietro)
+    ap.add_argument("--musica-dir", default=os.environ.get("ATLANTE_MUSICA_DIR") or CONF["musica_dir"],
+                    help="dove salvare i brani scaricati da internet (fa parte della libreria; anche ATLANTE_MUSICA_DIR)")
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
