@@ -22,7 +22,7 @@ import threading
 import time
 import unittest
 import unittest.mock
-from urllib.parse import quote as _quote
+from urllib.parse import quote as _quote, urlsplit
 
 QUI =os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(QUI, "musica_libreria.py")
@@ -634,6 +634,10 @@ class TestExtra(unittest.TestCase):
 
     # ----- dispositivi (telecomando) -----
 
+    def test_gestione_senza_indirizzo_pubblico(self):
+        r = self.s.json("POST", "/api/extra/gestione/persone", {"nome": "Ida"}, codice=409)
+        self.assertIn("ATLANTE_PUBBLICO", r["errore"])
+
     def test_dispositivi(self):
         iphone, mac = "iphone-prova-0001", "mac-prova-00000001"
         stato = {"brano": {"sid": "abc", "titolo": "Without Me", "artista": "Eminem"}, "suona": True, "t": 12.5,
@@ -1101,7 +1105,7 @@ class TestAccesso(unittest.TestCase):
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="atlante-accesso-")
         cls.c = prepara_cartelle(cls.base)
-        cls.s = Server(cls.base, cls.c).avvia()
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
         cls.file = os.path.join(cls.c["cache"], "accesso.json")
         # le persone si preparano da qui, sullo stesso file del server (che lo rilegge quando cambia)
         sys.dont_write_bytecode = True
@@ -1448,6 +1452,67 @@ class TestAccesso(unittest.TestCase):
         self.assertEqual(anna("POST", "/api/extra/dispositivi/franca-telefono-1/comando", {"azione": "pause"})[0], 200)
         self.assertEqual(anna("GET", "/api/extra/dispositivi/franca-telefono-1/comandi?attesa=0")[1],
                          {"comandi": [{"azione": "pause"}]})
+
+    def test_9f_gestione_persone(self):
+        def samuele(metodo, p, corpo=None, codice=200):
+            return self.s.json(metodo, p, corpo, codice)
+
+        def biscotto_da(link, ip):
+            st, h, b = self.da_fuori("POST", urlsplit(link).path, b"", ip=ip, extra=dict(self.ORIGINE, **{"User-Agent": self.IPHONE}))
+            self.assertEqual(st, 200, b[:200])
+            return self.biscotto(h).split(";")[0].split("=", 1)[1]
+
+        r = samuele("POST", "/api/extra/gestione/persone", {"nome": "Gina"})
+        gina, link = r["persona"]["id"], r["invito"]["link"]
+        self.assertTrue(link.startswith("https://mac.esempio.ts.net:10000/accesso/invito/"), link)
+        v = biscotto_da(link, "203.0.113.120")
+        el = {x["id"]: x for x in samuele("GET", "/api/extra/gestione/persone")["persone"]}
+        self.assertEqual([d["tipo"] for d in el[gina]["dispositivi"]], ["iphone"])
+        nuovo = samuele("POST", "/api/extra/gestione/persone/%s/invito" % gina)["invito"]["link"]
+        self.assertNotEqual(nuovo, link)
+        # le rotte della Gestione: solo Samuele, e solo dalla sua app
+        for metodo, rotta in (("GET", "persone"), ("GET", "richieste"), ("POST", "persone"), ("DELETE", "persone/" + gina)):
+            st, h, b = self.da_fuori(metodo, "/api/extra/gestione/" + rotta, {} if metodo == "POST" else None, biscotto=v,
+                                     extra=self.ORIGINE)
+            self.assertEqual(st, 403, rotta)
+        st, h, b = richiesta(self.s.porta, "POST", "/api/extra/gestione/persone", {"nome": "X"},
+                             intest={"Origin": "https://altro.example"})
+        self.assertEqual(st, 403)
+        # Gina chiede un invito per Marco; Samuele lo consente; Gina rivede il link da mandare
+        st, h, b = self.da_fuori("POST", "/api/extra/inviti", {"nome": "Marco"}, biscotto=v, extra={"Origin": self.ORIGINE["Origin"]})
+        self.assertEqual(st, 200, b[:200])
+        rid = json.loads(b.decode("utf-8"))["richiesta"]["id"]
+        rq = [x for x in samuele("GET", "/api/extra/gestione/richieste")["richieste"] if x["id"] == rid][0]
+        self.assertEqual((rq["nome"], rq["da"], rq["da_nome"], rq["stato"]), ("Marco", gina, "Gina", "attesa"))
+        marco = samuele("POST", "/api/extra/gestione/richieste/%s/consenti" % rid)
+        st, h, b = self.da_fuori("GET", "/api/extra/inviti", biscotto=v)
+        suoi = json.loads(b.decode("utf-8"))["inviti"]
+        self.assertEqual(suoi[0]["link"], marco["invito"]["link"])
+        self.assertNotIn("codice", suoi[0])
+        el = {x["id"]: x for x in samuele("GET", "/api/extra/gestione/persone")["persone"]}
+        self.assertEqual((el[marco["persona"]["id"]]["da"], el[marco["persona"]["id"]]["da_nome"]), (gina, "Gina"))
+        rid2 = json.loads(self.da_fuori("POST", "/api/extra/inviti", {"nome": "Nora"}, biscotto=v,
+                                        extra={"Origin": self.ORIGINE["Origin"]})[2].decode("utf-8"))["richiesta"]["id"]
+        self.assertEqual(samuele("POST", "/api/extra/gestione/richieste/%s/rifiuta" % rid2), {"ok": True})
+        samuele("POST", "/api/extra/gestione/richieste/%s/rifiuta" % rid2, codice=404)
+        # revoche: un dispositivo, poi la persona
+        did = v.split(".")[2]
+        self.assertEqual(samuele("DELETE", "/api/extra/gestione/dispositivi/" + did), {"ok": True})
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=v)[0], 401)
+        self.assertEqual(samuele("DELETE", "/api/extra/gestione/persone/" + gina), {"ok": True})
+        self.assertNotIn(gina, [x["id"] for x in samuele("GET", "/api/extra/gestione/persone")["persone"]])
+        samuele("DELETE", "/api/extra/gestione/persone/" + gina, codice=404)
+        # Samuele entrato con la password: i suoi dispositivi si vedono, ma non revoca quello che sta usando
+        self.assertEqual(self.imposta("password della prova gestione")[0], 0)
+        p = self.biscotto(self.entra("password della prova gestione", "203.0.113.121")[1]).split(";")[0].split("=", 1)[1]
+        chiave = "p:" + p.split(".")[1]
+        self.assertEqual(self.da_fuori("GET", "/api/extra/io", biscotto=p)[0], 200)
+        self.assertIn(chiave, [x["id"] for x in samuele("GET", "/api/extra/gestione/persone")["tuoi"]])
+        st, h, b = self.da_fuori("DELETE", "/api/extra/gestione/dispositivi/" + chiave, biscotto=p, extra={"Origin": self.ORIGINE["Origin"]})
+        self.assertEqual(st, 409)
+        self.assertIn("stai usando", json.loads(b.decode("utf-8"))["errore"])
+        self.assertEqual(samuele("DELETE", "/api/extra/gestione/dispositivi/" + chiave), {"ok": True})
+        self.assertEqual(self.da_fuori("GET", "/api/extra/io", biscotto=p)[0], 401)
 
 
 class FintaRichiesta:

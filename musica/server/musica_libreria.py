@@ -1981,6 +1981,82 @@ class Dispositivi:
 DISP = Dispositivi()
 
 
+def _link_invito(codice):
+    if not PUBBLICO:
+        raise ErroreExtra(409, "Manca l'indirizzo pubblico dell'app (ATLANTE_PUBBLICO): senza, il link non si apre da fuori")
+    return PUBBLICO + "accesso/invito/" + codice
+
+
+def _con_link(r):
+    """Una richiesta d'invito per l'app: il link al posto del codice, e il nome di chi l'ha chiesta."""
+    x = {k: v for k, v in r.items() if k != "codice"}
+    if r.get("codice"):
+        x["link"] = _link_invito(r["codice"])
+    x["da_nome"] = PERS.nome(r["da"])
+    return x
+
+
+def _chi_e(h):
+    return getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None, "chiave": None}
+
+
+def _gestione(h, metodo, resto, corpo):
+    """Gestione → Persone: inviti, nuovi link, richieste degli invitati, revoche. Solo Samuele."""
+    if _chi_e(h)["ruolo"] != "proprietario":
+        raise ErroreExtra(403, "Solo Samuele può usare la Gestione")
+    if metodo not in ("GET", "POST", "DELETE"):
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    if resto == ["persone"] and metodo == "GET":
+        el = PERS.elenco()
+        for x in el["persone"]:
+            if x.get("da"):
+                x["da_nome"] = PERS.nome(x["da"])
+        return _json(h, el)
+    if resto == ["persone"] and metodo == "POST":
+        persona = PERS.crea(corpo.get("nome"))
+        codice, scade = PERS.invito(persona["id"])
+        return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
+    if len(resto) == 3 and resto[0] == "persone" and resto[2] == "invito" and metodo == "POST":
+        codice, scade = PERS.invito(resto[1])
+        return _json(h, {"invito": {"link": _link_invito(codice), "scade": scade}})
+    if len(resto) == 2 and resto[0] == "persone" and metodo == "DELETE":
+        if not PERS.revoca_persona(resto[1]):
+            raise ErroreExtra(404, "Persona sconosciuta")
+        return _json(h, {"ok": True})
+    if len(resto) == 2 and resto[0] == "dispositivi" and metodo == "DELETE":
+        if resto[1] == _chi_e(h)["chiave"]:
+            raise ErroreExtra(409, "Questo è il dispositivo che stai usando")
+        if not PERS.revoca_dispositivo(resto[1]):
+            raise ErroreExtra(404, "Dispositivo sconosciuto")
+        return _json(h, {"ok": True})
+    if resto == ["richieste"] and metodo == "GET":
+        return _json(h, {"richieste": [_con_link(r) for r in PERS.richieste()]})
+    if len(resto) == 3 and resto[0] == "richieste" and metodo == "POST" and resto[2] in ("consenti", "rifiuta"):
+        if resto[2] == "rifiuta":
+            if not PERS.rifiuta(resto[1]):
+                raise ErroreExtra(404, "Richiesta sconosciuta o già decisa")
+            return _json(h, {"ok": True})
+        persona, codice, scade = PERS.consenti(resto[1])
+        return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/%s" % "/".join(resto))
+
+
+def _inviti(h, metodo, corpo):
+    """«Invita un amico»: un invitato chiede, Samuele decide in Gestione; Samuele invita subito."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        if metodo == "GET":
+            return _json(h, {"inviti": [_con_link(r) for r in PERS.richieste_di(chi["persona"])]})
+        return _json(h, {"richiesta": _con_link(PERS.richiedi(chi["persona"], corpo.get("nome")))})
+    if chi["ruolo"] != "proprietario":
+        raise ErroreExtra(403, "Gli inviti li chiedono Samuele e i suoi invitati")
+    if metodo == "GET":
+        return _json(h, {"inviti": []})
+    persona = PERS.crea(corpo.get("nome"))
+    codice, scade = PERS.invito(persona["id"])
+    return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
+
+
 def _di(h):
     """Di chi sono i dispositivi di questa richiesta: "p" (Samuele, anche dalla rete di casa) o l'id dell'invitato."""
     chi = getattr(h, "_chi", None)
@@ -3229,6 +3305,11 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "clip" and len(resto) == 1:
         solo("GET")
         _json(h, _clip_brano(resto[0]))
+    elif cosa == "gestione":
+        _gestione(h, metodo, resto, corpo)
+    elif cosa == "inviti" and not resto:
+        solo("GET", "POST")
+        _inviti(h, metodo, corpo)
     elif cosa == "io" and not resto:   # chi è questo dispositivo: l'app mostra la Gestione o le funzioni degli invitati
         solo("GET")
         chi = getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None}
@@ -3343,6 +3424,7 @@ RETI_TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("f
 # persone invitate da Samuele: ognuna entra con il suo link (vedi Persone)
 PERS = None                       # Persone, preparato da main()
 PROPRIETARI = set()               # login Tailscale di Samuele (ATLANTE_PROPRIETARI); vuoto: tutta la rete Tailscale
+PUBBLICO = ""                     # indirizzo dell'app da Internet (Funnel) per i link d'invito (--pubblico, ATLANTE_PUBBLICO)
 INVITO_DURATA = 7 * 86400         # un link d'invito non usato scade dopo una settimana
 COLLEGAMENTO_DURATA = 15 * 60     # codice per l'app sulla schermata Home dell'iPhone (biscotti separati da Safari)
 COLLEGAMENTO_ALFABETO = "ACDEFGHJKMNPQRTUVWXY3479"   # niente lettere e cifre che si confondono (0/O, 1/I, 5/S…)
@@ -4246,7 +4328,7 @@ def _imposta_password(file):
 
 
 def main():
-    global ACC, CLIP, PERS, PROPRIETARI
+    global ACC, CLIP, PERS, PROPRIETARI, PUBBLICO
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -4274,6 +4356,9 @@ def main():
     ap.add_argument("--ia-modello", default="", help="modello di Ollama per l'IA locale, es. llama3.2 "
                     "(predefinito: il primo installato)")
     ap.add_argument("--ia-indirizzo", default=CONF["ia_indirizzo"], help="indirizzo di Ollama sul Mac")
+    ap.add_argument("--pubblico", default=os.environ.get("ATLANTE_PUBBLICO", ""),
+                    help="indirizzo dell'app da Internet (tailscale funnel), es. https://mac-mini.tailnet.ts.net:10000/, "
+                    "per i link d'invito (anche ATLANTE_PUBBLICO)")
     ap.add_argument("--imposta-password", action="store_true", help="imposta (o cambia) la password per aprire l'app "
                     "da Internet con `tailscale funnel` e esce; la legge da tastiera o dalla prima riga dello standard input")
     a = ap.parse_args()
@@ -4286,6 +4371,9 @@ def main():
     PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
+    PUBBLICO = a.pubblico.strip()
+    if PUBBLICO and not PUBBLICO.endswith("/"):
+        PUBBLICO += "/"
     indirizzo = a.indirizzo.strip()
     if indirizzo and not indirizzo.endswith("/"):
         indirizzo += "/"
