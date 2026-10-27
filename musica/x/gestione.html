@@ -69,6 +69,9 @@
   <h2 class="h2" id="classifiche">Classifiche e playlist</h2>
   <p class="small">I brani delle classifiche più note (ogni settimana), poi delle playlist più seguite di Spotify e YouTube Music, sempre nella versione explicit, entrano da soli nella libreria.</p>
   <div id="cl"><p class="small">Un momento…</p></div>
+  <h2 class="h2">Ascolti in Atlante</h2>
+  <p class="small">Le stesse classifiche che vedono tutti: di una persona si vede solo quello che ha scelto di condividere.</p>
+  <div class="list" id="alist"></div>
 </div>
 <script src="kit.js"></script>
 <script>
@@ -199,6 +202,22 @@ $('invita').onclick = async () => {
 };
 $('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('invita').click(); });
 disegna();
+
+// ascolti: le classifiche di tutti e chi condivide i suoi; gli ascolti di chi non li condivide non arrivano qui
+async function ascolti() {
+  let j;
+  try { j = await api('ascoltati'); }
+  catch (e) { $('alist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le classifiche</b><span>' + esc(e.message) + '</span></span></div>'; return; }
+  const riga = (x, i) => '<div class="row"><span class="av" style="background:var(--fill);color:var(--fg2)">' + (i + 1) + '</span><span class="tx"><b>' + esc(x.titolo || 'Brano') + '</b><span>' +
+    esc(x.artista || '') + (x.ascolti ? ' · ' + x.ascolti + (x.ascolti === 1 ? ' ascolto' : ' ascolti') : '') + '</span></span></div>';
+  const titolo = (t, sotto) => '<div class="row"><span class="tx"><b>' + t + '</b>' + (sotto ? '<span>' + sotto + '</span>' : '') + '</span></div>';
+  const vuota = 'Nessun brano ascoltato da almeno ' + j.soglia + ' persone, per ora';
+  $('alist').innerHTML = titolo('Questa settimana', j.settimana.length ? '' : vuota) + j.settimana.slice(0, 10).map(riga).join('') +
+    titolo('Questo mese', j.mese.length ? '' : vuota) + j.mese.slice(0, 10).map(riga).join('') +
+    titolo('Chi condivide i suoi ascolti', (j.condivisi.length ? j.condivisi.map(c => esc(c.nome)).join(', ') : 'Nessuno, per ora') + (j.io.condivido ? ' · anche tu' : '')) +
+    j.condivisi.map(c => titolo('Cosa ascolta ' + esc(c.nome)) + c.brani.slice(0, 5).map(riga).join('')).join('');
+}
+ascolti();
 </script>
 <script>
 'use strict';

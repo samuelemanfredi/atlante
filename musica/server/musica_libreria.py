@@ -4075,6 +4075,508 @@ def _gestione_classifiche(h, metodo, resto, corpo):
     raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/classifiche/%s" % "/".join(resto))
 
 
+# ----- brani ascoltati: classifiche e consigli tra le persone -----
+#
+# L'app dice al Mac mini quando un brano del catalogo ha suonato davvero (la stessa regola che lo salva sul telefono).
+# Qui si contano gli ascolti per persona ("p" = Samuele, anche dalla rete di casa; l'id per un invitato) e per giorno, in
+# <cache>/ascoltati.json (lo legge solo il proprietario), al più per 2 anni. Da lì:
+#   - «I più ascoltati in Atlante» della settimana e del mese (ultimi 7 e 30 giorni): ogni persona conta al più
+#     ASCOLTATI_TETTO volte per brano a settimana, così chi ripete un brano tutto il giorno non lo porta da solo in cima;
+#   - «Chi ascolta questo brano ascolta anche…»;
+#   - «Per te»: somiglianza del coseno tra le persone, poi i brani delle più simili mai sentiti (ricalcolo ogni notte);
+#   - «Cosa ascolta Anna» e «Consigliato da Anna» solo per chi accende «Condividi i miei ascolti».
+# Nelle parti anonime un brano compare solo se l'hanno ascoltato almeno ASCOLTATI_SOGLIA persone diverse: con poche
+# persone un «chi ascolta questo ascolta anche…» direbbe chi è stato. Nessuna rotta dà ad altri (Samuele compreso) gli
+# ascolti di una persona che non li condivide. Una persona revocata esce subito da tutto, e di notte anche dal file.
+#
+#   GET    ascoltati                      {io, settimana, mese, per_te, condivisi, soglia, giorno} per chi chiede
+#   POST   ascoltati {ascolti:[{brano, giorno}]}  (o {brano, giorno}) -> {contati, scartati}
+#   POST   ascoltati/condividi {si}       -> {condivido}
+#   DELETE ascoltati                      cancella dal Mac mini i propri ascolti -> {ok, cancellati}
+#   GET    ascoltati/anche/<brano>        -> {brani:[...]}
+
+ASCOLTATI = None                  # Ascoltati, preparato da main() con avvia_ascoltati
+ASCOLTATI_GIORNI = 730            # al più 2 anni di ascolti
+ASCOLTATI_SOGLIA = 3              # persone diverse perché un brano compaia nelle parti anonime (soglia da confermare)
+ASCOLTATI_TETTO = 3               # volte che una persona conta per un brano in una settimana
+ASCOLTATI_SETTIMANA = 7
+ASCOLTATI_MESE = 30
+ASCOLTATI_GIORNO_MAX = 1000       # ascolti contati per persona in un giorno (un'app impazzita non riempie il file)
+ASCOLTATI_LOTTO = 500             # ascolti in una richiesta (quelli fatti senza rete arrivano insieme)
+ASCOLTATI_SALVA = 5               # secondi: le scritture vicine (tanti ascolti insieme) diventano una sola
+ASCOLTATI_ELENCO = 50             # brani di una classifica
+ASCOLTATI_PER_TE = 30
+ASCOLTATI_ANCHE = 20
+ASCOLTATI_CONDIVISI = 20          # brani di «Cosa ascolta Anna»
+ASCOLTATI_VICINI = 20             # persone più simili da cui vengono i consigli
+ASCOLTATI_TENUTI = 300            # brani candidati tenuti per persona tra un calcolo e l'altro
+ASCOLTATI_RICHIESTA = 600         # secondi: chi non aveva consigli li richiede al più così spesso (prima della notte)
+ASCOLTATI_NOTTE = 4               # ora del ricalcolo dei consigli
+ASCOLTATI_ID = re.compile(r"^[0-9a-f]{16}$")   # id di un brano del catalogo
+
+
+def _asc_giorno(k=0):
+    """Il giorno di k giorni fa (0 = oggi, -1 = domani; ora del Mac) come «AAAA-MM-GG»."""
+    t = time.localtime(time.time())
+    return time.strftime("%Y-%m-%d", time.localtime(time.mktime((t.tm_year, t.tm_mon, t.tm_mday - k, 12, 0, 0, 0, 0, -1))))
+
+
+def _asc_persone():
+    """Chi conta: Samuele ("p") e gli invitati non revocati; None se non si sa (archivio delle persone illeggibile)."""
+    if PERS is None:
+        return None
+    ids = {x["id"] for x in PERS.elenco()["persone"]}
+    return None if PERS.rotto and not ids else ids | {"p"}
+
+
+def _asc_nome(pid):
+    return "Samuele" if pid == "p" else (PERS.nome(pid) if PERS is not None else "")
+
+
+_ASC_CAT = [None, 0, {}]   # (indice della libreria, brani, {id: voce}): si rifà quando il Mac rilegge il disco
+
+
+def _asc_catalogo():
+    """I brani noti al Mac, anche di un disco scollegato (ascolti fatti senza rete dai brani sul telefono): per scartare
+    gli id inventati e per i titoli."""
+    if LIB is None:
+        return None
+    v, n = LIB.vecchie, len(LIB.brani)
+    if _ASC_CAT[0] is not v or _ASC_CAT[1] != n:
+        d = {x["id"]: x for x in list(v.values())}
+        d.update(LIB.brani)
+        _ASC_CAT[:] = [v, n, d]
+    return _ASC_CAT[2]
+
+
+def _asc_consigli(chi, vett):
+    """Consigli per le persone `chi`: somiglianza del coseno tra i loro ascolti e quelli degli altri, poi i brani delle
+    ASCOLTATI_VICINI persone più simili che loro non hanno mai sentito, ognuno con il contributo di ogni persona simile.
+    -> ({persona: {brano: {vicino: punteggio}}}, {brano: persone che l'hanno ascoltato})"""
+    norme = {p: math.sqrt(sum(x * x for x in v.values())) for p, v in vett.items()}
+    asc = {}
+    for p, v in vett.items():
+        for b in v:
+            asc.setdefault(b, set()).add(p)
+    consigli = {}
+    for u in chi:
+        vu = vett.get(u)
+        if not vu:
+            consigli[u] = {}
+            continue
+        simili = []
+        for p, v in vett.items():
+            if p == u:
+                continue
+            a, b = (vu, v) if len(vu) <= len(v) else (v, vu)
+            dot = sum(x * b.get(k, 0) for k, x in a.items())
+            if dot > 0:
+                simili.append((dot / (norme[u] * norme[p]), p))
+        simili.sort(key=lambda x: (-x[0], x[1]))
+        contributi = {}
+        for s, p in simili[:ASCOLTATI_VICINI]:
+            for b, x in vett[p].items():
+                if b not in vu:
+                    contributi.setdefault(b, {})[p] = s * x
+        # si tengono i migliori: quelli che già ora si possono mostrare e, a parte, quelli di una persona sola (si
+        # mostrano se lei accende la condivisione)
+        ordine = sorted(contributi, key=lambda b: (-sum(contributi[b].values()), b))
+        tenuti = [b for b in ordine if len(asc[b]) >= ASCOLTATI_SOGLIA][:ASCOLTATI_TENUTI]
+        tenuti += [b for b in ordine if len(asc[b]) < ASCOLTATI_SOGLIA][:ASCOLTATI_TENUTI]
+        consigli[u] = {b: contributi[b] for b in tenuti}
+    return consigli, asc
+
+
+def _asc_dormi_fino(ora):
+    t = time.localtime()
+    fine = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, ora, 0, 0, 0, 0, -1))
+    if fine <= time.time() + 60:
+        fine = time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, ora, 0, 0, 0, 0, -1))
+    while time.time() < fine:   # a pezzi: dopo uno stop del Mac conta l'orologio, non il tempo passato sveglio
+        time.sleep(min(600, max(1, fine - time.time())))
+
+
+class Ascoltati:
+    """Ascolti per persona e giorno ({persona: {giorno: {brano: volte}}}), chi li condivide e i consigli calcolati.
+    `persone`, `nome` e `catalogo` (per le prove) sostituiscono l'archivio delle persone e la libreria del Mac."""
+
+    def __init__(self, file, persone=None, nome=None, catalogo=None):
+        self.file = file
+        self.blocco = threading.RLock()
+        self.persone = persone or _asc_persone
+        self._sicuro = (lambda: True) if persone else (lambda: PERS is not None and not PERS.rotto)
+        self.nome = nome or _asc_nome
+        self.catalogo = catalogo or _asc_catalogo
+        self.conti, self.condivide = {}, {}
+        self.versione, self.salvato, self._sporco, self._timer = 0, 0.0, False, None
+        self._oggi, self._domani, self._g, self._k = None, None, [], {}   # giorni dal più recente; giorno -> giorni fa
+        self._vett = {}       # persona -> {brano: ascolti dei 2 anni, al più ASCOLTATI_TETTO a settimana}
+        self.consigli, self.ascoltatori, self.calcolati = {}, {}, {}
+        self._durante = None    # chi cancella i suoi ascolti mentre si ricalcolano i consigli
+        self._cache = None
+        self._leggi()
+
+    # --- file ---
+
+    def _leggi(self):
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("non è un oggetto")
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            # rovinato: lo si mette da parte invece di sovrascriverlo con un archivio vuoto
+            print("Atlante: %s non si legge (%s): lo metto da parte in .rotto" % (self.file, e), flush=True)
+            try:
+                os.replace(self.file, self.file + ".rotto")
+            except OSError:
+                pass
+            return
+        conti = d.get("conti") if isinstance(d.get("conti"), dict) else {}
+        for p, giorni in conti.items():
+            for g, brani in (giorni.items() if isinstance(giorni, dict) else ()):
+                buoni = {b: n for b, n in (brani.items() if isinstance(brani, dict) else ())
+                         if ASCOLTATI_ID.match(str(b)) and type(n) is int and n > 0}
+                if buoni:
+                    self.conti.setdefault(str(p), {})[str(g)] = buoni
+        if isinstance(d.get("condivide"), dict):
+            self.condivide = {str(p): t for p, t in d["condivide"].items()}
+
+    def _scrivi(self):
+        self._sporco, self.salvato = False, time.time()
+        os.makedirs(os.path.dirname(self.file) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (self.file, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"versione": 1, "conti": self.conti, "condivide": self.condivide}, f, ensure_ascii=False,
+                          separators=(",", ":"))
+            os.replace(tmp, self.file)
+        except BaseException:
+            self._sporco = True
+            _cancella(tmp)
+            raise
+
+    def _salva_presto(self):
+        """Su disco subito, o al più tardi tra ASCOLTATI_SALVA secondi se si è appena scritto."""
+        self._sporco = True
+        attesa = self.salvato + ASCOLTATI_SALVA - time.time()
+        try:
+            if attesa <= 0:
+                self._scrivi()
+                return
+        except OSError as e:   # disco pieno: gli ascolti restano in memoria, si riprova alla prossima
+            print("Atlante: ascolti non salvati: %s" % e, flush=True)
+            attesa = ASCOLTATI_SALVA
+        if self._timer is None:
+            self._timer = threading.Timer(attesa, self._salva_dopo)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _salva_dopo(self):
+        with self.blocco:
+            self._timer = None
+            if self._sporco:
+                try:
+                    self._scrivi()
+                except OSError as e:
+                    print("Atlante: ascolti non salvati: %s" % e, flush=True)
+
+    def salva(self):
+        with self.blocco:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self._sporco:
+                self._scrivi()
+
+    # --- conti ---
+
+    def _giorno_nuovo(self):
+        """A ogni giorno nuovo le settimane (contate all'indietro da oggi) cambiano: si rifanno i conti dei 2 anni."""
+        oggi = _asc_giorno(0)
+        if oggi == self._oggi:
+            return
+        self._g = [_asc_giorno(k) for k in range(ASCOLTATI_GIORNI)]
+        self._k = {g: k for k, g in enumerate(self._g)}
+        self._oggi, self._domani = oggi, _asc_giorno(-1)
+        self._vett = {p: self._vettore(p) for p in self.conti}
+        self._cache = None
+
+    def _vettore(self, p, giorni=None):
+        """{brano: ascolti} di una persona negli ultimi `giorni` giorni (i 2 anni se None), al più ASCOLTATI_TETTO per
+        brano in ogni settimana."""
+        mie, blocchi = self.conti.get(p, {}), {}
+        el = ((self._k.get(g), br) for g, br in mie.items()) if giorni is None else ((k, mie.get(self._g[k])) for k in range(giorni))
+        for k, br in el:
+            if k is None or not br:
+                continue
+            for b, n in br.items():
+                blocchi[(b, k // 7)] = blocchi.get((b, k // 7), 0) + n
+        v = {}
+        for (b, _), n in blocchi.items():
+            v[b] = v.get(b, 0) + min(ASCOLTATI_TETTO, n)
+        return v
+
+    def _valide(self):
+        chi = self.persone()
+        return {p for p in self.conti if chi is None or p in chi}
+
+    def ascolta(self, pid, voci):
+        """Ascolti di una persona: [{brano, giorno «AAAA-MM-GG» (oggi se manca)}]. -> (contati, scartati)"""
+        with self.blocco:
+            self._giorno_nuovo()
+            chi = self.persone()
+            if chi is not None and pid not in chi:
+                return 0, len(voci)
+            cat = self.catalogo() or {}
+            giorni, contati = self.conti.setdefault(pid, {}), 0
+            for x in voci:
+                b = x.get("brano") if isinstance(x, dict) else None
+                g = (x.get("giorno") or self._oggi) if isinstance(x, dict) else None
+                if g == self._domani:
+                    g = self._oggi   # telefono in un altro fuso orario: per il Mac è ancora oggi
+                if not isinstance(b, str) or not ASCOLTATI_ID.match(b) or not isinstance(g, str) or g not in self._k \
+                        or (cat and b not in cat) or sum(giorni.get(g, {}).values()) >= ASCOLTATI_GIORNO_MAX:
+                    continue
+                s = self._k[g] // 7   # la sua settimana: il tetto vale lì
+                prima = sum(giorni.get(self._g[k], {}).get(b, 0) for k in range(s * 7, min(s * 7 + 7, ASCOLTATI_GIORNI)))
+                br = giorni.setdefault(g, {})
+                br[b] = br.get(b, 0) + 1
+                if prima < ASCOLTATI_TETTO:
+                    v = self._vett.setdefault(pid, {})
+                    v[b] = v.get(b, 0) + 1
+                contati += 1
+            if not giorni:
+                del self.conti[pid]
+            if contati:
+                self.versione += 1
+                self._salva_presto()
+            return contati, len(voci) - contati
+
+    def condividi(self, pid, si):
+        with self.blocco:
+            if si:
+                self.condivide.setdefault(pid, time.time())
+            else:
+                self.condivide.pop(pid, None)
+            self.versione += 1
+            self._scrivi()   # subito: chi la spegne vuole che il nome sparisca, anche dopo un riavvio del Mac
+            return pid in self.condivide
+
+    def _dimentica(self, pid):
+        """Via una persona dai consigli già calcolati: i suoi e il suo contributo a quelli degli altri."""
+        self.consigli.pop(pid, None)
+        self.calcolati.pop(pid, None)
+        for c in self.consigli.values():
+            for b in [b for b, cs in c.items() if cs.pop(pid, None) is not None and not cs]:
+                del c[b]
+        for s in self.ascoltatori.values():
+            s.discard(pid)
+
+    def cancella(self, pid):
+        """Il tasto «Cancella i miei ascolti»: via dal file (subito) e da classifiche e consigli. -> ascolti cancellati"""
+        with self.blocco:
+            n = sum(sum(br.values()) for br in self.conti.pop(pid, {}).values())
+            self._vett.pop(pid, None)
+            self._dimentica(pid)
+            if self._durante is not None:
+                self._durante.add(pid)
+            self.versione += 1
+            self._scrivi()
+            return n
+
+    def pulisci(self):
+        """Di notte (e all'avvio): via i giorni di più di 2 anni fa e gli ascolti delle persone revocate (non se
+        l'archivio delle persone non si legge: sembrerebbero revocate tutte)."""
+        with self.blocco:
+            self._giorno_nuovo()
+            chi = self.persone()
+            if not self._sicuro():
+                chi = None
+            via = False
+            for p in list(self.conti):
+                if chi is not None and p not in chi:
+                    del self.conti[p]
+                    self._vett.pop(p, None)
+                    self.condivide.pop(p, None)
+                    self._dimentica(p)
+                    via = True
+                    continue
+                for g in [g for g in self.conti[p] if g not in self._k]:
+                    del self.conti[p][g]
+                    via = True
+                if not self.conti[p]:
+                    del self.conti[p]
+            if via:
+                self.versione += 1
+                self._vett = {p: self._vettore(p) for p in self.conti}
+                self._scrivi()
+
+    # --- classifiche e consigli ---
+
+    def _classifica(self, giorni, valide):
+        tot, quanti = {}, {}
+        for p in valide:
+            for b, n in self._vettore(p, giorni).items():
+                tot[b] = tot.get(b, 0) + n
+                quanti[b] = quanti.get(b, 0) + 1
+        return sorted(((b, n) for b, n in tot.items() if quanti[b] >= ASCOLTATI_SOGLIA), key=lambda x: (-x[1], x[0]))
+
+    @staticmethod
+    def _voce(b, cat, **extra):
+        x = cat.get(b) or {}
+        return dict({"brano": b, "titolo": x.get("title") or "", "artista": x.get("artist") or "",
+                     "album": x.get("album") or "", "copertina": x.get("cover")}, **extra)
+
+    def _voci(self, el, cat, quanti):
+        return [self._voce(b, cat, ascolti=n) for b, n in el if not cat or b in cat][:quanti]
+
+    def classifiche(self, pid):
+        """Tutto quello che vede `pid`: le classifiche (uguali per tutti), i suoi consigli, chi condivide, i suoi numeri."""
+        with self.blocco:
+            self._giorno_nuovo()
+            valide = self._valide()
+            cat = self.catalogo() or {}
+            chiave = (self.versione, self._oggi, frozenset(valide))
+            if self._cache is None or self._cache[0] != chiave:
+                self._cache = (chiave, self._classifica(ASCOLTATI_SETTIMANA, valide), self._classifica(ASCOLTATI_MESE, valide),
+                               {p: sorted(self._vettore(p, ASCOLTATI_MESE).items(), key=lambda x: (-x[1], x[0]))
+                                for p in valide if p in self.condivide})
+            _, sett, mese, cond = self._cache
+            condivisi = []
+            for p, el in cond.items():
+                nome, brani = self.nome(p), self._voci(el, cat, ASCOLTATI_CONDIVISI)
+                if p != pid and nome and brani:
+                    condivisi.append({"nome": nome, "brani": brani})
+            condivisi.sort(key=lambda x: x["nome"].lower())
+            return {"io": {"condivido": pid in self.condivide, "nome": self.nome(pid),
+                           "ascolti": sum(sum(br.values()) for g, br in self.conti.get(pid, {}).items() if g in self._k)},
+                    "settimana": self._voci(sett, cat, ASCOLTATI_ELENCO), "mese": self._voci(mese, cat, ASCOLTATI_ELENCO),
+                    "per_te": self._per_te(pid, valide, cat), "condivisi": condivisi,
+                    "soglia": ASCOLTATI_SOGLIA, "giorno": self._oggi}
+
+    def _per_te(self, u, valide, cat):
+        mie = self._vett.get(u)
+        if not mie:
+            return []
+        if u not in self.consigli or (not self.consigli[u] and time.time() - self.calcolati.get(u, 0) > ASCOLTATI_RICHIESTA):
+            # arrivato dopo il calcolo della notte (o allora non aveva ascolti): i suoi consigli subito
+            vett = {p: v for p, v in self._vett.items() if p in valide and v}
+            c, self.ascoltatori = _asc_consigli([u], vett)
+            self.consigli[u], self.calcolati[u] = c[u], time.time()
+        out = []
+        for b, cs in self.consigli[u].items():
+            if b in mie:
+                continue   # sentito dopo il calcolo
+            cs = {v: s for v, s in cs.items() if v in valide}
+            cond = [v for v in cs if v in self.condivide]
+            # anonimo solo se l'hanno ascoltato in abbastanza; se no, solo con il nome di chi lo condivide
+            if not cs or (not cond and len(self.ascoltatori.get(b, set()) & valide) < ASCOLTATI_SOGLIA):
+                continue
+            out.append((-sum(cs.values()), b, max(cond, key=lambda v: (cs[v], v)) if cond else None))
+        out.sort(key=lambda x: (x[0], x[1]))
+        return [self._voce(b, cat, da=self.nome(da) if da else None) for _, b, da in out if not cat or b in cat][:ASCOLTATI_PER_TE]
+
+    def ricalcola(self):
+        """I consigli di tutti (ogni notte e all'avvio). Si calcolano fuori dal blocco, sui conti di quel momento: chi
+        intanto cancella i suoi ascolti ne esce lo stesso."""
+        with self.blocco:
+            self._giorno_nuovo()
+            valide = self._valide()
+            vett = {p: dict(v) for p, v in self._vett.items() if p in valide and v}
+            self._durante = set()
+        try:
+            consigli, asc = _asc_consigli(sorted(vett), vett)
+        finally:
+            with self.blocco:
+                durante, self._durante = self._durante, None
+        with self.blocco:
+            ora = time.time()
+            self.consigli, self.ascoltatori, self.calcolati = consigli, asc, {p: ora for p in consigli}
+            for p in durante:
+                self._dimentica(p)
+
+    def anche(self, b):
+        """«Chi ascolta questo brano ascolta anche…»: i brani che con `b` hanno ascoltato almeno ASCOLTATI_SOGLIA persone."""
+        with self.blocco:
+            self._giorno_nuovo()
+            valide = self._valide()
+            cat = self.catalogo() or {}
+            chi = [p for p in valide if b in self._vett.get(p, {})]
+            if len(chi) < ASCOLTATI_SOGLIA:
+                return []
+            quanti, volte = {}, {}
+            for p in chi:
+                for y, n in self._vett[p].items():
+                    if y != b:
+                        quanti[y] = quanti.get(y, 0) + 1
+                        volte[y] = volte.get(y, 0) + n
+            el = sorted((y for y, q in quanti.items() if q >= ASCOLTATI_SOGLIA), key=lambda y: (-quanti[y], -volte[y], y))
+            return [self._voce(y, cat) for y in el if not cat or y in cat][:ASCOLTATI_ANCHE]
+
+    def avvia(self):
+        """Pulizia e ricalcolo dei consigli subito e poi ogni notte, in sottofondo."""
+        def ciclo():
+            while True:
+                try:
+                    self.pulisci()
+                    self.ricalcola()
+                except Exception as e:   # noqa: BLE001
+                    print("Atlante: consigli d'ascolto non ricalcolati: %s" % e, flush=True)
+                _asc_dormi_fino(ASCOLTATI_NOTTE)
+        threading.Thread(target=ciclo, daemon=True).start()
+
+
+def avvia_ascoltati(cache):
+    """Prepara i brani ascoltati (<cache>/ascoltati.json) e il ricalcolo dei consigli, subito e ogni notte."""
+    global ASCOLTATI
+    ASCOLTATI = Ascoltati(os.path.join(os.path.abspath(os.path.expanduser(cache)), "ascoltati.json"))
+    ASCOLTATI.avvia()
+    return ASCOLTATI
+
+
+def _ascoltati(h, metodo, resto, corpo):
+    """Rotte api/extra/ascoltati, per tutti (anche gli invitati): ognuno scrive e cancella solo i suoi. Dalla rete di
+    casa si conta come Samuele, ma senza cambiare la sua condivisione né cancellare i suoi ascolti."""
+    if ASCOLTATI is None:
+        raise ErroreExtra(503, "Le classifiche d'ascolto non sono pronte sul Mac")
+    pid, casa = _di(h), _chi_e(h)["ruolo"] == "casa"
+
+    def cambia():
+        if casa:
+            raise ErroreExtra(403, "Dalla rete di casa gli ascolti sono quelli di Samuele: per cambiarli apri l'app con Tailscale")
+
+    if not resto and metodo == "GET":
+        j = ASCOLTATI.classifiche(pid)
+        j["io"]["cambia"] = not casa
+        return _json(h, j)
+    if not resto and metodo == "POST":
+        voci = corpo.get("ascolti") if "ascolti" in corpo else [corpo]
+        if not isinstance(voci, list):
+            raise ErroreExtra(400, "ascolti: serve un elenco")
+        if len(voci) > ASCOLTATI_LOTTO:
+            raise ErroreExtra(413, "Troppi ascolti insieme (al più %d)" % ASCOLTATI_LOTTO)
+        contati, scartati = ASCOLTATI.ascolta(pid, voci)
+        return _json(h, {"contati": contati, "scartati": scartati})
+    if not resto and metodo == "DELETE":
+        cambia()
+        return _json(h, {"ok": True, "cancellati": ASCOLTATI.cancella(pid)})
+    if resto == ["condividi"] and metodo == "POST":
+        cambia()
+        return _json(h, {"condivido": ASCOLTATI.condividi(pid, corpo.get("si") is True)})
+    if len(resto) == 2 and resto[0] == "anche" and metodo == "GET":
+        if not ASCOLTATI_ID.match(resto[1]):
+            raise ErroreExtra(400, "Brano non valido")
+        return _json(h, {"brani": ASCOLTATI.anche(resto[1])})
+    if not resto or resto == ["condividi"] or (len(resto) == 2 and resto[0] == "anche"):
+        raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/ascoltati/%s" % "/".join(resto))
+
+
 # ----- voci e audiolibri con `say` -----
 
 _VOCI = {"t": 0.0, "say": "", "voci": []}
@@ -4776,6 +5278,8 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "clip" and len(resto) == 1:
         solo("GET")
         _json(h, _clip_brano(resto[0]))
+    elif cosa == "ascoltati":
+        _ascoltati(h, metodo, resto, corpo)
     elif cosa == "gestione":
         _gestione(h, metodo, resto, corpo)
     elif cosa == "inviti" and not resto:
@@ -5827,7 +6331,8 @@ PERMESSE_INVITATI = re.compile(
     r"^/(?:|index\.html|sw\.js|manifest\.webmanifest|favicon\.ico|icon-(?:maskable-)?\d+\.png"
     r"|apple-touch-icon(?:-precomposed)?\.png|x/kit\.(?:js|css)|x/inviti\.html|x/idee\.html)$"
     r"|^(?:/.*)?/api/(?:musica/(?:catalogo|file/[^/]+|copertina/[^/]+|pezzo/[^/]+)"
-    r"|extra/(?:io|inviti|idee|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?))$")
+    r"|extra/(?:io|inviti|idee|clip|clip/file/[^/]+|clip/[^/]+|dispositivi(?:/[^/]+/(?:stato|comandi|comando))?)"
+    r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?)$")
 
 
 def _permesso(h):
@@ -5915,6 +6420,7 @@ def main():
     ACC = Accesso(file_accesso)
     PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
     IDEE = Idee(os.path.join(os.path.expanduser(a.cache), "idee.json"))
+    avvia_ascoltati(a.cache)   # brani ascoltati: classifiche e consigli tra le persone
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
     PUBBLICO = a.pubblico.strip()

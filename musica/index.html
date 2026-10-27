@@ -304,6 +304,13 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .trk .dl{color:var(--fg2);font-size:13px;flex:none}
 .dlbar{font-size:14px;color:var(--fg2);margin:-6px 0 12px}
 .trk.off .art,.trk.off .tx{opacity:.4}
+/* brani ascoltati in Atlante: classifiche e consigli */
+.asub{color:var(--fg2);font-size:15px;margin:-6px 0 10px}
+.aseg{display:inline-flex;background:var(--fill);border-radius:9px;padding:2px;margin:0 0 8px}
+.aseg button{padding:6px 14px;border-radius:7px;font-size:14px;font-weight:600;color:var(--fg2)}
+.aseg button.on{background:var(--sheet);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.grp>button>.art{width:40px;height:40px;border-radius:5px}.grp>button>.art svg{color:var(--phi)}
+.qasc{padding:18px 0 4px}.qasc h4{margin:0;font-size:17px}.qasc small{display:block;opacity:.6;font-size:13px}
 @media (prefers-reduced-motion:reduce){*{transition-duration:.01ms!important;animation:none!important}}
 </style>
 </head>
@@ -1332,6 +1339,7 @@ const pages = {
     if (P.length) h += '<h2 class="h2">Le tue playlist</h2><div class="shelf">' + P.map(p => { const tr = plTracks(p); return '<button class="tile" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<div class="n">' + esc(p.name) + '</div><div class="a">' + tr.length + ' brani</div></button>'; }).join('') + '</div>';
     const top = [...T.values()].filter(t => t.plays).sort((a, b) => b.plays - a.plays).slice(0, 8);
     if (top.length) h += '<h2 class="h2">I più ascoltati</h2>' + trackRows(top, {label:'I più ascoltati'});
+    h += ascHome();
     return h;
   },
   lib() {
@@ -1431,7 +1439,7 @@ const pages = {
       xmodsVisibili().map(g => '<h2 class="h2">' + g.g + '</h2><div class="xgrid">' + g.m.map(m =>
         '<button class="xtile' + (m.k === 'gestione' && (IO.nuove || {}).youtube_bloccato ? ' xyt' : '') + '" data-a="xopen" data-k="' + m.k + '"' + (m.k === 'gestione' && nuoveGestione() ? ' style="position:relative"' : '') + '><span class="xi" style="background:' + m.c + '">' + m.i + '</span><b>' + m.t + '</b><span>' + m.d + '</span>' +
           (m.k === 'gestione' && nuoveGestione() ? '<span class="xn" aria-label="cose nuove">' + nuoveGestione() + '</span>' : '') + '</button>').join('') + '</div>').join('') +
-      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, la tua interfaccia e la chat.</p>' : '');
+      (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: carica brani, la tua interfaccia e la chat.</p>' : '') + ascAltro();
   },
   search() {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
@@ -1623,8 +1631,8 @@ function updateNow() {
 }
 function renderQueue() {
   const up = S.queue.slice(S.qi + 1);
-  $('qlist').innerHTML = up.length ? up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; return '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
-    '<div class="qempty">Nessun brano in coda.' + (S.repeat === 'all' ? ' Si ricomincia dall\'inizio.' : '') + '</div>';
+  $('qlist').innerHTML = (up.length ? up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; return '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
+    '<div class="qempty">Nessun brano in coda.' + (S.repeat === 'all' ? ' Si ricomincia dall\'inizio.' : '') + '</div>') + ascLettore();
 }
 let dragging = false, lastSave = 0, lastPos = 0;
 function tick() {
@@ -1659,7 +1667,7 @@ function playedSecs() { let s = 0; const p = au.played; for (let i = 0; i < p.le
 function checkHeard() {
   if (!curId || keptFor === curId) return;
   const d = au.duration, need = isFinite(d) && d > 0 ? Math.min(HEARD, d / 2) : HEARD;
-  if (playedSecs() >= need) { keptFor = curId; keep(curId); }
+  if (playedSecs() >= need) { keptFor = curId; keep(curId); ascAscoltato(curId); }
 }
 auOn('timeupdate', checkHeard);
 auOn('loadedmetadata', () => { tick(); const t = T.get(curId); if (t && (!t.duration || Math.abs(t.duration - au.duration) > 2) && isFinite(au.duration)) { t.duration = au.duration; dbPut('meta', t).catch(() => {}); } });
@@ -2072,6 +2080,7 @@ function trackMenu(id, pl) {
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
     '<button data-a="m-artist" data-k="' + esc(primary(t)) + '"><span class="l">Vai all\'artista</span>' + ic('person') + '</button>' +
     '<button data-a="m-share" data-id="' + id + '"><span class="l">Condividi brano…</span>' + ic('share') + '</button>' +
+    (t.remote && ASC ? '<button data-a="asc-anche" data-id="' + id + '"><span class="l">Chi ascolta questo brano ascolta anche…</span>' + ic('person') + '</button>' : '') +
     (t.remote && !saved.has(id) && SRV ? '<button data-a="m-dl" data-id="' + id + '"><span class="l">Scarica sull\'iPhone</span>' + ic('down') + '</button>' : '') +
     (t.remote && saved.has(id) ? '<button data-a="m-undl" data-id="' + id + '"><span class="l">Togli dall\'iPhone</span>' + ic('trash') + '</button>' : '') +
     // i brani del Mac si modificano e si eliminano sul disco: qui le modifiche verrebbero sovrascritte dal catalogo
@@ -2677,6 +2686,178 @@ async function shareTrack(id) {
 }
 
 function toast(m, sticky) { const t = $('toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), sticky ? 8000 : 2400); }
+
+/* ---------- brani ascoltati in Atlante: classifiche e consigli tra le persone ---------- */
+// Quando un brano del Mac ha suonato davvero (la regola di checkHeard: HEARD secondi, la metà per i brani brevissimi)
+// l'app lo dice al Mac mini, che conta gli ascolti di ognuno (server: Ascoltati): «I più ascoltati in Atlante», «Per te»,
+// «Chi ascolta questo brano ascolta anche…» e «Cosa ascolta …» di chi condivide. Senza rete gli ascolti aspettano qui
+// (am-asc-coda, con il giorno in cui ci sono stati) e si mostra l'ultima classifica ricevuta (am-asc).
+let ASC = ls.get('am-asc', null);
+const ASCQ = ls.get('am-asc-coda', []);
+const ASCANCHE = ls.get('am-asc-anche', {});   // brano del catalogo -> {t, brani}: le ultime risposte, anche senza rete
+const ascChiesti = new Map();                  // brano -> quando si è chiesto «anche» al Mac (al più una volta al minuto)
+let ascInvio = false, ascCaricando = false;
+const ascRete = () => /^https?:$/.test(location.protocol) && !/claude\.ai$/.test(location.hostname);
+const ascOggi = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const ascSoglia = () => (ASC && ASC.soglia) || 3;
+const ascBrani = L => (L || []).map(x => T.get('r' + x.brano)).filter(Boolean);   // solo quelli che ci sono nella libreria
+function ascAscoltato(id) {
+  const t = T.get(id); if (!t || !t.remote || !t.sid) return;   // brani importati e podcast non sono nel catalogo del Mac
+  ASCQ.push({brano:t.sid, giorno:ascOggi()});
+  if (ASCQ.length > 2000) ASCQ.splice(0, ASCQ.length - 2000);
+  ls.set('am-asc-coda', ASCQ); ascInvia();
+}
+async function ascInvia() {
+  if (ascInvio || !ASCQ.length || !ascRete()) return;
+  ascInvio = true;
+  try {
+    while (ASCQ.length) {
+      const lotto = ASCQ.slice(0, 200);
+      const r = await fetchT(XAPI + 'ascoltati', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ascolti:lotto}), cache:'no-store'}, 10000);
+      if (r.status === 401 || r.status === 429 || r.status >= 500) break;   // si riprova più tardi
+      ASCQ.splice(0, lotto.length); ls.set('am-asc-coda', ASCQ);       // anche un altro rifiuto: non li vorrà mai
+    }
+  } catch (e) {}   // senza rete: restano in coda
+  ascInvio = false;
+}
+function ascRidisegna() { const v = curRoute().v; if ((tab === 'home' && v === 'home') || (tab === 'altro' && v === 'altro')) render(true); }
+async function ascCarica() {
+  if (ascCaricando || !ascRete()) return; ascCaricando = true;
+  try {
+    const r = await fetchT(XAPI + 'ascoltati', {cache:'no-store'}, 10000);
+    const j = r.ok ? await r.json() : null;
+    if (j && Array.isArray(j.settimana) && j.io) {
+      const senzaT = x => JSON.stringify(Object.assign({}, x, {t:0}));
+      const prima = ASC ? senzaT(ASC) : '';
+      ASC = Object.assign(j, {t:Date.now()}); ls.set('am-asc', ASC);
+      if (prima !== senzaT(ASC)) ascRidisegna();
+    }
+  } catch (e) {}
+  ascCaricando = false;
+}
+async function ascAncheDati(sid) {   // i brani di «anche» (solo gli id), o null se il Mac non risponde
+  ascChiesti.set(sid, Date.now());
+  try {
+    const r = await fetchT(XAPI + 'ascoltati/anche/' + encodeURIComponent(sid), {cache:'no-store'}, 8000);
+    const j = r.ok ? await r.json() : null;
+    if (!j || !Array.isArray(j.brani)) return null;
+    ASCANCHE[sid] = {t:Date.now(), brani:j.brani.map(x => ({brano:x.brano}))};
+    const ks = Object.keys(ASCANCHE);
+    if (ks.length > 100) ks.sort((a, b) => ASCANCHE[a].t - ASCANCHE[b].t).slice(0, ks.length - 100).forEach(k => delete ASCANCHE[k]);
+    ls.set('am-asc-anche', ASCANCHE);
+    return ASCANCHE[sid].brani;
+  } catch (e) { return null; }
+}
+// brani in fila come le copertine degli album: un tocco li fa suonare da lì in avanti
+function ascScaffale(tr, label) {
+  const l = regList(tr.map(t => t.id), label);
+  return '<div class="shelf">' + tr.map((t, i) => '<button class="tile" data-a="play" data-l="' + l + '" data-i="' + i + '">' + art(t.cover) +
+    '<div class="n">' + esc(t.title) + '</div><div class="a">' + esc(t.artist || UNK_ART) + '</div></button>').join('') + '</div>';
+}
+// alla prima apertura delle classifiche: si chiede se condividere (spento finché non si dice di sì)
+function ascChiedi() {
+  const io = ASC && ASC.io;
+  if (!io || io.condivido || io.cambia === false || ls.get('am-asc-chiesto', false)) return '';
+  return '<div class="banner"><span class="bt"><b>Condividi i tuoi ascolti?</b> Gli altri vedrebbero «Cosa ascolta ' + esc(io.nome) +
+    '» e i consigli con il tuo nome. Se no resti anonimo; si cambia in Altro.</span><button class="ba" data-a="asc-si">Condividi</button>' +
+    '<button class="bx" data-a="asc-no" aria-label="Non ora">' + ic('close') + '</button></div>';
+}
+function ascHome() {
+  if (!ASC) return '';   // il Mac non ha mai risposto (app aperta da un'altra parte)
+  let h = '';
+  // «Per te»: il Mac toglie i brani che hai già ascoltato da quando conta; qui anche quelli sentiti prima su questo telefono
+  const pt = (ASC.per_te || []).filter(x => { const t = T.get('r' + x.brano); return t && !t.plays; });
+  const anon = ascBrani(pt.filter(x => !x.da)).slice(0, 15);
+  if (anon.length) h += '<h2 class="h2">Per te</h2><p class="asub">Da chi ha gusti simili ai tuoi, mai ascoltati da te</p>' + ascScaffale(anon, 'Per te');
+  const nomi = []; pt.forEach(x => { if (x.da && nomi.indexOf(x.da) < 0) nomi.push(x.da); });
+  nomi.slice(0, 3).forEach(n => { const tr = ascBrani(pt.filter(x => x.da === n)).slice(0, 15); if (tr.length) h += '<h2 class="h2">Consigliato da ' + esc(n) + '</h2>' + ascScaffale(tr, 'Consigliato da ' + n); });
+  h += '<h2 class="h2">I più ascoltati in Atlante</h2>' + ascChiedi();
+  const per = ls.get('am-asc-per', 'settimana') === 'mese' ? 'mese' : 'settimana', top = ascBrani(ASC[per]).slice(0, 10);
+  h += '<div class="aseg" role="tablist">' + [['settimana', 'Questa settimana'], ['mese', 'Questo mese']].map(([k, t]) =>
+    '<button role="tab" data-a="asc-per" data-k="' + k + '" aria-selected="' + (k === per) + '"' + (k === per ? ' class="on"' : '') + '>' + t + '</button>').join('') + '</div>';
+  h += top.length ? trackRows(top, {label:'I più ascoltati in Atlante'}) :
+    '<p class="asub">Qui compaiono i brani ascoltati da almeno ' + ascSoglia() + ' persone di Atlante negli ultimi ' + (per === 'mese' ? '30' : '7') + ' giorni.</p>';
+  (ASC.condivisi || []).slice(0, 5).forEach(c => { const tr = ascBrani(c.brani).slice(0, 15); if (tr.length) h += '<h2 class="h2">Cosa ascolta ' + esc(c.nome) + '</h2>' + ascScaffale(tr, 'Cosa ascolta ' + c.nome); });
+  return h;
+}
+function ascAltro() {
+  const io = ASC && ASC.io; if (!io) return '';
+  if (io.cambia === false) return '<h2 class="h2">I tuoi ascolti</h2><p class="xnote">Dalla rete di casa gli ascolti contano come quelli di Samuele: per condividerli o cancellarli apri l\'app con Tailscale.</p>';
+  return '<h2 class="h2">I tuoi ascolti</h2><div class="lrows">' +
+    '<button class="lrow" data-a="asc-condividi" role="switch" aria-checked="' + !!io.condivido + '"><span class="ic">' + ic('person') + '</span><span class="t">Condividi i miei ascolti<small>' +
+    (io.condivido ? 'Gli altri vedono «Cosa ascolta ' + esc(io.nome) + '» e i consigli con il tuo nome' : 'Spento: nelle classifiche di Atlante sei anonimo') + '</small></span><span class="sw' + (io.condivido ? ' on' : '') + '"></span></button>' +
+    '<button class="lrow" data-a="asc-cancella"><span class="ic">' + ic('trash') + '</span><span class="t">Cancella i miei ascolti dal Mac mini<small>' +
+    (io.ascolti ? io.ascolti + (io.ascolti === 1 ? ' ascolto salvato' : ' ascolti salvati') : 'Nessun ascolto salvato') + '</small></span></button></div>' +
+    '<p class="xnote">Conta un brano che ha suonato almeno ' + HEARD + ' secondi. Nelle classifiche e nei consigli anonimi un brano compare solo se l\'hanno ascoltato almeno ' + ascSoglia() + ' persone.</p>';
+}
+// «Chi ascolta questo brano ascolta anche…» dal menu di un brano: prima l'ultima risposta salvata, poi quella del Mac
+async function ascAnche(id) {
+  const t = T.get(id); if (!t || !t.sid) return;
+  const mostra = (L, nota) => {
+    const tr = L ? ascBrani(L) : [], ids = tr.map(x => x.id).join(',');
+    openSheet('<div class="grp scroll" data-asc="' + esc(t.sid) + '">' + head(t) + '<div class="smsg"><b>Chi ascolta questo brano ascolta anche…</b>' +
+      (nota || (tr.length ? 'Brani ascoltati insieme a questo da almeno ' + ascSoglia() + ' persone.' : 'Ancora niente: servono almeno ' + ascSoglia() + ' persone che ascoltano questo brano e altri in comune.')) + '</div>' +
+      tr.map((x, i) => '<button data-a="asc-suona" data-ids="' + ids + '" data-i="' + i + '">' + art(x.cover) + '<span class="l dv"><b>' + esc(x.title) + '</b><small>' + esc(x.artist || UNK_ART) + '</small></span></button>').join('') + '</div>' + cancel);
+  };
+  const c = ASCANCHE[t.sid];
+  mostra(c && c.brani, c ? '' : 'Chiedo al Mac…');
+  const L = await ascAncheDati(t.sid);
+  if (!sh.classList.contains('open') || !$('sheet').querySelector('[data-asc="' + t.sid + '"]')) return;   // chiusa nel frattempo
+  if (L) mostra(L); else if (!c) mostra(null, 'Il Mac non risponde: riprova quando sei collegato.');
+}
+// nel lettore (vista della coda), sotto i successivi: un tocco mette il brano subito dopo quello in ascolto
+function ascLettore() {
+  const t = curId && T.get(curId); if (!t || !t.remote || !t.sid || !ASC) return '';
+  const c = ASCANCHE[t.sid];
+  if ((!c || Date.now() - c.t > 3600000) && Date.now() - (ascChiesti.get(t.sid) || 0) > 60000)
+    ascAncheDati(t.sid).then(L => { if (L && curId === t.id && np.classList.contains('q')) renderQueue(); });
+  const tr = c ? ascBrani(c.brani).filter(x => x.id !== curId).slice(0, 8) : [];
+  if (!tr.length) return '';
+  return '<div class="qasc"><h4>Chi ascolta questo brano ascolta anche…</h4><small>Tocca per sentirlo subito dopo</small></div>' +
+    tr.map(x => '<button class="qrow" data-a="asc-dopo" data-id="' + x.id + '">' + art(x.cover) + '<span class="tx"><b>' + esc(x.title) + '</b><span>' + esc(x.artist || UNK_ART) + '</span></span></button>').join('');
+}
+async function ascCondividi(si) {
+  ls.set('am-asc-chiesto', true);
+  try {
+    const r = await fetchT(XAPI + 'ascoltati/condividi', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({si}), cache:'no-store'}, 8000);
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) { toast((j && j.errore) || 'Il Mac non ha risposto: riprova'); render(true); return; }
+    if (ASC && ASC.io) { ASC.io.condivido = !!j.condivido; ls.set('am-asc', ASC); }
+    toast(j.condivido ? 'Ascolti condivisi: gli altri vedono il tuo nome' : 'Ascolti non più condivisi: il tuo nome è sparito');
+    render(true); ascCarica();
+  } catch (e) { toast('Il Mac non risponde: riprova quando sei collegato'); render(true); }
+}
+async function ascCancella() {
+  try {
+    const r = await fetchT(XAPI + 'ascoltati', {method:'DELETE', cache:'no-store'}, 10000);
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) { toast((j && j.errore) || 'Il Mac non ha risposto: riprova'); return; }
+    ASCQ.length = 0; ls.set('am-asc-coda', ASCQ);   // anche quelli non ancora arrivati al Mac
+    toast(j.cancellati ? 'Cancellati dal Mac mini: ' + j.cancellati + (j.cancellati === 1 ? ' ascolto' : ' ascolti') : 'Sul Mac mini non c\'erano tuoi ascolti');
+    await ascCarica(); render(true);
+  } catch (e) { toast('Il Mac non risponde: riprova quando sei collegato'); }
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-a^="asc-"]'); if (!b) return;
+  const d = b.dataset;
+  switch (d.a) {
+    case 'asc-per': ls.set('am-asc-per', d.k); render(true); break;
+    case 'asc-si': ascCondividi(true); break;
+    case 'asc-no': ls.set('am-asc-chiesto', true); render(true); toast('Resti anonimo: si cambia in Altro'); break;
+    case 'asc-condividi': ascCondividi(!(ASC && ASC.io && ASC.io.condivido)); break;
+    case 'asc-cancella': openSheet('<div class="grp"><div class="smsg"><b>Cancellare i tuoi ascolti?</b>Il Mac mini dimentica i brani che hai ascoltato: escono dalle classifiche e dai consigli. Brani, preferiti e playlist restano.</div>' +
+      '<button class="red cancel" data-a="asc-cancella2">Cancella i miei ascolti</button></div>' + cancel); break;
+    case 'asc-cancella2': closeSheet(); ascCancella(); break;
+    case 'asc-anche': ascAnche(d.id); break;
+    case 'asc-suona': { const ids = (d.ids || '').split(',').filter(x => T.has(x)), i = Math.max(0, ids.indexOf((d.ids || '').split(',')[+d.i]));
+      closeSheet(); if (!ids.length) break; if (!canPlay(ids[i])) { toast(NOMAC); break; } playList(ids, i, false, 'Ascoltati anche'); break; }
+    case 'asc-dopo': if (T.has(d.id)) playNext(d.id); break;
+  }
+});
+addEventListener('online', () => { ascInvia(); ascCarica(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { ascInvia(); if (!ASC || Date.now() - (ASC.t || 0) > 600000) ascCarica(); } });
+setInterval(() => { if (document.visibilityState === 'visible') { ascInvia(); if (!ASC || Date.now() - (ASC.t || 0) > 900000) ascCarica(); } }, 300000);
+setTimeout(() => { ascInvia(); ascCarica(); }, 1500);
 
 /* ---------- avvio ---------- */
 (function tabsInit() { const b = document.querySelectorAll('#tabs button'); b[0].innerHTML = ic('home') + 'Home'; b[1].innerHTML = ic('lib') + 'Libreria'; b[2].innerHTML = ic('search') + 'Cerca'; b[3].innerHTML = ic('grid') + 'Altro'; })();
