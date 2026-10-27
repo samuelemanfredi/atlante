@@ -1,6 +1,7 @@
-// Prove del «mix al salto» dell'app (musica/index.html) con JavaScriptCore, che c'è su ogni Mac:
+// Prove del mix tra i brani dell'app (musica/index.html: mix a fine brano e «mix al salto») con JavaScriptCore, che c'è
+// su ogni Mac:
 //
-//     osascript -l JavaScript test_mix_salto.js ../index.html
+//     osascript -l JavaScript test_mix.js ../index.html
 //
 // Le funzioni si prendono dall'app così come sono (non se ne copia nessuna) e si provano da sole e dentro una
 // simulazione dei due lettori audio con un orologio finto: niente browser, niente suono, pochi secondi.
@@ -45,10 +46,12 @@ function riga(src, inizio) {
   return src.slice(i + 1, src.indexOf('\n', i + 1));
 }
 // le funzioni (e le righe) date, eseguite con «env» come ambiente: quello che non definiscono lo cercano lì
-function carica(src, nomi, righe, env, trasforma) {
+function carica(src, nomi, righe, env, trasforma, extra) {
   let codice = righe.map(r => riga(src, r)).join('\n') + '\n' + nomi.map(n => estrai(src, n)).join('\n');
   if (trasforma) codice = trasforma(codice);
-  const f = new Function('env', 'with (env) { return (function () {\n' + codice + '\nreturn {' + nomi.join(',') + '};\n})(); }');
+  const tutti = nomi.concat(Object.keys(extra || {}));
+  codice += '\n' + Object.values(extra || {}).join('\n');
+  const f = new Function('env', 'with (env) { return (function () {\n' + codice + '\nreturn {' + tutti.join(',') + '};\n})(); }');
   return f(env);
 }
 
@@ -74,6 +77,13 @@ class SP {
   static resolve(v) { return v instanceof SP ? v : new SP(r => r(v)); }
   static reject(e) { return new SP((r, j) => j(e)); }
   static all(a) { return new SP((res, rej) => { const out = []; let n = a.length; if (!n) return res(out); a.forEach((p, i) => SP.resolve(p).then(v => { out[i] = v; if (!--n) res(out); }, rej)); }); }
+}
+// una funzione «async function nome(…)» dell'app che gira con le promesse finte (diventa un generatore)
+function sincrona(src, nome) {
+  const f = estrai(src, nome);
+  vero(f.startsWith('async function ' + nome + '('), nome + ' non è più async: aggiornare la prova');
+  const testa = f.slice(0, f.indexOf('{') + 1), corpo = f.slice(f.indexOf('{') + 1, -1);
+  return testa.replace('async function', 'function') + ' return corri(function* () {' + corpo.replace(/\bawait /g, 'yield ') + '}.bind(this)); }';
 }
 // una funzione async dell'app fatta girare con le promesse finte (async → generatore)
 function corri(gen) {
@@ -112,6 +122,10 @@ function prove(src, fatte) {
   prova('brano spostato in attesa', () => scenarioSpostato(src));
   prova('iPhone con il mixer', () => scenarioMixer(src));
   prova('vicino alla fine del brano', () => scenarioVicinoFine(src));
+  prova('velocità a gradini', () => gradiniPuri(src));
+  prova('mix a fine brano senza mixer', () => scenarioFineBrano(src, false));
+  prova('mix a fine brano con il mixer', () => scenarioFineBrano(src, true));
+  prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
 }
 
 // tutto lo script dell'app si compila (non si esegue): un errore di battitura in qualsiasi punto si vede qui
@@ -281,7 +295,10 @@ function mondo(src, opz) {
     return {dur:b.duration, ms:u.startsWith('blob:') ? 60 : (opz.streamMs != null ? opz.streamMs : 700)};
   };
   class Lettore {
-    constructor(nome) { Object.assign(this, {nome, paused:true, currentTime:0, playbackRate:1, readyState:0, muted:false, duration:NaN, ended:false, seeking:false, volume:1, _src:null, _l:{}, _vuole:false, _da:0, rifiuta:false}); }
+    constructor(nome) { Object.assign(this, {nome, paused:true, currentTime:0, _v:1, cambi:[], readyState:0, muted:false, duration:NaN, ended:false, seeking:false, volume:1, _src:null, _l:{}, _vuole:false, _da:0, rifiuta:false, rifiutaUnaVolta:false}); }
+    get playbackRate() { return this._v; }
+    set playbackRate(v) { if (v !== this._v) this.cambi.push([W.t, v]); this._v = v; }   // i cambi veri di velocità
+    get buffered() { const d = this.readyState >= 3 ? this.duration : 0; return {length:d ? 1 : 0, start:() => 0, end:() => d}; }
     addEventListener(ev, fn, o) { (this._l[ev] = this._l[ev] || []).push({fn, once:!!(o && o.once)}); }
     removeEventListener(ev, fn) { this._l[ev] = (this._l[ev] || []).filter(x => x.fn !== fn); }
     emit(ev) { const l = (this._l[ev] || []).slice(); this._l[ev] = (this._l[ev] || []).filter(x => !x.once); l.forEach(x => x.fn({target:this})); }
@@ -290,7 +307,7 @@ function mondo(src, opz) {
     load() { this.pause(); Object.assign(this, {readyState:0, currentTime:0, duration:NaN, ended:false, _vuole:false}); const u = this._src, f = file(u); if (f) tempo.setTimeout(() => { if (this._src !== u) return; this.duration = f.dur; this.readyState = 4; this.emit('loadedmetadata'); this._forse(); }, f.ms); }
     set src(u) { this._src = u; this.load(); }
     get src() { return this._src || ''; }
-    play() { if (this.rifiuta) return SP.reject(new Error('NotAllowedError')); if (this.paused) { this.paused = false; this.ended = false; this._vuole = true; this.emit('play'); this._forse(); } return SP.resolve(); }
+    play() { if (this.rifiuta) return SP.reject(new Error('NotAllowedError')); if (this.rifiutaUnaVolta) { this.rifiutaUnaVolta = false; const e = new Error('interrotto'); e.name = 'AbortError'; return SP.reject(e); } if (this.paused) { this.paused = false; this.ended = false; this._vuole = true; this.emit('play'); this._forse(); } return SP.resolve(); }
     _forse() { if (!this.paused && this._vuole && this.readyState >= 3) { this._vuole = false; this._da = W.t + (opz.latenza != null ? opz.latenza : 20); this.emit('playing'); } }
     pause() { if (!this.paused) { this.paused = true; this.emit('pause'); } }
     avanza(dt) {
@@ -315,7 +332,8 @@ function mondo(src, opz) {
     load:(i, play) => { log.load.push([i, !!play]); F.xfAbort(); env.S.qi = i; env.curId = env.S.queue[i]; const t = T.get(env.curId); env.au.src = salvati.has(t.id) ? 'blob:' + t.id : 'api/musica/file/' + t.sid; if (play) env.au.play(); },
     next:auto => log.next.push(auto),
     updateNow() {}, saveState() {}, markCur() {}, checkHeard() {}, controllaPassaggio() {},
-    xfPrepare:P => { log.prep.push([P.idB, W.t, !!env.MIX.salto]); return SP.resolve(); },   // il mix a fine brano: qui si guarda solo quando si prepara
+    xfPreparaFinto:P => { log.prep.push([P.idB, W.t, !!env.MIX.salto]); return SP.resolve(); },   // mix a fine brano finto: si guarda solo quando si prepara
+    document:{hidden:false}, corri,
     getFile:id => SP.resolve(salvati.has(id) ? {nome:id} : null),
     grid:(id, part) => {
       log.grid.push([id, part]);
@@ -326,9 +344,10 @@ function mondo(src, opz) {
     }
   };
   const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev',
-    'mixFattore', 'rampaVel', 'pezzoQui', 'partenzaBattito', 'accorciaW', 'saltoResto',
+    'mixFattore', 'rampaVel', 'pezzoQui', 'partenzaBattito', 'accorciaW', 'saltoResto', 'velocita', 'conPitch', 'gradini', 'rampaGradini', 'correzioneFase',
     'avanti', 'saltaA', 'saltoIdx', 'gridQui', 'saltoMisurato', 'saltoTick', 'saltoParti', 'saltoCarica', 'saltoVia', 'saltoSubito', 'saltoAnnulla', 'saltoPausa', 'saltoSpostato'],
-  ['const wrap = ', 'const otherDeck = ', 'const SALTO = '], env);
+  ['const wrap = ', 'const otherDeck = ', 'const SALTO = '], env, null,
+  {xfPrepare:opz.finebrano ? sincrona(src, 'xfPrepare') : 'function xfPrepare(P) { return xfPreparaFinto(P); }'});
   // gli eventi come auOn nell'app: contano solo quelli del lettore in uso
   tutti.forEach(el => {
     el.addEventListener('timeupdate', () => { if (el === env.au) { F.xfTick(); F.saltoTick(); } });
@@ -584,4 +603,73 @@ function scenarioVicinoFine(src) {
   const M2 = mondo(src, {da:240 - 13});
   M2.fai(() => M2.F.avanti());
   vero(JSON.stringify(M2.log.next) === '[false]', 'a 13 s dalla fine: cambio subito');
+}
+
+function gradiniPuri(src) {
+  const env = {MIX:{gains:new Map()}};
+  const F = carica(src, ['rampaVel', 'rampaGradini', 'gradini', 'correzioneFase', 'velocita'], [], env);
+  for (let q = -0.1; q <= 1.1; q += 0.01) vicino(F.rampaGradini(q, 1.07, 0), F.rampaVel(q, 1.07), 1e-12, 'senza mixer la rampa è quella di prima');
+  const valori = new Set(); let cambi = 0, prima = 1;
+  for (let q = 0; q <= 1.0001; q += 0.001) { const v = F.rampaGradini(q, 1.07, 4); valori.add(v); if (v !== prima) cambi++; prima = v; }
+  vero(cambi === 4 && valori.size === 5, 'rampa a 4 gradini: ' + cambi + ' cambi, ' + valori.size + ' valori');
+  vicino(F.rampaGradini(1, 1.07, 4), 1.07, 1e-12, 'ultimo gradino'); vicino(F.rampaGradini(0, 1.07, 4), 1, 1e-12, 'prima del primo gradino');
+  vicino(F.rampaGradini(0.3, 1.07, 4), F.rampaVel(0.5, 1.07), 1e-12, 'secondo gradino');
+  vero(F.gradini(4) === 0, 'senza mixer: rampa continua');
+  env.MIX.gains.set(1, 1);
+  vero(F.gradini(4) === 4 && F.gradini(2) === 2 && F.gradini(9) === 4 && F.gradini(0.2) === 1, 'con il mixer: un gradino al secondo, da 1 a 4');
+  // correzione dei battiti
+  vicino(F.correzioneFase(0.1, 0.5, false), -0.1 * 0.5 / 1.5, 1e-12, 'senza mixer come prima');
+  vicino(F.correzioneFase(-2, 0.5, false), 0.05, 1e-12, 'al più +5%');
+  vero(F.correzioneFase(0.07, 0.5, true) === 0 && F.correzioneFase(-0.08, 0.5, true) === 0, 'con il mixer niente correzione sotto 0,08 battito');
+  vicino(F.correzioneFase(0.1, 0.5, true), -0.025, 1e-12, 'con il mixer: lo scarto si recupera in 2 s');
+  vicino(F.correzioneFase(0.45, 0.5, true), -0.05, 1e-12, 'con il mixer al più −5%');
+  const el = {_v:1, n:0, get playbackRate() { return this._v; }, set playbackRate(v) { this.n++; this._v = v; }};
+  F.velocita(el, 1); F.velocita(el, 1.00005); vero(el.n === 0, 'velocita: nessun cambio se è già quella');
+  F.velocita(el, 1.03); vero(el.n === 1 && el._v === 1.03, 'velocita: cambio');
+}
+
+// mix a fine brano dall'inizio alla fine, con il vero xfPrepare: rampa, partenza sul battito, dissolvenza agganciata
+function mixerFinto(M) {
+  const nodo = () => ({gain:{value:1, cancelScheduledValues() {}, setValueAtTime() {}, setValueCurveAtTime() {}, linearRampToValueAtTime() {}}});
+  M.env.MIX.ctx = {state:'running', get currentTime() { return M.ora() / 1000; }};
+  M.env.MIX.gains = new Map([[M.DECKS[0], nodo()], [M.DECKS[1], nodo()]]);
+}
+function scenarioFineBrano(src, mixer) {
+  // con il mixer il brano nuovo parte 60 ms in ritardo: serve almeno una correzione dei battiti
+  const M = mondo(src, {finebrano:true, da:240 - 42, latenza:mixer ? 60 : 20}), {env, log, DECKS} = M, A = DECKS[0], B = DECKS[1];
+  if (mixer) mixerFinto(M);
+  let partito = 0, err = [], cambiRampa = 0;
+  M.passa(45, () => {
+    if (!partito && env.curId === 'rB') { partito = M.ora(); cambiRampa = A.cambi.length; }
+    if (partito && env.MIX.act && M.ora() - partito > 600) err.push(Math.abs(scarto(M, A, B, 'rA', 'rB')));
+  });
+  vero(partito, 'il mix a fine brano non è partito');
+  vero(log.diario.some(x => x.e === 'mix' && x.match === true), 'mix a tempo nel diario');
+  vero(!env.MIX.act && env.au === B && A.paused && !A.getAttribute('src'), 'dissolvenza finita');
+  vero(err.length > 50 && Math.max.apply(null, err) < (mixer ? 0.16 : 0.05), 'battiti non agganciati nella dissolvenza: ' + Math.max.apply(null, err));
+  vero(Math.max.apply(null, err.slice(-25)) < (mixer ? 0.08 : 0.03), 'battiti non agganciati a fine dissolvenza: ' + Math.max.apply(null, err.slice(-25)));
+  const inDiss = A.cambi.slice(cambiRampa).filter(c => c[0] < M.ora() - 100 && c[1] !== 1);
+  if (mixer) {
+    vero(cambiRampa <= 4, 'con il mixer la rampa deve avere al più 4 gradini (' + cambiRampa + ')');
+    vero(inDiss.length >= 1, 'con il mixer serviva una correzione dei battiti');
+    for (let i = 1; i < inDiss.length; i++) vero(inDiss[i][0] - inDiss[i - 1][0] >= 1990, 'con il mixer al più una correzione ogni 2 s: ' + JSON.stringify(inDiss));
+    vero(B.cambi.length === 0, 'il brano nuovo non cambia velocità');
+  } else vero(cambiRampa > 20, 'senza mixer la rampa resta continua (' + cambiRampa + ')');
+}
+
+function scenarioSaltoCambi(src) {
+  const M = mondo(src, {latenza:60}), {env, DECKS} = M, A = DECKS[0], B = DECKS[1];
+  mixerFinto(M);
+  let partito = 0, prima = 0, err = [];
+  M.fai(() => M.F.avanti());
+  M.passa(12, () => {
+    if (!partito && env.curId === 'rB') { partito = M.ora(); prima = A.cambi.length; }
+    if (partito && env.MIX.act && M.ora() - partito > 60) err.push(Math.abs(scarto(M, A, B, 'rA', 'rB')));
+  });
+  vero(partito && env.curId === 'rB' && !env.MIX.act, 'salto con il mixer non arrivato');
+  vero(prima <= 2, 'rampa del salto con il mixer: al più 2 gradini (' + prima + ')');
+  const dopo = A.cambi.slice(prima).filter(c => c[1] !== 1);
+  vero(dopo.length <= 3, 'dissolvenza del salto con il mixer: al più una correzione ogni 2 s (' + JSON.stringify(dopo) + ')');
+  vero(dopo.length >= 1, 'serviva una correzione dei battiti');
+  vero(Math.max.apply(null, err) < 0.16 && Math.max.apply(null, err.slice(-25)) < 0.08, 'battiti agganciati anche con poche correzioni (' + Math.max.apply(null, err) + ', alla fine ' + Math.max.apply(null, err.slice(-25)) + ')');
 }

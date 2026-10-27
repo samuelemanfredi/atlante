@@ -1818,13 +1818,13 @@ class TestPersone(unittest.TestCase):
 # ----- mix tra i brani dell'app: prove della logica di index.html con JavaScriptCore del Mac -----
 class TestMixApp(unittest.TestCase):
     """Le funzioni del mix (anche il «mix al salto») e una simulazione dei due lettori girano in JavaScriptCore,
-    che c'è su ogni Mac (osascript -l JavaScript): test_mix_salto.js. Senza osascript (non è un Mac) si salta."""
+    che c'è su ogni Mac (osascript -l JavaScript): test_mix.js. Senza osascript (non è un Mac) si salta."""
 
     def test_mix(self):
         osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
         if not osa:
             self.skipTest("osascript non c'è: non è un Mac")
-        js, app = os.path.join(QUI, "test_mix_salto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        js, app = os.path.join(QUI, "test_mix.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
         r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
         out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
         if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
