@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Chiamate</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.av{width:40px;height:40px;border-radius:20px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;background:#8e8e93;font-size:16px;text-transform:uppercase}
+.row .az{display:flex;gap:8px;flex:none}
+.tondo{width:40px;height:40px;border-radius:20px;background:var(--fill);color:var(--ok);display:grid;place-items:center;flex:none}
+.tondo svg{width:22px;height:22px}
+.tondo:disabled{opacity:.4}
+.sel{width:24px;height:24px;border-radius:12px;border:2px solid var(--fg3);flex:none;display:grid;place-items:center;color:#fff}
+.sel.on{background:var(--ok);border-color:var(--ok)}
+.sel.on::after{content:'✓';font-size:14px;font-weight:700}
+.rec .tx span.persa{color:var(--bad)}
+/* schermata della chiamata: sempre scura, come il telefono */
+#sc{position:fixed;inset:0;z-index:40;background:#1c1c1e;color:#fff;display:flex;flex-direction:column;overflow:hidden}
+#sc .testa{padding:calc(env(safe-area-inset-top,0px) + 22px) 20px 8px;text-align:center;position:relative;z-index:3;text-shadow:0 1px 6px rgba(0,0,0,.5)}
+#sc .nome{font-size:28px;font-weight:600;line-height:1.2;word-break:break-word}
+#sc .stato{font-size:16px;color:rgba(255,255,255,.75);margin-top:4px;min-height:22px}
+#riq{flex:1;min-height:0;display:grid;gap:6px;padding:6px;grid-auto-rows:1fr}
+#riq.n2,#riq.n3{grid-template-columns:1fr 1fr}
+#riq.n3 .riq:first-child{grid-column:1/3}
+#sc.video1 .testa{position:absolute;left:0;right:0;top:0}
+#sc.video1 #riq{position:absolute;inset:0;padding:0}
+#sc.video1 #riq .riq{border-radius:0}
+#sc.video1 .tasti{margin-top:auto}   /* il video sotto tutto, i tasti restano in basso */
+.riq{position:relative;border-radius:16px;overflow:hidden;background:#2c2c2e;display:grid;place-items:center;min-height:0}
+.riq video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+.riq .ini{width:96px;height:96px;border-radius:50%;background:#48484a;display:grid;place-items:center;font-size:38px;font-weight:600;text-transform:uppercase}
+.riq .et{position:absolute;left:10px;bottom:10px;font-size:14px;background:rgba(0,0,0,.5);padding:3px 9px;border-radius:9px;max-width:calc(100% - 20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#mio{position:absolute;right:14px;top:calc(env(safe-area-inset-top,0px) + 92px);width:96px;height:132px;border-radius:14px;object-fit:cover;background:#000;z-index:4;box-shadow:0 4px 16px rgba(0,0,0,.4)}
+#mio.specchio{transform:scaleX(-1)}
+.tasti{display:flex;justify-content:center;flex-wrap:wrap;gap:12px 14px;padding:14px 12px calc(env(safe-area-inset-bottom,0px) + 24px);position:relative;z-index:3}
+.tasto{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:12px;color:rgba(255,255,255,.9);width:66px;text-shadow:0 1px 4px rgba(0,0,0,.5)}
+.tasto i{width:62px;height:62px;border-radius:50%;background:rgba(255,255,255,.2);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:grid;place-items:center;font-style:normal}
+.tasto svg{width:28px;height:28px}
+.tasto.on i{background:#fff;color:#000}
+.tasto.rosso i{background:#ff3b30;color:#fff}
+.tasto.verde i{background:#34c759;color:#fff}
+.tasto:disabled{opacity:.45}
+#tArrivo .tasto{width:84px}
+#tArrivo .tasto i{width:72px;height:72px}
+#sentire{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 130px);display:flex;justify-content:center;z-index:5}
+#scegli{position:absolute;left:0;right:0;bottom:0;z-index:6;background:#2c2c2e;border-radius:16px 16px 0 0;padding:14px 14px calc(env(safe-area-inset-bottom,0px) + 18px);max-height:70%;overflow:auto;color:#fff}
+#scegli .row{border-bottom-color:rgba(255,255,255,.12)}
+#scegli .row .tx span{color:rgba(255,255,255,.6)}
+</style>
+</head>
+<body>
+<div class="wrap" id="elenco">
+  <p class="note">🔒 Le chiamate vanno da telefono a telefono, cifrate: il Mac mini di Samuele mette solo in contatto, non le sente e non le vede.</p>
+  <div class="seg" id="modo"><button class="on" data-m="una">Una persona</button><button data-m="gruppo">Gruppo (fino a 4)</button></div>
+  <p class="small" id="gnota" hidden>Scegli fino a 3 persone: ognuno vede e sente tutti gli altri.</p>
+  <div class="list" id="persone"><div class="row"><span class="tx"><span>Carico le persone…</span></span></div></div>
+  <div class="btns" id="gtasti" hidden><button class="btn pri" id="gvoce" disabled>Chiama</button><button class="btn" id="gvideo" disabled>Videochiamata</button></div>
+  <p class="small" id="ponte" hidden>Se con i dati mobili una chiamata non si collega, riprova con il Wi‑Fi.</p>
+  <h2 class="h2">Recenti</h2>
+  <div class="list" id="recenti"></div>
+  <p class="small">Le chiamate recenti restano solo su questo dispositivo.</p>
+</div>
+
+<div id="sc" hidden>
+  <div class="testa"><div class="nome" id="scNome"></div><div class="stato" id="scStato"></div></div>
+  <div id="riq"></div>
+  <video id="mio" autoplay playsinline muted hidden></video>
+  <div id="sentire" hidden><button class="btn pri" id="bSentire">Tocca per sentire</button></div>
+  <div class="tasti" id="tArrivo" hidden>
+    <button class="tasto rosso" id="bRifiuta"><i data-ic="giu"></i>Rifiuta</button>
+    <button class="tasto" id="bSoloVoce" hidden><i data-ic="mic"></i>Solo voce</button>
+    <button class="tasto verde" id="bRispondi"><i data-ic="tel"></i>Rispondi</button>
+  </div>
+  <div class="tasti" id="tChiamata" hidden>
+    <button class="tasto" id="bMic"><i></i><span>Microfono</span></button>
+    <button class="tasto" id="bVideo"><i></i><span>Video</span></button>
+    <button class="tasto" id="bGira" hidden><i data-ic="gira"></i>Gira</button>
+    <button class="tasto" id="bAlto" hidden><i data-ic="alto"></i><span>Altoparlante</span></button>
+    <button class="tasto" id="bAggiungi" hidden><i data-ic="aggiungi"></i>Aggiungi</button>
+    <button class="tasto rosso" id="bChiudi"><i data-ic="giu"></i>Chiudi</button>
+  </div>
+  <div id="scegli" hidden></div>
+</div>
+
+<script src="kit.js"></script>
+<script>
+'use strict';
+/* Chiamate vocali e video (WebRTC). Il Mac mini fa solo da centralino (api/extra/chiamate…): chi chiama chi, lo squillo,
+   e i messaggi per collegarsi (offerta, risposta, candidati). Voce e video vanno da telefono a telefono, cifrati
+   (DTLS-SRTP). In un gruppo ognuno è collegato con ognuno: chi entra manda l'offerta a chi è già dentro.
+   La pagina ha due usi:
+   - elenco delle persone da chiamare (riquadro «Chiamate» di «Altro»);
+   - schermata della chiamata, che l'app apre in una cornice sua sopra tutto (?chiama=<persona>[,<persona>]&video=1 o
+     ?entrante=<id della chiamata>, con &cornice=1). Aperta da sola (senza l'app) fa tutto lei, squilli compresi.
+   Da un altro modulo (la chat): AX.host.chiama('<persona>', video) oppure aprire x/chiamate.html?chiama=<persona>. */
+const {$, esc, api} = AX;
+const host = AX.host;
+const Q = new URLSearchParams(location.search);
+const CORNICE = Q.get('cornice') === '1' && !!host;
+const enc = encodeURIComponent;
+const pausa = ms => new Promise(r => setTimeout(r, ms));
+const ID = /^[A-Za-z0-9_-]{8,64}$/;
+// lo stesso dispositivo del telecomando (am-dev-id): il Mac mini sa così da quale dispositivo hai risposto. Una pagina
+// aperta da sola, fuori dall'app, è un dispositivo a parte (se no squillerebbe due volte nello stesso browser)
+const DISP = (() => {
+  let v = host && host.dispositivo ? host.dispositivo() : '';
+  if (!ID.test(v || '')) { try { v = JSON.parse(localStorage.getItem('am-dev-id')); } catch (e) { v = ''; } }
+  if (!ID.test(v || '')) {
+    v = AX.store.get('chiamate-disp', '');
+    if (!ID.test(v)) { v = 'c' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36); AX.store.set('chiamate-disp', v); }
+  }
+  return host ? v : v.slice(0, 56) + '-pagina';
+})();
+
+const IC = {
+  mic:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+  micno:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M4 4l16 16"/></svg>',
+  video:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2.5" y="6" width="13" height="12" rx="2.5"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/></svg>',
+  videono:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="6" width="13" height="12" rx="2.5"/><path d="M15.5 10.5l6-3.5v10l-6-3.5zM3 3l18 18"/></svg>',
+  gira:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9a8 8 0 0 1 14.5-3M20 15a8 8 0 0 1-14.5 3"/><path d="M18.5 2v4h-4M5.5 22v-4h4"/><circle cx="12" cy="12" r="2.5"/></svg>',
+  alto:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>',
+  aggiungi:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/></svg>',
+  tel:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.58 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z"/></svg>',
+  giu:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1a1 1 0 0 1-.56.9 11.3 11.3 0 0 0-2.66 1.85 1 1 0 0 1-1.4-.02L.29 13.08a1 1 0 0 1 0-1.41C3.34 8.77 7.46 7 12 7s8.66 1.77 11.71 4.67a1 1 0 0 1 0 1.41l-2.48 2.47a1 1 0 0 1-1.4.02 11.3 11.3 0 0 0-2.67-1.85 1 1 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>'
+};
+document.querySelectorAll('[data-ic]').forEach(el => { el.innerHTML = IC[el.dataset.ic]; });
+const iniziali = n => String(n || '?').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('') || '?';
+const COLORI = ['#ff9500', '#34c759', '#007aff', '#af52de', '#ff2d55', '#5ac8fa', '#ffcc00', '#5856d6'];
+const colore = id => COLORI[[...String(id)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORI.length];
+const nomi = L => L.length <= 1 ? (L[0] || '') : L.slice(0, -1).join(', ') + ' e ' + L[L.length - 1];
+
+/* ---------- squilli (Web Audio) ----------
+   Dentro l'app il suono nasce nel contesto audio dell'app (sbloccato dai tocchi su di essa): una cornice appena aperta
+   non ha ancora avuto tocchi, e l'iPhone non la lascerebbe suonare. */
+const SQ = {ctx:null, tm:0, vibra:0};
+function contesto() {
+  if (SQ.ctx && SQ.ctx.state !== 'closed') return SQ.ctx;
+  try { SQ.ctx = host && host.contestoAudio ? host.contestoAudio() : new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { SQ.ctx = null; }
+  return SQ.ctx;
+}
+function tono(ctx, hz, da, dur, vol) {
+  const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + da;
+  o.frequency.value = hz; o.type = 'sine';
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.02); g.gain.setValueAtTime(vol, t + dur - 0.03); g.gain.linearRampToValueAtTime(0, t + dur);
+  o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+function squillo(tipo) {
+  clearInterval(SQ.tm); SQ.tm = 0; clearInterval(SQ.vibra); SQ.vibra = 0;
+  try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) {}
+  if (!tipo) return;
+  const ctx = contesto(); if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  const giro = {
+    // squillo in arrivo: tre note, due volte, ogni 2,5 s
+    arrivo: [2500, () => [0, 0.45].forEach(b => [784, 988, 1175].forEach((hz, k) => tono(ctx, hz, b + k * 0.12, 0.11, 0.18)))],
+    // il «tuuu» di chi chiama (come in Italia: 425 Hz, 1 s acceso e 4 spento)
+    uscita: [5000, () => tono(ctx, 425, 0, 1, 0.12)],
+    // occupato: 425 Hz a colpi brevi
+    occupato: [400, () => tono(ctx, 425, 0, 0.2, 0.12)]
+  }[tipo];
+  if (!giro) return;
+  giro[1](); SQ.tm = setInterval(giro[1], giro[0]);
+  if (tipo === 'arrivo' && navigator.vibrate) { const v = () => { try { navigator.vibrate([400, 200, 400]); } catch (e) {} }; v(); SQ.vibra = setInterval(v, 2500); }
+  if (tipo === 'occupato') setTimeout(() => { if (SQ.tm) squillo(null); }, 2800);
+}
+
+/* ---------- registro delle chiamate (solo su questo dispositivo) ---------- */
+const ESITI = {fatta:'', persa:'Persa', rifiutata:'Rifiutata', occupato:'Occupato', 'nessuna risposta':'Nessuna risposta', annullata:'Annullata', altrove:'Su un altro dispositivo', errore:'Non riuscita'};
+function registro() { const R = AX.store.get('chiamate-registro', []); return Array.isArray(R) ? R : []; }
+function quando(t) {
+  const d = new Date(t), oggi = new Date(), ieri = new Date(Date.now() - 86400000), ora = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  if (d.toDateString() === oggi.toDateString()) return 'oggi alle ' + ora;
+  if (d.toDateString() === ieri.toDateString()) return 'ieri alle ' + ora;
+  return d.toLocaleDateString('it-IT', {day:'numeric', month:'short'}) + ' alle ' + ora;
+}
+const durata = s => s >= 3600 ? Math.floor(s / 3600) + ' h ' + Math.floor(s % 3600 / 60) + ' min' : s >= 60 ? Math.round(s / 60) + ' min' : s + ' s';
+function disegnaRecenti() {
+  const R = registro();
+  $('recenti').innerHTML = R.length ? R.map((r, i) => {
+    const con = Array.isArray(r.con) ? r.con : [], primo = con[0] || {};
+    const chi = nomi(con.map(x => x.nome)), es = ESITI[r.esito] || '', persa = r.verso === 'entrata' && r.esito !== 'fatta' && r.esito !== 'altrove';
+    return '<div class="row rec"><span class="av" style="background:' + colore(primo.id || '') + '">' + esc(iniziali(primo.nome)) + '</span>' +
+      '<span class="tx"><b>' + esc(chi || 'Qualcuno') + '</b><span class="' + (persa ? 'persa' : '') + '">' + (r.verso === 'entrata' ? '↙ ' : '↗ ') + (r.video ? 'Video · ' : '') +
+      esc(quando(r.quando)) + (es ? ' · ' + esc(es) : r.durata ? ' · ' + durata(r.durata) : '') + '</span></span>' +
+      '<span class="az"><button class="tondo" data-r="' + i + '" aria-label="Richiama">' + IC.tel + '</button><button class="tondo" data-rv="' + i + '" aria-label="Richiama in video">' + IC.video + '</button></span></div>';
+  }).join('') : '<div class="row"><span class="tx"><span>Nessuna chiamata, per ora.</span></span></div>';
+  const richiama = (i, video) => { const r = R[i]; const ids = (Array.isArray(r.con) ? r.con : []).map(x => x.id).filter(id => PERSONE.some(p => p.id === id)); if (ids.length) avvia(ids, video); else AX.toast('Questa persona non è più in Atlante'); };
+  $('recenti').querySelectorAll('[data-r]').forEach(b => b.onclick = () => richiama(+b.dataset.r, false));
+  $('recenti').querySelectorAll('[data-rv]').forEach(b => b.onclick = () => richiama(+b.dataset.rv, true));
+}
+addEventListener('storage', e => { if (e.key === 'ax-chiamate-registro') disegnaRecenti(); });   // scritto dalla cornice della chiamata
+
+/* ---------- elenco delle persone ---------- */
+let PERSONE = [], ME = null, GRUPPO = false;
+const scelte = new Set();
+async function caricaPersone() {
+  try {
+    const j = await api('chiamate/persone');
+    ME = j.io; PERSONE = j.persone || [];
+  } catch (e) {
+    $('persone').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere chi è in Atlante</b><span>' + esc(e.message) + '</span></span></div>';
+    return false;
+  }
+  disegnaPersone(); disegnaRecenti();
+  return true;
+}
+function disegnaPersone() {
+  $('persone').innerHTML = PERSONE.length ? PERSONE.map(p =>
+    '<div class="row"' + (GRUPPO ? ' data-g="' + esc(p.id) + '" role="button"' : '') + '><span class="av" style="background:' + colore(p.id) + '">' + esc(iniziali(p.nome)) + '</span>' +
+    '<span class="tx"><b>' + esc(p.nome) + '</b></span>' +
+    (GRUPPO ? '<span class="sel' + (scelte.has(p.id) ? ' on' : '') + '"></span>'
+      : '<span class="az"><button class="tondo" data-v="' + esc(p.id) + '" aria-label="Chiama ' + esc(p.nome) + '">' + IC.tel + '</button><button class="tondo" data-vv="' + esc(p.id) + '" aria-label="Videochiama ' + esc(p.nome) + '">' + IC.video + '</button></span>') + '</div>').join('')
+    : '<div class="row"><span class="tx"><span>Non c\'è ancora nessun altro in Atlante da chiamare.</span></span></div>';
+  $('persone').querySelectorAll('[data-v]').forEach(b => b.onclick = () => avvia([b.dataset.v], false));
+  $('persone').querySelectorAll('[data-vv]').forEach(b => b.onclick = () => avvia([b.dataset.vv], true));
+  $('persone').querySelectorAll('[data-g]').forEach(r => r.onclick = () => {
+    const id = r.dataset.g;
+    if (scelte.has(id)) scelte.delete(id); else if (scelte.size < 3) scelte.add(id); else { AX.toast('Al più 3 persone, con te 4'); return; }
+    disegnaPersone();
+  });
+  $('gvoce').disabled = $('gvideo').disabled = !scelte.size;
+}
+$('modo').querySelectorAll('button').forEach(b => b.onclick = () => {
+  GRUPPO = b.dataset.m === 'gruppo'; scelte.clear();
+  $('modo').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  $('gtasti').hidden = $('gnota').hidden = !GRUPPO; disegnaPersone();
+});
+$('gvoce').onclick = () => avvia([...scelte], false);
+$('gvideo').onclick = () => avvia([...scelte], true);
+// dentro l'app la chiamata va nella cornice sopra tutto (resta aperta anche cambiando modulo); da sola, qui
+function avvia(ids, video) {
+  if (!ids.length) return;
+  if (host && host.chiama && !CORNICE) { if (host.chiama(ids, video) === false) AX.toast('C\'è già una chiamata aperta'); return; }
+  chiama(ids, video);
+}
+
+/* ---------- la chiamata ---------- */
+let C = null;
+function nuova() {
+  C = {id:null, seq:null, vista:null, attivo:false, entrata:false, risposto:false, rispondendo:false, finita:false, video:false,
+    locale:null, mic:null, cam:null, fronte:true, muto:false, peers:new Map(), prima:{}, ice:{iceServers:[]}, inizio:0, errori:0,
+    uscite:[], uscita:-1, blocco:null, orologio:0, registrata:false};
+  return C;
+}
+nuova();
+const MOTIVI = {rifiutata:'Chiamata rifiutata', occupato:'Occupato', 'nessuna risposta':'Nessuna risposta', annullata:'Chiamata annullata', chiusa:'Chiamata terminata', caduta:'Linea caduta'};
+const io = v => v && (v.partecipanti || []).find(x => x.io);
+const altri = v => v ? (v.partecipanti || []).filter(x => !x.io) : [];
+const gruppo = () => altri(C.vista).filter(x => x.stato === 'dentro' || x.stato === 'squilla').length > 1;
+function scritta(t) { $('scStato').textContent = t; }
+function apriSchermo() {
+  $('elenco').hidden = true; $('sc').hidden = false; $('scegli').hidden = true;
+  $('tArrivo').hidden = $('tChiamata').hidden = true; $('sentire').hidden = true;
+  $('riq').innerHTML = ''; $('scNome').textContent = ''; scritta('');
+}
+function permesso(e) {
+  if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) return 'Serve il permesso per il microfono (e la fotocamera per il video): consentilo nelle impostazioni del browser';
+  if (e && e.name === 'NotFoundError') return 'Nessun microfono su questo dispositivo';
+  return 'Microfono non disponibile: ' + ((e && e.message) || e);
+}
+function adatto() {
+  if (!window.RTCPeerConnection) return 'Questo browser non fa chiamate: aggiornalo o usa Safari o Chrome';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'Le chiamate funzionano solo dall\'indirizzo sicuro (https) dell\'app';
+  return '';
+}
+function vincoli() {
+  const g = gruppo();
+  return {facingMode:C.fronte ? 'user' : 'environment', width:{ideal:g ? 640 : 1280}, height:{ideal:g ? 480 : 720}, frameRate:{ideal:g ? 20 : 30}};
+}
+async function prendiMedia(video) {
+  const audio = {echoCancellation:true, noiseSuppression:true, autoGainControl:true};
+  let s;
+  try { s = await navigator.mediaDevices.getUserMedia({audio, video:video ? vincoli() : false}); }
+  catch (e) {
+    if (!video) throw e;
+    s = await navigator.mediaDevices.getUserMedia({audio});   // fotocamera negata o assente: almeno la voce
+    AX.toast('Fotocamera non disponibile: solo voce');
+  }
+  C.locale = s; C.mic = s.getAudioTracks()[0] || null; C.cam = s.getVideoTracks()[0] || null;
+  if (C.muto && C.mic) C.mic.enabled = false;
+  mostraMio(); dispositivi();
+}
+function mostraMio() {
+  const v = $('mio');
+  v.hidden = !C.cam;
+  v.classList.toggle('specchio', C.fronte);
+  if (C.cam) { if (v.srcObject !== C.locale) v.srcObject = C.locale; v.play().catch(() => {}); } else v.srcObject = null;
+}
+// fotocamere e uscite audio: «Gira» se ce n'è più d'una, «Altoparlante» dove il browser sceglie dove suonare
+async function dispositivi() {
+  let d = [];
+  try { d = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
+  $('bGira').hidden = d.filter(x => x.kind === 'videoinput').length < 2;
+  C.uscite = 'setSinkId' in HTMLMediaElement.prototype ? d.filter(x => x.kind === 'audiooutput' && x.deviceId && x.deviceId !== 'communications') : [];
+  $('bAlto').hidden = C.uscite.length < 2;
+}
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', () => { if (C.attivo) dispositivi(); });
+async function tieniAcceso() {   // schermo acceso durante la chiamata
+  try { if (navigator.wakeLock && !C.blocco && !C.finita && !document.hidden) C.blocco = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (C.attivo && !document.hidden) { C.blocco = null; tieniAcceso(); } });
+
+// chi esce dalla pagina (app chiusa, ricaricata) esce dalla chiamata: gli altri non aspettano la linea caduta
+addEventListener('pagehide', () => {
+  if (!C.id || C.finita) return;
+  try {
+    fetch(AX.API + 'chiamate/' + enc(C.id) + '/' + (C.entrata && !C.risposto ? 'rifiuta' : 'chiudi'),
+      {method:'POST', keepalive:true, headers:{'Content-Type':'application/json'}, body:JSON.stringify({disp:DISP})});
+  } catch (e) {}
+});
+
+async function chiama(ids, video) {
+  if (C.attivo || C.preparando) return;
+  nuova(); C.preparando = true; C.video = video;
+  apriSchermo();
+  const n = ids.map(id => (PERSONE.find(p => p.id === id) || {}).nome).filter(Boolean);
+  $('scNome').textContent = nomi(n); scritta('Preparo la chiamata…');
+  const no = adatto(); if (no) return fine(no, 'errore');
+  try {
+    const [ice, j] = await Promise.all([api('chiamate/ice'), api('chiamate/attendi?disp=' + enc(DISP))]);
+    C.ice = ice; C.seq = j.seq;
+  } catch (e) { return fine(e.message, 'errore'); }
+  try { await prendiMedia(video); } catch (e) { return fine(permesso(e), 'errore'); }
+  try {
+    const r = await api('chiamate', {method:'POST', body:{a:ids, video, disp:DISP}});
+    C.id = r.chiamata.id; C.attivo = true; C.risposto = true; C.preparando = false;
+    tieniAcceso();
+    aggiorna(r.chiamata);
+    if (C.finita) return;
+    squillo('uscita');
+    ciclo();
+  } catch (e) { fine(e.message, 'errore'); }
+}
+
+async function entrata(cid) {
+  if (C.attivo || C.preparando) return;
+  nuova(); C.preparando = true; C.entrata = true; C.id = cid;
+  apriSchermo(); scritta('Chiamata in arrivo…');
+  try {
+    const [ice, j] = await Promise.all([api('chiamate/ice').catch(() => ({iceServers:[]})), api('chiamate/attendi?disp=' + enc(DISP))]);
+    C.ice = ice; C.seq = j.seq; C.attivo = true; C.preparando = false;
+    aggiorna((j.chiamate || []).find(x => x.id === cid));
+  } catch (e) { return fine(e.message, 'errore'); }
+  if (C.finita) return;
+  const no = adatto();
+  if (no) { scritta(no); $('bRispondi').disabled = $('bSoloVoce').disabled = true; }
+  $('bSoloVoce').hidden = !C.vista.video;
+  $('tArrivo').hidden = false;
+  squillo('arrivo');
+  ciclo();
+}
+async function rispondi(video) {
+  if (C.rispondendo || C.risposto || C.finita) return;
+  C.rispondendo = true; squillo(null);
+  $('bRispondi').disabled = $('bSoloVoce').disabled = $('bRifiuta').disabled = true;
+  scritta('Collegamento…');
+  try { await prendiMedia(video); }
+  catch (e) { api('chiamate/' + enc(C.id) + '/rifiuta', {method:'POST', body:{disp:DISP}}).catch(() => {}); return fine(permesso(e), 'errore'); }
+  try {
+    const r = await api('chiamate/' + enc(C.id) + '/rispondi', {method:'POST', body:{disp:DISP}});
+    C.risposto = true; C.rispondendo = false;
+    $('tArrivo').hidden = true;
+    tieniAcceso();
+    aggiorna(r.chiamata);
+    // chi entra manda l'offerta a chi è già dentro (per ogni coppia una sola offerta, niente incroci)
+    if (!C.finita) for (const x of altri(r.chiamata)) if (x.stato === 'dentro') offri(x.id);
+  } catch (e) { fine(e.message, 'errore'); }
+}
+function rifiuta() {
+  if (C.finita) return;
+  api('chiamate/' + enc(C.id) + '/rifiuta', {method:'POST', body:{disp:DISP}}).catch(() => {});
+  fine('Chiamata rifiutata', 'rifiutata', 600);
+}
+function riaggancia() {
+  if (C.finita) return;
+  if (C.id) api('chiamate/' + enc(C.id) + '/chiudi', {method:'POST', body:{disp:DISP}}).catch(() => {});
+  fine('Chiamata terminata', C.inizio ? 'fatta' : C.entrata ? 'rifiutata' : 'annullata', 900);
+}
+
+// attesa lunga sul centralino: segnali per collegarsi e com'è la chiamata (chi squilla, chi è dentro, chi è uscito)
+async function ciclo() {
+  const mia = C;
+  while (mia.attivo && mia === C) {
+    try {
+      const j = await api('chiamate/attendi?disp=' + enc(DISP) + '&dopo=' + mia.seq + '&attesa=25', {timeout:35000});
+      if (!mia.attivo || mia !== C) return;
+      mia.seq = j.seq; mia.errori = 0;
+      for (const e of j.eventi || []) if (e.tipo === 'segnale' && e.chiamata === mia.id) await ricevi(e);
+      aggiorna((j.chiamate || []).find(x => x.id === mia.id));
+    } catch (e) {
+      if (!mia.attivo || mia !== C) return;
+      if (++mia.errori >= 3) scritta('Il Mac mini non risponde…');
+      await pausa(2000);
+    }
+  }
+}
+function aggiorna(v) {
+  if (C.finita) return;
+  if (!v) {
+    // il centralino non la conosce più (riavviato): se i telefoni sono collegati si continua, da telefono a telefono
+    if (C.risposto && [...C.peers.values()].some(p => p.collegato)) { C.orfana = true; return disegna(); }
+    return fine(C.entrata && !C.risposto ? 'Chiamata persa' : 'Chiamata terminata', C.inizio ? 'fatta' : C.entrata ? 'persa' : 'annullata');
+  }
+  C.vista = v;
+  const mio = io(v);
+  if (C.entrata && !C.risposto) {
+    if (mio.stato === 'dentro' && mio.disp !== DISP) return fine('Hai risposto su un altro dispositivo', 'altrove', 1200);
+    if (v.stato === 'finita' || (mio.stato !== 'squilla' && mio.stato !== 'dentro')) return fine(mio.stato === 'rifiutata' ? 'Chiamata rifiutata' : 'Chiamata persa', mio.stato === 'rifiutata' ? 'rifiutata' : 'persa');
+  } else if (v.stato === 'finita' || mio.stato !== 'dentro') {
+    const m = v.stato === 'finita' ? v.motivo : mio.stato;
+    return fine(MOTIVI[m] || 'Chiamata terminata', C.inizio ? 'fatta' : m === 'chiusa' ? 'annullata' : m, m === 'occupato' ? 3000 : 1800);
+  }
+  for (const x of altri(v)) if (x.stato !== 'dentro' && C.peers.has(x.id)) chiudiPeer(x.id);   // uscito, caduto
+  disegna();
+}
+
+/* ---------- collegamenti da telefono a telefono ---------- */
+function nuovoPeer(pid, offerente) {
+  const pc = new RTCPeerConnection({iceServers:(C.ice && C.ice.iceServers) || [], bundlePolicy:'max-bundle'});
+  const p = {pid, pc, offerente, stream:new MediaStream(), invio:Promise.resolve(), coda:[], tm:0, remoti:C.prima[pid] || [],
+    suo:{microfono:true, video:false}, collegato:false, riavvio:0, audio:null, video:null};
+  delete C.prima[pid];
+  pc.onicecandidate = e => {
+    if (!e.candidate || !e.candidate.candidate) return;
+    p.coda.push(e.candidate.toJSON ? e.candidate.toJSON() : {candidate:e.candidate.candidate, sdpMid:e.candidate.sdpMid, sdpMLineIndex:e.candidate.sdpMLineIndex});
+    if (!p.tm) p.tm = setTimeout(() => { p.tm = 0; const c = p.coda.splice(0); if (c.length) manda(p, 'candidati', c); }, 150);   // a gruppi
+  };
+  pc.ontrack = e => { if (!p.stream.getTracks().includes(e.track)) p.stream.addTrack(e.track); media(p); };
+  const stato = () => {
+    const s = pc.connectionState || pc.iceConnectionState;
+    if (s === 'connected' || s === 'completed') {
+      if (!p.collegato) { p.collegato = true; if (!C.inizio) { C.inizio = Date.now(); squillo(null); } }
+    } else if (s === 'failed' || s === 'closed') {
+      p.collegato = false;
+      if (s === 'closed') return disegna();
+      // collegamento perso: chi aveva offerto riprova (ICE restart), l'altro glielo chiede
+      if (p.offerente) riavvia(p); else manda(p, 'riprova', {});
+    }
+    disegna();
+  };
+  pc.onconnectionstatechange = stato; pc.oniceconnectionstatechange = stato;
+  C.peers.set(pid, p);
+  return p;
+}
+function manda(p, tipo, dati) {   // in ordine, uno dopo l'altro: la risposta non arriva mai prima dell'offerta
+  const id = C.id;
+  p.invio = p.invio.then(() => api('chiamate/' + enc(id) + '/segnale', {method:'POST', body:{disp:DISP, a:p.pid, tipo, dati}})).catch(e => console.warn('chiamate:', tipo, e.message));
+  return p.invio;
+}
+const mioStato = () => ({microfono:!C.muto, video:!!C.cam});
+function inviaStato() { for (const p of C.peers.values()) manda(p, 'stato', mioStato()); }
+const trasm = (p, k) => p.pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === k);
+async function limita(p) {   // nei gruppi ogni telefono manda il video a tutti: meno banda per ciascuno
+  const t = trasm(p, 'video'); if (!t || !t.sender.getParameters) return;
+  try {
+    const prm = t.sender.getParameters();
+    if (!prm.encodings || !prm.encodings.length) return;
+    prm.encodings[0].maxBitrate = gruppo() ? 600000 : 1500000;
+    await t.sender.setParameters(prm);
+  } catch (e) {}
+}
+async function offri(pid) {
+  const p = nuovoPeer(pid, true), pc = p.pc;
+  try {
+    // sempre voce e video, anche in una chiamata vocale: accendere il video dopo non chiede di rinegoziare
+    pc.addTransceiver(C.mic || 'audio', {direction:'sendrecv', streams:[C.locale]});
+    pc.addTransceiver(C.cam || 'video', {direction:'sendrecv', streams:[C.locale]});
+    await pc.setLocalDescription(await pc.createOffer());
+    manda(p, 'offerta', {type:'offer', sdp:pc.localDescription.sdp});
+    manda(p, 'stato', mioStato());
+    limita(p);
+  } catch (e) { console.warn('chiamate: offerta', e); }
+  disegna();
+}
+async function riavvia(p) {
+  if (Date.now() - p.riavvio < 8000 || C.finita) return;
+  p.riavvio = Date.now();
+  try {
+    await p.pc.setLocalDescription(await p.pc.createOffer({iceRestart:true}));
+    manda(p, 'offerta', {type:'offer', sdp:p.pc.localDescription.sdp});
+  } catch (e) {}
+}
+async function remoti(p) {
+  const L = p.remoti.splice(0);
+  for (const c of L) { try { await p.pc.addIceCandidate(c); } catch (e) {} }
+}
+async function ricevi(e) {
+  const d = e.dati || {}, pid = e.da;
+  let p = C.peers.get(pid);
+  try {
+    if (e.segnale === 'offerta') {
+      if (!p) p = nuovoPeer(pid, false);
+      await p.pc.setRemoteDescription({type:'offer', sdp:String(d.sdp || '')});
+      for (const t of p.pc.getTransceivers()) {
+        const k = t.receiver && t.receiver.track && t.receiver.track.kind;
+        if (!k) continue;
+        if (t.direction !== 'sendrecv') t.direction = 'sendrecv';
+        await t.sender.replaceTrack(k === 'audio' ? C.mic : C.cam || null);
+      }
+      await remoti(p);
+      await p.pc.setLocalDescription(await p.pc.createAnswer());
+      manda(p, 'risposta', {type:'answer', sdp:p.pc.localDescription.sdp});
+      manda(p, 'stato', mioStato());
+      limita(p);
+    } else if (!p) {
+      if (e.segnale === 'candidati' && Array.isArray(d)) (C.prima[pid] = C.prima[pid] || []).push(...d);   // arrivati prima dell'offerta
+    } else if (e.segnale === 'risposta') {
+      await p.pc.setRemoteDescription({type:'answer', sdp:String(d.sdp || '')});
+      await remoti(p);
+    } else if (e.segnale === 'candidati' && Array.isArray(d)) {
+      p.remoti.push(...d);
+      if (p.pc.remoteDescription) await remoti(p);
+    } else if (e.segnale === 'stato') {
+      p.suo = {microfono:d.microfono !== false, video:!!d.video}; disegna();
+    } else if (e.segnale === 'riprova' && p.offerente) riavvia(p);
+  } catch (err) { console.warn('chiamate: segnale', e.segnale, err); }
+}
+function media(p) {
+  if (!p.audio) {
+    p.audio = document.createElement('audio'); p.audio.autoplay = true; p.audio.hidden = true; document.body.appendChild(p.audio);
+    if (C.uscita >= 0 && C.uscite[C.uscita] && p.audio.setSinkId) p.audio.setSinkId(C.uscite[C.uscita].deviceId).catch(() => {});
+  }
+  if (p.audio.srcObject !== p.stream) p.audio.srcObject = p.stream;
+  const pr = p.audio.play();
+  // l'audio non parte da solo (il browser vuole un tocco): un tasto per sentire
+  if (pr && pr.catch) pr.catch(() => { $('sentire').hidden = false; });
+  disegna();
+}
+$('bSentire').onclick = () => { $('sentire').hidden = true; for (const p of C.peers.values()) if (p.audio) p.audio.play().catch(() => {}); };
+function chiudiPeer(pid) {
+  const p = C.peers.get(pid); if (!p) return;
+  clearTimeout(p.tm);
+  try { p.pc.close(); } catch (e) {}
+  if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
+  p.stream.getTracks().forEach(t => t.stop());
+  C.peers.delete(pid);
+}
+
+/* ---------- disegno della schermata ---------- */
+const STATI = {squilla:'Squilla…', rifiutata:'Ha rifiutato', occupato:'Occupato', 'nessuna risposta':'Nessuna risposta', uscito:'È uscito', caduta:'Linea caduta', annullata:'Annullata'};
+function orologio() {
+  if (!C.inizio || C.finita) return;
+  const s = Math.floor((Date.now() - C.inizio) / 1000);
+  scritta((C.orfana ? 'Da telefono a telefono · ' : '') + String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'));
+}
+setInterval(orologio, 1000);
+function disegna() {
+  const v = C.vista; if (!v || C.finita) return;
+  const L = altri(v), vivi = L.filter(x => x.stato === 'dentro' || x.stato === 'squilla');
+  $('scNome').textContent = C.entrata && !C.risposto ? v.da_nome + (L.length > 1 ? ' (con ' + nomi(L.filter(x => x.id !== v.da).map(x => x.nome)) + ')' : '') : nomi((vivi.length ? vivi : L).map(x => x.nome));
+  if (C.entrata && !C.risposto) scritta(C.rispondendo ? 'Collegamento…' : (v.video ? 'Videochiamata' : 'Chiamata') + (L.length > 1 ? ' di gruppo' : '') + ' in arrivo');
+  else if (C.inizio) orologio();
+  else scritta(vivi.some(x => x.stato === 'dentro') ? 'Collegamento…' : vivi.length ? 'Squilla…' : '');
+  $('tChiamata').hidden = !C.risposto;
+  if (!$('tChiamata').hidden) {
+    $('bMic').classList.toggle('on', C.muto); $('bMic').querySelector('i').innerHTML = C.muto ? IC.micno : IC.mic; $('bMic').querySelector('span').textContent = C.muto ? 'Muto' : 'Microfono';
+    $('bVideo').classList.toggle('on', !!C.cam); $('bVideo').querySelector('i').innerHTML = C.cam ? IC.video : IC.videono; $('bVideo').querySelector('span').textContent = C.cam ? 'Video' : 'Video spento';
+    $('bGira').disabled = !C.cam;
+    $('bAggiungi').hidden = !!C.orfana || vivi.length >= 3;   // al più 4 con me
+  }
+  // un riquadro per ogni altra persona: il suo video se l'ha acceso, se no le iniziali
+  const mostra = C.risposto ? vivi : [{id:v.da, nome:v.da_nome, stato:'dentro'}];
+  const riq = $('riq');
+  riq.className = 'n' + Math.min(4, mostra.length);
+  [...riq.children].forEach(el => { if (!mostra.some(x => x.id === el.dataset.p)) el.remove(); });
+  for (const x of mostra) {
+    let el = [...riq.children].find(e => e.dataset.p === x.id);
+    if (!el) {
+      el = document.createElement('div'); el.className = 'riq'; el.dataset.p = x.id;
+      el.innerHTML = '<span class="ini"></span><video autoplay playsinline muted hidden></video><span class="et"></span>';
+      el.querySelector('.ini').style.background = colore(x.id);
+      riq.appendChild(el);
+    }
+    el.querySelector('.ini').textContent = iniziali(x.nome);
+    const p = C.peers.get(x.id), vid = el.querySelector('video');
+    const conVideo = !!(p && p.suo.video && p.stream.getVideoTracks().some(t => t.readyState === 'live'));
+    if (conVideo) { if (vid.srcObject !== p.stream) vid.srcObject = p.stream; if (vid.paused) vid.play().catch(() => {}); }
+    vid.hidden = !conVideo;
+    const st = x.stato === 'squilla' ? STATI.squilla : !p ? (C.risposto ? 'Collegamento…' : '') : !p.collegato ? 'Collegamento…' : !p.suo.microfono ? 'Microfono spento' : '';
+    el.querySelector('.et').textContent = mostra.length > 1 || st ? x.nome + (st ? ' · ' + st : '') : '';
+    el.querySelector('.et').hidden = !(mostra.length > 1 || st);
+  }
+  $('sc').classList.toggle('video1', mostra.length === 1 && !!el1Video());
+}
+function el1Video() { const v = $('riq').querySelector('video:not([hidden])'); return v; }
+
+function fine(testo, esito, attesa) {
+  if (C.finita) return;
+  const mia = C;
+  mia.finita = true; mia.attivo = false; mia.preparando = false;
+  squillo(esito === 'occupato' ? 'occupato' : null);
+  for (const pid of [...mia.peers.keys()]) chiudiPeer(pid);
+  if (mia.locale) mia.locale.getTracks().forEach(t => t.stop());
+  $('mio').srcObject = null; $('mio').hidden = true;
+  try { if (mia.blocco) mia.blocco.release(); } catch (e) {}
+  registra(mia, esito);
+  $('tArrivo').hidden = $('tChiamata').hidden = $('scegli').hidden = $('sentire').hidden = true;
+  $('riq').querySelectorAll('video').forEach(v => { v.srcObject = null; v.hidden = true; });
+  $('sc').classList.remove('video1');
+  scritta(testo);
+  setTimeout(() => { if (C === mia) esci(); }, attesa || 1800);
+}
+function registra(c, esito) {
+  if (c.registrata || !c.vista || esito === 'errore' && !c.id) return;
+  c.registrata = true;
+  const R = registro();
+  R.unshift({quando:Date.now(), verso:c.entrata ? 'entrata' : 'uscita', con:altri(c.vista).map(x => ({id:x.id, nome:x.nome})),
+    video:!!c.vista.video, esito:c.inizio ? 'fatta' : esito, durata:c.inizio ? Math.round((Date.now() - c.inizio) / 1000) : 0});
+  AX.store.set('chiamate-registro', R.slice(0, 40));
+}
+function esci() {
+  if (CORNICE && host.chiamataFinita) { host.chiamataFinita(); return; }
+  $('sc').hidden = true; $('elenco').hidden = false;
+  disegnaRecenti();
+  if (!host) ascoltaEntrate();
+}
+
+/* ---------- tasti ---------- */
+$('bRispondi').onclick = () => rispondi(!!(C.vista && C.vista.video));
+$('bSoloVoce').onclick = () => rispondi(false);
+$('bRifiuta').onclick = rifiuta;
+$('bChiudi').onclick = riaggancia;
+$('bMic').onclick = () => { C.muto = !C.muto; if (C.mic) C.mic.enabled = !C.muto; inviaStato(); disegna(); };
+$('bVideo').onclick = async () => {
+  const b = $('bVideo'); b.disabled = true;
+  try {
+    if (C.cam) {   // spenta davvero (anche la lucina): agli altri arriva il nulla al posto del video
+      for (const p of C.peers.values()) { const t = trasm(p, 'video'); if (t) await t.sender.replaceTrack(null).catch(() => {}); }
+      C.cam.stop(); C.locale.removeTrack(C.cam); C.cam = null;
+    } else {
+      let s;
+      try { s = await navigator.mediaDevices.getUserMedia({video:vincoli()}); } catch (e) { AX.toast('Fotocamera non disponibile'); return; }
+      C.cam = s.getVideoTracks()[0]; C.locale.addTrack(C.cam);
+      for (const p of C.peers.values()) { const t = trasm(p, 'video'); if (t) await t.sender.replaceTrack(C.cam).catch(() => {}); }
+      dispositivi();
+    }
+    mostraMio(); inviaStato(); disegna();
+  } finally { b.disabled = false; }
+};
+$('bGira').onclick = async () => {
+  if (!C.cam) return;
+  const b = $('bGira'); b.disabled = true;
+  const vecchia = C.cam;
+  vecchia.stop();   // l'iPhone non apre due fotocamere insieme
+  C.fronte = !C.fronte;
+  let s = null;
+  try { s = await navigator.mediaDevices.getUserMedia({video:vincoli()}); }
+  catch (e) { C.fronte = !C.fronte; try { s = await navigator.mediaDevices.getUserMedia({video:vincoli()}); } catch (e2) {} }
+  C.locale.removeTrack(vecchia);
+  C.cam = s ? s.getVideoTracks()[0] : null;
+  if (C.cam) C.locale.addTrack(C.cam);
+  for (const p of C.peers.values()) { const t = trasm(p, 'video'); if (t) await t.sender.replaceTrack(C.cam).catch(() => {}); }
+  b.disabled = false;
+  mostraMio(); inviaStato(); disegna();
+};
+$('bAlto').onclick = async () => {   // passa all'uscita audio successiva (altoparlante, cuffie, auricolare…)
+  if (C.uscite.length < 2) return;
+  C.uscita = (C.uscita + 1) % C.uscite.length;
+  const u = C.uscite[C.uscita];
+  for (const p of C.peers.values()) if (p.audio && p.audio.setSinkId) await p.audio.setSinkId(u.deviceId).catch(() => {});
+  $('bAlto').querySelector('span').textContent = (u.label || 'Uscita ' + (C.uscita + 1)).replace(/\s*\(.*\)$/, '').slice(0, 18);
+  $('bAlto').classList.add('on');
+};
+$('bAggiungi').onclick = async () => {
+  if (!PERSONE.length) await caricaPersone();
+  const dentro = new Set(altri(C.vista).filter(x => x.stato === 'dentro' || x.stato === 'squilla').map(x => x.id));
+  const L = PERSONE.filter(p => !dentro.has(p.id));
+  const s = $('scegli');
+  s.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><b>Aggiungi alla chiamata</b><button class="btn sm" id="sChiudi">Annulla</button></div>' +
+    (L.length ? L.map(p => '<button class="row" data-a="' + esc(p.id) + '"><span class="av" style="background:' + colore(p.id) + '">' + esc(iniziali(p.nome)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b></span></button>').join('')
+      : '<p class="small" style="color:rgba(255,255,255,.6)">Non c\'è nessun altro da aggiungere.</p>');
+  s.hidden = false;
+  $('sChiudi').onclick = () => { s.hidden = true; };
+  s.querySelectorAll('[data-a]').forEach(b => b.onclick = async () => {
+    s.hidden = true;
+    try { aggiorna((await api('chiamate/' + enc(C.id) + '/aggiungi', {method:'POST', body:{disp:DISP, a:[b.dataset.a]}})).chiamata); }
+    catch (e) { AX.toast(e.message); }
+  });
+};
+
+/* ---------- pagina aperta da sola: aspetta le chiamate in arrivo (dentro l'app lo fa l'app) ---------- */
+let ascolto = false;
+async function ascoltaEntrate() {
+  if (host || ascolto) return;
+  ascolto = true;
+  let seq = null;
+  while (!C.attivo && !C.preparando) {
+    try {
+      const j = await api('chiamate/attendi?disp=' + enc(DISP) + (seq != null ? '&dopo=' + seq + '&attesa=25' : ''), {timeout:35000});
+      seq = j.seq;
+      if (C.attivo || C.preparando) break;
+      const c = (j.chiamate || []).find(x => x.stato !== 'finita' && (io(x) || {}).stato === 'squilla');
+      if (c) { ascolto = false; entrata(c.id); return; }
+    } catch (e) { await pausa(5000); }
+  }
+  ascolto = false;
+}
+
+/* ---------- avvio ---------- */
+(async function avvio() {
+  const chi = (Q.get('chiama') || '').split(',').filter(Boolean).slice(0, 3), video = Q.get('video') === '1', cid = Q.get('entrante') || '';
+  if (CORNICE) {   // schermata della chiamata dentro la cornice dell'app
+    if (cid) entrata(cid);
+    else if (chi.length) { await caricaPersone(); chiama(chi, video); }
+    else host.chiamataFinita();
+    return;
+  }
+  AX.header('Chiamate');
+  disegnaRecenti();
+  const ok = await caricaPersone();
+  AX.api('chiamate/ice').then(j => { $('ponte').hidden = !!j.turn; }).catch(() => {});
+  if (cid && !host) entrata(cid);
+  else if (chi.length && ok) {
+    history.replaceState(null, '', location.pathname);   // ricaricando la pagina non si richiama
+    avvia(chi, video);
+  }
+  if (!host && ok && !C.preparando && !C.attivo) ascoltaEntrate();
+})();
+</script>
+</body>
+</html>

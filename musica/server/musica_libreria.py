@@ -2969,25 +2969,28 @@ class Centralino:
             raise ErroreExtra(400, "Segnale non valido: servono dati")
         if len(json.dumps(dati, ensure_ascii=False)) > SEGNALE_MAX:
             raise ErroreExtra(413, "Segnale troppo grande")
-        with self.cond:
-            ora = time.time()
-            self._pulisci(ora)
-            c = self._sua(cid, chi)
-            x = c["p"][chi]
-            if c["stato"] == "finita" or x["stato"] != "dentro":
-                raise ErroreExtra(409, "Non sei dentro questa chiamata")
-            if x["disp"] != disp:
-                raise ErroreExtra(409, "La chiamata è su un altro tuo dispositivo")
-            y = c["p"].get(a) if isinstance(a, str) and a != chi else None
-            if y is None or y["stato"] != "dentro":
-                raise ErroreExtra(404, "Questa persona non è nella chiamata")
-            x["segnali"] += 1
-            if x["segnali"] > SEGNALI_PERSONA:
-                raise ErroreExtra(429, "Troppi messaggi in questa chiamata")
-            self.visti[(chi, disp)] = ora
-            self._evento(a, y["disp"], tipo="segnale", chiamata=cid, da=chi, segnale=tipo, dati=dati)
-            self.cond.notify_all()
-        return {"ok": True}
+        try:
+            with self.cond:
+                ora = time.time()
+                self._pulisci(ora)
+                c = self._sua(cid, chi)
+                x = c["p"][chi]
+                if c["stato"] == "finita" or x["stato"] != "dentro":
+                    raise ErroreExtra(409, "Non sei dentro questa chiamata")
+                if x["disp"] != disp:
+                    raise ErroreExtra(409, "La chiamata è su un altro tuo dispositivo")
+                y = c["p"].get(a) if isinstance(a, str) and a != chi else None
+                if y is None or y["stato"] != "dentro":
+                    raise ErroreExtra(404, "Questa persona non è nella chiamata")
+                x["segnali"] += 1
+                if x["segnali"] > SEGNALI_PERSONA:
+                    raise ErroreExtra(429, "Troppi messaggi in questa chiamata")
+                self.visti[(chi, disp)] = ora
+                self._evento(a, y["disp"], tipo="segnale", chiamata=cid, da=chi, segnale=tipo, dati=dati)
+                self.cond.notify_all()
+            return {"ok": True}
+        finally:
+            self._manda()
 
 
 def avviso_chiamata(persona, evento, chiamata):

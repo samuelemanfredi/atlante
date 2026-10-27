@@ -2645,6 +2645,97 @@ VID.el.addEventListener('click', () => {   // tocco sul video: schermo intero
 });
 vidSegna();
 
+/* ---------- chiamate vocali e video (x/chiamate.html) ----------
+   Il Mac mini fa da centralino (api/extra/chiamate…): l'app tiene aperta un'attesa lunga e, quando qualcuno chiama,
+   apre la schermata della chiamata in una cornice sua, sopra l'app e i moduli (che restano com'erano: si può cambiare
+   modulo senza far cadere la chiamata). Voce e video vanno da telefono a telefono, cifrati. Durante la chiamata la
+   musica va in pausa e poi riprende. Ad app chiusa la chiamata arriva come notifica (Web Push, dalla chat): toccandola
+   l'app si apre e, se squilla ancora, la chiamata compare qui da sola.
+   Per gli altri moduli (la chat): AM.chiama(persona o [persone], video) apre la chiamata; true se è partita. */
+const XCHIAMATE = {k:'chiamate', t:'Chiamate', d:'Voce e video con chi è in Atlante', i:'📞', c:'#34c759'};
+[XMODS, XINVITATI].forEach(L => {   // il riquadro anche per gli invitati
+  let g = L.find(x => x.g === 'Messaggi e chiamate');
+  if (!g) L.push(g = {g:'Messaggi e chiamate', m:[]});
+  if (!g.m.some(m => m.k === XCHIAMATE.k)) g.m.push(XCHIAMATE);
+});
+const CH = {seq:null, aperta:false, musica:false, ctx:null};
+const chSi = () => IO.ruolo === 'proprietario' || IO.ruolo === 'invitato';   // la rete di casa senza nessuno dietro no
+function chCornice() {
+  let d = $('xc');
+  if (!d) {
+    d = document.createElement('div'); d.id = 'xc'; d.hidden = true;
+    d.style.cssText = 'position:fixed;inset:0;z-index:85;background:#1c1c1e';
+    const f = document.createElement('iframe'); f.title = 'Chiamata';
+    f.setAttribute('allow', 'camera; microphone; autoplay; screen-wake-lock; speaker-selection');
+    f.style.cssText = 'width:100%;height:100%;border:0;display:block;background:#1c1c1e';
+    d.appendChild(f); document.body.appendChild(d);
+  }
+  return d;
+}
+function apriChiamata(q) {
+  if (CH.aperta) return false;   // una chiamata alla volta
+  CH.aperta = true;
+  CH.musica = !!curId && !au.paused && !RC.id;
+  if (CH.musica) { pausaVoluta = Date.now(); au.pause(); }
+  const d = chCornice();
+  d.firstChild.src = 'x/chiamate.html' + q + (q.indexOf('?') >= 0 ? '&' : '?') + 'cornice=1';
+  d.hidden = false;
+  return true;
+}
+function chiudiChiamata() {
+  if (!CH.aperta) return;
+  CH.aperta = false;
+  const d = $('xc');
+  if (d) { d.hidden = true; d.firstChild.src = 'about:blank'; }   // via la pagina: microfono e fotocamera si spengono
+  if (CH.musica) { CH.musica = false; if (curId && au.paused) au.play().catch(() => {}); }
+}
+// gli squilli nascono qui: il contesto audio dell'app, sbloccato dal primo tocco, suona anche quando chiamano più tardi
+function chContesto() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!CH.ctx || CH.ctx.state === 'closed') { try { CH.ctx = new AC(); } catch (e) { CH.ctx = null; return null; } }
+  if (CH.ctx.state === 'suspended') CH.ctx.resume().catch(() => {});
+  return CH.ctx;
+}
+function chSblocca() {
+  if (!chSi()) return;
+  const c = chContesto();
+  if (c) { ['touchend', 'click'].forEach(n => removeEventListener(n, chSblocca, true)); setTimeout(() => { if (!CH.aperta) c.suspend().catch(() => {}); }, 300); }
+}
+['touchend', 'click'].forEach(n => addEventListener(n, chSblocca, {capture:true, passive:true}));
+Object.assign(AM, {
+  chiama(persone, video) { const L = [].concat(persone || []).filter(Boolean); return L.length ? apriChiamata('?chiama=' + encodeURIComponent(L.join(',')) + (video ? '&video=1' : '')) : false; },
+  chiamataFinita() { chiudiChiamata(); },
+  dispositivo() { return DEV.id; },
+  contestoAudio() { return chContesto(); }
+});
+// chiamate in arrivo: come i comandi del telecomando, attesa lunga; sul telefono in tasca si smette (arriva la notifica)
+async function chAscolta() {
+  for (;;) {
+    // non aspetta il catalogo (SRV): aperta toccando la notifica, la chiamata deve comparire subito
+    if (navigator.onLine === false || !chSi() || CH.aperta || (document.hidden && (isIOS || DEV.tipo === 'android'))) { CH.seq = null; await pausa(1500); continue; }
+    try {
+      const r = await fetchT(XAPI + 'chiamate/attendi?disp=' + encodeURIComponent(DEV.id) + (CH.seq != null ? '&dopo=' + CH.seq + '&attesa=25' : ''), {cache:'no-store'}, 35000);
+      if (!r.ok) { CH.seq = null; await pausa(r.status === 403 ? 60000 : 5000); continue; }
+      const j = await r.json();
+      CH.seq = j.seq;
+      if (!CH.aperta) chGuarda(j.chiamate || []);
+    } catch (e) { CH.seq = null; await pausa(5000); }
+  }
+}
+function chGuarda(L) {
+  for (const c of L) {
+    const io = c.stato !== 'finita' && (c.partecipanti || []).find(x => x.io);
+    if (!io) continue;
+    if (io.stato === 'squilla') { apriChiamata('?entrante=' + encodeURIComponent(c.id)); return; }
+    // una chiamata rimasta aperta su questo dispositivo (app ricaricata a metà): si chiude, così gli altri non aspettano
+    if (io.stato === 'dentro' && io.disp === DEV.id) {
+      fetchT(XAPI + 'chiamate/' + encodeURIComponent(c.id) + '/chiudi', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({disp:DEV.id})}, 8000).catch(() => {});
+    }
+  }
+}
+chAscolta();
+
 /* ---------- AirPlay e condivisione ---------- */
 function castPick() {
   if (au.webkitShowPlaybackTargetPicker) { try { au.webkitShowPlaybackTargetPicker(); } catch (e) { toast('AirPlay non disponibile adesso'); } return; }
