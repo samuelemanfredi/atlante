@@ -625,6 +625,51 @@ class TestExtra(unittest.TestCase):
         self.s.json("POST", "/api/extra/musica", {"id": "Scarica0001"}, codice=403, intest={"Origin": "http://cattivo.example"})
         self.s.json("POST", "/api/extra/musica/nessuno/annulla", codice=404)
 
+    # ----- dispositivi (telecomando) -----
+
+    def test_dispositivi(self):
+        iphone, mac = "iphone-prova-0001", "mac-prova-00000001"
+        stato = {"brano": {"sid": "abc", "titolo": "Without Me", "artista": "Eminem"}, "suona": True, "t": 12.5,
+                 "coda": ["abc", "def"]}
+        self.assertEqual(self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac,
+                                     {"nome": "  MacBook   di Samuele ", "tipo": "mac", "stato": stato}), {"comandi": []})
+        self.s.json("POST", "/api/extra/dispositivi/%s/stato" % iphone, {"nome": "iPhone", "tipo": "telefono", "stato": {}})
+        d = {x["id"]: x for x in self.s.json("GET", "/api/extra/dispositivi")["dispositivi"]}
+        self.assertEqual((d[mac]["nome"], d[mac]["tipo"], d[mac]["stato"]), ("MacBook di Samuele", "mac", stato))
+        self.assertEqual(d[iphone]["tipo"], "pc")   # tipo sconosciuto
+        self.assertLess(d[mac]["fa"], 5)
+        # comando dall'iPhone al Mac: l'attesa lunga del Mac risponde subito
+        esito = {}
+
+        def attendi():
+            t0 = time.time()
+            esito["c"] = self.s.json("GET", "/api/extra/dispositivi/%s/comandi?attesa=10" % mac)["comandi"]
+            esito["dopo"] = time.time() - t0
+        th = threading.Thread(target=attendi)
+        th.start()
+        time.sleep(0.4)
+        self.assertEqual(self.s.json("POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "seek", "t": 42}), {"ok": True})
+        th.join(10)
+        self.assertEqual(esito["c"], [{"azione": "seek", "t": 42}])
+        self.assertLess(esito["dopo"], 5)
+        # consegnato una volta sola; senza comandi l'attesa finisce vuota
+        self.assertEqual(self.s.json("GET", "/api/extra/dispositivi/%s/comandi?attesa=0.3" % mac)["comandi"], [])
+        # i comandi arrivano anche con lo stato (se l'attesa lunga non c'è)
+        self.s.json("POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "pause"})
+        self.s.json("POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "next"})
+        self.assertEqual(self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"nome": "MacBook", "stato": stato})["comandi"],
+                         [{"azione": "pause"}, {"azione": "next"}])
+        # errori
+        self.assertIn("errore", self.s.json("POST", "/api/extra/dispositivi/sconosciuto-000/comando", {"azione": "play"}, codice=404))
+        self.assertIn("errore", self.s.json("POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "spegni"}, codice=400))
+        self.assertIn("errore", self.s.json("POST", "/api/extra/dispositivi/corto/stato", {"stato": {}}, codice=400))
+        self.assertIn("errore", self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"stato": [1]}, codice=400))
+        self.assertIn("errore", self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"stato": {"x": "a" * 40000}}, codice=413))
+        self.assertIn("errore", self.s.json("GET", "/api/extra/dispositivi/%s/comandi?attesa=x" % mac, codice=400))
+        self.assertIn("errore", self.s.json("GET", "/api/extra/dispositivi/%s/stato" % mac, codice=405))
+        self.s.json("POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "play"}, codice=403,
+                    intest={"Origin": "http://cattivo.example"})
+
     # ----- voci e audiolibri -----
 
     def test_voci(self):
@@ -700,6 +745,45 @@ class TestExtra(unittest.TestCase):
         self.assertIsInstance(j["pulizia"], list)
         for v in j["pulizia"]:
             self.assertTrue({"nome", "percorso", "dimensione"} <= set(v), v)
+
+
+class TestDispositiviTempi(unittest.TestCase):
+    """Scadenze del telecomando con i tempi accorciati: comandi vecchi scartati, dispositivi spariti, limite dell'elenco."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_disp", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def test_scadenze(self):
+        m = self.m
+        m.COMANDO_SCADE, m.DISP_VIVO = 0.3, 0.6
+        d = m.Dispositivi()
+        d.stato("vecchio-0001", {"nome": "iPhone", "stato": {}})
+        d.comando("vecchio-0001", {"azione": "play"})
+        time.sleep(0.4)
+        self.assertEqual(d.stato("vecchio-0001", {"nome": "iPhone", "stato": {}}), [])   # «riproduci» troppo vecchio
+        time.sleep(0.7)
+        self.assertEqual(d.elenco(), [])   # non si fa sentire: sparito
+        with self.assertRaises(m.ErroreExtra) as e:
+            d.comando("vecchio-0001", {"azione": "play"})
+        self.assertEqual(e.exception.codice, 404)
+        # l'attesa lunga lo tiene vivo
+        d.stato("vivo-00000001", {"nome": "Mac", "stato": {}})
+        for _ in range(3):
+            d.attendi("vivo-00000001", 0.3)
+        self.assertEqual([x["id"] for x in d.elenco()], ["vivo-00000001"])
+
+    def test_limite(self):
+        m = self.m
+        m.DISP_VIVO, m.DISP_MAX = 60, 3
+        d = m.Dispositivi()
+        for i in range(5):
+            d.stato("disp-%04d" % i, {"nome": "D%d" % i, "stato": {}})
+            time.sleep(0.01)
+        self.assertEqual([x["id"] for x in d.elenco()], ["disp-0004", "disp-0003", "disp-0002"])
 
 
 class TestProxyInterno(unittest.TestCase):
