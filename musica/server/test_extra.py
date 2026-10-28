@@ -6938,5 +6938,32 @@ class TestPosizioneJS(unittest.TestCase):
             shutil.rmtree(base, ignore_errors=True)
 
 
+class TestTunnelCloudflare(unittest.TestCase):
+    """cloudflared si collega da 127.0.0.1: le sue richieste sono Internet, mai «casa» né Samuele."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("musica_libreria_tunnel", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def h(self, intestazioni):
+        return type("H", (), {"headers": intestazioni, "client_address": ("127.0.0.1", 1)})()
+
+    def test_mac_stesso(self):
+        h = self.h({})
+        self.assertEqual(self.m._via(h), "casa")
+        self.assertTrue(self.m._proprietario_rete(h))
+
+    def test_da_cloudflare(self):
+        for x in ({"Cf-Ray": "1", "Cf-Connecting-Ip": "203.0.113.9"},
+                  {"Cf-Ray": "1", "Cf-Connecting-Ip": "203.0.113.9", "X-Forwarded-For": "127.0.0.1"}):
+            h = self.h(x)
+            self.assertEqual(self.m._via(h), "internet")
+            self.assertFalse(self.m._fidato(h))
+            self.assertFalse(self.m._proprietario_rete(h))
+            self.assertEqual(self.m._ip_cliente(h), "203.0.113.9")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
