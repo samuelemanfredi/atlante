@@ -1908,7 +1908,8 @@ auOn('error', async () => {
    I BPM si misurano sui 30 s finali del brano in corso e sui 30 s iniziali del successivo (dal file sull'iPhone, o dal Mac
    che manda il pezzo già decodificato), una volta sola per brano. Se i ritmi non si riconoscono o sono troppo lontani,
    resta una dissolvenza normale. */
-const MIX = {on:ls.get('am-mix', true), X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0};
+// X: secondi della dissolvenza a fine brano, verso il successivo (12 dal 28/10, chiesto da Samuele: «allunga un po'»; erano 10)
+const MIX = {on:ls.get('am-mix', true), X:12, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0};
 // «un lettore solo» non c'è più (vedi la pausa del lettore, più sotto): chi l'aveva salvato lo perde, una volta sola. Se
 // era acceso (il mix fermo per sempre per un falso allarme) lo si scrive nel diario
 (function () { const era = ls.get('am-mix-unlettore', null); if (era == null) return; try { localStorage.removeItem('am-mix-unlettore'); } catch (e) {} if (era) setTimeout(() => diario('un lettore solo: tolto'), 0); })();
