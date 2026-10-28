@@ -25,6 +25,8 @@ import threading
 import time
 import unittest
 import unittest.mock
+import urllib.error
+import urllib.request
 from urllib.parse import parse_qs, quote as _quote, urlsplit
 
 QUI =os.path.dirname(os.path.abspath(__file__))
@@ -344,8 +346,9 @@ def aspetta(cond, tempo=20, passo=0.05):
 
 
 class Server:
-    def __init__(self, base, cartelle, extra=()):
-        self.base, self.c, self.extra = base, cartelle, list(extra)
+    def __init__(self, base, cartelle, extra=(), ambiente=None):
+        """`ambiente`: variabili d'ambiente in più per il server (None la toglie)."""
+        self.base, self.c, self.extra, self.ambiente = base, cartelle, list(extra), dict(ambiente or {})
         self.porta = porta_libera()
         self.p = None
 
@@ -365,8 +368,16 @@ class Server:
         for k, v in (("ATLANTE_LRCLIB", chiuso), ("ATLANTE_MYMEMORY", chiuso), ("ATLANTE_WHISPER_INSTALLA", "0"),
                      ("ATLANTE_WHISPER_URL_MODELLO", chiuso + "/modello.bin"), ("ATLANTE_WHISPER_SPAZIO_MIN_GB", "0")):
             env.setdefault(k, v)
+        # i link da scaricare si controllano risolvendo il nome (solo indirizzi pubblici): qui senza chiedere al DNS vero,
+        # così le prove non dipendono dalla rete (93.184.215.14 è un indirizzo pubblico qualsiasi)
+        env.setdefault("ATLANTE_DNS_PROVE", "example.com=93.184.215.14,soundcloud.com=93.184.215.14")
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
+        for k, v in self.ambiente.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
         self.log = open(os.path.join(self.base, "server-%d.log" % self.porta), "wb")
         self.p = subprocess.Popen([sys.executable, "-I", SERVER, self.c["musica"], "--porta", str(self.porta),
                                    "--cache", self.c["cache"], "--app", self.c["app"], "--video-dir", self.c["video"],
@@ -1148,6 +1159,20 @@ class TestProxyInterno(unittest.TestCase):
                             self.wfile.write(b"a" * 262144)
                     except OSError:
                         pass
+                elif self.path.startswith("/media-"):   # audio con tipi strani: due, un elenco, parametri
+                    tipi = {"/media-elenco": ["audio/mpeg, text/html"], "/media-due": ["audio/mpeg", "text/html"],
+                            "/media-parametri": ["Video/MP4; codecs=avc1"], "/media-strano": ["audio/x<b>"],
+                            "/media-grande": ["application/octet-stream"]}[self.path]
+                    corpo = b"<script>alert(1)</script>" + b"a" * (16 * 1024 * 1024 if self.path == "/media-grande" else 1000)
+                    self.send_response(200)
+                    for x in tipi:
+                        self.send_header("Content-Type", x)
+                    self.send_header("Content-Length", str(len(corpo)))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(corpo)
+                    except OSError:
+                        pass
                 elif self.path == "/ua":
                     corpo = (self.headers.get("User-Agent") or "").encode()
                     self.send_response(200)
@@ -1165,6 +1190,8 @@ class TestProxyInterno(unittest.TestCase):
 
         class Proxy(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                if m.controlla_accesso(self):   # senza password (ACC None): chi chiede è Samuele, come nel server
+                    return
                 if not m.gestisci_extra(self, "GET"):
                     self.send_error(404)
 
@@ -1213,6 +1240,23 @@ class TestProxyInterno(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual(h["Content-Type"], "audio/mpeg")
         self.assertEqual(len(b), 80 * 262144)
+        # aperto come pagina non può fare niente con i dati dell'app
+        self.assertEqual((h["Content-Security-Policy"], h["X-Content-Type-Options"]), ("sandbox", "nosniff"))
+
+    def test_tipi_degli_audio(self):
+        # un tipo solo, audio/… o video/…, rimandato pulito; due tipi, un elenco o un tipo strano non sono un audio
+        st, h, b = self.leggi("/media-parametri")
+        self.assertEqual((st, h["Content-Type"]), (200, "video/mp4"))
+        self.assertEqual((h["Content-Security-Policy"], h["X-Content-Type-Options"]), ("sandbox", "nosniff"))
+        st, h, b = self.leggi("/media-grande")   # un file grande senza tipo passa a pezzi, come un audio
+        self.assertEqual((st, h["Content-Type"], h["Content-Security-Policy"]), (200, "application/octet-stream", "sandbox"))
+        for p in ("/media-elenco", "/media-due", "/media-strano"):
+            st, h, b = self.leggi(p)
+            self.assertEqual(st, 200, p)
+            self.assertEqual(len(h.get_all("Content-Type")), 1, p)
+            self.assertNotIn(",", h["Content-Type"], p)
+            self.assertFalse(h["Content-Type"].startswith(("audio/", "video/")), (p, h["Content-Type"]))
+            self.assertEqual((h["Content-Security-Policy"], h["X-Content-Type-Options"]), ("sandbox", "nosniff"), p)
 
     def test_errore_del_sito(self):
         st, h, b = self.leggi("/manca")
@@ -1233,26 +1277,13 @@ FUNNEL = {"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7", "X
           "X-Forwarded-Host": "mac.esempio.ts.net:10000", "Host": "mac.esempio.ts.net:10000"}
 
 
-class TestAccesso(unittest.TestCase):
-    """Da Internet (tailscale funnel) serve la password; dalla rete Tailscale e dal Mac no."""
+class AiutiAccesso:
+    """Quello che serve alle prove dell'accesso da Internet (tailscale funnel): la password, le richieste da fuori e gli
+    invitati che entrano dal loro link. La classe di prova prepara self.s (il server), self.c (le sue cartelle) e
+    self.pers (Persone sullo stesso file del server, che lo rilegge quando cambia)."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.base = tempfile.mkdtemp(prefix="atlante-accesso-")
-        cls.c = prepara_cartelle(cls.base)
-        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
-        cls.file = os.path.join(cls.c["cache"], "accesso.json")
-        # le persone si preparano da qui, sullo stesso file del server (che lo rilegge quando cambia)
-        sys.dont_write_bytecode = True
-        spec = importlib.util.spec_from_file_location("musica_libreria_accesso", SERVER)
-        cls.m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.m)
-        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.s.ferma()
-        shutil.rmtree(cls.base, ignore_errors=True)
+    ORIGINE = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:10000"}
+    IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15"
 
     def imposta(self, pw):
         r = subprocess.run([sys.executable, "-I", SERVER, "--imposta-password", "--cache", self.c["cache"]],
@@ -1278,6 +1309,39 @@ class TestAccesso(unittest.TestCase):
                 return v
         return None
 
+    def invitato(self, nome="Anna", ip="203.0.113.60"):
+        """Persona invitata che entra dal suo link: (persona, biscotto, pagina dopo «Entra»)."""
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip=ip,
+                                 extra=dict(self.ORIGINE, **{"User-Agent": self.IPHONE}))
+        self.assertEqual(st, 200, b[:300])
+        v = (self.biscotto(h) or "").split(";")[0].split("=", 1)[-1]
+        self.assertTrue(v.startswith("o."), self.biscotto(h))
+        return a["id"], v, b.decode("utf-8")
+
+
+class TestAccesso(AiutiAccesso, unittest.TestCase):
+    """Da Internet (tailscale funnel) serve la password; dalla rete Tailscale e dal Mac no."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-accesso-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        cls.file = os.path.join(cls.c["cache"], "accesso.json")
+        # le persone si preparano da qui, sullo stesso file del server (che lo rilegge quando cambia)
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_accesso", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
     def test_1_senza_password_da_fuori_non_si_entra(self):
         if os.path.exists(self.file):
             with open(self.file) as f:
@@ -1295,13 +1359,16 @@ class TestAccesso(unittest.TestCase):
 
     def test_2_dal_mac_e_da_tailscale_si_entra(self):
         for intest in ({},   # il Mac stesso (127.0.0.1, nessun proxy)
-                       {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"},
+                       {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com"},
                        {"X-Forwarded-For": "100.101.1.2"},   # dispositivo della rete Tailscale senza identità
                        {"X-Forwarded-For": "fd7a:115c:a1e0::1"}):
             for p in ("/", "/api/extra/stato", "/x/prova.html"):
                 st, h, b = richiesta(self.s.porta, "GET", p, intest=intest)
                 self.assertEqual(st, 200, (p, intest))
-            self.assertIn("am_accesso=", self.biscotto(h) or "", intest)
+            if intest:
+                self.assertIn("am_accesso=", self.biscotto(h) or "", intest)
+            else:   # dal Mac stesso no: un programma del Mac mandato a leggere qui (yt-dlp) non porta via un biscotto
+                self.assertIsNone(self.biscotto(h))
         # i biscotti dati in rete Tailscale valgono poi anche da Internet
         v = self.biscotto(h).split(";")[0].split("=", 1)[1]
         self.assertEqual(self.da_fuori("GET", "/api/extra/stato", biscotto=v)[0], 200)
@@ -1337,7 +1404,7 @@ class TestAccesso(unittest.TestCase):
             return "hash" in json.load(f)
 
     def dal_tailscale(self, metodo, percorso, corpo=None):
-        h = {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com",
+        h = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com",
              "X-Forwarded-Proto": "https", "Host": "mac.esempio.ts.net:8448"}
         if corpo is not None:
             h.update({"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:8448"})
@@ -1439,20 +1506,6 @@ class TestAccesso(unittest.TestCase):
         self.assertEqual(self.entra("password per i tentativi", "198.51.100.10")[0], 303)   # un altro indirizzo sì
 
     # ----- invitati: link d'invito, codice per l'app sulla Home, revoca -----
-
-    ORIGINE = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:10000"}
-    IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15"
-
-    def invitato(self, nome="Anna", ip="203.0.113.60"):
-        """Persona invitata che entra dal suo link: (persona, biscotto, pagina dopo «Entra»)."""
-        a = self.pers.crea(nome)
-        codice, _ = self.pers.invito(a["id"])
-        st, h, b = self.da_fuori("POST", "/accesso/invito/" + codice, b"", ip=ip,
-                                 extra=dict(self.ORIGINE, **{"User-Agent": self.IPHONE}))
-        self.assertEqual(st, 200, b[:300])
-        v = (self.biscotto(h) or "").split(";")[0].split("=", 1)[-1]
-        self.assertTrue(v.startswith("o."), self.biscotto(h))
-        return a["id"], v, b.decode("utf-8")
 
     def test_6_invito_da_fuori(self):
         a = self.pers.crea("Anna")
@@ -1758,17 +1811,21 @@ class TestRuoli(unittest.TestCase):
     def test_tailscale_vince_sul_biscotto_invitato(self):
         a = self.m.PERS.crea("Ospite")
         did = self.m.PERS.usa_invito(self.m.PERS.invito(a["id"])[0], "iphone")
-        intest = {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com",
+        intest = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com",
                   "Cookie": "am_accesso=" + self.m.PERS.biscotto(did)}
         ruolo, biscotto = self.ruolo("127.0.0.1", intest)
         self.assertEqual(ruolo, "proprietario")
         self.assertFalse(biscotto.split("=", 1)[1].startswith("o."))   # il telefono torna di Samuele
 
     def test_mac_e_tailscale(self):
-        self.assertEqual(self.ruolo("127.0.0.1")[0], "proprietario")
-        self.assertIsNotNone(self.ruolo("127.0.0.1")[1])
-        ts = {"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"}
+        # il Mac stesso è Samuele solo con il suo nome, e non riceve un biscotto (non gli serve: è sempre Samuele)
+        for host in ("127.0.0.1:8790", "localhost", "[::1]:8790"):
+            self.assertEqual(self.ruolo("127.0.0.1", {"Host": host}), ("proprietario", None), host)
+        for intest in ({}, {"Host": "mac.esempio.ts.net"}, {"Host": "evil.example"}):   # un altro nome: la rete di casa
+            self.assertEqual(self.ruolo("127.0.0.1", intest), ("casa", None), intest)
+        ts = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com"}
         self.assertEqual(self.ruolo("127.0.0.1", ts)[0], "proprietario")
+        self.assertIsNotNone(self.ruolo("127.0.0.1", ts)[1])
         with unittest.mock.patch.object(self.m, "PROPRIETARI", {"samuele@example.com"}):
             self.assertEqual(self.ruolo("127.0.0.1", ts)[0], "proprietario")
             altro = dict(ts, **{"Tailscale-User-Login": "anna@example.com"})
@@ -3134,7 +3191,8 @@ class TestAscoltati(unittest.TestCase):
 
     def senti(self, chi, n, volte=1, fa=0):
         """`chi` ha ascoltato il brano numero n `volte` volte, `fa` giorni fa."""
-        return self.a.ascolta(chi, [{"brano": BRANI_FINTI[n], "giorno": self.m._asc_giorno(fa)}] * volte)
+        return self.a.ascolta(chi, [{"brano": BRANI_FINTI[n], "giorno": self.m._asc_giorno(fa)}] * volte,
+                              indietro=self.m.ASCOLTATI_GIORNI)
 
     def classifica(self, quale="settimana", chi="p"):
         return [(BRANI_FINTI.index(x["brano"]), x["ascolti"]) for x in self.a.classifiche(chi)[quale]]
@@ -3405,14 +3463,16 @@ class TestAscoltatiServer(unittest.TestCase):
         tre = [self.invitato(n) for n in ("Anna", "Bruno", "Carla")]
         for _, v in tre:
             self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(1)), (200, {"contati": 1, "scartati": 0}))
-            # ascolti fatti senza rete 12 giorni fa, arrivati adesso: contano in quel giorno
-            self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(6, fa=12))[0], 200)
+            # ascolti fatti senza rete due giorni fa, arrivati adesso: contano in quel giorno; più vecchi no (le
+            # classifiche e i consigli non si riempiono di giorni passati)
+            self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(6, fa=2)), (200, {"contati": 1, "scartati": 0}))
+            self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(7, fa=3)), (200, {"contati": 0, "scartati": 1}))
         self.assertEqual(self.samuele("POST", "/api/extra/ascoltati", {"brano": self.b[1]}), {"contati": 1, "scartati": 0})
         st, j = self.da(tre[0][1], "GET", "/api/extra/ascoltati")
         self.assertEqual(st, 200)
         self.assertEqual([(x["brano"], x["titolo"], x["artista"], x["ascolti"]) for x in j["settimana"]],
-                         [(self.b[1], "Brano 1", "Artista 1", 4)])
-        self.assertEqual((self.sett(j, 6), self.sett(j, 6, "mese")), ([], [3]))
+                         [(self.b[1], "Brano 1", "Artista 1", 4), (self.b[6], "Brano 6", "Artista 6", 3)])
+        self.assertEqual((self.sett(j, 6), self.sett(j, 6, "mese"), self.sett(j, 7, "mese")), ([3], [3], []))
         self.assertEqual(j["io"], {"condivido": False, "ascolti": 2, "nome": "Anna", "cambia": True})
         # Samuele vede le stesse classifiche di tutti e, di una persona, niente (anche se lo chiede)
         sam = self.samuele("GET", "/api/extra/ascoltati?persona=" + tre[0][0])
@@ -7795,7 +7855,7 @@ class TestStessoMac(unittest.TestCase):
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="atlante-stessomac-")
         cls.c = prepara_cartelle(cls.base)
-        os.environ["ATLANTE_IP_MAC"] = "100.71.110.38,fd7a:115c:a1e0::71"
+        os.environ["ATLANTE_IP_MAC"] = "100.64.0.10,fd7a:115c:a1e0::71"
         try:
             cls.s = Server(cls.base, cls.c).avvia()
         finally:
@@ -7813,14 +7873,14 @@ class TestStessoMac(unittest.TestCase):
 
     def test_1_dal_mac_stesso(self):
         self.assertIs(self.io()["stesso_mac"], True)   # senza proxy davanti, da 127.0.0.1
-        for ip in ("100.71.110.38", "fd7a:115c:a1e0::71", "127.0.0.1"):   # attraverso tailscale serve
+        for ip in ("100.64.0.10", "fd7a:115c:a1e0::71", "127.0.0.1"):   # attraverso tailscale serve
             intest = {"X-Forwarded-For": ip, "Tailscale-User-Login": "samuele@example.com"}
             self.assertIs(self.io(intest)["stesso_mac"], True, ip)
 
     def test_2_da_un_altro_dispositivo(self):
-        for intest in ({"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"},   # l'iPhone
+        for intest in ({"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com"},   # l'iPhone
                        # i primi indirizzi si possono inventare: conta l'ultimo, quello scritto da tailscaled
-                       {"X-Forwarded-For": "100.71.110.38, 100.127.102.35", "Tailscale-User-Login": "samuele@example.com"}):
+                       {"X-Forwarded-For": "100.64.0.10, 100.64.0.20", "Tailscale-User-Login": "samuele@example.com"}):
             self.assertNotIn("stesso_mac", self.io(intest), intest)   # per gli altri la risposta resta com'era
 
     def test_3_app(self):
@@ -9145,6 +9205,623 @@ class TestKaraokeRiavvio(unittest.TestCase):
         self.assertNotEqual(q, p)
         self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False})
         self.assertTrue(aspetta(lambda: not _vivo(q), 10, 0.1))
+
+
+# ----- sicurezza (28/10): rotte degli invitati, link per yt-dlp, nomi permessi, dispositivi, tentativi, risorse -----
+
+SAMUELE_TS = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com", "X-Forwarded-Proto": "https",
+              "Host": "mac.esempio.ts.net:8448", "X-Forwarded-Host": "mac.esempio.ts.net:8448"}   # l'iPhone di Samuele
+CASA_TS = dict(SAMUELE_TS, **{"X-Forwarded-For": "100.64.0.30", "Tailscale-User-Login": "anna@example.com"})   # un altro login
+
+
+def senza_host(porta, percorso):
+    """GET senza l'intestazione Host (HTTP/1.1 la vuole: un browser la manda sempre)."""
+    c = http.client.HTTPConnection("127.0.0.1", porta, timeout=10)
+    try:
+        c.putrequest("GET", percorso, skip_host=True, skip_accept_encoding=True)
+        c.endheaders()
+        r = c.getresponse()
+        return r.status, r.headers, r.read()
+    finally:
+        c.close()
+
+
+class TestSicurezza(AiutiAccesso, unittest.TestCase):
+    """Sul server vero, con un invitato vero: le rotte degli invitati controllate su quello che il server esegue davvero,
+    i link per yt-dlp solo verso Internet (e per gli invitati solo YouTube), il Mac che è Samuele solo con il suo nome,
+    i soli nomi (Host) di Atlante, lo stato dei dispositivi pulito e la rete di casa separata da Samuele."""
+
+    ORIGINE_JSON = {"Origin": "https://mac.esempio.ts.net:10000"}
+    NEGATO = "Non disponibile per gli invitati"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-sicurezza-")
+        cls.c = prepara_cartelle(cls.base)
+        with open(os.path.join(cls.c["musica"], "Artista - Brano.mp3"), "wb") as f:
+            f.write(mp3_finto("Brano", "Artista"))
+        # con ATLANTE_PROPRIETARI: dalla rete Tailscale solo quel login è Samuele, gli altri sono «casa»
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000", "--spazio-min-gb", "0"],
+                       ambiente={"ATLANTE_PROPRIETARI": "samuele@example.com", "ATLANTE_HOST_OK": "musica.casa.example",
+                                 "ATLANTE_ASCOLTO": None}).avvia()
+        cls.m = carica_modulo("musica_libreria_sicurezza")
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cls.ospite = None
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def ugo(self):
+        """Un invitato (lo stesso per tutte le prove): (persona, biscotto)."""
+        if TestSicurezza.ospite is None:
+            pid, v, _ = self.invitato("Ugo", ip="203.0.113.201")
+            TestSicurezza.ospite = (pid, v)
+        return TestSicurezza.ospite
+
+    def da_ugo(self, metodo, percorso, corpo=None):
+        if corpo is None and metodo == "POST":
+            corpo = {}
+        st, h, b = self.da_fuori(metodo, percorso, corpo, biscotto=self.ugo()[1], extra=self.ORIGINE_JSON)
+        try:
+            j = json.loads(b.decode("utf-8")) if b else None
+        except ValueError:
+            j = None
+        return st, j
+
+    def lavori_ytdlp(self, nome, tempo=20):
+        f = os.path.join(self.c["finto"], "ytdlp-%s.json" % nome)
+        self.assertTrue(aspetta(lambda: os.path.exists(f), tempo), "yt-dlp non è partito per " + nome)
+        with open(f) as fh:
+            return json.load(fh)["args"]
+
+    # tutte le rotte di api/extra/ (come le divide il server) e se un invitato le può usare
+    ROTTE = (
+        # di Samuele e della rete di casa
+        ("GET", "stato", False), ("GET", "proxy?url=https%3A%2F%2Fexample.com%2F", False), ("GET", "video", False),
+        ("POST", "video", False), ("GET", "video/file/abc", False), ("POST", "video/abc/annulla", False),
+        ("GET", "film", False), ("GET", "film/file/x.mp4", False), ("GET", "voci", False), ("GET", "audiolibro", False),
+        ("POST", "audiolibro", False), ("GET", "audiolibro/file/abc/0", False), ("DELETE", "audiolibro/abc", False),
+        ("GET", "ia", False), ("POST", "ia", False), ("GET", "dispositivo", False), ("GET", "playlist", False),
+        ("GET", "gestione/persone", False), ("POST", "gestione/persone", False), ("GET", "gestione/controllo", False),
+        ("GET", "gestione/rete", False), ("GET", "gestione/testi", False), ("GET", "gestione/idee", False),
+        ("GET", "gestione/classifiche", False), ("GET", "interfaccia/bozza", False), ("POST", "interfaccia/bozza", False),
+        ("POST", "interfaccia/pubblica", False), ("GET", "interfaccia/versioni", False),
+        ("POST", "interfaccia/versioni/1/ripristina", False), ("GET", "sconosciuta", False),
+        # una rotta degli invitati, ma con un altro metodo
+        ("DELETE", "io", False), ("POST", "classifiche", False), ("GET", "musica/abc/annulla", False),
+        ("PUT", "interfaccia/personale", False), ("POST", "testi", False), ("DELETE", "dispositivi", False),
+        ("GET", "chat/dispositivi", False), ("DELETE", "chiamate", False),
+        # degli invitati
+        ("GET", "io", True), ("GET", "inviti", True), ("POST", "inviti", True), ("GET", "idee", True), ("POST", "idee", True),
+        ("GET", "classifiche", True), ("GET", "clip", True), ("GET", "clip/abc", True), ("GET", "clip/file/abc.mp4", True),
+        ("GET", "dispositivi", True), ("POST", "dispositivi/telefono-ugo-01/stato", True),
+        ("GET", "dispositivi/telefono-ugo-01/comandi?attesa=0", True), ("POST", "dispositivi/telefono-ugo-01/comando", True),
+        ("GET", "musica", True), ("POST", "musica", True), ("GET", "musica/cerca?q=%20", True),
+        ("GET", "musica/ascolta/corto", True), ("POST", "musica/abc/annulla", True), ("GET", "caricamenti", True),
+        ("POST", "caricamenti", True), ("GET", "caricamenti/0123456789abcdef", True),
+        ("PUT", "caricamenti/0123456789abcdef?da=0", True), ("DELETE", "caricamenti/0123456789abcdef", True),
+        ("GET", "caricamenti/0123456789abcdef/file", True), ("GET", "interfaccia", True), ("GET", "interfaccia/base", True),
+        ("POST", "interfaccia/personale", True), ("GET", "ascoltati", True), ("POST", "ascoltati", True),
+        ("POST", "ascoltati/condividi", True), ("GET", "ascoltati/anche/0123456789abcdef", True),
+        ("DELETE", "ascoltati", True), ("GET", "tematiche", True), ("GET", "tematiche/ritmi", True),
+        ("GET", "tematiche/nessuna", True), ("POST", "tematiche/condivise", True),
+        ("DELETE", "tematiche/condivise/abc", True), ("GET", "testi", True), ("GET", "testi/abc", True),
+        ("GET", "chiavi", True), ("POST", "chiavi", True), ("GET", "posizione", True), ("POST", "posizione", True),
+        ("POST", "posizione/0123456789abcdef", True), ("DELETE", "posizione/0123456789abcdef", True),
+        ("GET", "chat/stato", True), ("GET", "chat/persone", True), ("GET", "chat/conversazioni", True),
+        ("POST", "chat/conversazioni", True), ("GET", "chat/messaggi?disp=x&attesa=0", True), ("POST", "chat/messaggi", True),
+        ("GET", "chat/avvisi?disp=x", True), ("POST", "chat/dispositivi", True), ("POST", "chat/blocchi", True),
+        ("DELETE", "chat/blocchi/x", True), ("POST", "chat/push", True), ("DELETE", "chat/push/x", True),
+        ("GET", "chat/allegati/x/0", True), ("POST", "chat/conversazioni/x/letto", True),
+        ("DELETE", "chat/conversazioni/x/membri/y", True), ("GET", "chiamate/persone", True), ("GET", "chiamate/ice", True),
+        ("GET", "chiamate/attendi?attesa=0", True), ("POST", "chiamate", True), ("POST", "chiamate/abc/chiudi", True),
+    )
+
+    @staticmethod
+    def forme(r):
+        """La stessa rotta scritta in tanti modi: un altro prefisso, barre doppie, un secondo api/extra/ dentro una rotta
+        degli invitati (chat accetta fino a 4 pezzi), anche con le barre codificate (%2F)."""
+        p, _, q = r.partition("?")
+        q = "?" + q if q else ""
+        return ["/api/extra/" + r, "/musica/api/extra/" + r, "/api/extra//" + r, "/api/extra/chat/api/extra/" + r,
+                "/api/extra/chat%2Fapi%2Fextra%2F" + p.replace("/", "%2F") + q, "/api/extra/chat//api/extra/" + r,
+                "/api/extra/chat/api%2Fextra/" + r, "/api/extra/tematiche/x/api/extra/" + r, "/x/chat.html/api/extra/" + r,
+                "/api/extra/chat/x/api/extra/" + r]
+
+    def test_1_rotte_degli_invitati(self):
+        for metodo, r, permessa in self.ROTTE:
+            if permessa:
+                st, j = self.da_ugo(metodo, "/api/extra/" + r)
+                self.assertNotIn(st, (401, 421), (metodo, r, j))
+                self.assertFalse(st == 403 and (j or {}).get("errore") == self.NEGATO, (metodo, r, j))
+                # la stessa rotta dietro un secondo api/extra/: per un invitato niente
+                st, j = self.da_ugo(metodo, "/api/extra/chat/api/extra/" + r)
+                self.assertEqual((st, (j or {}).get("errore")), (403, self.NEGATO), (metodo, "chat/api/extra/" + r))
+                continue
+            for p in self.forme(r):
+                st, j = self.da_ugo(metodo, p)
+                self.assertEqual((st, (j or {}).get("errore")), (403, self.NEGATO), (metodo, p, j))
+        # anche per Samuele un indirizzo con due api/extra/ non è una rotta: si legge il primo, e lì non c'è
+        for p in ("/api/extra/chat/api/extra/stato", "/api/extra/chat%2Fapi%2Fextra%2Fstato", "/api/extra/chat/x/api/extra/io"):
+            self.assertEqual(richiesta(self.s.porta, "GET", p)[0], 404, p)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/musica/api/extra/stato")[0], 200)   # un prefisso solo va bene
+
+    def test_2_link_per_yt_dlp(self):
+        porta = self.s.porta
+        # un invitato scarica solo da YouTube e YouTube Music: niente Mac, niente rete di casa, niente altri siti
+        for url in ("http://127.0.0.1:%d/api/extra/film/file/x.mp4" % porta, "http://localhost:%d/" % porta,
+                    "https://example.com/brano", "https://youtube.com.example.com/watch?v=Abcdefghijk",
+                    "http://[::1]:%d/api/extra/stato" % porta, "http://100.64.0.10:8790/"):
+            st, j = self.da_ugo("POST", "/api/extra/musica", {"url": url})
+            self.assertEqual(st, 403, (url, j))
+        st, j = self.da_ugo("POST", "/api/extra/musica", {"url": "https://www.youtube.com/watch?v=Invitato001&list=PLx"})
+        self.assertEqual(st, 200, j)
+        lavori = {x["id"]: x for x in self.da_ugo("GET", "/api/extra/musica")[1]["lavori"]}
+        self.assertEqual(lavori[j["id"]]["url"], "https://music.youtube.com/watch?v=Invitato001")   # l'indirizzo lo fa il Mac
+        self.assertIn("--max-filesize", self.lavori_ytdlp("watch?v=Invitato001"))
+        # Samuele: qualsiasi sito pubblico, mai il Mac, la rete di casa, Tailscale o un nome che non esiste
+        for url in ("http://127.0.0.1:%d/api/extra/film/file/x.mp4" % porta, "http://localhost/x", "http://[::1]/x",
+                    "http://10.0.0.2/x", "http://192.168.1.1/x", "http://169.254.169.254/latest/meta-data/",
+                    "http://100.64.0.10/x", "http://[fd7a:115c:a1e0::1]/x", "http://0.0.0.0:%d/" % porta,
+                    "http://[::ffff:127.0.0.1]:%d/" % porta, "http://nonesiste.invalid/x"):
+            for rotta in ("musica", "video"):
+                st, h, b = richiesta(porta, "POST", "/api/extra/" + rotta, {"url": url})
+                self.assertIn(st, (400, 403), (rotta, url, b[:200]))
+        self.assertNotIn("film/file", json.dumps(self.s.json("GET", "/api/extra/musica")) +
+                         json.dumps(self.s.json("GET", "/api/extra/video")))
+        # i link buoni partono, con un limite alla grandezza del file
+        self.s.json("POST", "/api/extra/video", {"url": "https://example.com/v/grande1"})
+        self.assertIn("--max-filesize", self.lavori_ytdlp("grande1"))
+        self.s.json("POST", "/api/extra/musica", {"url": "https://example.com/m/grande2"})
+        self.assertIn("--max-filesize", self.lavori_ytdlp("grande2"))
+        # a un invitato l'errore di yt-dlp non arriva così com'è (con un link qualsiasi diceva cosa c'era dietro)
+        st, j = self.da_ugo("POST", "/api/extra/musica", {"id": "errore00001"})
+        self.assertEqual(st, 200, j)
+        jid = j["id"]
+        l = aspetta(lambda: (lambda x: x if x and x["stato"] in ("fatto", "errore") else None)(
+            {x["id"]: x for x in self.da_ugo("GET", "/api/extra/musica")[1]["lavori"]}.get(jid)), 30)
+        self.assertEqual(l["stato"], "errore", l)
+        self.assertTrue(l["errore"], l)
+        self.assertNotIn("[youtube]", l["errore"])
+        self.assertNotIn("Video non disponibile", l["errore"])
+
+    def test_3_il_mac_e_samuele_solo_con_il_suo_nome(self):
+        porta = self.s.porta
+        for host in ("127.0.0.1:%d" % porta, "localhost:%d" % porta, "[::1]:%d" % porta, "LOCALHOST"):
+            st, h, b = richiesta(porta, "GET", "/api/extra/io", intest={"Host": host})
+            self.assertEqual((st, json.loads(b.decode("utf-8"))["ruolo"]), (200, "proprietario"), host)
+            # nessun biscotto nuovo: un programma del Mac mandato a leggere qui (yt-dlp) non lo porta via
+            self.assertIsNone(self.biscotto(h), host)
+        # il nome dell'app (o uno permesso) senza tailscale serve davanti non è Samuele: è la rete di casa
+        for host in ("mac.esempio.ts.net:10000", "musica.casa.example"):
+            st, h, b = richiesta(porta, "GET", "/api/extra/io", intest={"Host": host})
+            self.assertEqual((st, json.loads(b.decode("utf-8"))["ruolo"]), (200, "casa"), host)
+            self.assertIsNone(self.biscotto(h), host)
+            self.assertEqual(richiesta(porta, "GET", "/api/extra/gestione/persone", intest={"Host": host})[0], 403, host)
+        # Samuele dalla rete Tailscale (tailscale serve davanti) resta Samuele, con il suo biscotto
+        st, h, b = richiesta(porta, "GET", "/api/extra/io", intest=SAMUELE_TS)
+        self.assertEqual((st, json.loads(b.decode("utf-8"))["ruolo"]), (200, "proprietario"))
+        self.assertIsNotNone(self.biscotto(h))
+
+    def test_4_solo_i_nomi_di_atlante(self):
+        porta = self.s.porta
+        # un altro sito che fa puntare il suo nome al Mac (DNS rebinding): il browser manda il nome di quel sito
+        for host in ("evil.example", "evil.example:%d" % porta, "127.0.0.1.nip.io:%d" % porta, "localhost.evil.example",
+                     "mac.esempio.ts.net.evil.example", "100.64.0.10:%d" % porta, "altro-mac.tailabcd.ts.net"):
+            for metodo, p in (("GET", "/"), ("GET", "/api/extra/io"), ("GET", "/api/musica/catalogo"), ("GET", "/accesso"),
+                              ("POST", "/api/extra/idee"), ("GET", "/x/prova.html")):
+                st, h, b = richiesta(porta, metodo, p, {"testo": "x"} if metodo == "POST" else None, intest={"Host": host})
+                self.assertEqual(st, 421, (host, metodo, p, b[:200]))
+        # anche dietro tailscale serve, se il nome non è quello del Mac nella rete Tailscale
+        self.assertEqual(richiesta(porta, "GET", "/api/extra/io", intest=dict(
+            SAMUELE_TS, **{"Host": "evil.example", "X-Forwarded-Host": "mac.esempio.ts.net"}))[0], 421)
+        self.assertEqual(senza_host(porta, "/api/extra/io")[0], 421)
+        # i nomi di Atlante: il Mac stesso, --pubblico, ATLANTE_HOST_OK, il nome del Mac nella rete Tailscale
+        for intest in ({"Host": "127.0.0.1:%d" % porta}, {"Host": "LOCALHOST:1234"}, {"Host": "[::1]"},
+                       {"Host": "localhost."}, FUNNEL, {"Host": "musica.casa.example:8790"}, SAMUELE_TS,
+                       dict(SAMUELE_TS, **{"Host": "mac-mini.tail1234.ts.net:8448", "X-Forwarded-Host": "mac-mini.tail1234.ts.net:8448"}),
+                       dict(SAMUELE_TS, **{"Host": "mac-mini.tail1234.ts.net", "X-Forwarded-Host": "mac-mini.tail1234.ts.net"})):
+            st, h, b = richiesta(porta, "GET", "/api/extra/classifiche", intest=intest)
+            self.assertNotEqual(st, 421, intest)
+        # e se nessuno sceglie dove ascoltare, il server ascolta solo sul Mac stesso
+        self.assertIn("Atlante Musica su http://127.0.0.1:%d/" % porta, self.s.leggi_log())
+
+    def test_5_dispositivi_e_rete_di_casa(self):
+        porta = self.s.porta
+        mac = "mac-samuele-0001"
+        brutto = {"sid": "abc", "titolo": "<img src=x onerror=alert(1)>", "artista": 5, "album": "A" * 5000,
+                  "copertina": "javascript:alert(document.cookie)", "durata": "lunga", "altro": "x"}
+        self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"nome": "Mac", "tipo": "mac",
+                                                                      "stato": {"brano": brutto, "suona": True}})
+
+        def dispositivi(intest=None):
+            st, h, b = richiesta(porta, "GET", "/api/extra/dispositivi", intest=intest)
+            self.assertEqual(st, 200, b[:200])
+            return {x["id"]: x for x in json.loads(b.decode("utf-8"))["dispositivi"]}
+        b = dispositivi(SAMUELE_TS)[mac]["stato"]["brano"]
+        self.assertEqual(b["copertina"], "")
+        self.assertEqual((b["artista"], b["durata"], len(b["album"]) <= 300), ("", 0, True))
+        self.assertIsInstance(b["titolo"], str)   # il testo resta: lo protegge l'app quando lo mostra
+        self.assertNotIn("altro", b)
+        for cop in ("data:text/html,<script>x</script>", "vbscript:x", " javascript:x", "JaVaScRiPt:x",
+                    "https://x.example/a b.jpg", 'https://x.example/"onerror=x', "api/musica/copertina/x.jpg", ["x"]):
+            self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"nome": "Mac", "stato": {"brano": {"copertina": cop}}})
+            self.assertEqual(dispositivi()[mac]["stato"]["brano"]["copertina"], "", cop)
+        for cop in ("https://i.ytimg.com/vi/x/hq720.jpg", "http://esempio.it/c.jpg", "blob:https://mac.esempio.ts.net/0a1b"):
+            self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"nome": "Mac", "stato": {"brano": {"copertina": cop}}})
+            self.assertEqual(dispositivi()[mac]["stato"]["brano"]["copertina"], cop)
+        self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"stato": {"brano": "testo"}}, codice=400)
+        # la rete di casa (qui: un altro login della rete Tailscale) ha i suoi dispositivi, non quelli di Samuele
+        self.assertEqual(dispositivi(CASA_TS), {})
+        st, h, b = richiesta(porta, "POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "pause"}, intest=CASA_TS)
+        self.assertEqual(st, 404, b[:200])
+        st, h, b = richiesta(porta, "POST", "/api/extra/dispositivi/tv-di-casa-0001/stato", {"nome": "TV", "stato": {}},
+                             intest=CASA_TS)
+        self.assertEqual(st, 200, b[:200])
+        self.assertEqual(list(dispositivi(CASA_TS)), ["tv-di-casa-0001"])
+        self.assertNotIn("tv-di-casa-0001", dispositivi(SAMUELE_TS))
+        # il telecomando tra i dispositivi di Samuele (iPhone con Tailscale → Mac) funziona come prima
+        st, h, b = richiesta(porta, "POST", "/api/extra/dispositivi/%s/comando" % mac, {"azione": "pause"}, intest=SAMUELE_TS)
+        self.assertEqual(st, 200, b[:200])
+        self.assertEqual(self.s.json("GET", "/api/extra/dispositivi/%s/comandi?attesa=0" % mac)["comandi"], [{"azione": "pause"}])
+        # e dalla rete di casa lo strato personale dell'interfaccia di Samuele non si cambia
+        st, h, b = richiesta(porta, "POST", "/api/extra/interfaccia/personale", {"modifiche": {}}, intest=CASA_TS)
+        self.assertEqual(st, 403, b[:200])
+        self.s.json("POST", "/api/extra/interfaccia/personale", {"modifiche": {}})
+
+    def test_6_ascolti_solo_recenti(self):
+        g = self.m._asc_giorno
+        b = aspetta(lambda: next((x["id"] for x in self.s.json("GET", "/api/musica/catalogo")["brani"]
+                                  if x["title"] == "Brano"), None))
+        self.assertTrue(b)
+        st, j = self.da_ugo("POST", "/api/extra/ascoltati", {"ascolti": [{"brano": b, "giorno": g(2)}, {"brano": b, "giorno": g(3)},
+                                                                         {"brano": b, "giorno": g(300)}]})
+        self.assertEqual((st, j), (200, {"contati": 1, "scartati": 2}))
+
+
+class TestTentativi(AiutiAccesso, unittest.TestCase):
+    """Password e codici sbagliati: si ferma chi li prova (un indirizzo, o tutta la sua rete /64 in IPv6), non tutti;
+    tanti tentativi da indirizzi diversi rallentano soltanto. Gli inviti (codici lunghi e casuali) non contano."""
+
+    PW = "password delle prove"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-tentativi-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        cls.pers = carica_modulo("musica_libreria_tentativi").Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def setUp(self):
+        try:
+            with open(os.path.join(self.c["cache"], "accesso.json")) as f:
+                pronta = "hash" in json.load(f)
+        except OSError:
+            pronta = False
+        if not pronta:
+            self.assertEqual(self.imposta(self.PW)[0], 0)
+
+    def test_1_tanti_indirizzi_non_fermano_tutti(self):
+        for i in range(30):
+            self.assertEqual(self.entra("sbagliata %d" % i, "198.51.100.%d" % (i + 1))[0], 401, i)
+        t0 = time.time()
+        st, h, b = self.entra(self.PW, "203.0.113.50")   # Samuele, da un indirizzo che non ha sbagliato
+        self.assertEqual(st, 303, b[:300])
+        self.assertGreater(time.time() - t0, 0.5)   # solo più lento
+        self.assertEqual(self.entra(self.PW, "198.51.100.1")[0], 303)   # uno sbaglio solo: non è fermo
+
+    def test_2_la_rete_ipv6_conta_come_un_indirizzo(self):
+        for i in range(5):
+            self.assertEqual(self.entra("sbagliata", "2001:db8:1:2::%x" % (i + 1))[0], 401)
+        st, h, b = self.entra(self.PW, "2001:db8:1:2:aaaa::99")   # stesso /64, un altro indirizzo
+        self.assertEqual(st, 429, b[:300])
+        self.assertGreater(int(h["Retry-After"]), 0)
+        self.assertEqual(self.entra(self.PW, "2001:db8:1:3::1")[0], 303)   # un'altra rete
+
+    def test_3_gli_inviti_non_contano(self):
+        for i in range(8):
+            st, h, b = self.da_fuori("POST", "/accesso/invito/" + _secrets.token_urlsafe(16), b"", ip="203.0.113.70",
+                                     extra=self.ORIGINE)
+            self.assertEqual(st, 410, b[:300])
+        self.assertEqual(self.entra(self.PW, "203.0.113.70")[0], 303)
+
+
+def grezza(porta, testo, attesa=10):
+    """Manda byte così come sono e legge fino alla chiusura: (risposta, secondi, chiusa dal server)."""
+    s = socket.create_connection(("127.0.0.1", porta), timeout=attesa)
+    t0, dati, chiusa = time.time(), b"", False
+    try:
+        s.sendall(testo)
+        while True:
+            try:
+                b = s.recv(65536)
+            except socket.timeout:
+                break
+            if not b:
+                chiusa = True
+                break
+            dati += b
+            if b"\r\n\r\n" in dati and b"Content-Length: " in dati:
+                testa, _, corpo = dati.partition(b"\r\n\r\n")
+                n = int(re.search(rb"Content-Length: (\d+)", testa).group(1))
+                if len(corpo) >= n:
+                    break
+    finally:
+        s.close()
+    return dati, time.time() - t0, chiusa
+
+
+class TestRisorse(unittest.TestCase):
+    """Le risorse del Mac contro le richieste fatte male: un tempo massimo per ogni richiesta (qui 3 s), il corpo letto
+    solo per POST, PUT e DELETE, JSON al più 1 MB (20 MB solo per i pezzi dei file e il testo di un audiolibro) e al più
+    ATLANTE_RICHIESTE_MAX richieste insieme (qui 4)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-risorse-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"],
+                       ambiente={"ATLANTE_TEMPO_RICHIESTA": "3", "ATLANTE_RICHIESTE_MAX": "4"}).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_1_modulo_senza_corpo(self):
+        # la pagina della password da Internet, con un corpo annunciato che non arriva mai: non resta appesa per sempre
+        r, secondi, chiusa = grezza(self.s.porta, b"POST /accesso HTTP/1.1\r\nHost: mac.esempio.ts.net:10000\r\n"
+                                    b"Tailscale-Funnel-Request: ?1\r\nX-Forwarded-For: 203.0.113.9\r\n"
+                                    b"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\n", 12)
+        self.assertTrue(chiusa or r.startswith(b"HTTP/"), (r[:200], secondi))   # risposta d'errore, o connessione chiusa
+        self.assertLess(secondi, 9)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/api/extra/io")[0], 200)
+
+    def test_2_get_con_un_corpo(self):
+        # una GET con un corpo (anche enorme e mai mandato) non si legge: la risposta arriva subito
+        r, secondi, chiusa = grezza(self.s.porta, ("GET /api/extra/io HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                                                   "Content-Length: 5000000\r\n\r\n" % self.s.porta).encode(), 8)
+        self.assertTrue(r.startswith(b"HTTP/1.0 200") or r.startswith(b"HTTP/1.1 200"), (r[:200], secondi))
+        self.assertLess(secondi, 2)
+
+    def test_3_corpi_grandi(self):
+        porta = self.s.porta
+        st, h, b = richiesta(porta, "POST", "/api/extra/idee", {"testo": "x" * (1100 * 1024)})
+        self.assertEqual(st, 413, b[:200])
+        # i pezzi dei file restano a 20 MB: questo non è troppo grande (è solo un caricamento che non c'è)
+        st, h, b = richiesta(porta, "PUT", "/api/extra/caricamenti/0123456789abcdef?da=0", b"\0" * (2 * 1024 * 1024),
+                             intest={"Content-Type": "application/octet-stream"})
+        self.assertEqual(st, 404, b[:200])
+        # e il testo di un audiolibro di Samuele (un libro lungo)
+        st, h, b = richiesta(porta, "POST", "/api/extra/audiolibro", {"titolo": "", "capitoli": [], "nota": "x" * (1500 * 1024)})
+        self.assertNotEqual(st, 413, b[:200])
+
+    def test_4_richieste_insieme(self):
+        ferme = [socket.create_connection(("127.0.0.1", self.s.porta), timeout=10) for _ in range(4)]
+        try:
+            time.sleep(0.3)
+            r, secondi, _ = grezza(self.s.porta, ("GET /api/extra/io HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                                                  "Connection: close\r\n\r\n" % self.s.porta).encode(), 12)
+            self.assertIn(b" 200 ", r[:20], r[:200])
+            # aspetta che si liberi un posto (le quattro connessioni ferme finiscono dopo il tempo massimo, 3 s)
+            self.assertGreater(secondi, 1.5)
+        finally:
+            for s in ferme:
+                s.close()
+
+
+class TestCodaInvitati(unittest.TestCase):
+    """«Cerca e scarica» degli invitati senza server (nessuno lavora la coda: i brani restano «in coda»): al più 5 brani
+    in arrivo per persona, la stima di ognuno prenotata subito nel limite di oggi e nello spazio libero, limite e spazio
+    ricontrollati quando il brano parte, e al più PREPARA_MAX yt-dlp insieme per ascoltare e scaricare da YouTube."""
+
+    def setUp(self):
+        self.m = m = carica_modulo("musica_libreria_coda_invitati")
+        self.base = tempfile.mkdtemp(prefix="atlante-coda-invitati-")
+        m.avvia_extra(cache=self.base, musica_dir=os.path.join(self.base, "Musica"))
+        m.avvia_caricamenti(self.base, os.path.join(self.base, "Da controllare"), os.path.join(self.base, "Film"),
+                            os.path.join(self.base, "Tolti"), limite_gb=1, spazio_gb=0)
+        m._CODE["musica"] = m.Coda(os.path.join(self.base, "musica.json"), 0, lambda *a: None)
+        self.programma = unittest.mock.patch.object(m, "_programma", lambda nome: "/usr/bin/false")
+        self.programma.start()
+
+    def tearDown(self):
+        self.programma.stop()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def errore(self, codice, fn, *a, **k):
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            fn(*a, **k)
+        self.assertEqual(e.exception.codice, codice, e.exception.testo)
+        return e.exception.testo
+
+    def test_al_piu_cinque_in_arrivo(self):
+        m = self.m
+        primi = [m._nuova_musica({"id": "Cinque%05d" % i}, "anna", "Anna") for i in range(5)]
+        self.assertIn("aspetta", self.errore(429, m._nuova_musica, {"id": "Cinque00005"}, "anna", "Anna"))
+        self.assertEqual(m._nuova_musica({"id": "Cinque00000"}, "anna", "Anna"), primi[0])   # lo stesso brano: lo stesso lavoro
+        m._nuova_musica({"id": "Bruno000001"}, "bruno", "Bruno")   # un'altra persona ha i suoi 5
+        for i in range(7):   # Samuele non ha limite
+            m._nuova_musica({"id": "Samuele%04d" % i}, samuele=True)
+        m._coda("musica").annulla(primi[1])   # uno finito (qui annullato) lascia il posto
+        m._nuova_musica({"id": "Cinque00005"}, "anna", "Anna")
+
+    def test_stima_prenotata(self):
+        m = self.m
+        with unittest.mock.patch.object(m.QUOTE, "limite", 3 * m.STIMA_BRANO - 1):
+            m._nuova_musica({"id": "Prenota0001"}, "carla", "Carla")
+            m._nuova_musica({"id": "Prenota0002"}, "carla", "Carla")
+            self.assertIn("di oggi", self.errore(429, m._nuova_musica, {"id": "Prenota0003"}, "carla", "Carla"))
+        with unittest.mock.patch.object(m, "_libero_su", return_value=2 * m.STIMA_BRANO - 1):
+            m._nuova_musica({"id": "Spazio00001"}, "dario", "Dario")
+            self.errore(507, m._nuova_musica, {"id": "Spazio00002"}, "dario", "Dario")
+
+    def test_ricontrollo_alla_partenza(self):
+        m = self.m
+        coda = m._coda("musica")
+        l = dict(coda.lavori[m._nuova_musica({"id": "Partenza001"}, "elena", "Elena")])
+        m.QUOTE.consuma("elena", m.QUOTE.limite, forza=True)   # nel frattempo ha caricato altro: il limite è finito
+        with unittest.mock.patch.object(m, "_prepara_audio", side_effect=AssertionError("yt-dlp non doveva partire")):
+            with self.assertRaises(Exception) as e:
+                m._scarica_musica(coda, l, None)
+            self.assertIn("di oggi", str(e.exception))
+            l = dict(coda.lavori[m._nuova_musica({"id": "Partenza002"}, "franca", "Franca")])
+            with unittest.mock.patch.object(m, "_libero_su", return_value=0):
+                with self.assertRaises(Exception) as e:
+                    m._scarica_musica(coda, l, None)
+                self.assertIn("spazio", str(e.exception))
+
+    def test_al_piu_tre_yt_dlp_insieme(self):
+        m = self.m
+        dentro, massimo, via, blocco = [0], [0], threading.Event(), threading.Lock()
+
+        def finto(args, coda=None, id_=None, progresso=None):
+            with blocco:
+                dentro[0] += 1
+                massimo[0] = max(massimo[0], dentro[0])
+            via.wait(10)
+            with blocco:
+                dentro[0] -= 1
+            return {"file": "", "errore": "finto"}
+
+        def prova(vid):
+            try:
+                m._prepara_audio(vid, attesa=30)
+            except (RuntimeError, m.ErroreExtra):
+                pass
+        with unittest.mock.patch.object(m, "_esegui_ytdlp", finto):
+            fili = [threading.Thread(target=prova, args=("Insieme%04d" % i,)) for i in range(6)]
+            for f in fili:
+                f.start()
+            time.sleep(0.6)
+            self.assertLessEqual(massimo[0], getattr(m, "PREPARA_MAX", 3))
+            # un ascolto che non trova posto aspetta poco, poi lo dice (503)
+            self.errore(503, m._prepara_audio, "Attesa00001", attesa=0.2)
+            via.set()
+            for f in fili:
+                f.join(10)
+        self.assertLessEqual(massimo[0], 3)
+
+
+class TestSicurezzaPiccole(unittest.TestCase):
+    """Le correzioni piccole, senza server: dispositivi spenti della chat e della posizione al più CHAT_SPENTI_MAX e
+    CHIAVI_SPENTE_MAX per persona, ascolti solo degli ultimi giorni, copertine con ogni rimando ricontrollato, l'indirizzo
+    di casa tra quelli vietati e, senza accesso, nessun permesso."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_sicurezza_piccole")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-sicurezza-piccole-")
+        self.m.PERS = self.m.Persone(os.path.join(self.base, "persone.json"))
+
+    def tearDown(self):
+        self.m.PERS = None
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def entrata(self, nome):
+        a = self.m.PERS.crea(nome)
+        return a["id"], self.m.PERS.usa_invito(self.m.PERS.invito(a["id"])[0], "iphone")
+
+    def test_chat_dispositivi_spenti(self):
+        m = self.m
+        ch = m.Chat(os.path.join(self.base, "chat"))
+        try:
+            pid, acc = self.entrata("Anna")
+            for _ in range(40):   # dati del sito cancellati 40 volte: ogni volta un dispositivo nuovo
+                ch.registra(pid, acc, {"id": b64u(os.urandom(16)), "chiave": chiave_finta()}, "iphone")
+            suoi = [x for x in ch.dati["dispositivi"].values() if x["persona"] == pid]
+            self.assertEqual(sum(1 for x in suoi if x.get("attivo", True)), 1)
+            self.assertLessEqual(len(suoi), 1 + getattr(m, "CHAT_SPENTI_MAX", 20))
+        finally:
+            if ch.timer:
+                ch.timer.cancel()
+
+    def test_chiavi_spente(self):
+        m = self.m
+        k = m.Chiavi(os.path.join(self.base, "chiavi.json"))
+        pid, acc = self.entrata("Bruno")
+        for _ in range(40):
+            k.registra(pid, acc, {"id": b64u(os.urandom(16)), "chiave": chiave_finta()}, "iphone")
+        suoi = [x for x in k.dati["dispositivi"].values() if x["persona"] == pid]
+        self.assertEqual(sum(1 for x in suoi if x.get("attivo", True)), 1)
+        self.assertLessEqual(len(suoi), 1 + getattr(m, "CHIAVI_SPENTE_MAX", 20))
+
+    def test_ascolti_solo_recenti(self):
+        m = self.m
+        a = m.Ascoltati(os.path.join(self.base, "ascoltati.json"), persone=lambda: {"anna"}, nome=lambda p: "Anna",
+                        catalogo=lambda: {})
+        g, b = m._asc_giorno, "0123456789abcdef"
+        self.assertEqual(a.ascolta("anna", [{"brano": b, "giorno": g(k)} for k in (0, 1, 2, -1)]), (4, 0))
+        self.assertEqual(a.ascolta("anna", [{"brano": b, "giorno": g(k)} for k in (3, 10, 400)]), (0, 3))
+
+    def test_copertine_ogni_rimando(self):
+        m = self.m
+        h = m._SoloSiti(m.HOST_COPERTINE)
+        req = urllib.request.Request("https://i.ytimg.com/vi/x/hq720.jpg")
+        for fuori in ("http://127.0.0.1:8790/api/extra/stato", "https://evil.example/x.jpg", "http://i.ytimg.com/x.jpg",
+                      "https://i.ytimg.com.evil.example/x.jpg", "file:///etc/passwd"):
+            with self.assertRaises(urllib.error.HTTPError, msg=fuori):
+                h.redirect_request(req, None, 302, "Found", {}, fuori)
+        self.assertIsNotNone(h.redirect_request(req, None, 302, "Found", {}, "https://yt3.ggpht.com/x=s800"))
+        # e _scarica_immagine la usa davvero
+        aperture = []
+
+        class Apri:
+            def open(self, *a, **k):
+                raise OSError("finto")
+        with unittest.mock.patch.object(m.urllib.request, "build_opener", lambda *h: aperture.append(h) or Apri()):
+            self.assertFalse(m._scarica_immagine("https://i.ytimg.com/vi/x/hq720.jpg", os.path.join(self.base, "c.jpg")))
+        self.assertTrue(any(isinstance(x, m._SoloSiti) for h in aperture for x in h), aperture)
+
+    def test_indirizzo_di_casa(self):
+        m = self.m
+        casa = frozenset({m._ip("2a01:4f8:c010:1234::5"), m._ip("127.0.0.1")})
+        with unittest.mock.patch.object(m, "_ip_del_mac", return_value=casa), \
+                unittest.mock.patch.dict(os.environ, {"ATLANTE_IP_CASA": "81.56.10.20, 2a02:1810:aaaa:bbbb::1"}):
+            for ip in ("2a01:4f8:c010:1234::abcd", "81.56.10.20", "::ffff:81.56.10.20", "2a02:1810:aaaa:bbbb::77"):
+                self.assertTrue(m._ip_vietato(ip), ip)
+            for ip in ("2a01:4f8:c010:1235::1", "81.56.10.21", "8.8.8.8", "2a02:1810:aaaa:bbbc::1"):
+                self.assertFalse(m._ip_vietato(ip), ip)
+
+    def test_senza_accesso_nessun_permesso(self):
+        m = self.m
+        h = FintaRisposta("127.0.0.1", {"Host": "127.0.0.1:8790"}, "/api/extra/io")   # nessuno ha deciso chi è
+        self.assertNotEqual(m._chi_e(h)["ruolo"], "proprietario")
+        m._instrada(h, "GET", ["io"], {})
+        self.assertNotEqual(h.risposta()["ruolo"], "proprietario")
+        self.assertNotIn("nuove", h.risposta())
+        for fn, a in ((m._gestione, (h, "GET", ["persone"], {})), (m._instrada, (h, "GET", ["stato"], {})),
+                      (m._instrada, (h, "GET", ["dispositivi"], {}))):
+            with self.assertRaises(m.ErroreExtra, msg=a) as e:
+                fn(*a)
+            self.assertEqual(e.exception.codice, 403)
+
+
+class TestSicurezzaApp(unittest.TestCase):
+    """Sicurezza dell'app e dei moduli (titoli e copertine protetti, nessuna chiamata o scaricamento da un link senza un
+    tocco, allegati della chat solo immagini raster) in JavaScriptCore: test_sicurezza.js. Senza osascript si salta."""
+
+    def test_sicurezza_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js = os.path.join(QUI, "test_sicurezza.js")
+        app, x = os.path.abspath(os.path.join(QUI, "..", "index.html")), os.path.abspath(os.path.join(QUI, "..", "x"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app, x], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
 class TestNotificheSW(unittest.TestCase):

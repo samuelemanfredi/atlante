@@ -377,7 +377,10 @@ async function itunes(path) {
   if ((await AX.stato()).ok) { try { return await (await AX.proxy(url)).json(); } catch (e) {} }
   throw err || new Error('Ricerca non disponibile');
 }
-const daItunes = r => ({feed:r.feedUrl || '', titolo:r.collectionName || r.trackName || 'Podcast', autore:r.artistName || '', cover:r.artworkUrl600 || r.artworkUrl100 || '', genere:r.primaryGenreName || '', itunesId:r.collectionId || r.trackId || 0, n:r.trackCount || 0});
+// copertine dei feed e di Apple: solo indirizzi http e https (un feed può scrivere qualsiasi cosa, e la copertina va anche
+// nel lettore dell'app e agli altri dispositivi con il telecomando)
+const copertinaSicura = u => { u = String(u == null ? '' : u).trim(); return /^https?:\/\//i.test(u) ? u : ''; };
+const daItunes = r => ({feed:r.feedUrl || '', titolo:r.collectionName || r.trackName || 'Podcast', autore:r.artistName || '', cover:copertinaSicura(r.artworkUrl600 || r.artworkUrl100), genere:r.primaryGenreName || '', itunesId:r.collectionId || r.trackId || 0, n:r.trackCount || 0});
 
 let qTimer = 0, qSeq = 0;
 async function cerca(q) {
@@ -410,7 +413,7 @@ async function caricaTop(forza) {
     S.top = ent.map(e => {
       const imgs = [].concat(e['im:image'] || []), img = imgs.length ? imgs[imgs.length - 1].label : '';
       return {itunesId:(e.id && e.id.attributes && e.id.attributes['im:id']) || '', titolo:(e['im:name'] || {}).label || '', autore:(e['im:artist'] || {}).label || '',
-        cover:img.replace(/\/\d+x\d+bb\./, '/300x300bb.'), genere:(e.category && e.category.attributes && e.category.attributes.label) || '', descr:(e.summary || {}).label || ''};
+        cover:copertinaSicura(img.replace(/\/\d+x\d+bb\./, '/300x300bb.')), genere:(e.category && e.category.attributes && e.category.attributes.label) || '', descr:(e.summary || {}).label || ''};
     });
     AX.store.set('podcast-top', {t:Date.now(), list:S.top});
     disegnaTop();
@@ -453,7 +456,7 @@ function parseFeed(txt, feed) {
     titolo:decodeEnt((kid(ch, 'title') || {textContent:''}).textContent.trim()),
     autore:decodeEnt(((kid(ch, 'itunes:author') || kid(ch, 'author') || {}).textContent || '').trim()),
     descr:pulisci((kid(ch, 'description') || kid(ch, 'itunes:summary') || kid(ch, 'subtitle') || {}).textContent || '', 3000),
-    cover:(imgCh && (imgCh.getAttribute('href') || imgCh.getAttribute('url'))) || (imgUrl ? imgUrl.textContent.trim() : ''),
+    cover:copertinaSicura((imgCh && (imgCh.getAttribute('href') || imgCh.getAttribute('url'))) || (imgUrl ? imgUrl.textContent.trim() : '')),
     serial:/serial/i.test((kid(ch, 'itunes:type') || {}).textContent || '')
   };
   const fh = hash(feed), visti = new Set(), lista = [];
@@ -475,7 +478,7 @@ function parseFeed(txt, feed) {
       titolo:testo(it, 'title') || 'Episodio',
       data:dataT, durata:durata(testo(it, 'itunes:duration')),
       descr:pulisci(testo(it, 'content:encoded') || testo(it, 'description') || testo(it, 'itunes:summary') || testo(it, 'summary', 'content'), 4000),
-      cover:img ? (img.getAttribute('href') || '') : '',
+      cover:copertinaSicura(img && img.getAttribute('href')),
       num:+testo(it, 'itunes:episode') || 0, stag:+testo(it, 'itunes:season') || 0
     });
   }

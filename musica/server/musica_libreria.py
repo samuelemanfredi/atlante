@@ -22,6 +22,9 @@ HTTPS (Safari e Chrome tengono l'app offline e la lasciano installare solo così
 e sull'iPhone si apre sempre e solo https://<mac>.<tailnet>.ts.net/ (un indirizzo fisso: brani
 salvati e playlist stanno con l'indirizzo). Con --indirizzo chi apre la vecchia http://<mac>:8790/
 da un altro dispositivo viene mandato lì. In alternativa: `tailscale cert` e --cert/--chiave.
+Il server ascolta solo sul Mac stesso (127.0.0.1): per aprirlo direttamente agli altri dispositivi ATLANTE_ASCOLTO=0.0.0.0.
+Risponde solo ai suoi nomi (contro il DNS rebinding): 127.0.0.1, localhost, [::1], quelli di --indirizzo e --pubblico,
+il nome del Mac nella rete Tailscale attraverso tailscale serve, e quelli di ATLANTE_HOST_OK (separati da virgole).
 Per unirlo a un server esistente basta chiamare `gestisci(handler)` dentro do_GET:
 restituisce True se la richiesta era per la musica.
 
@@ -1513,13 +1516,28 @@ def _playlist_mac(h):
 #   GET    tematiche[/<id>] …          playlist di Atlante e playlist con l'IA (vedi la loro sezione)
 #
 # Errori: {errore: "testo"} con codice >= 400.
+#
+# La rotta comincia dopo il PRIMO «api/extra/» dell'indirizzo (prima può esserci un prefisso, es. /musica/). Un
+# indirizzo con un secondo «api/extra/» (…/api/extra/chat/api/extra/stato) non è una rotta: prima il server leggeva
+# l'ultimo, e un invitato arrivava così alle rotte di Samuele passando per una delle sue (vedi _permesso).
 
-EXTRA = re.compile(r"^(?:.*/)?api/extra/(.*)$")
+EXTRA = re.compile(r"^(?:.*?/)?api/extra/(.*)$")
+SOLO_SAMUELE_E_CASA = ("stato", "proxy", "video", "film", "voci", "audiolibro", "ia", "dispositivo")
+
+
+def _parti_extra(m):
+    """I pezzi della rotta (senza quelli vuoti delle barre doppie) dopo il primo api/extra/; None se dopo c'è di nuovo
+    «api/extra» (anche scritto …/api//extra o con le barre codificate)."""
+    parti = [x for x in m.group(1).split("/") if x]
+    if any(parti[i] == "api" and parti[i + 1] == "extra" for i in range(len(parti) - 1)):
+        return None
+    return parti
 CONF = {"cache": "~/.atlante-musica", "video_dir": "~/Movies/Atlante", "libri_dir": "~/Music/Atlante Audiolibri",
         "musica_dir": "~/Music/Atlante Scaricati", "ia_modello": "", "ia_indirizzo": "http://127.0.0.1:11434"}
 # avviato da launchd o da un'altra app il PATH è minimo: Homebrew sta in /opt/homebrew/bin (Apple Silicon) o /usr/local/bin
 CARTELLE_PROGRAMMI = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/usr/sbin", "/bin", "/sbin")
-MAX_CORPO = 20 * 1024 * 1024    # corpo delle richieste (testo di un audiolibro)
+MAX_CORPO = 20 * 1024 * 1024    # corpo delle richieste con i byte di un file (pezzi da 8 MB) o il testo di un audiolibro
+MAX_JSON = 1024 * 1024          # e di tutte le altre (JSON): più grande non serve a nessuna rotta
 MAX_PROXY = 15 * 1024 * 1024
 MAX_MEDIA = 1024 * 1024 * 1024   # audio e video (episodi di podcast, capitoli): passano a pezzi, senza tenerli in memoria
 ATTESA_MEDIA = 30                # secondi massimi senza ricevere niente durante un audio o video
@@ -1878,7 +1896,7 @@ def _scarica_video(coda, l, _dati):
     tmp = os.path.join(_cartella_tmp(), "video-" + l["id"])   # pezzi a metà: via in ogni caso alla fine
     os.makedirs(tmp, exist_ok=True)
     ff = _programma("ffmpeg")
-    args = [yt, "--newline", "--progress", "--no-playlist", "--no-mtime",
+    args = [yt, "--newline", "--progress", "--no-playlist", "--no-mtime", "--max-filesize", str(VIDEO_MAX),
             "-P", "home:" + cartella, "-P", "temp:" + tmp, "-o", "%(title).150B [%(id)s].%(ext)s",
             "--print", "before_dl:[atlante] titolo %(title)s", "--print", "after_move:[atlante] file %(filepath)s"]
     if ff:
@@ -1931,10 +1949,18 @@ def _scarica_video(coda, l, _dati):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _nuovo_video(corpo):
+def _nuovo_video(corpo, samuele=False):
+    """Un video da scaricare. Samuele: da qualsiasi sito pubblico; gli altri (la rete di casa) solo da YouTube."""
     url = str(corpo.get("url") or "").strip()
     if not re.match(r"^https?://[^\s/]+\S*$", url, re.I):
         raise ErroreExtra(400, "Serve l'indirizzo (http o https) della pagina del video")
+    vid = _id_da_link(url)
+    if vid:
+        url = "https://www.youtube.com/watch?v=" + vid   # l'indirizzo lo scrive il Mac: niente playlist né altro
+    elif not samuele:
+        raise ErroreExtra(403, SOLO_YOUTUBE)
+    else:
+        _link_pubblico(url)
     tipo = str(corpo.get("tipo") or "video")
     if tipo not in ("video", "audio"):
         raise ErroreExtra(400, "Tipo non valido: video o audio")
@@ -1965,6 +1991,55 @@ def _file_video(h, id_):
         raise ErroreExtra(404, "File non trovato: non ancora scaricato, oppure spostato dalla cartella")
     tipo = TIPI_VIDEO.get(os.path.splitext(p)[1].lower()) or mimetypes.guess_type(p)[0] or "application/octet-stream"
     _invia_file(h, p, tipo, {"Content-Disposition": _disposizione(os.path.basename(p)), "X-Content-Type-Options": "nosniff"})
+
+
+# ----- link per yt-dlp: solo verso Internet -----
+# yt-dlp legge qualsiasi indirizzo, anche quelli del Mac stesso (l'app su 127.0.0.1, dove il Mac è Samuele), della rete
+# di casa e della rete Tailscale. Prima di farlo partire il nome del link si risolve qui e nessuno dei suoi indirizzi può
+# essere vietato (_ip_vietato, come per il proxy). Chi non è Samuele scarica solo da YouTube e YouTube Music: il link si
+# riduce all'id del video e l'indirizzo lo scrive il Mac. E c'è sempre un limite alla grandezza del file.
+
+VIDEO_MAX = 50 * 1024 ** 3   # un video scaricato con yt-dlp al più (--max-filesize)
+SOLO_YOUTUBE = "Da qui si scarica solo da YouTube e YouTube Music: incolla il link di un video o di un brano di YouTube"
+ERRORE_INVITATI = "Scaricamento non riuscito: il brano non è disponibile su YouTube, o il Mac non è riuscito a prenderlo. " \
+                  "Riprova più tardi."
+
+
+def _risolvi(host, porta):
+    """Gli indirizzi IP di un nome. ATLANTE_DNS_PROVE («nome=ip,…») è solo per le prove: risposte fisse senza la rete
+    (che passano comunque da _ip_vietato)."""
+    for x in os.environ.get("ATLANTE_DNS_PROVE", "").split(","):
+        k, _, v = x.strip().partition("=")
+        if k and k.lower() == host.lower():
+            return [v.strip()]
+    try:
+        infos = socket.getaddrinfo(host, porta, 0, socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return []
+    ips = []
+    for info in infos:
+        if info[4][0] not in ips:
+            ips.append(info[4][0])
+    return ips
+
+
+def _link_pubblico(url):
+    """ErroreExtra se il link (http o https) non porta a Internet pubblico: il nome si risolve e nessuno dei suoi
+    indirizzi può essere il Mac, la rete di casa, Tailscale, link-local o un altro indirizzo non pubblico."""
+    u = urlsplit(url)
+    try:
+        if u.scheme.lower() not in ("http", "https") or not u.hostname:
+            raise ValueError
+        host = u.hostname.encode("idna").decode("ascii")
+        porta = u.port or (443 if u.scheme.lower() == "https" else 80)
+    except (UnicodeError, ValueError):
+        raise ErroreExtra(400, "Indirizzo non valido")
+    ips = _risolvi(host, porta)
+    if not ips:
+        raise ErroreExtra(400, "Sito non trovato: %s" % u.hostname)
+    if any(_ip_vietato(ip) for ip in ips):
+        raise ErroreExtra(403, "Indirizzo non permesso: dal Mac si scarica solo da siti pubblici "
+                               "(non dal Mac stesso né dalla rete di casa)")
 
 
 # ----- musica da internet: ricerca, ascolto e scaricamento nella libreria -----
@@ -2213,7 +2288,23 @@ _PREPARAZIONI = {}
 _blocco_preparazioni = threading.Lock()
 
 
-def _prepara_audio(vid, coda=None, id_=None, progresso=None):
+PREPARA_MAX = 3           # yt-dlp insieme per ascoltare prima e scaricare da YouTube (gli altri aspettano il turno)
+ATTESA_PREPARA = 20       # secondi che un ascolto aspetta il suo turno, poi 503 (lo scaricamento in coda aspetta e basta)
+_PREPARA_POSTI = threading.BoundedSemaphore(PREPARA_MAX)
+
+
+def _turno(coda, id_, attesa):
+    """Un posto tra i PREPARA_MAX yt-dlp che preparano un audio. Un lavoro in coda aspetta finché serve (e si può
+    annullare intanto); un ascolto al più `attesa` secondi, poi 503."""
+    if coda is None:
+        if not _PREPARA_POSTI.acquire(timeout=ATTESA_PREPARA if attesa is None else attesa):
+            raise ErroreExtra(503, "Il Mac sta già preparando altri brani: riprova fra poco")
+        return
+    while not _PREPARA_POSTI.acquire(timeout=1):
+        coda.controlla(id_)
+
+
+def _prepara_audio(vid, coda=None, id_=None, progresso=None, attesa=None):
     """L'audio originale del brano (m4a se c'è) nella cache degli ascolti, scaricato una volta sola: lo usano ▶︎ e ⬇︎.
     Due richieste insieme per lo stesso brano (l'iPhone ne fa più d'una, a pezzi) aspettano lo stesso scaricamento."""
     with _blocco_preparazioni:
@@ -2228,10 +2319,16 @@ def _prepara_audio(vid, coda=None, id_=None, progresso=None):
             raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
         tmp = tempfile.mkdtemp(prefix="ascolto-", dir=_cartella_tmp())
         try:
+            _turno(coda, id_, attesa)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        try:
             info = {}
             # il client predefinito; se YouTube lo blocca (403), quello del telefono, come per il Cloud
             for client in ("", "mweb"):
                 args = [yt, "--newline", "--progress", "--no-playlist", "--no-mtime", "-f", "ba[ext=m4a]/ba/b",
+                        "--max-filesize", str(BRANO_MAX),
                         "-P", "home:" + tmp, "-P", "temp:" + tmp, "-o", "%(id)s.%(ext)s"] + _STAMPE_INFO
                 if client:
                     args += ["--extractor-args", "youtube:player_client=" + client]
@@ -2249,6 +2346,7 @@ def _prepara_audio(vid, coda=None, id_=None, progresso=None):
             return dest
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+            _PREPARA_POSTI.release()
 
 
 def _ascolta(h, vid):
@@ -2257,6 +2355,9 @@ def _ascolta(h, vid):
     try:
         p = _prepara_audio(vid)
     except RuntimeError as e:
+        if _chi_e(h)["ruolo"] != "proprietario":   # agli altri l'errore di yt-dlp così com'è non arriva
+            print("Atlante: ascolto di %s non riuscito: %s" % (vid, e), flush=True)
+            raise ErroreExtra(502, "Ascolto non riuscito: il brano non è disponibile su YouTube")
         raise ErroreExtra(502, "Ascolto non riuscito: %s" % e)
     tipo = TIPI_VIDEO.get(os.path.splitext(p)[1].lower()) or "application/octet-stream"
     _invia_file(h, p, tipo, {"X-Content-Type-Options": "nosniff"})
@@ -2273,13 +2374,33 @@ def _cartella_musica():
     return p
 
 
-def _scarica_immagine(url, dest, siti=HOST_COPERTINE):
+def _sito_tra(url, siti):
+    """True per un indirizzo https di uno dei siti dati (o di un loro sottodominio)."""
     s = urlsplit(url)
     host = (s.hostname or "").lower()
-    if s.scheme != "https" or not any(host == d or host.endswith("." + d) for d in siti):
+    return s.scheme == "https" and any(host == d or host.endswith("." + d) for d in siti)
+
+
+class _SoloSiti(urllib.request.HTTPRedirectHandler):
+    """Ogni rimando ricontrollato: solo https e solo verso i siti dati (una copertina non porta il Mac altrove, né al Mac
+    stesso)."""
+
+    def __init__(self, siti):
+        super().__init__()
+        self.siti = siti
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _sito_tra(newurl, self.siti):
+            raise urllib.error.HTTPError(newurl, code, "rimandato fuori dai siti delle copertine", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _scarica_immagine(url, dest, siti=HOST_COPERTINE):
+    if not _sito_tra(url, siti):
         return False   # solo dai siti delle copertine: un indirizzo qualsiasi farebbe del Mac un proxy
     try:
-        r = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": BROWSER}), timeout=10)
+        r = urllib.request.build_opener(_SoloSiti(siti)).open(urllib.request.Request(url, headers={"User-Agent": BROWSER}),
+                                                              timeout=10)
         with r:
             if not (r.headers.get("Content-Type") or "").startswith("image/"):
                 return False
@@ -2354,6 +2475,24 @@ def _mp3(ff, sorgente, copertina, tag, uscita, copia=False):
 
 
 def _scarica_musica(coda, l, _dati):
+    if not l.get("controllo"):
+        return _scarica_brano(coda, l)
+    # di un invitato: limite di oggi e spazio di nuovo adesso (in coda il giorno può essere cambiato, o lo spazio finito);
+    # e se non riesce, l'errore di yt-dlp così com'è non gli arriva
+    if QUOTE and QUOTE.usati(l["di"]) + STIMA_BRANO > QUOTE.limite:
+        raise RuntimeError(QUOTE.messaggio())
+    if _libero_su(_cart("controllo_dir")) - STIMA_BRANO < SPAZIO_MIN:
+        raise RuntimeError("Sul Mac mini c'è poco spazio libero: lo scaricamento è fermo")
+    try:
+        return _scarica_brano(coda, l)
+    except (Annullato, ErroreExtra):
+        raise
+    except Exception as e:   # noqa: BLE001
+        print("Atlante: brano %s di un invitato non riuscito: %s" % (l["id"], e), flush=True)
+        raise RuntimeError(ERRORE_INVITATI) from None
+
+
+def _scarica_brano(coda, l):
     dest_dir = _cartella_carica("controllo_dir") if l.get("controllo") else _cartella_musica()
     ff = _programma("ffmpeg")
     tmp = tempfile.mkdtemp(prefix="musica-", dir=_cartella_tmp())
@@ -2364,8 +2503,8 @@ def _scarica_musica(coda, l, _dati):
             info = _info_ascolto(l["yt"])
         else:   # link di un altro sito (SoundCloud, Bandcamp…): titolo, artista e copertina dalla sua pagina
             info = _esegui_ytdlp([_programma("yt-dlp"), "--newline", "--progress", "--no-playlist", "--no-mtime",
-                                  "-f", "ba/b", "-P", "home:" + tmp, "-P", "temp:" + tmp, "-o", "%(id).80B.%(ext)s"] +
-                                 _STAMPE_INFO + ["--", l["url"]], coda, l["id"], avanza)
+                                  "-f", "ba/b", "--max-filesize", str(BRANO_MAX), "-P", "home:" + tmp, "-P", "temp:" + tmp,
+                                  "-o", "%(id).80B.%(ext)s"] + _STAMPE_INFO + ["--", l["url"]], coda, l["id"], avanza)
             if not info["file"]:
                 raise RuntimeError(info["errore"] or "yt-dlp non è riuscito a scaricare l'audio")
             sorgente = info["file"]
@@ -2408,8 +2547,13 @@ def _scarica_musica(coda, l, _dati):
         _cancella(os.path.join(dest_dir, "." + l["id"] + ".tmp"))   # annullato o non riuscito a metà
 
 
-def _nuova_musica(corpo, di=None, chi_nome=""):
-    """Un brano da scaricare. Con `di` (un invitato) il brano va in «Da controllare» e conta nel suo limite di oggi."""
+INVITATO_IN_ARRIVO = 5    # brani di un invitato in coda o in corso insieme («Cerca e scarica»)
+
+
+def _nuova_musica(corpo, di=None, chi_nome="", samuele=False):
+    """Un brano da scaricare. Con `di` (un invitato) il brano va in «Da controllare» e conta nel suo limite di oggi: al
+    più INVITATO_IN_ARRIVO insieme, e ognuno prenota subito STIMA_BRANO nel limite e nello spazio libero (la grandezza
+    vera si sa solo alla fine). Un link di un sito qualsiasi solo per Samuele (`samuele`), e solo verso Internet."""
     vid = str(corpo.get("id") or "").strip()
     url = str(corpo.get("url") or "").strip()
     if not vid and url:
@@ -2418,14 +2562,16 @@ def _nuova_musica(corpo, di=None, chi_nome=""):
         raise ErroreExtra(400, "Brano non valido")
     if not vid and not re.match(r"^https?://[^\s/]+\S*$", url, re.I):
         raise ErroreExtra(400, "Serve un brano della ricerca o il link (http o https) della sua pagina")
+    if not vid and not samuele:
+        raise ErroreExtra(403, SOLO_YOUTUBE)
+    if not vid:
+        _link_pubblico(url)
     if not _programma("yt-dlp"):
         raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
-    if di and QUOTE:
-        QUOTE.controlla(di, STIMA_BRANO)
-    _cartella_carica("controllo_dir") if di else _cartella_musica()
+    cartella = _cartella_carica("controllo_dir") if di else _cartella_musica()
     coda = _coda("musica")
-    if vid:   # lo stesso brano chiesto di nuovo (due tocchi, due dispositivi): lo stesso lavoro, nessun doppione
-        with coda.blocco:
+    with coda.blocco:   # conti e aggiunta insieme: due richieste nello stesso momento non passano tutte e due
+        if vid:   # lo stesso brano chiesto di nuovo (due tocchi, due dispositivi): lo stesso lavoro, nessun doppione
             for l in reversed(list(coda.lavori.values())):
                 if l.get("yt") == vid and l.get("di") == di and (l.get("stato") in ("in coda", "in corso") or
                                            (l.get("stato") == "fatto" and os.path.isfile(l.get("_percorso") or ""))):
@@ -2433,12 +2579,20 @@ def _nuova_musica(corpo, di=None, chi_nome=""):
             if di and any(l.get("yt") == vid and not l.get("di") and l.get("stato") == "fatto" and
                           os.path.isfile(l.get("_percorso") or "") for l in coda.lavori.values()):
                 raise ErroreExtra(409, "Questo brano è già nella libreria di Atlante: lo trovi tra i brani")
-    testo = lambda k, n: str(corpo.get(k) or "").strip()[:n]   # noqa: E731
-    return coda.aggiungi({"yt": vid, "url": "https://music.youtube.com/watch?v=" + vid if vid else url,
-                          "titolo": testo("titolo", 300) or ("" if vid else url), "artista": testo("artista", 300),
-                          "album": testo("album", 300), "copertina": testo("copertina", 1000),
-                          "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": "",
-                          **({"di": di, "chi_nome": chi_nome, "controllo": True, "caricamento": ""} if di else {})})
+        if di:
+            in_arrivo = sum(1 for l in coda.lavori.values() if l.get("di") == di and l.get("stato") in ("in coda", "in corso"))
+            if in_arrivo >= INVITATO_IN_ARRIVO:
+                raise ErroreExtra(429, "Hai già %d brani in arrivo: aspetta che finiscano" % in_arrivo)
+            if QUOTE:   # quelli già in arrivo contano già nel limite di oggi
+                QUOTE.controlla(di, STIMA_BRANO * (in_arrivo + 1))
+            if _libero_su(cartella) - STIMA_BRANO * (in_arrivo + 1) < SPAZIO_MIN:
+                raise ErroreExtra(507, "Sul Mac mini restano meno di %s liberi: gli scaricamenti sono fermi" % _misura(SPAZIO_MIN))
+        testo = lambda k, n: str(corpo.get(k) or "").strip()[:n]   # noqa: E731
+        return coda.aggiungi({"yt": vid, "url": "https://music.youtube.com/watch?v=" + vid if vid else url,
+                              "titolo": testo("titolo", 300) or ("" if vid else url), "artista": testo("artista", 300),
+                              "album": testo("album", 300), "copertina": testo("copertina", 1000),
+                              "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": "",
+                              **({"di": di, "chi_nome": chi_nome, "controllo": True, "caricamento": ""} if di else {})})
 
 
 def _annulla_musica(id_, di=None):
@@ -2468,6 +2622,7 @@ ATTESA_MAX = 25          # secondi dell'attesa lunga (dietro Tailscale una richi
 AZIONI = ("toggle", "play", "pause", "next", "prev", "seek", "volume", "suona")
 TIPI_DISP = ("iphone", "ipad", "android", "mac", "pc")
 ID_DISP = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+BRANO_DISP_TESTO = 300   # caratteri di titolo, artista e album nello stato di un dispositivo
 
 
 NON_RAGGIUNGIBILE = "Dispositivo non raggiungibile: l'app su quel dispositivo è chiusa?"
@@ -2501,11 +2656,38 @@ class Dispositivi:
     def _suo(self, x, di):
         return x is not None and x.get("di", "p") == di
 
+    @staticmethod
+    def _pulito(stato):
+        """Lo stato con il brano controllato: lo mostrano gli altri dispositivi della persona (titolo, copertina), quindi
+        ogni campo del tipo giusto e non troppo lungo, e la copertina solo http, https o blob (mai javascript: o data:).
+        Un campo sbagliato diventa vuoto; i campi che l'app non manda si tolgono."""
+        b = stato.get("brano")
+        if b is None:
+            return stato
+        if not isinstance(b, dict):
+            raise ErroreExtra(400, "Brano non valido: serve un oggetto")
+        x = {}
+        for k in ("titolo", "artista", "album"):
+            if k in b:
+                x[k] = " ".join(b[k].split())[:BRANO_DISP_TESTO] if isinstance(b[k], str) else ""
+        if "sid" in b:
+            x["sid"] = b["sid"] if isinstance(b["sid"], str) and re.fullmatch(r"[A-Za-z0-9_-]{0,64}", b["sid"]) else ""
+        if "copertina" in b:
+            c = b["copertina"]
+            ok = isinstance(c, str) and len(c) <= 2000 and not re.search(r"[\x00-\x20\x7f\"'<>\\`]", c) and \
+                urlsplit(c).scheme.lower() in ("http", "https", "blob")
+            x["copertina"] = c if ok else ""
+        if "durata" in b:
+            d = b["durata"]
+            x["durata"] = d if isinstance(d, (int, float)) and not isinstance(d, bool) and math.isfinite(d) and d >= 0 else 0
+        return dict(stato, brano=x)
+
     def stato(self, id_, corpo, di="p"):
         if not ID_DISP.match(id_ or ""):
             raise ErroreExtra(400, "Dispositivo non valido")
         stato = corpo.get("stato") or {}
         self._misura(stato, "Stato")
+        stato = self._pulito(stato)
         nome = " ".join(str(corpo.get("nome") or "").split())[:40] or "Dispositivo"
         tipo = corpo.get("tipo") if corpo.get("tipo") in TIPI_DISP else "pc"
         ora = time.time()
@@ -2585,7 +2767,9 @@ def _con_link(r):
 
 
 def _chi_e(h):
-    return getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None, "chiave": None}
+    """Chi fa la richiesta, deciso da controlla_accesso. Se non l'ha deciso nessuno: «nessuno», con il minimo dei
+    permessi (prima valeva Samuele)."""
+    return getattr(h, "_chi", None) or {"ruolo": "nessuno", "persona": None, "chiave": None}
 
 
 def _gestione(h, metodo, resto, corpo):
@@ -2659,9 +2843,21 @@ def _inviti(h, metodo, corpo):
 
 
 def _di(h):
-    """Di chi sono i dispositivi di questa richiesta: "p" (Samuele, anche dalla rete di casa) o l'id dell'invitato."""
-    chi = getattr(h, "_chi", None)
-    return chi["persona"] if chi and chi["ruolo"] == "invitato" else "p"
+    """Di chi sono idee, playlist e ascolti di questa richiesta: "p" (Samuele, anche dalla rete di casa) o l'id
+    dell'invitato. Senza nessuno dietro: 403."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return chi["persona"]
+    if chi["ruolo"] in ("proprietario", "casa"):
+        return "p"
+    raise ErroreExtra(403, "Non disponibile senza accesso")
+
+
+def _di_disp(h):
+    """Di chi sono i dispositivi del telecomando: "p" per Samuele, l'id per un invitato, «casa» per la rete di casa
+    (e un altro login della rete Tailscale). Chi è in casa ha i suoi: non vede né comanda i dispositivi di Samuele (e
+    lo stato che ne arriva, titoli e copertine, non finisce nell'app di Samuele)."""
+    return "casa" if _chi_e(h)["ruolo"] == "casa" else _di(h)
 
 
 def _attesa(h):
@@ -2707,6 +2903,7 @@ POS_CORPO_MAX = 4096               # una posizione cifrata, in base64url (sono p
 TIPI_POS = ("vivo", "punto")
 CHIAVI_DISP_MAX = 10               # dispositivi con la chiave per persona: oltre, esce quello sentito meno di recente
 CHIAVI_SPENTE = 30 * 86400         # le chiavi spente (telefono cambiato, accesso revocato) escono dal file dopo 30 giorni
+CHIAVI_SPENTE_MAX = 20             # e al più 20 per persona (le più vecchie escono prima)
 CIFRA_SAMUELE = "Samuele"
 ID_CIFRA = re.compile(r"^[A-Za-z0-9_-]{16,43}$")   # id scelti dai telefoni (dispositivi, aggiornamenti): 16 byte casuali
 ID_POS = re.compile(r"^[0-9a-f]{16}$")
@@ -2762,6 +2959,14 @@ def _cifra_vivi():
             revocati = set(d["revocati"])
     persone["p"] = CIFRA_SAMUELE
     return persone, accessi, revocati
+
+
+def _togli_spenti(d, persona, massimo):
+    """Al più `massimo` dispositivi spenti (attivo False) di una persona in `d` (id -> dispositivo): via i più vecchi."""
+    spenti = sorted((k for k, y in d.items() if y.get("persona") == persona and not y.get("attivo", True)),
+                    key=lambda k: d[k].get("spento", 0))
+    for k in spenti[:max(0, len(spenti) - massimo)]:
+        del d[k]
 
 
 class Chiavi:
@@ -2846,6 +3051,7 @@ class Chiavi:
             x.pop("spento", None)
             for k in [k for k, y in d.items() if not y.get("attivo", True) and ora - y.get("spento", 0) > CHIAVI_SPENTE]:
                 del d[k]
+            _togli_spenti(d, persona, CHIAVI_SPENTE_MAX)
             self._scrivi()
             return prima != (True, x.get("accesso"))
 
@@ -7400,6 +7606,8 @@ ASCOLTATI_SETTIMANA = 7
 ASCOLTATI_MESE = 30
 ASCOLTATI_GIORNO_MAX = 1000       # ascolti contati per persona in un giorno (un'app impazzita non riempie il file)
 ASCOLTATI_LOTTO = 500             # ascolti in una richiesta (quelli fatti senza rete arrivano insieme)
+ASCOLTATI_INDIETRO = 2            # giorni indietro accettati (oggi, ieri, l'altro ieri): quelli fatti senza rete arrivano
+                                  # alla prossima apertura dell'app, e nessuno riempie classifiche e consigli di giorni passati
 ASCOLTATI_SALVA = 5               # secondi: le scritture vicine (tanti ascolti insieme) diventano una sola
 ASCOLTATI_ELENCO = 50             # brani di una classifica
 ASCOLTATI_PER_TE = 30
@@ -7622,8 +7830,9 @@ class Ascoltati:
         chi = self.persone()
         return {p for p in self.conti if chi is None or p in chi}
 
-    def ascolta(self, pid, voci):
-        """Ascolti di una persona: [{brano, giorno «AAAA-MM-GG» (oggi se manca)}]. -> (contati, scartati)"""
+    def ascolta(self, pid, voci, indietro=ASCOLTATI_INDIETRO):
+        """Ascolti di una persona: [{brano, giorno «AAAA-MM-GG» (oggi se manca)}], al più di `indietro` giorni fa.
+        -> (contati, scartati)"""
         with self.blocco:
             self._giorno_nuovo()
             chi = self.persone()
@@ -7637,7 +7846,8 @@ class Ascoltati:
                 if g == self._domani:
                     g = self._oggi   # telefono in un altro fuso orario: per il Mac è ancora oggi
                 if not isinstance(b, str) or not ASCOLTATI_ID.match(b) or not isinstance(g, str) or g not in self._k \
-                        or (cat and b not in cat) or sum(giorni.get(g, {}).values()) >= ASCOLTATI_GIORNO_MAX:
+                        or self._k[g] > indietro or (cat and b not in cat) \
+                        or sum(giorni.get(g, {}).values()) >= ASCOLTATI_GIORNO_MAX:
                     continue
                 s = self._k[g] // 7   # la sua settimana: il tetto vale lì
                 prima = sum(giorni.get(self._g[k], {}).get(b, 0) for k in range(s * 7, min(s * 7 + 7, ASCOLTATI_GIORNI)))
@@ -8041,7 +8251,9 @@ def _chi_carica(h):
         return chi["persona"], (PERS.nome(chi["persona"]) if PERS else "") or "Invitato"
     if chi["ruolo"] == "casa":
         return "casa", "Rete di casa"
-    return "p", "Samuele"
+    if chi["ruolo"] == "proprietario":
+        return "p", "Samuele"
+    raise ErroreExtra(403, "Non disponibile senza accesso")
 
 
 def _limite(di):
@@ -9041,6 +9253,8 @@ def _chi_scarica(h):
     """Per «Cerca e scarica»: l'id dell'invitato (il brano va in «Da controllare»), None per Samuele e la rete di casa
     (il brano entra nella libreria come sempre)."""
     chi = _chi_e(h)
+    if chi["ruolo"] not in ("invitato", "proprietario", "casa"):
+        raise ErroreExtra(403, "Non disponibile senza accesso")
     return chi["persona"] if chi["ruolo"] == "invitato" else None
 
 
@@ -11407,7 +11621,21 @@ def _ip_vietato(testo):
         elif ip.teredo is not None:
             ip = ip.teredo[1]
     return (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
-            or ip.is_reserved or ip.is_unspecified)
+            or ip.is_reserved or ip.is_unspecified or _ip_di_casa(ip))
+
+
+def _ip_di_casa(ip):
+    """L'indirizzo pubblico di casa (il router, e da lì la rete di casa): la stessa rete /64 di un IPv6 pubblico del
+    Mac (letti da ifconfig, vedi _ip_del_mac) e gli indirizzi di ATLANTE_IP_CASA, separati da virgole (l'IPv4 pubblico
+    il Mac non lo vede: dietro il router ha solo quello di casa; un IPv6 lì vale per la sua rete /64)."""
+    casa = [a for a in _ip_del_mac() if a.version == 6 and a.is_global]
+    casa += [a for a in map(_ip, os.environ.get("ATLANTE_IP_CASA", "").split(",")) if a is not None]
+    for a in casa:
+        if a.version != ip.version:
+            continue
+        if ip == a or (a.version == 6 and ip in ipaddress.ip_network("%s/64" % a, strict=False)):
+            return True
+    return False
 
 
 class _Conn(http.client.HTTPConnection):
@@ -11527,9 +11755,9 @@ def _proxy(h):
             lun = int(r.getheader("Content-Length") or 0)
         except ValueError:
             lun = 0
-        tipo = (r.getheader("Content-Type") or "").lower()
-        if tipo.startswith(("audio/", "video/")) or tipo.startswith("application/octet-stream") and lun > MAX_PROXY:
-            _proxy_media(h, r, sock, url, lun)
+        tipo, media = _tipo_sito(r)
+        if media or tipo == "application/octet-stream" and lun > MAX_PROXY:
+            _proxy_media(h, r, sock, url, lun, media or tipo)
             return
         if lun > MAX_PROXY:
             raise ErroreExtra(413, "Contenuto troppo grande (oltre 15 MB)")
@@ -11560,7 +11788,7 @@ def _proxy(h):
     corpo = b"".join(pezzi)
     h._musica_risposto = True
     h.send_response(200)
-    h.send_header("Content-Type", r.getheader("Content-Type") or "application/octet-stream")
+    h.send_header("Content-Type", tipo and r.getheader("Content-Type") or "application/octet-stream")
     ce = r.getheader("Content-Encoding")
     if ce and ce.strip().lower() != "identity":
         h.send_header("Content-Encoding", ce)
@@ -11574,19 +11802,38 @@ def _proxy(h):
         h.wfile.write(corpo)
 
 
-def _proxy_media(h, r, sock, url, lun):
-    """Audio o video letto per l'app (episodio di podcast, capitolo LibriVox): passa a pezzi, fino a 1 GB."""
+_TIPO_SITO = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}")
+_TIPO_MEDIA = re.compile(r"(?:audio|video)/[a-z0-9][a-z0-9.+-]{0,63}")
+
+
+def _tipo_sito(r):
+    """(tipo, media) dalla risposta del sito: `tipo` è il tipo (minuscolo, senza parametri) se c'è una sola intestazione
+    Content-Type, senza virgole e scritta bene, "" se no; `media` è lo stesso tipo se è proprio un audio/… o un video/…
+    (es. «audio/mpeg»), "" se no. Due tipi, un elenco o un tipo strano non sono un audio: si mandano come pagina."""
+    tipi = r.msg.get_all("Content-Type") or []
+    if len(tipi) != 1 or "," in tipi[0]:
+        return "", ""
+    tipo = tipi[0].split(";", 1)[0].strip().lower()
+    if not _TIPO_SITO.fullmatch(tipo):
+        return "", ""
+    return tipo, tipo if _TIPO_MEDIA.fullmatch(tipo) else ""
+
+
+def _proxy_media(h, r, sock, url, lun, tipo):
+    """Audio o video letto per l'app (episodio di podcast, capitolo LibriVox): passa a pezzi, fino a 1 GB. Il tipo è
+    quello controllato da _tipo_sito, scritto pulito; aperto come pagina non può fare niente (sandbox, nosniff)."""
     if lun > MAX_MEDIA:
         raise ErroreExtra(413, "File troppo grande (oltre 1 GB)")
     h._musica_risposto = True
     h.send_response(200)
-    h.send_header("Content-Type", r.getheader("Content-Type") or "application/octet-stream")
+    h.send_header("Content-Type", tipo)
     if lun:
         h.send_header("Content-Length", str(lun))
     else:
         h.close_connection = True   # lunghezza ignota: la fine del file è la chiusura della connessione
     h.send_header("Cache-Control", "no-store")
     h.send_header("X-Content-Type-Options", "nosniff")
+    h.send_header("Content-Security-Policy", "sandbox")
     h.send_header("X-Url-Finale", quote(url, safe=":/?#[]@!$&'()*+,;=%-._~"))
     h.end_headers()
     if h.command == "HEAD":
@@ -11861,7 +12108,7 @@ def _interfaccia():
 
 def _rotte_interfaccia(h, metodo, resto, corpo):
     """Strati dell'interfaccia: la base pubblicata la leggono tutti, il proprio strato personale lo cambia ognuno
-    (Samuele e la rete di casa: «p», come per i dispositivi), la bozza e le versioni sono solo di Samuele."""
+    (la rete di casa vede quello di Samuele, «p», ma non lo cambia), la bozza e le versioni sono solo di Samuele."""
     def solo(*metodi):
         if metodo not in metodi:
             raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
@@ -11882,6 +12129,9 @@ def _rotte_interfaccia(h, metodo, resto, corpo):
         return _json(h, {"base": ui.base()})
     if resto == ["personale"]:
         solo("POST")
+        if _chi_e(h)["ruolo"] == "casa":
+            raise ErroreExtra(403, "Dalla rete di casa l'interfaccia personale è quella di Samuele: per cambiarla apri "
+                                   "l'app con Tailscale o con il tuo invito")
         return _json(h, {"personale": ui.personale(_di(h), corpo.get("modifiche"))})
     if resto[0] in ("bozza", "pubblica", "versioni") and not samuele:
         raise ErroreExtra(403, "Solo Samuele cambia la base dell'interfaccia")
@@ -11934,6 +12184,8 @@ def _rotte_interfaccia(h, metodo, resto, corpo):
 
 CHAT_GIORNI = 30                  # i messaggi cifrati aspettano i telefoni spenti al più 30 giorni, poi si cancellano
 CHAT_DISP_MAX = 10                # dispositivi della chat per persona: oltre, esce quello sentito meno di recente
+CHAT_SPENTI_MAX = 20              # e dispositivi usciti tenuti per persona (servono per i messaggi mandati prima): oltre,
+                                  # via i più vecchi (chi cancella i dati del sito cento volte non riempie il file)
 CHAT_GRUPPO_MAX = 32              # persone in un gruppo, chi l'ha creato compreso
 CHAT_GRUPPI_PERSONA = 200         # gruppi creati da una persona
 CHAT_NOME_MAX = 40
@@ -12289,6 +12541,7 @@ class Chat:
                 x = d[did] = {"persona": persona, "chiave": chiave, "creato": ora}
             x.update(accesso=accesso or x.get("accesso"), tipo=tipo, visto=ora, attivo=True)
             x.pop("spento", None)
+            _togli_spenti(d, persona, CHAT_SPENTI_MAX)
             self._salva()
             if prima != (True, x.get("accesso")):
                 self._tocca_tutti()   # le chiavi di questa persona sono cambiate per tutti
@@ -13001,7 +13254,9 @@ def _chat(h, metodo, resto, corpo):
 
 # ----- richieste HTTP -----
 
-def _leggi_corpo(h):
+def _leggi_corpo(h, massimo=MAX_JSON):
+    """Il corpo della richiesta, al più `massimo` byte (1 MB per il JSON, 20 MB per i pezzi dei file). Un corpo che non
+    arriva tutto entro il tempo della richiesta (TEMPO_RICHIESTA) è un errore, e la connessione si chiude."""
     if "chunked" in (h.headers.get("Transfer-Encoding") or "").lower():
         h.close_connection = True
         raise ErroreExtra(411, "Serve Content-Length")
@@ -13012,10 +13267,38 @@ def _leggi_corpo(h):
     if n < 0:
         h.close_connection = True
         raise ErroreExtra(400, "Content-Length non valido")
-    if n > MAX_CORPO:
-        h.close_connection = True   # il corpo non si legge: la connessione non si può riusare
-        raise ErroreExtra(413, "Richiesta troppo grande (massimo 20 MB)")
-    return h.rfile.read(n) if n else b""
+    if n > massimo:
+        h.close_connection = True   # il corpo non si tiene: la connessione non si riusa
+        if n <= MAX_CORPO:   # letto e buttato a pezzi, così l'app riceve il 413 invece di una connessione chiusa a metà
+            try:
+                while n > 0:
+                    b = h.rfile.read(min(n, 65536))
+                    if not b:
+                        break
+                    n -= len(b)
+            except OSError:
+                pass
+        raise ErroreExtra(413, "Richiesta troppo grande (massimo %s)" % _misura(massimo))
+    if not n:
+        return b""
+    try:
+        dati = h.rfile.read(n)
+    except OSError:   # tempo scaduto (socket.timeout) o connessione chiusa a metà
+        dati = b""
+    if len(dati) != n:
+        h.close_connection = True
+        raise ErroreExtra(400, "Richiesta incompleta")
+    return dati
+
+
+def _corpo_permesso(h, metodo, parti):
+    """Quanto può essere grande il corpo di questa rotta: 20 MB per i byte di un file (i pezzi dei caricamenti e delle
+    copertine con PUT, quelli degli allegati della chat) e per il testo di un audiolibro di Samuele; 1 MB per il resto."""
+    if metodo == "PUT" or (metodo == "POST" and parti[:1] == ["chat"] and len(parti) == 4 and parti[1] == "allegati"):
+        return MAX_CORPO
+    if metodo == "POST" and parti == ["audiolibro"] and _chi_e(h)["ruolo"] in ("proprietario", "casa"):
+        return MAX_CORPO
+    return MAX_JSON
 
 
 def _da_json(dati):
@@ -13051,6 +13334,10 @@ def _instrada(h, metodo, parti, corpo):
         if metodo not in metodi:
             raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
 
+    # le rotte che usano le risorse del Mac (programmi, proxy, file, IA): solo Samuele e la rete di casa, anche se
+    # _permesso le lasciasse passare per sbaglio
+    if cosa in SOLO_SAMUELE_E_CASA and _chi_e(h)["ruolo"] not in ("proprietario", "casa"):
+        raise ErroreExtra(403, "Non disponibile per gli invitati")
     if cosa == "stato" and not resto:
         solo("GET")
         _json(h, stato())
@@ -13062,7 +13349,7 @@ def _instrada(h, metodo, parti, corpo):
         if metodo == "GET":
             _json(h, {"lavori": _coda("video").elenco()})
         else:
-            _json(h, {"id": _nuovo_video(corpo)})
+            _json(h, {"id": _nuovo_video(corpo, _chi_e(h)["ruolo"] == "proprietario")})
     elif cosa == "video" and len(resto) == 2 and resto[0] == "file":
         solo("GET")
         _file_video(h, resto[1])
@@ -13082,7 +13369,7 @@ def _instrada(h, metodo, parti, corpo):
         if metodo == "GET":
             _json(h, {"lavori": _lavori_musica(h)})
         else:
-            _json(h, {"id": _nuova_musica(corpo, _chi_scarica(h), _chi_carica(h)[1])})
+            _json(h, {"id": _nuova_musica(corpo, _chi_scarica(h), _chi_carica(h)[1], _chi_e(h)["ruolo"] == "proprietario")})
     elif cosa == "musica" and len(resto) == 2 and resto[1] == "annulla":
         solo("POST")
         _annulla_musica(resto[0], _chi_scarica(h))
@@ -13124,7 +13411,7 @@ def _instrada(h, metodo, parti, corpo):
         _idee(h, metodo, corpo)
     elif cosa == "io" and not resto:   # chi è questo dispositivo: l'app mostra la Gestione o le funzioni degli invitati
         solo("GET")
-        chi = getattr(h, "_chi", None) or {"ruolo": "proprietario", "persona": None}
+        chi = _chi_e(h)
         pid = chi.get("persona")
         r = {"ruolo": chi["ruolo"], "persona": {"id": pid, "nome": PERS.nome(pid)} if pid and PERS else None}
         if chi["ruolo"] == "proprietario" and PERS:   # il riquadro Gestione mostra quante cose nuove aspettano Samuele
@@ -13140,16 +13427,16 @@ def _instrada(h, metodo, parti, corpo):
         _json(h, r)
     elif cosa == "dispositivi" and not resto:
         solo("GET")
-        _json(h, {"dispositivi": DISP.elenco(_di(h))})
+        _json(h, {"dispositivi": DISP.elenco(_di_disp(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "stato":
         solo("POST")
-        _json(h, {"comandi": DISP.stato(resto[0], corpo, _di(h))})
+        _json(h, {"comandi": DISP.stato(resto[0], corpo, _di_disp(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comandi":
         solo("GET")
-        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h), _di(h))})
+        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h), _di_disp(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comando":
         solo("POST")
-        DISP.comando(resto[0], corpo, _di(h))
+        DISP.comando(resto[0], corpo, _di_disp(h))
         _json(h, {"ok": True})
     elif cosa in ("chiavi", "posizione"):   # posizione condivisa, cifrata da telefono a telefono: vedi la sua sezione
         _posizione(h, metodo, cosa, resto, corpo)
@@ -13199,13 +13486,20 @@ def gestisci_extra(h, metodo=None):
         metodo = "GET"   # stessa risposta senza corpo (_json e _invia_file guardano h.command)
     h._musica_risposto = False
     try:
-        dati = _leggi_corpo(h)
-        h._grezzo = dati   # PUT: i byte di un pezzo di file o di una copertina
+        parti = _parti_extra(m)
+        if metodo in ("POST", "PUT", "DELETE"):
+            dati = _leggi_corpo(h, _corpo_permesso(h, metodo, parti or []))
+        else:   # GET e HEAD: un corpo non si legge (nemmeno se annunciato), e la connessione non si riusa
+            dati = b""
+            if (h.headers.get("Content-Length") or "0").strip() != "0" or h.headers.get("Transfer-Encoding"):
+                h.close_connection = True
+        if parti is None:
+            raise ErroreExtra(404, "Richiesta sconosciuta: un indirizzo con due api/extra/")
         if metodo in ("POST", "DELETE", "PUT", "PATCH") and not _stessa_origine(h):
             raise ErroreExtra(403, "Richiesta da un altro sito: rifiutata")
-        h._grezzo = dati   # i pezzi degli allegati della chat arrivano come byte cifrati, non come JSON
+        h._grezzo = dati   # PUT: i byte di un pezzo di file o di una copertina; POST: i pezzi cifrati della chat
         corpo = _da_json(dati) if metodo == "POST" and not _byte_grezzi(h) else {}
-        _instrada(h, metodo, [p for p in m.group(1).split("/") if p], corpo)
+        _instrada(h, metodo, parti, corpo)
     except ErroreExtra as e:
         if not h._musica_risposto:
             try:
@@ -13592,8 +13886,10 @@ ACCESSO_BISCOTTO = "am_accesso"
 ACCESSO_DURATA = 400 * 86400      # il massimo che Safari e Chrome tengono
 ACCESSO_RINNOVO = 30 * 86400      # un biscotto con più di 30 giorni si rinnova alla prima richiesta
 ACCESSO_ITER = 240000             # PBKDF2: ogni tentativo costa al Mac circa un decimo di secondo
-ACCESSO_TENTATIVI = 5             # password sbagliate da uno stesso indirizzo in ACCESSO_FINESTRA, poi si aspetta
-ACCESSO_TENTATIVI_TUTTI = 25      # e da tutti gli indirizzi insieme
+ACCESSO_TENTATIVI = 5             # password sbagliate da uno stesso indirizzo (o rete /64 IPv6) in ACCESSO_FINESTRA,
+                                  # poi quell'indirizzo aspetta
+ACCESSO_TENTATIVI_TUTTI = 25      # da tutti gli indirizzi insieme: oltre, ogni tentativo è solo più lento (nessuno si
+ACCESSO_RALLENTA = 1.0            # ferma: chiunque su Internet potrebbe bloccare Samuele), di tanti secondi
 ACCESSO_FINESTRA = 15 * 60
 # senza biscotto passano solo la pagina della password e quello che serve per installare l'app (manifest, icone),
 # e solo nella cartella principale dell'app: nessun altro indirizzo che finisca allo stesso modo (api/…/icon-1.png)
@@ -13705,34 +14001,51 @@ class Accesso:
             return 0
         return scad
 
+    @staticmethod
+    def _chi_prova(ip):
+        """Di chi sono i tentativi: l'indirizzo IPv4, o la rete /64 di un IPv6 (un telefono o un server ne ha tanti, e
+        li cambia a piacere)."""
+        a = _ip(ip)
+        if a is None:
+            return str(ip)[:64]
+        return str(ipaddress.ip_network("%s/64" % a, strict=False)) if a.version == 6 else str(a)
+
     def attesa(self, ip):
-        """Secondi da aspettare prima di riprovare la password da questo indirizzo (0: si può subito)."""
+        """Secondi da aspettare prima di riprovare la password da questo indirizzo (0: si può subito). Solo chi ha
+        sbagliato aspetta: i tentativi di tutti insieme rallentano (rallenta), non fermano."""
+        ora, k = time.time(), self._chi_prova(ip)
+        with self.blocco:
+            self.tutti = [t for t in self.tutti if ora - t < ACCESSO_FINESTRA]
+            mie = [t for t in self.errori.get(k, []) if ora - t < ACCESSO_FINESTRA]
+            if mie:
+                self.errori[k] = mie
+            else:
+                self.errori.pop(k, None)
+            w = mie[-ACCESSO_TENTATIVI] + ACCESSO_FINESTRA - ora if len(mie) >= ACCESSO_TENTATIVI else 0
+            return int(w) + 1 if w > 0 else 0
+
+    def rallenta(self):
+        """Pausa prima di controllare una password o un codice quando da tutti gli indirizzi insieme ne sono arrivati
+        troppi di sbagliati (tanti indirizzi diversi: provano solo più lentamente)."""
         ora = time.time()
         with self.blocco:
             self.tutti = [t for t in self.tutti if ora - t < ACCESSO_FINESTRA]
-            mie = [t for t in self.errori.get(ip, []) if ora - t < ACCESSO_FINESTRA]
-            if mie:
-                self.errori[ip] = mie
-            else:
-                self.errori.pop(ip, None)
-            w = 0
-            if len(mie) >= ACCESSO_TENTATIVI:
-                w = max(w, mie[-ACCESSO_TENTATIVI] + ACCESSO_FINESTRA - ora)
-            if len(self.tutti) >= ACCESSO_TENTATIVI_TUTTI:
-                w = max(w, self.tutti[-ACCESSO_TENTATIVI_TUTTI] + ACCESSO_FINESTRA - ora)
-            return int(w) + 1 if w > 0 else 0
+            troppi = len(self.tutti) >= ACCESSO_TENTATIVI_TUTTI
+        if troppi:
+            time.sleep(ACCESSO_RALLENTA)
 
     def sbagliata(self, ip):
-        ora = time.time()
+        ora, k = time.time(), self._chi_prova(ip)
         with self.blocco:
-            if len(self.errori) > 5000:   # moltissimi indirizzi diversi: resta il limite su tutti insieme
-                self.errori.clear()
-            self.errori.setdefault(ip, []).append(ora)
+            if len(self.errori) > 5000:   # moltissimi indirizzi diversi: escono quelli che non sbagliano da più tempo
+                for x in sorted(self.errori, key=lambda x: self.errori[x][-1] if self.errori[x] else 0)[:1000]:
+                    del self.errori[x]
+            self.errori.setdefault(k, []).append(ora)
             self.tutti.append(ora)
 
     def riuscita(self, ip):
         with self.blocco:
-            self.errori.pop(ip, None)
+            self.errori.pop(self._chi_prova(ip), None)
 
 
 def _impronta(codice):
@@ -14189,15 +14502,25 @@ def _biscotto_valido(h):
     return None
 
 
+def _dal_mac_diretto(h):
+    """Richiesta di un programma del Mac stesso, senza tailscale serve davanti (127.0.0.1 e nessun X-Forwarded-For)."""
+    vicino = _ip(h.client_address[0])
+    return vicino is not None and vicino.is_loopback and h.headers.get("X-Forwarded-For") is None
+
+
 def _proprietario_rete(h):
     """Il Mac stesso o Samuele dalla rete Tailscale (con ATLANTE_PROPRIETARI, solo quei login): non serve il biscotto.
-    La rete di casa no: lì si ascolta, ma senza diventare Samuele."""
+    La rete di casa no: lì si ascolta, ma senza diventare Samuele. Il Mac stesso solo con il suo nome (Host 127.0.0.1,
+    localhost o [::1]): una pagina che fa puntare il suo nome al Mac, o un programma del Mac mandato a leggere un
+    indirizzo con un altro nome, non diventa Samuele."""
     if h.headers.get("Tailscale-Funnel-Request") is not None:
         return False
     vicino = _ip(h.client_address[0])
     xff = h.headers.get("X-Forwarded-For")
     if xff is None:
-        return vicino is not None and (vicino.is_loopback or (_ip_tailscale(vicino) and not PROPRIETARI))
+        if vicino is not None and vicino.is_loopback:
+            return _nome_host(h.headers.get("Host")) in HOST_LOCALI
+        return vicino is not None and _ip_tailscale(vicino) and not PROPRIETARI
     if vicino is None or not vicino.is_loopback:
         return False
     login = (h.headers.get("Tailscale-User-Login") or "").strip().lower()
@@ -14205,6 +14528,61 @@ def _proprietario_rete(h):
         return not PROPRIETARI or login in PROPRIETARI
     ultimo = _ip(xff.split(",")[-1])
     return ultimo is not None and (ultimo.is_loopback or (_ip_tailscale(ultimo) and not PROPRIETARI))
+
+
+# ----- i nomi di Atlante (contro il DNS rebinding) -----
+# Una pagina di un altro sito aperta nel browser del Mac (o di un dispositivo di casa) può far puntare il suo nome a
+# 127.0.0.1 e parlare con il server come se fosse sua: il browser però manda sempre il nome di quel sito nell'Host, e
+# quello non si può cambiare. Si risponde solo ai nomi di Atlante: 127.0.0.1, localhost e [::1] (con qualsiasi porta),
+# il nome di --indirizzo e di --pubblico, quelli di ATLANTE_HOST_OK (separati da virgole) e il nome del Mac nella rete
+# Tailscale. tailscale serve (e funnel) lascia nell'Host il nome chiesto dal browser (lo ripete in X-Forwarded-Host)
+# e aggiunge X-Forwarded-For: una richiesta così, dal Mac stesso, con un nome *.ts.net è il Mac nella rete Tailscale
+# (un nome *.ts.net non si può far puntare al Mac da un altro sito; X-Forwarded-Host da solo invece si può scrivere,
+# quindi conta l'Host). Gli altri nomi: 421.
+HOST_LOCALI = ("127.0.0.1", "localhost", "::1")
+HOST_OK = set()   # da ATLANTE_HOST_OK, preparato da main()
+
+
+def _nome_host(valore):
+    """Il nome di un'intestazione Host (o di un indirizzo «nome:porta»): minuscolo, senza porta, parentesi quadre e punto
+    finale; "" se manca o non si legge."""
+    v = (valore or "").strip()
+    if not v or len(v) > 300 or any(c in v for c in " \t/\\@?#,"):
+        return ""
+    try:
+        n = urlsplit("//" + v).hostname or ""
+    except ValueError:
+        return ""
+    return n[:-1] if n.endswith(".") else n
+
+
+def _host_permesso(h):
+    n = _nome_host(h.headers.get("Host"))
+    if not n:
+        return False
+    if n in HOST_LOCALI or n in HOST_OK or n in {_nome_host(urlsplit(x).netloc) for x in (INDIRIZZO, PUBBLICO) if x}:
+        return True
+    # il nome del Mac nella rete Tailscale, attraverso tailscale serve (dal Mac stesso, con X-Forwarded-For)
+    vicino, xfh = _ip(h.client_address[0]), h.headers.get("X-Forwarded-Host")
+    return (vicino is not None and vicino.is_loopback and h.headers.get("X-Forwarded-For") is not None
+            and n.endswith(".ts.net") and (xfh is None or _nome_host(xfh) == n))
+
+
+def controlla_host(h):
+    """Da chiamare per prima in do_GET, do_HEAD, do_POST, do_PUT e do_DELETE: True (e risposta 421) se l'Host non è
+    uno dei nomi di Atlante."""
+    if _host_permesso(h):
+        return False
+    corpo = "Atlante Musica risponde solo ai suoi indirizzi.\n".encode("utf-8")
+    h.close_connection = True   # un corpo eventuale non si legge
+    h.send_response(421)
+    h.send_header("Content-Type", "text/plain; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+    return True
 
 
 def _set_cookie(h, valore):
@@ -14335,15 +14713,22 @@ def _troppi_tentativi(h, w, **k):
 
 
 def _leggi_modulo(h):
-    """Corpo di un modulo POST (al più 4 KB): (byte, campi) o None se è troppo grande."""
+    """Corpo di un modulo POST (al più 4 KB): (byte, campi) o None se è troppo grande o non arriva tutto (entro il
+    tempo della richiesta: un corpo annunciato e mai mandato non tiene fermo il server)."""
     try:
         n = int(h.headers.get("Content-Length") or 0)
     except ValueError:
         n = -1
-    if not 0 <= n <= 4096:
+    if not 0 <= n <= 4096 or h.headers.get("Transfer-Encoding"):
         h.close_connection = True
         return None
-    dati = h.rfile.read(n) if n else b""
+    try:
+        dati = h.rfile.read(n) if n else b""
+    except OSError:   # tempo scaduto o connessione chiusa
+        dati = None
+    if dati is None or len(dati) != n:
+        h.close_connection = True
+        return None
     try:
         return dati, parse_qs(dati.decode("utf-8"), max_num_fields=10)
     except (UnicodeDecodeError, ValueError):
@@ -14359,6 +14744,7 @@ def _usa_collegamento(h, codice):
     w = ACC.attesa(ip)
     if w:
         return _troppi_tentativi(h, w, modulo=modulo)
+    ACC.rallenta()
     did = PERS.usa_collegamento(codice, tipo_da_agente(h.headers.get("User-Agent"))) if PERS else None
     if not did:
         ACC.sbagliata(ip)
@@ -14400,15 +14786,13 @@ def _pagina_invito(h, codice, samuele, chi=None):
     if samuele:   # Samuele che prova il link resta Samuele, e l'invito resta per chi deve riceverlo
         return _scrivi_pagina_accesso(h, 409, "Questo invito è per un'altra persona: tu sei già dentro come Samuele.",
                                       True, modulo=False)
+    # i codici d'invito sono lunghi e casuali (128 bit): non si indovinano, quindi non contano tra i tentativi sbagliati
+    # (un link scaduto aperto più volte, magari da tutto un gruppo, non ferma nessuno)
     ip = _ip_cliente(h)
-    w = ACC.attesa(ip)
-    if w:
-        return _troppi_tentativi(h, w, modulo=False)
     did = PERS.usa_invito(codice, tipo_da_agente(h.headers.get("User-Agent")), ip)
     if not did:
-        if invitato:   # già dentro (pagina rimandata più tardi): non è un tentativo sbagliato
+        if invitato:   # già dentro (pagina rimandata più tardi)
             return _gia_dentro(h, invitato)
-        ACC.sbagliata(ip)
         return _scrivi_pagina_accesso(h, 410, morto, True, modulo=False)
     pid = PERS.persona_di(did)
     h._biscotto = _set_cookie(h, PERS.biscotto(did))
@@ -14439,6 +14823,7 @@ def _nuova_password(h, dati):
         if w:
             return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % (
                 (w + 59) // 60, "o" if w <= 60 else "i"), True, modulo=modulo, intestazioni=[("Retry-After", str(w))])
+        ACC.rallenta()
         if not ACC.giusta(q.get("password", [""])[0]):
             ACC.sbagliata(ip)
             return _scrivi_pagina_accesso(h, 401, "La password di adesso è sbagliata.", True, modulo=modulo)
@@ -14487,6 +14872,7 @@ def _pagina_accesso(h, entrato, samuele):
         return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
                                       True, intestazioni=[("Retry-After", str(w))])
     pw = campi.get("password", [""])[0]
+    ACC.rallenta()
     if pw and ACC.giusta(pw):
         ACC.riuscita(ip)
         h._biscotto = _set_cookie(h, ACC.biscotto())
@@ -14524,7 +14910,9 @@ def controlla_accesso(h):
     if b is not None and b[0] == "o":
         if vecchio:
             h._biscotto = _set_cookie(h, PERS.biscotto(b[2]))
-    elif samuele and vecchio:
+    elif samuele and vecchio and not _dal_mac_diretto(h):
+        # al Mac stesso il biscotto non serve (è sempre Samuele): non lo riceve, così un programma del Mac mandato a
+        # leggere un indirizzo dell'app (yt-dlp, un proxy) non porta via il biscotto di Samuele
         h._biscotto = _set_cookie(h, ACC.biscotto(b[2] if b else None))
     if PERS is not None and h._chi and h._chi["chiave"]:
         ua = h.headers.get("User-Agent")
@@ -14579,9 +14967,13 @@ PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/chiamate\.html
 
 
 def _permesso(h):
-    """Da chiamare subito dopo controlla_accesso: False (e risposta 403) se un invitato chiede quello che non può."""
+    """Da chiamare subito dopo controlla_accesso: False (e risposta 403) se un invitato chiede quello che non può.
+    Due controlli: l'indirizzo (PERMESSE_INVITATI) e la rotta che il server eseguirà davvero (_rotta_invitato)."""
     chi = getattr(h, "_chi", None)
-    if not chi or chi["ruolo"] != "invitato" or PERMESSE_INVITATI.match(unquote(urlsplit(h.path).path)):
+    if not chi or chi["ruolo"] != "invitato":
+        return True
+    p = unquote(urlsplit(h.path).path)
+    if PERMESSE_INVITATI.match(p) and _rotta_invitato(h.command, p):
         return True
     if h.command not in ("GET", "HEAD"):
         h.close_connection = True   # corpo non letto
@@ -14606,6 +14998,85 @@ PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern +
                                r"|^(?:/.*)?/api/extra/(?:chiavi|posizione(?:/[^/]+)?)$")
 # ----- testi sincronizzati: anche per gli invitati (ascoltano la musica, quindi ne vedono anche il testo) -----
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extra/testi(?:/[^/]+)?$")
+
+# ----- le rotte che gli invitati possono usare davvero -----
+# PERMESSE_INVITATI guarda l'indirizzo; qui si guarda la rotta che il server eseguirà, divisa come la divide _instrada:
+# metodo, cosa e pezzi («*» è un pezzo qualsiasi). Quello che non c'è è vietato. Un indirizzo come
+# …/api/extra/chat/api/extra/stato passava PERMESSE_INVITATI (sembra una rotta della chat) e il server eseguiva «stato».
+# Su ogni riga i metodi (in maiuscolo) valgono per tutte le rotte della riga.
+_ROTTE_INVITATI = """
+GET io classifiche clip clip/* clip/file/* dispositivi dispositivi/*/comandi
+POST dispositivi/*/stato dispositivi/*/comando
+GET POST inviti idee musica caricamenti chiavi posizione
+GET musica/cerca musica/ascolta/* caricamenti/* caricamenti/*/file
+POST musica/*/annulla
+PUT DELETE caricamenti/*
+GET interfaccia interfaccia/base
+POST interfaccia/personale
+GET POST DELETE ascoltati
+POST ascoltati/condividi
+GET ascoltati/anche/*
+GET tematiche tematiche/*
+POST tematiche/ia tematiche/condivise
+DELETE tematiche/condivise/*
+GET testi testi/*
+POST DELETE posizione/*
+GET chat/stato chat/persone chat/conversazioni chat/messaggi chat/avvisi chat/allegati/*/*
+POST chat/dispositivi chat/conversazioni chat/conversazioni/*/membri chat/conversazioni/*/letto chat/messaggi
+POST chat/allegati chat/allegati/*/* chat/blocchi chat/push
+DELETE chat/conversazioni/*/membri/* chat/blocchi/* chat/push/*
+GET chiamate/persone chiamate/ice chiamate/attendi
+POST chiamate chiamate/*/*
+"""
+ROTTE_INVITATI = frozenset((m, tuple(r.split("/"))) for riga in _ROTTE_INVITATI.strip().splitlines()
+                           for m in riga.split() if m.isupper() for r in riga.split() if not r.isupper())
+PEZZI_MUSICA_INVITATI = ("catalogo", "file", "copertina", "pezzo")   # api/musica/…: ascoltare sì, «aggiorna» no
+
+
+def _rotta_invitato(metodo, p):
+    """True se un invitato può fare `metodo` su `p` (già decodificato) secondo la rotta che il server eseguirà."""
+    metodo = "GET" if metodo == "HEAD" else metodo
+    m = EXTRA.match(p)
+    if m:
+        parti = _parti_extra(m)
+        return parti is not None and any(
+            mm == metodo and len(schema) == len(parti) and all(s in ("*", x) for s, x in zip(schema, parti))
+            for mm, schema in ROTTE_INVITATI)
+    m = PREFISSO.match(p)
+    if m:
+        return metodo == "GET" and m.group(1) in PEZZI_MUSICA_INVITATI
+    return "/api/" not in p   # le pagine: le decide PERMESSE_INVITATI
+
+
+# ----- risorse del server: tempo e richieste insieme -----
+# Ogni connessione ha un filo suo (ThreadingHTTPServer). Senza limiti, chi apre tante connessioni e non manda niente (o
+# annuncia un corpo e non lo manda) tiene fermi fili e memoria del Mac per sempre: ogni lettura o scrittura ha al più
+# TEMPO_RICHIESTA secondi (l'attesa lunga dei telefoni è di 25 s, ma lì il server non legge: aspetta i comandi), e al
+# più RICHIESTE_MAX connessioni sono servite insieme; le altre aspettano il loro turno (non si rifiutano).
+TEMPO_RICHIESTA = 30   # ATLANTE_TEMPO_RICHIESTA per cambiarlo (le prove lo accorciano)
+RICHIESTE_MAX = 64     # ATLANTE_RICHIESTE_MAX
+
+
+class ServerLimitato(ThreadingHTTPServer):
+    request_queue_size = 128   # con 5, dietro Tailscale le copertine davano 502
+
+    def __init__(self, indirizzo, gestore, massimo):
+        self.posti = threading.BoundedSemaphore(max(1, massimo))
+        super().__init__(indirizzo, gestore)
+
+    def process_request(self, request, client_address):
+        self.posti.acquire()   # aspetta che una connessione finisca
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.posti.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.posti.release()
 
 
 def _numero_ambiente(nome, predefinito):
@@ -14721,6 +15192,10 @@ def main():
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
     PUBBLICO = a.pubblico.strip()
+    # altri nomi con cui si apre l'app (oltre a 127.0.0.1, localhost, --indirizzo, --pubblico e il nome nella rete
+    # Tailscale), separati da virgole: es. il nome del Mac nella rete di casa con ATLANTE_ASCOLTO=0.0.0.0
+    HOST_OK.update(n for n in (_nome_host(urlsplit(x.strip()).netloc if "//" in x else x) for x in
+                               os.environ.get("ATLANTE_HOST_OK", "").split(",")) if n)
     CL_SPAZIO_MIN = int(max(0.0, _numero_ambiente("ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB", 200)) * 1024 ** 3)
     _prepara_chiamate(a.stun)
     if PUBBLICO and not PUBBLICO.endswith("/"):
@@ -14762,6 +15237,9 @@ def main():
     host_sicuro = urlsplit(indirizzo).netloc.lower()
 
     class H(SimpleHTTPRequestHandler):
+        # secondi al più per leggere (la richiesta, il corpo) o scrivere un pezzo della risposta
+        timeout = max(1.0, _numero_ambiente("ATLANTE_TEMPO_RICHIESTA", TEMPO_RICHIESTA))
+
         def __init__(self, *x, **k):
             super().__init__(*x, directory=app, **k)
 
@@ -14778,33 +15256,33 @@ def main():
             return True
 
         def do_GET(self):
-            if controlla_accesso(self) or not _permesso(self):
+            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "GET") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_GET()
 
         def do_HEAD(self):
-            if controlla_accesso(self) or not _permesso(self):
+            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "HEAD") and not gestisci(self) and not self._vai_al_sicuro():
                 super().do_HEAD()
 
         def do_POST(self):
-            if controlla_accesso(self) or not _permesso(self):
+            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "POST"):
                 self.close_connection = True   # corpo non letto
                 self.send_error(501, "Unsupported method ('POST')")
 
         def do_DELETE(self):
-            if controlla_accesso(self) or not _permesso(self):
+            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "DELETE"):
                 self.close_connection = True
                 self.send_error(501, "Unsupported method ('DELETE')")
 
         def do_PUT(self):   # i pezzi dei caricamenti (brani, film) e le copertine nuove: il corpo sono i byte
-            if controlla_accesso(self) or not _permesso(self):
+            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
                 return
             if not gestisci_extra(self, "PUT"):
                 self.close_connection = True
@@ -14832,11 +15310,11 @@ def main():
         def log_message(self, *x):
             pass
 
-    # ATLANTE_ASCOLTO=127.0.0.1 dietro Tailscale: dalla rete di casa nessuno deve arrivarci. La password la chiede
-    # solo a chi arriva da Internet (tailscale funnel): vedi controlla_accesso
-    ascolto = os.environ.get("ATLANTE_ASCOLTO", "0.0.0.0")
-    ThreadingHTTPServer.request_queue_size = 128   # con 5, dietro Tailscale le copertine davano 502
-    srv = ThreadingHTTPServer((ascolto, a.porta), H)
+    # Solo sul Mac stesso (127.0.0.1): dalla rete Tailscale e da Internet si arriva con tailscale serve e funnel, dalla
+    # rete di casa nessuno deve arrivarci. ATLANTE_ASCOLTO=0.0.0.0 per aprirlo alla rete di casa (con ATLANTE_HOST_OK
+    # per il nome usato lì). La password la chiede solo a chi arriva da Internet: vedi controlla_accesso
+    ascolto = os.environ.get("ATLANTE_ASCOLTO", "127.0.0.1")
+    srv = ServerLimitato((ascolto, a.porta), H, int(_numero_ambiente("ATLANTE_RICHIESTE_MAX", RICHIESTE_MAX)))
     if https:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(a.cert, a.chiave)
