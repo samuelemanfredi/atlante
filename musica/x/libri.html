@@ -389,18 +389,31 @@ function misuraBasso() {
 function urlHost(blob) { try { return (AX.host ? parent : window).URL.createObjectURL(blob); } catch (e) { return URL.createObjectURL(blob); } }
 
 /* ---------- copertine ---------- */
+// copertine dei libri importati: solo immagini raster (JPEG, PNG, WebP, GIF) con il loro tipo giusto. Un SVG o un tipo
+// strano si lascia perdere: il suo blob: arriva all'app come copertina e, aperto in una scheda nuova, farebbe girare
+// i suoi script come se fosse l'app
+const TIPI_COPERTINA = new Map([['image/jpeg', 'image/jpeg'], ['image/jpg', 'image/jpeg'], ['image/pjpeg', 'image/jpeg'], ['image/png', 'image/png'], ['image/x-png', 'image/png'], ['image/webp', 'image/webp'], ['image/gif', 'image/gif']]);
+const tipoCopertina = t => TIPI_COPERTINA.get(String(t || '').toLowerCase().split(';')[0].trim()) || '';
+// la copertina salvata, solo se è un'immagine raster (anche quelle dei libri importati prima, magari SVG)
+function copertinaBlob(b) {
+  const c = b && b.cover, t = c && tipoCopertina(c.type);
+  if (!t) return null;
+  return c.type === t ? c : c.slice(0, c.size, t);
+}
 function coverHtml(b, cls) {
   const sq = b.tipo === 'audio' ? ' sq' : '';
   let u = b.coverUrl || '';
-  if (!u && b.cover) { u = S.covers.get(b.id); if (!u) { try { u = URL.createObjectURL(b.cover); S.covers.set(b.id, u); } catch (e) { u = ''; } } }
+  const cb = !u && copertinaBlob(b);
+  if (cb) { u = S.covers.get(b.id); if (!u) { try { u = URL.createObjectURL(cb); S.covers.set(b.id, u); } catch (e) { u = ''; } } }
   if (u) return `<img class="bcov${sq} ${cls || ''}" src="${esc(u)}" alt="" loading="lazy" data-t="${esc(b.titolo || '')}" data-au="${esc(b.autore || '')}">`;
   return `<span class="bcov gcov${sq} ${cls || ''}" style="--h:${hashN(b.titolo || '') % 360}"><b>${esc(b.titolo || 'Senza titolo')}</b><i>${esc(b.autore || '')}</i></span>`;
 }
 async function coverPerLettore(b) {
   if (b.coverUrl) return b.coverUrl;
-  if (!b.cover) return '';
+  const c = copertinaBlob(b);
+  if (!c) return '';
   const k = 'cover:' + b.id;
-  if (!S.urlsHost.has(k)) S.urlsHost.set(k, urlHost(b.cover));
+  if (!S.urlsHost.has(k)) S.urlsHost.set(k, urlHost(c));
   return S.urlsHost.get(k);
 }
 
@@ -548,12 +561,12 @@ async function leggiEpub(file, fase) {
     if (tit && pars.length > 1 && pars[0].toLowerCase() === tit.toLowerCase()) pars.shift();
     capitoli.push({titolo:tit, pars});
   }
-  // copertina
+  // copertina: solo un'immagine raster (tipoCopertina), con il suo tipo giusto; un SVG non diventa la copertina
   let cov = [...man.values()].find(m => /cover-image/.test(m.prop));
   if (!cov) { const meta = [...opf.getElementsByTagNameNS('*', 'meta')].find(x => x.getAttribute('name') === 'cover'); if (meta) cov = man.get(meta.getAttribute('content')); }
-  if (!cov || !/^image\//.test(cov.tipo)) cov = [...man.values()].find(m => /^image\//.test(m.tipo) && /cover|copertina/i.test(m.href)) || null;
+  if (!cov || !tipoCopertina(cov.tipo)) cov = [...man.values()].find(m => tipoCopertina(m.tipo) && /cover|copertina/i.test(m.href)) || null;
   let cover = null;
-  if (cov) { const f = trova(cov.href); if (f) { try { cover = new Blob([await f.async('arraybuffer')], {type:cov.tipo}); } catch (e) {} } }
+  if (cov) { const f = trova(cov.href); if (f) { try { cover = new Blob([await f.async('arraybuffer')], {type:tipoCopertina(cov.tipo)}); } catch (e) {} } }
   fase && fase(1);
   return {titolo, autore, lingua, cover, formato:'EPUB', capitoli:capitoli.map(c => ({titolo:c.titolo, testo:c.pars.join('\n')}))};
 }

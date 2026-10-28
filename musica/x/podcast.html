@@ -280,9 +280,10 @@ const DB = (() => {
       t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Spazio insufficiente'));
     });
   }
+  // quello che si rilegge passa da pulisciSalvato (copertine e indirizzi salvati da una versione di prima)
   return {
-    get: (s, k) => run(s, 'readonly', st => st.get(k)),
-    all: s => run(s, 'readonly', st => st.getAll()),
+    get: (s, k) => run(s, 'readonly', st => st.get(k)).then(v => s === 'file' ? v : pulisciSalvato(v)),
+    all: s => run(s, 'readonly', st => st.getAll()).then(L => s === 'file' ? L : (L || []).map(v => pulisciSalvato(v))),
     put: (s, v) => run(s, 'readwrite', st => st.put(v)),
     del: (s, k) => run(s, 'readwrite', st => st.delete(k)),
     clear: s => run(s, 'readwrite', st => st.clear())
@@ -378,8 +379,22 @@ async function itunes(path) {
   throw err || new Error('Ricerca non disponibile');
 }
 // copertine dei feed e di Apple: solo indirizzi http e https (un feed può scrivere qualsiasi cosa, e la copertina va anche
-// nel lettore dell'app e agli altri dispositivi con il telecomando)
-const copertinaSicura = u => { u = String(u == null ? '' : u).trim(); return /^https?:\/\//i.test(u) ? u : ''; };
+// nel lettore dell'app e agli altri dispositivi con il telecomando). Un indirizzo relativo («//cdn…», «img/c.jpg») si
+// legge prima dall'indirizzo del feed (base), poi si guarda lo schema
+const copertinaSicura = (u, base) => { u = String(u == null ? '' : u).trim(); if (!u) return ''; try { u = new URL(u).href; } catch (e) { try { u = new URL(u, base).href; } catch (e2) { return ''; } } return /^https?:\/\//i.test(u) ? u : ''; };
+// dati salvati sul telefono da una versione di prima (copertine e indirizzi presi dal feed com'erano): si ripuliscono
+// quando si rileggono. cover come copertinaSicura (i relativi letti dal feed del record), url solo http e https
+function pulisciSalvato(x, base, liv) {
+  if (!x || typeof x !== 'object' || (liv | 0) > 4) return x;
+  if (base == null && typeof x.feed === 'string') base = x.feed;
+  for (const k of Object.keys(x)) {
+    const v = x[k];
+    if (k === 'cover') x[k] = copertinaSicura(v, base);
+    else if (k === 'url') x[k] = typeof v === 'string' && /^https?:\/\//i.test(v.trim()) ? v.trim() : '';
+    else if (v && typeof v === 'object') pulisciSalvato(v, base, (liv | 0) + 1);
+  }
+  return x;
+}
 const daItunes = r => ({feed:r.feedUrl || '', titolo:r.collectionName || r.trackName || 'Podcast', autore:r.artistName || '', cover:copertinaSicura(r.artworkUrl600 || r.artworkUrl100), genere:r.primaryGenreName || '', itunesId:r.collectionId || r.trackId || 0, n:r.trackCount || 0});
 
 let qTimer = 0, qSeq = 0;
@@ -404,7 +419,7 @@ async function cerca(q) {
 
 async function caricaTop(forza) {
   const cache = AX.store.get('podcast-top', null);
-  if (cache && cache.list && cache.list.length) { S.top = cache.list; disegnaTop(); if (!forza && Date.now() - cache.t < 6 * 3600e3) return; }
+  if (cache && cache.list && cache.list.length) { S.top = cache.list.map(p => pulisciSalvato(p)); disegnaTop(); if (!forza && Date.now() - cache.t < 6 * 3600e3) return; }
   let j = null;
   for (let k = 0; k < 2 && !j; k++) { try { const r = await AX.fetchT(TOP_URL, {}, 12000); if (r.ok) j = await r.json(); } catch (e) {} if (!j) await sleep(600); }
   if (!j && (await AX.stato()).ok) { try { j = await (await AX.proxy(TOP_URL)).json(); } catch (e) {} }
@@ -456,7 +471,7 @@ function parseFeed(txt, feed) {
     titolo:decodeEnt((kid(ch, 'title') || {textContent:''}).textContent.trim()),
     autore:decodeEnt(((kid(ch, 'itunes:author') || kid(ch, 'author') || {}).textContent || '').trim()),
     descr:pulisci((kid(ch, 'description') || kid(ch, 'itunes:summary') || kid(ch, 'subtitle') || {}).textContent || '', 3000),
-    cover:copertinaSicura((imgCh && (imgCh.getAttribute('href') || imgCh.getAttribute('url'))) || (imgUrl ? imgUrl.textContent.trim() : '')),
+    cover:copertinaSicura((imgCh && (imgCh.getAttribute('href') || imgCh.getAttribute('url'))) || (imgUrl ? imgUrl.textContent.trim() : ''), feed),
     serial:/serial/i.test((kid(ch, 'itunes:type') || {}).textContent || '')
   };
   const fh = hash(feed), visti = new Set(), lista = [];
@@ -478,7 +493,7 @@ function parseFeed(txt, feed) {
       titolo:testo(it, 'title') || 'Episodio',
       data:dataT, durata:durata(testo(it, 'itunes:duration')),
       descr:pulisci(testo(it, 'content:encoded') || testo(it, 'description') || testo(it, 'itunes:summary') || testo(it, 'summary', 'content'), 4000),
-      cover:copertinaSicura(img && img.getAttribute('href')),
+      cover:copertinaSicura(img && img.getAttribute('href'), feed),
       num:+testo(it, 'itunes:episode') || 0, stag:+testo(it, 'itunes:season') || 0
     });
   }

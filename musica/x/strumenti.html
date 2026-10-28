@@ -301,8 +301,8 @@ function carica(url) {
     document.head.appendChild(s);
   }));
 }
-function fmtB(n) {
-  if (typeof n !== 'number' || !isFinite(n)) return n == null ? '—' : String(n);
+function fmtB(n) {   // va nel codice HTML: quello che non è un numero si vede protetto
+  if (typeof n !== 'number' || !isFinite(n)) return n == null ? '—' : esc(String(n));
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return n.toLocaleString('it-IT', {maximumFractionDigits: n < 10 && i ? 1 : 0}) + ' ' + u[i];

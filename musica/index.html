@@ -194,6 +194,19 @@ img{max-width:100%;display:block}
 #mini .mt span{font-size:13px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #mini .mb{width:42px;height:42px;display:grid;place-items:center;font-size:24px}
 
+/* ---------- titoli che scorrono (lo script «titoli che scorrono», dopo quello principale) ----------
+   A riposo il titolo resta com'è, con i «…». Mentre scorre (data-ts) si sposta il testo intero (<ts-in>) con transform,
+   fatto dalla scheda grafica: di --ts-d in --ts-t (--ts-r: tempo già passato, per un titolo ridisegnato a metà giro),
+   e poi resta lì (il transform fermo è la fine dell'animazione). Al ritorno (ts-torna sulla pagina) torna all'inizio,
+   morbido, in --ts-b (1 s, fino a 2 s per i titoli lunghissimi). I bordi sfumano: 12 px a destra come TS_SFUMA, così
+   la fine del titolo si ferma dove si legge tutta. <ts-in> non prende i tocchi: vanno al titolo, come prima */
+ts-in{pointer-events:none}
+[data-ts]{text-overflow:clip!important;-webkit-mask-image:linear-gradient(90deg,transparent,#000 8px,#000 calc(100% - 12px),transparent);mask-image:linear-gradient(90deg,transparent,#000 8px,#000 calc(100% - 12px),transparent)}
+[data-ts]>ts-in{display:inline-block;transform:translateX(var(--ts-d,0px));animation:tsVa var(--ts-t,0s) linear var(--ts-r,0s);will-change:transform}
+html.ts-torna [data-ts]>ts-in{transform:none;animation:none;transition:transform var(--ts-b,1s) ease-in-out}
+@keyframes tsVa{from{transform:none}}
+@media (prefers-reduced-motion:reduce){[data-ts]{text-overflow:ellipsis!important;-webkit-mask-image:none;mask-image:none}[data-ts]>ts-in{display:inline;transform:none}}
+
 /* barra schede */
 #tabs{position:fixed;z-index:31;left:0;right:0;bottom:0;padding:0 env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);background:var(--bar);-webkit-backdrop-filter:blur(24px) saturate(180%);backdrop-filter:blur(24px) saturate(180%);border-top:.5px solid var(--sep)}
 #tabs .in{display:grid;grid-template-columns:repeat(4,1fr);max-width:640px;margin:0 auto;height:52px}
@@ -819,7 +832,7 @@ async function loadServer() {
     }
   } catch (e) {}
   if (!j || !Array.isArray(j.brani)) { SRV = false; return false; }
-  SRV = true; SRVN = j.brani.length; SRVURL = typeof j.indirizzo === 'string' ? j.indirizzo : '';
+  SRV = true; SRVN = j.brani.length; SRVURL = typeof j.indirizzo === 'string' && /^https?:\/\//i.test(j.indirizzo) ? j.indirizzo : '';
   // «aggiornato: 0»: il Mac (appena acceso) non ha ancora finito di leggere il disco. Il catalogo è incompleto:
   // non si toglie niente dalla libreria e si richiede tra poco, invece di dire «disco scollegato»
   SRVSCAN = !j.aggiornato;
@@ -1468,7 +1481,7 @@ function emptyState() {
 // offline né installazione. Si propone l'indirizzo https fisso, se il Mac lo conosce.
 function secureBanner() {
   if (!window.PWA || window.isSecureContext !== false) return '';
-  let host = ''; try { host = SRVURL ? new URL(SRVURL).host : ''; } catch (e) {}
+  let host = ''; try { host = /^https?:\/\//i.test(SRVURL) ? new URL(SRVURL).host : ''; } catch (e) {}   // il link solo http o https
   return '<div class="banner"><span class="bt">' + (host ? 'Per installare Musica e ascoltarla anche senza connessione aprila da <b>' + esc(host) + '</b>.' :
     'Da questo indirizzo (http) Musica non si installa e senza connessione non si apre: aprila dall\'indirizzo https del Mac.') + '</span>' +
     (host ? '<a class="ba" href="' + esc(SRVURL) + '">Apri</a>' : '') + '</div>';
@@ -1648,6 +1661,7 @@ async function clCarica() {
 const clTraccia = b => (b.brano && T.get('r' + b.brano)) || null;
 const clTracce = voci => voci.map(clTraccia).filter(Boolean);
 const clData = t => t ? new Date(t * 1000).toLocaleDateString('it-IT', {day:'numeric', month:'long'}) : '';
+const clQuanti = c => { const n = c.brani.length | 0; return n === 1 ? '1 brano' : n + ' brani'; };   // un numero (|0): va nel codice HTML
 function clScaffale() {   // Home
   if (!CLS.length) return '';
   return '<h2 class="h2"><button data-a="go" data-v="classifiche" style="display:flex;align-items:center;gap:4px">Classifiche<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' +
@@ -1675,7 +1689,7 @@ function clRighe(voci, l, pos) {
 }
 pages.classifiche = function () {
   return topBar() + '<h1 class="lt">Classifiche</h1>' + (CLS.length ? '<div>' + CLS.map(c => '<button class="trk" data-a="go" data-v="classifica" data-k="' + esc(c.id) + '">' + mosaic(clTracce(c.brani)) +
-    '<span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">' + (c.brani.length === 1 ? '1 brano' : c.brani.length + ' brani') + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' +
+    '<span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">' + clQuanti(c) + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' +
     '<p class="foot">Si aggiornano da sole ogni giorno e suonano i brani che hai già. Quelle di musica libera portano anche brani nuovi nella libreria.</p>' :
     '<div class="empty"><div class="big">' + ic('classifica') + '</div><h3>Nessuna classifica, per ora</h3><p>Compaiono quando il Mac mini le ha lette.</p></div>');
 };
@@ -1685,8 +1699,8 @@ pages.classifica = function (r) {
   const tr = clTracce(c.brani), l = regList(tr.map(t => t.id), c.nome);
   const arrivo = c.brani.filter(b => !clTraccia(b) && b.stato === 'in arrivo').length, hai = c.brani.filter(clTraccia).length;
   const nota = c.libera ? (arrivo ? arrivo + (arrivo === 1 ? ' brano in arrivo' : ' brani in arrivo') + ' nella libreria' : 'Musica libera, con licenza Creative Commons') :
-    hai + ' di ' + c.brani.length + ' nella libreria';
-  let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(c.nome) + '</div><div class="hm">' + (c.brani.length === 1 ? '1 brano' : c.brani.length + ' brani') + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</div>' +
+    hai + ' di ' + (c.brani.length | 0) + ' nella libreria';
+  let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(c.nome) + '</div><div class="hm">' + clQuanti(c) + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</div>' +
     '<div class="hm" style="text-transform:none;letter-spacing:0;font-weight:400">' + nota + '</div></div></div>';
   if (tr.length) h += pbtns(l);
   h += clRighe(c.brani, l, b => '<b>' + esc(b.pos) + '</b>' + clSegno(b));
@@ -1741,7 +1755,8 @@ function mplPagina(r) {
   let h = topBar(menu) + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(p.nome) + '</div><div class="hm">' + mplFonte(p) + ' · ' + mplN(tr.length) + (tot ? ' · ' + Math.round(tot / 60) + ' min' : '') + '</div></div></div>';
   if (!tr.length) return h + '<div class="empty"><h3>Nessun brano della libreria</h3><p>I brani di questa playlist non sono nella libreria del Mac.</p></div>';
   h += pbtns(l) + trackRows(tr, {label:p.nome});   // senza «pl»: dal menu ⋯ di un brano niente «Rimuovi dalla playlist»
-  if (p.fuori) h += '<p class="foot">' + (p.fuori === 1 ? '1 brano della playlist non è' : p.fuori + ' brani della playlist non sono') + ' nella libreria del Mac.</p>';
+  const fuori = p.fuori | 0;   // dal Mac: nel codice HTML solo come numero
+  if (fuori) h += '<p class="foot">' + (fuori === 1 ? '1 brano della playlist non è' : fuori + ' brani della playlist non sono') + ' nella libreria del Mac.</p>';
   return h + '<p class="foot">' + (p.fonte === 'radio' ? 'Playlist della vecchia radio' : 'Playlist del disco') + ' sul Mac: si aggiorna da sola. Per cambiarla, dal menu ⋯ fanne una copia nelle tue playlist.</p>';
 }
 pages.macpl = mplPagina;
@@ -2620,7 +2635,7 @@ const atlWait = new Set();
 const atlPl = id => { for (const g of (ATL && ATL.gruppi) || []) for (const p of g.playlist) if (p.id === id) return p; return null; };
 const atlTr = ids => (ids || []).map(i => T.get('r' + i)).filter(Boolean);
 const atlTile = p => '<button class="tile" data-a="go" data-v="atlpl" data-k="' + esc(p.id) + '">' + mosaic((p.copertine || []).map(k => ({cover:'s:' + k}))) +
-  '<div class="n">' + esc(p.nome) + '</div><div class="a">' + (p.n === 1 ? '1 brano' : p.n + ' brani') + '</div></button>';
+  '<div class="n">' + esc(p.nome) + '</div><div class="a">' + ((p.n | 0) === 1 ? '1 brano' : (p.n | 0) + ' brani') + '</div></button>';
 async function atlCarica(force) {
   if (!force && Date.now() - atlT < 120000) return;
   atlT = Date.now();
@@ -2654,7 +2669,8 @@ async function atlChiama(path, corpo, metodo, ms) {
 }
 function atlStato() {
   const s = ATL && ATL.stato;
-  return s && s.attivo && s.totale && s.fatti < s.totale ? '<p class="dlbar">Il Mac mini sta ascoltando la musica per le playlist: ' + s.fatti.toLocaleString('it') + ' di ' + s.totale.toLocaleString('it') + ' brani. Intanto le playlist si riempiono da sole.</p>' : '';
+  const fatti = s ? s.fatti | 0 : 0, totale = s ? s.totale | 0 : 0;   // numeri dal Mac: nel codice HTML solo come numeri
+  return s && s.attivo && totale && fatti < totale ? '<p class="dlbar">Il Mac mini sta ascoltando la musica per le playlist: ' + fatti.toLocaleString('it') + ' di ' + totale.toLocaleString('it') + ' brani. Intanto le playlist si riempiono da sole.</p>' : '';
 }
 const iaCard = () => '<button class="mixcard" data-a="ia-apri"><span class="mi">' + ic('ia') + '</span><span><b>Crea con l\'IA</b><span>Scrivi che musica vuoi, oppure «Su misura per me»</span></span></button>';
 function atlSezione() {   // in Libreria
@@ -2702,7 +2718,7 @@ function iaSheet() {
   const rim = ATL && ATL.ia ? ATL.ia.rimaste : null;
   openSheet('<div class="grp"><form class="sform" data-ia="1"><label for="iaq">Crea con l\'IA</label>' +
     '<textarea id="iaq" rows="3" maxlength="400" placeholder="Per esempio: «rap italiano carico per la salita, 40 minuti» o «musica calma per cena con amici, niente inglese»"></textarea>' +
-    '<div class="nota">L\'IA del Mac mini capisce cosa chiedi, poi il Mac sceglie i brani dalla libreria.' + (rim != null ? ' Oggi ne puoi chiedere ancora ' + rim + '.' : '') + '</div>' +
+    '<div class="nota">L\'IA del Mac mini capisce cosa chiedi, poi il Mac sceglie i brani dalla libreria.' + (rim != null ? ' Oggi ne puoi chiedere ancora ' + (rim | 0) + '.' : '') + '</div>' +
     '<div class="row2"><button type="button" data-a="ia-misura">Su misura per me</button><button class="pri" type="submit">Crea</button></div></form></div>' + cancel);
   setTimeout(() => { const i = $('iaq'); if (i) i.focus(); }, 320);
 }
@@ -3278,8 +3294,9 @@ const TT = id => T.get(id) || EXT.get(id);
 let xCur = '';
 // modulo chiesto dall'indirizzo dell'app (?x=video&url=… da Condividi e Comandi Rapidi, ?x=chat&c=… dalle notifiche).
 // L'indirizzo può venire da un link di chiunque: non porta mai le richieste che nei moduli partono da sole (subito: lo
-// scaricamento di x/video.html; cornice: la chiamata di x/chiamate.html), che lì restano da confermare con un tocco
-const SOLO_DALL_APP = ['x', 'subito', 'cornice'];
+// scaricamento di x/video.html, di una volta; cornice e gettone: la chiamata di x/chiamate.html), che lì restano da
+// confermare con un tocco
+const SOLO_DALL_APP = ['x', 'subito', 'cornice', 'gettone'];
 function moduloDaIndirizzo(search) {
   const qs = new URLSearchParams(search), k = qs.get('x');
   if (!k) return null;
@@ -3375,6 +3392,7 @@ async function devAscolta() {
       const r = await fetchT(XAPI + 'dispositivi/' + encodeURIComponent(DEV.id) + '/comandi?attesa=25', {cache:'no-store'}, 35000);
       const j = r.ok ? await r.json() : null;
       if (j && j.comandi) j.comandi.forEach(devEsegui); else await pausa(5000);
+      if (j && j.riprova) await pausa(j.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
     } catch (e) { await pausa(5000); }
   }
 }
@@ -3767,14 +3785,16 @@ function castPerche(el) {
    modulo senza far cadere la chiamata). Voce e video vanno da telefono a telefono, cifrati. Durante la chiamata la
    musica va in pausa e poi riprende. Ad app chiusa la chiamata arriva come notifica (Web Push, dalla chat): toccandola
    l'app si apre e, se squilla ancora, la chiamata compare qui da sola.
-   Per gli altri moduli (la chat): AM.chiama(persona o [persone], video) apre la chiamata; true se è partita. */
+   Per gli altri moduli (la chat): AM.chiama(persona o [persone], video) apre la chiamata; true se è partita.
+   La cornice porta un gettone usa e getta (CH.gettone): x/chiamate.html lo restituisce con AM.gettoneChiamata prima di
+   chiamare o rispondere da sola, così parte senza tocchi solo la cornice aperta qui, mai un indirizzo scritto da altri. */
 const XCHIAMATE = {k:'chiamate', t:'Chiamate', d:'Voce e video con chi è in Atlante', i:'📞', c:'#34c759'};
 [XMODS, XINVITATI].forEach(L => {   // il riquadro anche per gli invitati
   let g = L.find(x => x.g === 'Messaggi e chiamate');
   if (!g) L.push(g = {g:'Messaggi e chiamate', m:[]});
   if (!g.m.some(m => m.k === XCHIAMATE.k)) g.m.push(XCHIAMATE);
 });
-const CH = {seq:null, aperta:false, musica:false, ctx:null};
+const CH = {seq:null, aperta:false, musica:false, ctx:null, gettone:''};
 const chSi = () => IO.ruolo === 'proprietario' || IO.ruolo === 'invitato';   // la rete di casa senza nessuno dietro no
 function chCornice() {
   let d = $('xc');
@@ -3794,13 +3814,26 @@ function apriChiamata(q) {
   CH.musica = !!curId && !au.paused && !RC.id;
   if (CH.musica) { pausaVoluta = Date.now(); au.pause(); }
   const d = chCornice();
-  d.firstChild.src = 'x/chiamate.html' + q + (q.indexOf('?') >= 0 ? '&' : '?') + 'cornice=1';
+  CH.gettone = chGettone();
+  d.firstChild.src = 'x/chiamate.html' + q + (q.indexOf('?') >= 0 ? '&' : '?') + 'cornice=1&gettone=' + CH.gettone;
   d.hidden = false;
   return true;
 }
+// 128 bit a caso, in esadecimale
+function chGettone() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return Array.from(b, x => (x < 16 ? '0' : '') + x.toString(16)).join('');
+}
+// la pagina della chiamata restituisce il gettone una volta sola: dopo (anche se era sbagliato) non vale più
+function chGettoneValido(g) {
+  const ok = CH.aperta && !!CH.gettone && typeof g === 'string' && g === CH.gettone;
+  CH.gettone = '';
+  return ok;
+}
 function chiudiChiamata() {
   if (!CH.aperta) return;
-  CH.aperta = false;
+  CH.aperta = false; CH.gettone = '';
   const d = $('xc');
   if (d) { d.hidden = true; d.firstChild.src = 'about:blank'; }   // via la pagina: microfono e fotocamera si spengono
   if (CH.musica) { CH.musica = false; if (curId && au.paused) au.play().catch(() => {}); }
@@ -3822,6 +3855,7 @@ function chSblocca() {
 Object.assign(AM, {
   chiama(persone, video) { const L = [].concat(persone || []).filter(Boolean); return L.length ? apriChiamata('?chiama=' + encodeURIComponent(L.join(',')) + (video ? '&video=1' : '')) : false; },
   chiamataFinita() { chiudiChiamata(); },
+  gettoneChiamata(g) { return chGettoneValido(g); },
   dispositivo() { return DEV.id; },
   contestoAudio() { return chContesto(); }
 });
@@ -3836,6 +3870,7 @@ async function chAscolta() {
       const j = await r.json();
       CH.seq = j.seq;
       if (!CH.aperta) chGuarda(j.chiamate || []);
+      if (j.riprova) await pausa(j.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
     } catch (e) { CH.seq = null; await pausa(5000); }
   }
 }
@@ -3969,7 +4004,7 @@ const ascChiesti = new Map();                  // brano -> quando si è chiesto 
 let ascInvio = false, ascCaricando = false;
 const ascRete = () => /^https?:$/.test(location.protocol) && !/claude\.ai$/.test(location.hostname);
 const ascOggi = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
-const ascSoglia = () => (ASC && ASC.soglia) || 3;
+const ascSoglia = () => ((ASC && ASC.soglia) | 0) || 3;   // un numero: va nel codice HTML
 const ascBrani = L => (L || []).map(x => T.get('r' + x.brano)).filter(Boolean);   // solo quelli che ci sono nella libreria
 function ascAscoltato(id) {
   const t = T.get(id); if (!t || !t.remote || !t.sid) return;   // brani importati e podcast non sono nel catalogo del Mac
@@ -4057,7 +4092,7 @@ function ascAltro() {
     '<button class="lrow" data-a="asc-condividi" role="switch" aria-checked="' + !!io.condivido + '"><span class="ic">' + ic('person') + '</span><span class="t">Condividi i miei ascolti<small>' +
     (io.condivido ? 'Gli altri vedono «Cosa ascolta ' + esc(io.nome) + '» e i consigli con il tuo nome' : 'Spento: nelle classifiche di Atlante sei anonimo') + '</small></span><span class="sw' + (io.condivido ? ' on' : '') + '"></span></button>' +
     '<button class="lrow" data-a="asc-cancella"><span class="ic">' + ic('trash') + '</span><span class="t">Cancella i miei ascolti dal Mac mini<small>' +
-    (io.ascolti ? io.ascolti + (io.ascolti === 1 ? ' ascolto salvato' : ' ascolti salvati') : 'Nessun ascolto salvato') + '</small></span></button></div>' +
+    ((io.ascolti | 0) ? (io.ascolti | 0) + ((io.ascolti | 0) === 1 ? ' ascolto salvato' : ' ascolti salvati') : 'Nessun ascolto salvato') + '</small></span></button></div>' +
     '<p class="xnote">Conta un brano che ha suonato almeno ' + HEARD + ' secondi. Nelle classifiche e nei consigli anonimi un brano compare solo se l\'hanno ascoltato almeno ' + ascSoglia() + ' persone.</p>';
 }
 // «Chi ascolta questo brano ascolta anche…» dal menu di un brano: prima l'ultima risposta salvata, poi quella del Mac
@@ -4806,6 +4841,169 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
 XMODS.find(g => g.g === 'In viaggio').m.unshift({k:'posizione', t:'Condividi la posizione', d:'Dal vivo o un punto, cifrata', i:'📍', c:'#30b0c7'});
 XINVITATI.push({g:'In viaggio', m:[{k:'posizione', t:'Condividi la posizione', d:'Dal vivo o un punto, cifrata', i:'📍', c:'#30b0c7'}]});
 </script>
+<script>
+'use strict';
+/* ---------- titoli che scorrono ----------
+   Un titolo che non sta nel suo spazio (brano, artista, album, playlist, nome di un dispositivo) non resta tagliato con
+   i «…»: fermo 2 s, poi scorre piano, sempre alla stessa velocità (TS_VEL pixel al secondo, corto o lungo che sia),
+   finché si legge la fine; resta lì 1,5 s, torna all'inizio con i «…», e da capo. Quelli che ci stanno non si muovono.
+   Scorrono solo quelli sullo schermo (IntersectionObserver), e tutti insieme: un solo orologio per tutti, che gira solo
+   quando c'è qualcosa da far scorrere; il movimento è un'animazione CSS di transform (la fa la scheda grafica), niente
+   lavoro a ogni fotogramma. Con «Riduci movimento» (Impostazioni › Accessibilità) restano fermi con i «…».
+   Il testo va dentro un elemento suo, <ts-in> (è lui che si sposta: il titolo resta fermo e taglia); non uno <span>,
+   perché regole come «#mini .mt span» (13 px, grigio) o «.qrow span» (display:block) lo cambierebbero. Mentre scorre il
+   titolo ha data-ts, un attributo e non una classe: l'editor dell'interfaccia non lo mette negli indirizzi. Le misure si
+   prendono tutte insieme all'inizio del giro, prima di ogni scrittura (niente ricalcoli della pagina a metà).
+   Titoli che cambiano (brano nuovo, preferito), righe nuove scorrendo le liste e pagine nuove: MutationObserver;
+   un titolo più largo o più stretto (telefono girato, un'icona in più nella riga): ResizeObserver. Un titolo nuovo
+   aspetta il giro dopo; uno ridisegnato uguale mentre scorre (la scheda «Riproduci su» si ridisegna ogni 2 s) continua
+   dal punto in cui era, senza tornare all'inizio. */
+// dove: i titoli tagliati con i «…» (text-overflow:ellipsis) — righe, riquadri, mini player, lettore, coda, testo, schede, «‹ indietro»
+const TS_SEL = '.trk .t1,.trk .t2,.tile .n,.tile .a,#miniT,#miniA,#npT,#npA,#npqT,#npqA,.nplhead .tx>b,.nplhead .tx>span,.qrow .tx>b,.qrow .tx>span,.shead .tx>b,.shead .tx>span,.back>span,.npdev>span,.l.dv>b,.l.dv>small';
+const TS_VEL = 35, TS_FERMO = 2, TS_FINE = 1.5, TS_TORNA = 250, TS_SFUMA = 12;   // px al secondo; secondi fermo all'inizio e alla fine; px al secondo del ritorno (fra 1 e 2 s); px della sfumatura a destra (come nel CSS)
+const TS = {vis:new Set(), via:[], testi:new Set(), fase:'', inizio:0, t:0, io:null, ro:null, mo:null, rid:null};   // vis: sullo schermo; via: quelli che scorrono in questo giro (testi: i loro testi; fase: 'va' o 'torna'; inizio: quando è partito); t: l'orologio
+
+// di quanto (d, px) e in quanto tempo (t, s) scorre un titolo largo sw nel suo spazio cw: null se ci sta, se non si vede
+// (larghezza 0) o con «Riduci movimento». Fino alla fine del testo più la sfumatura: l'ultima lettera si legge tutta
+function tsCalcola(sw, cw, ridotto) {
+  if (ridotto || !(cw > 0) || !(sw > cw)) return null;
+  const d = sw - cw + TS_SFUMA;
+  return {d, t:Math.round(d / TS_VEL * 100) / 100};
+}
+// quanto dura l'andata di un giro: il più lungo arriva in fondo, poi TS_FINE fermi; poi tornano tutti insieme
+function tsDurata(tempi) { let m = 0; for (const t of tempi) if (t > m) m = t; return m + TS_FINE; }
+// quanto dura il ritorno, uguale per tutti (arrivano insieme): 1 s, fino a 2 s se il più lungo ha tanta strada da rifare
+function tsRitorno(distanze) { let m = 0; for (const d of distanze) if (d > m) m = d; return Math.round(Math.min(2, Math.max(1, m / TS_TORNA)) * 100) / 100; }
+// sotto una scheda aperta, il lettore a tutto schermo o un modulo di Altro non si vede (per l'IntersectionObserver sì)
+function tsCoperto(el) {
+  const sh = $('sh'), np = $('np'), xp = $('xp');
+  if (sh && sh.classList.contains('open')) return !sh.contains(el);
+  if (np && np.classList.contains('open')) return !np.contains(el);
+  return !!(xp && !xp.hidden && $('view').contains(el));
+}
+// il testo del titolo dentro <ts-in>, una volta sola (le icone, come la stella dei preferiti, vanno con lui)
+function tsAvvolgi(el) {
+  const f = el.firstChild;
+  if (f && f === el.lastChild && f.nodeType === 1 && f.localName === 'ts-in') return f;
+  const s = document.createElement('ts-in');
+  while (el.firstChild) s.appendChild(el.firstChild);
+  el.appendChild(s);
+  return s;
+}
+// quelli che scorrono in questo giro: prima tutte le misure, poi tutte le scritture (testo avvolto, --ts-d, --ts-t, --ts-r);
+// gia: i secondi del giro già passati (un titolo ridisegnato a metà giro riprende da lì)
+function tsPrepara(els, ridotto, gia) {
+  const m = els.map(el => !ridotto && el.isConnected && !tsCoperto(el) ? tsCalcola(el.scrollWidth, el.clientWidth, false) : null);
+  const via = [];
+  els.forEach((el, i) => {
+    const x = m[i]; if (!x) return;
+    tsAvvolgi(el);
+    el.style.setProperty('--ts-d', -x.d + 'px'); el.style.setProperty('--ts-t', x.t + 's'); el.style.setProperty('--ts-r', -(Math.round((gia || 0) * 100) / 100) + 's');
+    via.push({el, t:x.t, d:x.d});
+  });
+  return via;
+}
+function tsSpento() { return !TS.rid || TS.rid.matches || document.hidden; }   // «Riduci movimento», o l'app non si vede
+function tsSveglia() {   // c'è qualcosa sullo schermo: se l'orologio è fermo, il giro parte dopo la pausa all'inizio (coi «…»)
+  if (TS.t || !TS.vis.size || tsSpento()) return;
+  TS.t = setTimeout(tsParti, TS_FERMO * 1000);
+}
+function tsParti() {   // un giro: quelli sullo schermo che non ci stanno partono tutti insieme
+  tsFerma();
+  if (tsSpento()) return;
+  for (const el of TS.vis) if (!el.isConnected) TS.vis.delete(el);
+  TS.via = tsPrepara([...TS.vis], false, 0);
+  if (TS.mo) TS.mo.takeRecords();   // il testo appena avvolto non è un titolo cambiato
+  if (!TS.via.length) return;   // niente da far scorrere: l'orologio si ferma finché qualcosa cambia
+  for (const x of TS.via) x.el.setAttribute('data-ts', '');
+  TS.testi = new Set(TS.via.map(x => x.el.textContent)); TS.fase = 'va'; TS.inizio = performance.now();
+  TS.t = setTimeout(tsTorna, tsDurata(TS.via.map(x => x.t)) * 1000);
+}
+function tsTorna() {   // tutti all'inizio insieme; poi a riposo, coi «…», e il giro dopo
+  const b = tsRitorno(TS.via.map(x => x.d));
+  TS.fase = 'torna'; document.documentElement.style.setProperty('--ts-b', b + 's'); document.documentElement.classList.add('ts-torna');
+  TS.t = setTimeout(() => { tsFerma(); tsSveglia(); }, b * 1000 + 50);
+}
+function tsFerma() {   // tutti fermi all'inizio, coi «…»
+  clearTimeout(TS.t); TS.t = 0;
+  for (const x of TS.via) x.el.removeAttribute('data-ts');
+  TS.via = []; TS.testi.clear(); TS.fase = '';
+  document.documentElement.classList.remove('ts-torna');
+}
+function tsTogli(el) {   // uno solo torna fermo (cambiato, uscito dallo schermo, coperto): gli altri continuano
+  const i = TS.via.findIndex(x => x.el === el); if (i < 0) return;
+  TS.via.splice(i, 1); el.removeAttribute('data-ts');
+}
+function tsSegui(n, nuovi) {   // titoli nuovi, o dentro un pezzo di pagina nuovo: si guardano quando sono sullo schermo (quanti)
+  const els = n.matches(TS_SEL) ? [n] : [];
+  for (const el of n.querySelectorAll(TS_SEL)) els.push(el);
+  for (const el of els) { TS.io.observe(el); if (nuovi) nuovi.push(el); }
+  return els.length;
+}
+function tsLascia(n) {   // titoli tolti dalla pagina (o dentro un pezzo tolto): non si guardano più
+  const els = n.matches(TS_SEL) ? [n] : [];
+  for (const el of n.querySelectorAll(TS_SEL)) els.push(el);
+  for (const el of els) { TS.io.unobserve(el); if (TS.ro) TS.ro.unobserve(el); TS.vis.delete(el); tsTogli(el); }
+}
+// titoli ridisegnati uguali mentre il giro va (elementi nuovi o riscritti, con il testo di uno che scorre): continuano dal
+// punto del giro, subito (prima che la pagina si veda: niente scatto all'inizio); gli altri aspettano il giro dopo
+function tsRiprendi(els) {
+  if (TS.fase !== 'va' || !els.length) return;
+  const gia = (performance.now() - TS.inizio) / 1000;
+  const via = tsPrepara([...new Set(els)].filter(el => TS.testi.has(el.textContent) && !TS.via.some(x => x.el === el)), tsSpento(), gia);
+  for (const x of via) { x.el.setAttribute('data-ts', ''); TS.via.push(x); }
+  if (via.length && TS.mo) TS.mo.takeRecords();
+}
+function tsVisti(es) {   // IntersectionObserver: entrati o usciti dallo schermo (l'orologio si sveglia per chi entra)
+  let entrati = 0;
+  for (const e of es) {
+    const el = e.target;
+    if (e.isIntersecting && el.isConnected) { if (!TS.vis.has(el)) { TS.vis.add(el); entrati++; if (TS.ro) TS.ro.observe(el); } continue; }
+    TS.vis.delete(el); tsTogli(el);
+    if (TS.ro) TS.ro.unobserve(el);
+    if (!el.isConnected) TS.io.unobserve(el);
+  }
+  if (entrati) tsSveglia();
+}
+function tsMisure(es) {   // ResizeObserver: un titolo più largo o più stretto si ferma e si rimisura al giro dopo
+  let cambiati = 0;
+  for (const e of es) {
+    const el = e.target, w = Math.round(e.contentRect.width);
+    if (el._tsW != null && el._tsW !== w) { tsTogli(el); cambiati++; }
+    el._tsW = w;
+  }
+  if (cambiati) tsSveglia();
+}
+function tsCambiati(rs) {   // MutationObserver: pagine e righe nuove o tolte, titoli riscritti dall'app (si fermano e si rimisurano)
+  const nuovi = TS.fase === 'va' ? [] : null;
+  let titoli = 0;   // il resto (l'ora del brano che cambia 4 volte al secondo, il testo cantato) non sveglia l'orologio
+  for (const r of rs) {
+    for (const n of r.removedNodes) if (n.nodeType === 1) tsLascia(n);
+    const c = r.target.nodeType === 1 ? r.target.closest(TS_SEL) : null;
+    if (c) { tsTogli(c); titoli++; if (nuovi) nuovi.push(c); }
+    for (const n of r.addedNodes) if (n.nodeType === 1) titoli += tsSegui(n, nuovi);
+  }
+  if (nuovi) tsRiprendi(nuovi);
+  if (titoli) tsSveglia();
+}
+(function tsAvvia() {
+  if (!('IntersectionObserver' in window) || !('MutationObserver' in window)) return;   // browser vecchio: restano i «…»
+  TS.rid = matchMedia('(prefers-reduced-motion: reduce)');
+  const rid = () => { if (TS.rid.matches) tsFerma(); else tsSveglia(); };
+  if (TS.rid.addEventListener) TS.rid.addEventListener('change', rid); else if (TS.rid.addListener) TS.rid.addListener(rid);
+  TS.io = new IntersectionObserver(tsVisti);
+  if ('ResizeObserver' in window) TS.ro = new ResizeObserver(tsMisure);
+  else { let t = 0; addEventListener('resize', () => { clearTimeout(t); t = setTimeout(() => { tsFerma(); tsSveglia(); }, 250); }); }
+  TS.mo = new MutationObserver(tsCambiati);
+  TS.mo.observe(document.body, {childList:true, subtree:true});
+  // aperta o chiusa una scheda, il lettore a tutto schermo o un modulo di Altro: chi resta sotto finisce il giro (niente
+  // scatti dietro la scheda) e al giro dopo resta fermo; chi torna scoperto riparte
+  const sopra = new MutationObserver(() => tsSveglia());
+  for (const [id, a] of [['sh', 'class'], ['np', 'class'], ['xp', 'hidden']]) { const el = $(id); if (el) sopra.observe(el, {attributes:true, attributeFilter:[a]}); }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) tsFerma(); else tsSveglia(); });
+  tsSegui(document.body);
+})();
+</script>
 <script src="x/posizione.js" async></script>
 <script>
 'use strict';
@@ -4822,7 +5020,7 @@ XINVITATI.push({g:'In viaggio', m:[{k:'posizione', t:'Condividi la posizione', d
    (api/extra/testi) e resta sul telefono (IndexedDB «am-testi») per quando il Mac non risponde; senza tempi si vede il
    testo semplice, senza testo una riga che lo dice. */
 const TESTO = {on:ls.get('am-testo', false), k:'', b:null, j:null, righe:null, riga:-2, primo:true, libero:0, raf:0, visto:0,
-  vis:false, pronto:'', chiesti:new Map(), db:null, trad:ls.get('am-trad', ''), poll:0, giri:0, avvisato:'', sospeso:''};
+  vis:false, pronto:'', chiesti:new Map(), db:null, trad:ls.get('am-trad', ''), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false};
 const TESTO_ANTICIPO = 0.25;   // la riga si accende un attimo prima della voce: l'occhio arriva in tempo
 const TESTO_PAUSA = 4;         // 4 s o più senza voce (l'introduzione, un assolo): i tre puntini
 const TESTO_VOC = /[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]/i;
@@ -4964,23 +5162,34 @@ async function testoDalTelefono(k) {
   try { const db = await testoDB(); return await new Promise(ok => { const q = db.transaction('testi').objectStore('testi').get(k); q.onsuccess = () => ok(q.result ? q.result.j : null); q.onerror = () => ok(null); }); } catch (e) { return null; }
 }
 async function testoSalva(k, j) { try { const db = await testoDB(); db.transaction('testi', 'readwrite').objectStore('testi').put({j, t:Date.now()}, k); } catch (e) {} }
-// il Mac sta ancora lavorando sul brano: Whisper ne ascolta la voce o la traduzione è in arrivo
-const testoInCorso = j => !!j && ((j.traduzione && j.traduzione.stato === 'in corso') || j.allineamento === 'in coda' || j.allineamento === 'in corso');
+// il Mac sta ancora lavorando sul brano: lo cerca su LRCLIB («in arrivo»), Whisper ne ascolta la voce o la traduzione è
+// in arrivo
+const testoInCorso = j => !!j && (j.stato === 'in arrivo' || (j.traduzione && j.traduzione.stato === 'in corso') || j.allineamento === 'in coda' || j.allineamento === 'in corso');
+// cosa fare con la risposta del Mac (ok, codice, JSON), con la copia sul telefono c se c'è: {j: il testo da usare, salva: da
+// tenere sul telefono, riprova: da richiedere la prossima volta, presto: subito e non dopo mezzo minuto}
+function testoEsito(ok, codice, j, c) {
+  // il Mac lo sta ancora cercando: non si salva sul telefono (intanto la copia, se c'è)
+  if (ok && j && j.stato === 'in arrivo') return c ? {j:c, riprova:true, presto:true} : {j};
+  if (ok && j && j.stato) return {j, salva:true};
+  const presto = codice === 429;   // troppe richieste insieme (429): si può richiedere tra poco
+  if (c) return {j:c, riprova:true, presto};
+  if (codice === 404 || codice === 400) return {j:{stato:'nessuno'}, riprova:true};
+  if (presto) return {j:{stato:'errore', tardi:true, errore:(j && j.errore) || 'Troppe richieste di testi: riprova tra poco'}, riprova:true, presto};
+  return {j:{stato:'errore', errore:(j && j.errore) || 'Il Mac non ha dato il testo: riprova più tardi'}, riprova:true};
+}
 function testoChiedi(b, lingua) {   // il testo dal Mac (una richiesta alla volta per brano); se non risponde, la copia sul telefono
   const k = b.k + '|' + (lingua || '');
   if (TESTO.chiesti.has(k)) return TESTO.chiesti.get(k);
-  let riprova = false;
+  let riprova = false, presto = false;
   const p = (async () => {
     const c = await testoDalTelefono(b.k);
     if (c && !SRV) return c;
     try {
       const r = await fetchT(testoUrl(b, lingua), {cache:'no-store'}, 25000);
-      const j = await r.json().catch(() => null);
-      if (r.ok && j && j.stato) { testoSalva(b.k, j); return j; }
-      riprova = true;
-      if (c) return c;
-      if (r.status === 404 || r.status === 400) return {stato:'nessuno'};
-      return {stato:'errore', errore:(j && j.errore) || 'Il Mac non ha dato il testo: riprova più tardi'};
+      const x = testoEsito(r.ok, r.status, await r.json().catch(() => null), c);
+      if (x.salva) testoSalva(b.k, x.j);
+      riprova = !!x.riprova; presto = !!x.presto;
+      return x.j;
     } catch (e) {
       riprova = true;
       return c || {stato:'errore', errore:'Il Mac non risponde: il testo arriva dal Mac (quelli già visti restano sul telefono)'};
@@ -4988,7 +5197,7 @@ function testoChiedi(b, lingua) {   // il testo dal Mac (una richiesta alla volt
   })();
   TESTO.chiesti.set(k, p);
   // non ha risposto o sta ancora lavorando: la prossima volta si richiede
-  p.then(j => { if (riprova || testoInCorso(j)) setTimeout(() => { if (TESTO.chiesti.get(k) === p) TESTO.chiesti.delete(k); }, riprova ? 30000 : 0); });
+  p.then(j => { if (riprova || testoInCorso(j)) setTimeout(() => { if (TESTO.chiesti.get(k) === p) TESTO.chiesti.delete(k); }, riprova && !presto ? 30000 : 0); });
   return p;
 }
 // il testo del brano che suona si prepara anche a lettore chiuso (dopo 5 s di ascolto): poi c'è subito, anche senza rete
@@ -4997,18 +5206,28 @@ setInterval(() => {
   const b = testoBrano();
   if (b && b.k !== TESTO.pronto) { TESTO.pronto = b.k; testoChiedi(b, ''); }
 }, 5000);
+// fra quanti ms richiedere il testo al Mac (0: non serve): finché ci lavora, il testo cercato su LRCLIB ogni 2,5 s, la
+// traduzione ogni 3 s, Whisper ogni 15 s; troppe richieste insieme (429): una volta sola, dopo 10 s
+function testoAttesa(j, tr, ritentato) {
+  if (j.stato === 'in arrivo') return 2500;
+  if (tr && tr.stato === 'in corso') return 3000;
+  if (j.allineamento === 'in coda' || j.allineamento === 'in corso') return 15000;
+  return j.tardi && !ritentato ? 10000 : 0;
+}
 // il testo che si vede: subito la copia sul telefono, poi quella del Mac (che può avere le parole dalla voce o la
-// traduzione); finché il Mac ci lavora si richiede (traduzione ogni 3 s, Whisper ogni 15 s)
+// traduzione); finché il Mac ci lavora si richiede (testoAttesa)
 async function testoCarica(b) {
   const k = b.k;
   clearTimeout(TESTO.poll);
   if (!TESTO.j) { const c = await testoDalTelefono(k); if (c && TESTO.k === k && !TESTO.j) testoDisegna(c); }
   const j = await testoChiedi(b, TESTO.trad);
   if (TESTO.k !== k) return;
-  if (!TESTO.j || j.stato !== 'errore') testoUsa(j);
+  // un testo già in vista resta finché il Mac non ne dà uno (un errore o «in arrivo» non lo cancellano)
+  if (!TESTO.j || TESTO.j.stato === 'in arrivo' || (j.stato !== 'errore' && j.stato !== 'in arrivo')) testoUsa(j);
   const tr = j.traduzione && j.traduzione.lingua === TESTO.trad ? j.traduzione : null;
   if (tr && tr.stato === 'non riuscita' && TESTO.avvisato !== k + tr.lingua) { TESTO.avvisato = k + tr.lingua; toast('Traduzione non riuscita: ' + (tr.motivo || 'riprovo più tardi')); }
-  const attesa = tr && tr.stato === 'in corso' ? 3000 : j.allineamento === 'in coda' || j.allineamento === 'in corso' ? 15000 : 0;
+  const attesa = testoAttesa(j, tr, TESTO.ritentato);
+  if (attesa && j.tardi) TESTO.ritentato = true;
   if (attesa && TESTO.giri++ < 80) TESTO.poll = setTimeout(() => { TESTO.poll = 0; testoRiprendi(b); }, attesa);
 }
 function testoRiprendi(b) {   // la richiesta che aspettava: solo per il brano di adesso, e solo se il testo si vede
@@ -5046,7 +5265,7 @@ function testoDisegna(j) {
   TESTO.j = j; TESTO.righe = null; TESTO.riga = -2; TESTO.primo = true; TESTO.libero = 0;
   L.classList.remove('piano', 'libero');
   const msg = (a, b) => { L.innerHTML = '<div class="lyrmsg">' + esc(a) + (b ? '<small>' + esc(b) + '</small>' : '') + '</div>'; L.scrollTop = 0; testoTasti(); };
-  if (!j) return msg('Cerco il testo…');
+  if (!j || j.stato === 'in arrivo') return msg('Cerco il testo…', j ? 'Il Mac lo sta chiedendo a LRCLIB' : '');
   if (j.stato === 'vuoto') return msg(RC.id || curId ? 'Nessun testo' : 'Niente in riproduzione', RC.id || curId ? 'Podcast, audiolibri e radio non hanno un testo a tempo' : '');
   if (j.stato === 'errore') return msg('Testo non disponibile', j.errore);
   if (j.stato === 'strumentale') return msg('Brano strumentale', j.fonte === 'voce' ? 'Whisper non ha sentito una voce: solo musica' : 'Niente parole: solo musica');
@@ -5078,7 +5297,7 @@ function testoTasti() {   // il tasto della traduzione, quando c'è un testo da 
 function testoControlla() {   // brano cambiato (anche nel passaggio del mix o sull'altro dispositivo): si chiede il suo testo
   const b = testoBrano(), k = b ? b.k : '';
   if (k === TESTO.k) return;
-  TESTO.k = k; TESTO.b = b; TESTO.giri = 0; TESTO.sospeso = ''; clearTimeout(TESTO.poll); TESTO.poll = 0; testoTesta(b);
+  TESTO.k = k; TESTO.b = b; TESTO.giri = 0; TESTO.ritentato = false; TESTO.sospeso = ''; clearTimeout(TESTO.poll); TESTO.poll = 0; testoTesta(b);
   if (!b) { testoDisegna({stato:'vuoto'}); return; }
   testoDisegna(null);
   testoCarica(b);

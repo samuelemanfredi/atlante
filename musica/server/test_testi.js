@@ -223,6 +223,31 @@ function prove(src, fatte) {
   AV.testoAvvia();   // di nuovo in vista: riprende
   eq([Av.carichi, Av.TESTO.sospeso], [['s:1'], ''], 'di nuovo in vista: si riprende a chiedere');
   fatte.push('richieste');
+
+  /* ---------- revisione di sicurezza (28/10): il Mac sta cercando il testo («in arrivo»), troppe richieste (429) ---------- */
+  const IC = new Function('return (function () {\n' + riga(src, 'const testoInCorso') + '\nreturn testoInCorso;\n})();')();
+  eq([IC({stato:'in arrivo'}), IC({stato:'ok'}), IC({stato:'ok', allineamento:'in coda'}), IC(null)], [true, false, true, false],
+    'il Mac ci lavora ancora');
+  const E2 = carica(src, ['testoEsito', 'testoAttesa'], [], {});
+  const copia = {stato:'ok', righe:[{t:1, testo:'dal telefono'}]};
+  eq(E2.testoEsito(true, 200, {stato:'in arrivo'}, null), {j:{stato:'in arrivo'}}, '«in arrivo»: non si salva sul telefono');
+  eq(E2.testoEsito(true, 200, {stato:'in arrivo'}, copia), {j:copia, riprova:true, presto:true}, '«in arrivo» con la copia sul telefono');
+  eq(!!E2.testoEsito(true, 200, {stato:'ok', righe:[]}, null).salva, true, 'il testo vero si salva sul telefono');
+  const t429 = E2.testoEsito(false, 429, {errore:'Hai cercato molti testi nuovi: riprova tra poco'}, null);
+  eq([t429.j.stato, t429.j.tardi, t429.j.errore, t429.riprova, t429.presto, !!t429.salva],
+    ['errore', true, 'Hai cercato molti testi nuovi: riprova tra poco', true, true, false], '429: «riprova tra poco», niente salvato');
+  eq(E2.testoEsito(false, 429, null, null).j.errore, 'Troppe richieste di testi: riprova tra poco', '429 senza messaggio del Mac');
+  eq(E2.testoEsito(false, 429, null, copia), {j:copia, riprova:true, presto:true}, '429 con la copia sul telefono');
+  eq(E2.testoEsito(false, 503, {errore:'LRCLIB non risponde'}, null), {j:{stato:'errore', errore:'LRCLIB non risponde'}, riprova:true},
+    'altro errore: si richiede dopo mezzo minuto');
+  eq(E2.testoEsito(false, 404, null, null), {j:{stato:'nessuno'}, riprova:true}, 'brano che non c\'è');
+  // quando si richiede: «in arrivo» presto; dopo un 429 una volta sola (niente richieste all'infinito)
+  eq(E2.testoAttesa({stato:'in arrivo'}, null, false), 2500, 'in arrivo: si richiede tra 2,5 s');
+  eq([E2.testoAttesa(t429.j, null, false), E2.testoAttesa(t429.j, null, true)], [10000, 0], '429: un tentativo, poi basta');
+  eq(E2.testoAttesa({stato:'ok', allineamento:'in coda'}, null, false), 15000, 'Whisper in coda');
+  eq(E2.testoAttesa({stato:'ok'}, {stato:'in corso'}, false), 3000, 'traduzione in corso');
+  eq(E2.testoAttesa({stato:'ok'}, null, false), 0, 'pronto: niente richieste');
+  fatte.push('in arrivo e 429');
 }
 
 function proveGestione(src, fatte) {

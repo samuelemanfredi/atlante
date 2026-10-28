@@ -268,8 +268,17 @@ function riassunto(c) {
   }
 }
 // tipi degli allegati: immagini solo raster (un SVG aperto dal suo blob: farebbe girare i suoi script come se fosse
-// l'app), video e audio; un tipo diverso resta vuoto e l'allegato è un file qualsiasi (application/octet-stream)
-const TIPI_ALLEGATO = /^(?:image\/(?:jpeg|png|gif|webp|heic|heif|heic-sequence|heif-sequence|avif|bmp|tiff)|(?:video|audio)\/[a-z0-9.+-]{1,40})$/;
+// l'app), video e audio solo con i tipi che si conoscono (un «video/qualcosa+xml» si aprirebbe come una pagina); un tipo
+// diverso resta vuoto e l'allegato è un file qualsiasi (application/octet-stream)
+const TIPI_ALLEGATO = /^(?:image\/(?:jpeg|png|gif|webp|heic|heif|heic-sequence|heif-sequence|avif|bmp|tiff)|video\/(?:mp4|quicktime|webm|ogg|x-m4v|3gpp|3gpp2|mpeg|mp2t|x-matroska)|audio\/(?:mp4|mpeg|mp3|aac|x-m4a|m4a|x-m4b|wav|x-wav|wave|vnd\.wave|ogg|opus|webm|flac|x-flac|aiff|x-aiff|3gpp|3gpp2|amr|x-caf))$/;
+// altri nomi degli stessi tipi (dal telefono, dai File o da una versione di prima): diventano quello giusto
+const ALIAS_ALLEGATO = new Map([['image/jpg', 'image/jpeg'], ['image/pjpeg', 'image/jpeg'], ['image/x-png', 'image/png'], ['image/apng', 'image/png']]);
+// il tipo di un allegato com'è giusto mandarlo e aprirlo: '' se non è tra quelli conosciuti (file qualsiasi)
+function mimeAllegato(t) {
+  t = String(t == null ? '' : t).toLowerCase().split(';')[0].trim();
+  t = ALIAS_ALLEGATO.get(t) || t;
+  return TIPI_ALLEGATO.test(t) ? t : '';
+}
 // contenuto arrivato da un altro telefono: si tiene solo quello che la pagina sa mostrare, con forme controllate
 function pulisci(c) {
   if (!c || typeof c !== 'object') return {tipo:'illeggibile'};
@@ -280,7 +289,7 @@ function pulisci(c) {
   if (['foto', 'video', 'vocale', 'audio'].indexOf(t) >= 0 && c.allegato) {
     const a = c.allegato;
     if (!/^[A-Za-z0-9_-]{22}$/.test(a.id) || !/^[A-Za-z0-9_-]{43}$/.test(a.chiave) || !(a.pezzi >= 1 && a.pezzi <= 25) || !(a.dimensione >= 1 && a.dimensione <= MAX_ALLEGATO)) return {tipo:'illeggibile'};
-    return {tipo:t, allegato:{id:a.id, chiave:a.chiave, pezzi:a.pezzi | 0, dimensione:a.dimensione | 0, mime:TIPI_ALLEGATO.test(a.mime) ? a.mime : '', nome:s(a.nome, 120)},
+    return {tipo:t, allegato:{id:a.id, chiave:a.chiave, pezzi:a.pezzi | 0, dimensione:a.dimensione | 0, mime:mimeAllegato(a.mime), nome:s(a.nome, 120)},
       anteprima:/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]{1,60000}$/.test(c.anteprima || '') ? c.anteprima : '', durata:+c.durata > 0 ? Math.min(+c.durata, 36000) : 0};
   }
   return {tipo:'illeggibile'};
@@ -323,6 +332,7 @@ async function giro() {
       }
       if (!macOk) { macOk = true; statoMac(); riprovaSospesi(); }
       errori = 0;
+      if (r.riprova) await pausa(r.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
       if (r.altri) continue;
     } catch (e) {
       if (e.j && e.j.registra) { try { await registra(); continue; } catch (e2) { if (e2.cambio) { giroAttivo = false; return cambioPersona(e2.cambio); } } }
@@ -452,7 +462,8 @@ async function mandaFile(file, tipo, durata) {
   if (!aperta) return;
   if (!file.size) return toast('File vuoto');
   if (file.size > MAX_ALLEGATO) return toast('Al più 200 MB per allegato');
-  const contenuto = {tipo, allegato:{id:'', chiave:'', pezzi:C.pezzi(file.size), dimensione:file.size, mime:file.type || '', nome:(file.name || tipo).slice(0, 120)},
+  // il tipo giusto (image/jpg → image/jpeg); un tipo che non si conosce (un'immagine SVG…) parte vuoto: file qualsiasi
+  const contenuto = {tipo, allegato:{id:'', chiave:'', pezzi:C.pezzi(file.size), dimensione:file.size, mime:mimeAllegato(file.type), nome:(file.name || tipo).slice(0, 120)},
     anteprima:await anteprimaDi(file, tipo), durata:durata || (tipo !== 'foto' ? await durataDi(file) : 0)};
   const x = await nuovoMessaggio(aperta, contenuto, 'carico');
   await db.put('allegati', {blob:file, mime:file.type}, 'loc:' + x.id);   // per «Riprova» se il caricamento si ferma
@@ -514,7 +525,9 @@ async function blobDi(a) {
 async function urlDi(a) {
   if (URLS.has(a.id)) return URLS.get(a.id);
   let b = await blobDi(a);
-  if (b.type && !TIPI_ALLEGATO.test(b.type)) b = b.slice(0, b.size, 'application/octet-stream');   // anche quelli salvati prima (SVG)
+  // solo con un tipo conosciuto, anche quelli salvati prima (SVG) o senza tipo: se no è un file qualsiasi
+  const t = mimeAllegato(b.type) || 'application/octet-stream';
+  if (b.type !== t) b = b.slice(0, b.size, t);
   const u = URL.createObjectURL(b); URLS.set(a.id, u); return u;
 }
 async function mostraAllegato(id, el) {
@@ -869,10 +882,9 @@ function menuAllegati() {
 }
 $('sceltaMedia').onchange = e => {
   const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-  const tipo = (f.type || '').startsWith('video') ? 'video' : 'foto';
-  // un'immagine che non è una foto (SVG): chi la riceve non la vedrebbe, quindi non parte
-  if (tipo === 'foto' && f.type && !TIPI_ALLEGATO.test(f.type)) { toast('Si mandano foto JPEG, PNG, HEIC, GIF o WebP: questa immagine no'); return; }
-  mandaFile(f, tipo);
+  // image/jpg, image/x-png… diventano il tipo giusto; un'immagine di un tipo che non si mostra (SVG…) parte lo stesso,
+  // come file qualsiasi (mandaFile, mimeAllegato)
+  mandaFile(f, (f.type || '').startsWith('video') ? 'video' : 'foto');
 };
 $('sceltaAudio').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) mandaFile(f, 'audio'); };
 let CATALOGO = null;

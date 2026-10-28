@@ -39,8 +39,8 @@ async function disegna() {
   try { L = (await api('inviti')).inviti; }
   catch (e) { $('ilist').innerHTML = '<div class="inv">Non riesco a leggere i tuoi inviti: ' + esc(e.message) + '</div>'; return; }
   $('ilist').innerHTML = L.length ? L.map((r, i) => {
-    const [testo, cl] = STATI[r.stato] || [r.stato, ''];
-    return '<div class="inv"><div class="top"><b>' + esc(r.nome) + '</b><span class="pill ' + cl + '">' + testo + '</span></div>' +
+    const [testo, cl] = STATI[r.stato] || [r.stato, ''];   // uno stato che la pagina non conosce si vede com'è, protetto
+    return '<div class="inv"><div class="top"><b>' + esc(r.nome) + '</b><span class="pill ' + cl + '">' + esc(testo) + '</span></div>' +
       (r.link ? '<div class="link">' + esc(r.link) + '</div><div class="btns"><button class="btn sm pri" data-s="' + i + '">Condividi</button><button class="btn sm" data-c="' + i + '">Copia</button></div>' +
         '<p class="small">Vale una volta sola, fino al ' + new Date(r.scade * 1000).toLocaleDateString('it-IT') + '.</p>' : '') + '</div>';
   }).join('') : '<div class="inv"><span class="small">Nessun invito, per ora.</span></div>';

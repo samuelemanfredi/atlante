@@ -57,15 +57,26 @@
     get(k, d) { try { const v = localStorage.getItem('ax-' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
     set(k, v) { try { localStorage.setItem('ax-' + k, JSON.stringify(v)); } catch (e) { toast('Spazio pieno: dati non salvati'); } }
   };
-  // lettore dell'app Musica. items: [{id, title, artist, album, url, cover}] (url assoluti o relativi a questa pagina)
+  // indirizzo assoluto (i relativi da questa pagina) solo se è http, https o blob:; se no ''
+  function sicuro(u) {
+    if (!u) return '';
+    try { u = new URL(String(u).trim(), location.href).href; } catch (e) { return ''; }
+    return /^(?:https?:\/\/|blob:)/i.test(u) ? u : '';
+  }
+  // lettore dell'app Musica. items: [{id, title, artist, album, url, cover}] (url assoluti o relativi a questa pagina).
+  // Qui per tutti i moduli: url e copertina solo http, https e blob: (anche i dati salvati da una versione di prima);
+  // un brano con un altro indirizzo resta fuori, una copertina con un altro indirizzo resta vuota
   const player = {
     available: !!host,
     play(items, start, from) {
-      const abs = items.map(it => Object.assign({}, it, {url:new URL(it.url, location.href).href, cover:it.cover ? new URL(it.cover, location.href).href : ''}));
-      if (host) return host.playExternal(abs, start || 0, from || document.title);
+      const tutti = (items || []).map(it => Object.assign({}, it, {url:sicuro(it.url), cover:sicuro(it.cover)}));
+      const abs = tutti.filter(it => it.url);
+      if (!abs.length) return;
+      start = Math.min(tutti.slice(0, start || 0).filter(it => it.url).length, abs.length - 1);   // lo stesso brano di prima, o il seguente
+      if (host) return host.playExternal(abs, start, from || document.title);
       const a = player._au || (player._au = Object.assign(document.createElement('audio'), {controls:true}));
       if (!a.isConnected) { a.style.cssText = 'position:fixed;left:8px;right:8px;bottom:8px;width:calc(100% - 16px);z-index:50'; document.body.appendChild(a); }
-      a.src = abs[start || 0].url; a.play().catch(() => {});
+      a.src = abs[start].url; a.play().catch(() => {});
     },
     toggle() { if (host) host.toggle(); else if (player._au) player._au.paused ? player._au.play() : player._au.pause(); },
     next() { if (host) host.next(); },

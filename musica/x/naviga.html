@@ -1583,6 +1583,7 @@ body{position:fixed;inset:0}
           }
         }
         versoTesto();
+        if (j.riprova) await sleep(j.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
       } catch (e) {
         if (tok !== VS.tok) return;
         if (e.dati && e.dati.registra) { await Cifra.registra(true).catch(() => {}); continue; }

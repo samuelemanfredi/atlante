@@ -101,7 +101,8 @@ function disegna() {
       h += '<div class="det" data-det="' + esc(b.id) + '">' +
         '<div class="btns"><button class="btn sm" data-ascolta="' + esc(b.id) + '">▶︎ Ascolta</button><span class="small" style="align-self:center">' +
         esc([durata(b.durata), misura(b.dimensione), b.formato, b.nome].filter(Boolean).join(' · ')) + '</span></div>' +
-        (b.url ? '<p class="small">Da <a href="' + esc(b.url) + '" target="_blank" rel="noopener noreferrer">' + esc(b.url) + '</a></p>' : '') +
+        // l'indirizzo d'origine diventa un link solo se è http o https; se no si vede soltanto
+        (b.url ? '<p class="small">Da ' + (/^https?:\/\//i.test(b.url) ? '<a href="' + esc(b.url) + '" target="_blank" rel="noopener noreferrer">' + esc(b.url) + '</a>' : esc(b.url)) + '</p>' : '') +
         campo(b.id, 'titolo', 'Titolo', b.tag.titolo) + campo(b.id, 'artista', 'Artista', b.tag.artista) + campo(b.id, 'album', 'Album', b.tag.album) +
         '<div class="btns"><button class="btn sm" data-cop="' + esc(b.id) + '">' + (b.copertina ? 'Cambia la copertina' : 'Scegli una copertina') + '</button></div>' +
         (b.doppioni.length ? '<div class="avviso">C\'è già nella libreria: ' + b.doppioni.map(d => '«' + esc(d.titolo) + '» di ' + esc(d.artista) + (d.album ? ' (' + esc(d.album) + ')' : '')).join(', ') + '.</div>' : '') +
