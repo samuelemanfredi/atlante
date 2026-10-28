@@ -145,7 +145,7 @@ details.card[open] summary::after{transform:rotate(-90deg)}
         <li>Aggiungi <b>Apri URL</b> (sul Testo). Fatto: in YouTube, Instagram, TikTok, Safari… tocca <b>Condividi → Scarica con Atlante</b>.</li>
       </ol>
       <div class="btns"><button class="btn sm" id="copyBase">Copia indirizzo</button></div>
-      <div class="small">Per far partire il download senza toccare altro, aggiungi <span class="code">&amp;subito=1</span> alla fine del Testo (e <span class="code">&amp;tipo=audio</span> per il solo audio).</div>
+      <div class="small">Il link si apre qui già scritto: tocca «Scarica» per farlo partire (per sicurezza un link non scarica mai da solo). Per il solo audio aggiungi <span class="code">&amp;tipo=audio</span> alla fine del Testo.</div>
     </div>
     <div class="card">
       <b>Segnalibro (Safari su iPhone e Mac, Chrome)</b>
@@ -590,11 +590,18 @@ details.card[open] summary::after{transform:rotate(-90deg)}
   $('copyBm').onclick = () => copia(BM, 'Codice copiato: incollalo come indirizzo del segnalibro');
 
   /* ---------- link passato nell'indirizzo (?url=…, da Comandi Rapidi o segnalibro) ---------- */
+  // ?subito=1 fa partire lo scaricamento senza tocchi solo dentro l'app (questa pagina nel riquadro dei moduli, #xf, e
+  // l'app non passa «subito» dal suo indirizzo: vedi moduloDaIndirizzo in index.html). Da sola, aperta da un link di
+  // chiunque, il link resta scritto e lo scaricamento parte con un tocco su «Scarica»
+  function partenzaAutomatica(q, w) {
+    if (q.get('subito') !== '1') return false;
+    try { const f = w.frameElement; return !!(f && f.id === 'xf' && w.parent && w.parent.AM); } catch (e) { return false; }
+  }
   let auto = false;
   const daIndirizzo = estraiUrl(qs.get('url') || qs.get('u') || qs.get('text') || '');
   if (daIndirizzo) {
     $('url').value = daIndirizzo; $('addr').value = daIndirizzo;
-    auto = qs.get('subito') === '1';
+    auto = partenzaAutomatica(qs, window);
     try { history.replaceState(null, '', location.pathname); } catch (e) {}   // un ricaricamento non lo rimanda
   }
   function avvioAutomatico() {

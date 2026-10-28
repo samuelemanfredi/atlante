@@ -94,11 +94,18 @@
    - elenco delle persone da chiamare (riquadro «Chiamate» di «Altro»);
    - schermata della chiamata, che l'app apre in una cornice sua sopra tutto (?chiama=<persona>[,<persona>]&video=1 o
      ?entrante=<id della chiamata>, con &cornice=1). Aperta da sola (senza l'app) fa tutto lei, squilli compresi.
-   Da un altro modulo (la chat): AX.host.chiama('<persona>', video) oppure aprire x/chiamate.html?chiama=<persona>. */
+   Da un altro modulo (la chat): AX.host.chiama('<persona>', video) oppure aprire x/chiamate.html?chiama=<persona>.
+   Chiama subito solo nella cornice dell'app (l'iframe in #xc che crea apriChiamata in index.html): un link con ?chiama=
+   aperto da solo o passato all'app (anche con &cornice=1) propone la chiamata e aspetta un tocco. */
 const {$, esc, api} = AX;
 const host = AX.host;
 const Q = new URLSearchParams(location.search);
-const CORNICE = Q.get('cornice') === '1' && !!host;
+// la cornice della chiamata è solo l'iframe che l'app crea per lei (#xc): non il riquadro dei moduli (#xf), dove può
+// arrivare anche un indirizzo scritto da altri, né una pagina di un altro sito (che non vede il suo frameElement)
+function nellaCornice(w) {
+  try { const f = w.frameElement; return !!(f && f.parentElement && f.parentElement.id === 'xc' && w.parent && w.parent.AM); } catch (e) { return false; }
+}
+const CORNICE = Q.get('cornice') === '1' && !!host && nellaCornice(window);
 const enc = encodeURIComponent;
 const pausa = ms => new Promise(r => setTimeout(r, ms));
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -234,6 +241,21 @@ function avvia(ids, video) {
   if (!ids.length) return;
   if (host && host.chiama && !CORNICE) { if (host.chiama(ids, video) === false) AX.toast('C\'è già una chiamata aperta'); return; }
   chiama(ids, video);
+}
+
+// chiamata chiesta dall'indirizzo (?chiama=…) fuori dalla cornice dell'app: la si propone in cima e parte solo con un
+// tocco (un link mandato da qualcuno non deve accendere microfono e fotocamera da solo). Solo persone che si possono chiamare
+function proponi(ids, video) {
+  const L = ids.map(id => PERSONE.find(p => p.id === id)).filter(Boolean);
+  if (!L.length) return;
+  const vecchia = $('proposta'); if (vecchia) vecchia.remove();
+  const d = document.createElement('div');
+  d.className = 'card'; d.id = 'proposta';
+  d.innerHTML = '<b>' + esc((video ? 'Videochiamata a ' : 'Chiamata a ') + nomi(L.map(p => p.nome))) + '</b>' +
+    '<div class="btns"><button class="btn pri" id="pSi">' + (video ? 'Videochiama' : 'Chiama') + '</button><button class="btn" id="pNo">Annulla</button></div>';
+  $('persone').before(d);
+  $('pSi').onclick = () => { d.remove(); avvia(L.map(p => p.id), video); };
+  $('pNo').onclick = () => d.remove();
 }
 
 /* ---------- la chiamata ---------- */
@@ -726,7 +748,7 @@ async function ascoltaEntrate() {
   if (cid && !host) entrata(cid);
   else if (chi.length && ok) {
     history.replaceState(null, '', location.pathname);   // ricaricando la pagina non si richiama
-    avvia(chi, video);
+    proponi(chi, video);   // un link non chiama da solo: serve un tocco
   }
   if (!host && ok && !C.preparando && !C.attivo) ascoltaEntrate();
 })();

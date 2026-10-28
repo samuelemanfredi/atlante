@@ -1302,7 +1302,10 @@ function artists() {
 const songs = () => braniOrdinati();   // ordinati una volta sola (grande libreria)
 const albumByKey = k => albums().find(a => a.key === k);
 const plTracks = p => p.ids.map(id => T.get(id)).filter(Boolean);
-const coverUrl = k => k && k.startsWith('u:') ? k.slice(2) : k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
+// copertine arrivate da fuori («u:»: moduli, altri dispositivi, feed dei podcast): solo http, https e blob:; javascript:,
+// data: e gli altri schemi diventano «nessuna copertina» (e in HTML vanno comunque protette con esc)
+const copertinaSicura = u => { u = String(u == null ? '' : u).trim(); return /^(?:https?:\/\/|blob:)/i.test(u) ? u : ''; };
+const coverUrl = k => k && k.startsWith('u:') ? copertinaSicura(k.slice(2)) : k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
 
 /* ---------- grande libreria (50 000 brani e più) ---------- */
 // Con decine di migliaia di brani ordinare tutto con il Collator costa (50 ms sul Mac, di più sull'iPhone) e lo facevano
@@ -1363,12 +1366,12 @@ function codaDaSalvare() {
 /* ---------- pezzi di interfaccia ---------- */
 function art(key, cls) {
   const u = coverUrl(key);
-  return '<span class="art ' + (cls || '') + '">' + (u ? '<img src="' + u + '" alt="" loading="lazy" decoding="async">' : '<span class="ph">' + ic('note') + '</span>') + '</span>';
+  return '<span class="art ' + (cls || '') + '">' + (u ? '<img src="' + esc(u) + '" alt="" loading="lazy" decoding="async">' : '<span class="ph">' + ic('note') + '</span>') + '</span>';
 }
 function mosaic(tr, cls) {
   const ks = []; for (const t of tr) { if (t.cover && ks.indexOf(t.cover) < 0) ks.push(t.cover); if (ks.length === 4) break; }
   if (ks.length < 4) return art(ks[0], cls);
-  return '<span class="art ' + (cls || '') + '"><span class="mosaic">' + ks.map(k => '<img src="' + coverUrl(k) + '" alt="">').join('') + '</span></span>';
+  return '<span class="art ' + (cls || '') + '"><span class="mosaic">' + ks.map(k => '<img src="' + esc(coverUrl(k)) + '" alt="">').join('') + '</span></span>';
 }
 function regList(ids, label) { lists.push({ids, label}); return lists.length - 1; }
 // liste lunghe (10 000 brani). Righe (brani, artisti): si disegnano solo quelle vicine allo schermo, sopra e sotto c'è
@@ -1653,8 +1656,8 @@ function clScaffale() {   // Home
 }
 function clSegno(b) {
   if (b.segno === 'nuovo') return '<i class="cls nuovo">nuovo</i>';
-  if (b.segno === 'su') return '<i class="cls su" aria-label="sale di ' + b.di + '">▲' + b.di + '</i>';
-  if (b.segno === 'giu') return '<i class="cls giu" aria-label="scende di ' + b.di + '">▼' + b.di + '</i>';
+  if (b.segno === 'su') return '<i class="cls su" aria-label="sale di ' + esc(b.di) + '">▲' + esc(b.di) + '</i>';
+  if (b.segno === 'giu') return '<i class="cls giu" aria-label="scende di ' + esc(b.di) + '">▼' + esc(b.di) + '</i>';
   if (b.segno === 'uguale') return '<i class="cls" aria-label="stessa posizione">=</i>';
   return '';
 }
@@ -1686,11 +1689,11 @@ pages.classifica = function (r) {
   let h = topBar() + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(c.nome) + '</div><div class="hm">' + (c.brani.length === 1 ? '1 brano' : c.brani.length + ' brani') + ' · aggiornata il ' + clData(c.cambiata || c.letta) + '</div>' +
     '<div class="hm" style="text-transform:none;letter-spacing:0;font-weight:400">' + nota + '</div></div></div>';
   if (tr.length) h += pbtns(l);
-  h += clRighe(c.brani, l, b => '<b>' + b.pos + '</b>' + clSegno(b));
+  h += clRighe(c.brani, l, b => '<b>' + esc(b.pos) + '</b>' + clSegno(b));
   const us = c.usciti || [];
   if (us.length) {
     const lu = regList(clTracce(us).map(t => t.id), c.nome + ' · Usciti di recente');
-    h += '<h2 class="h2">Usciti di recente</h2>' + clRighe(us, lu, b => '<small>era ' + b.pos + '°</small>') +
+    h += '<h2 class="h2">Usciti di recente</h2>' + clRighe(us, lu, b => '<small>era ' + esc(b.pos) + '°</small>') +
       '<p class="foot">Usciti dalla classifica nelle ultime 4 settimane. Quelli che hai restano nella libreria e nelle tue playlist.</p>';
   }
   return h;
@@ -3273,6 +3276,17 @@ function copieScaricati() {
 const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entrano in libreria né in «Brani»
 const TT = id => T.get(id) || EXT.get(id);
 let xCur = '';
+// modulo chiesto dall'indirizzo dell'app (?x=video&url=… da Condividi e Comandi Rapidi, ?x=chat&c=… dalle notifiche).
+// L'indirizzo può venire da un link di chiunque: non porta mai le richieste che nei moduli partono da sole (subito: lo
+// scaricamento di x/video.html; cornice: la chiamata di x/chiamate.html), che lì restano da confermare con un tocco
+const SOLO_DALL_APP = ['x', 'subito', 'cornice'];
+function moduloDaIndirizzo(search) {
+  const qs = new URLSearchParams(search), k = qs.get('x');
+  if (!k) return null;
+  SOLO_DALL_APP.forEach(n => qs.delete(n));
+  const q = qs.toString();
+  return {k, q:q ? '?' + q : ''};
+}
 function openX(k, q) {
   if (k === 'interfaccia') { uiApri('personale'); return; }   // «Modifica interfaccia»: l'editor, non una pagina
   const m = xmodsVisibili().flatMap(g => g.m).find(x => x.k === k); if (!m) return;
@@ -3494,7 +3508,8 @@ function devRiga(x) {
 function devRender() {
   if (devSheetK) return devAzioni(devSheetK);
   const t = curId && TT(curId);
-  const qui = '<button data-a="dev-qui" class="' + (RC.id ? '' : 'acc') + '">' + ic('devs') + '<span class="l dv"><b>Questo dispositivo</b><small>' + esc(DEV.nome) + (t ? ' · ' + (au.paused ? '❚❚ ' : '▶︎ ') + t.title : '') + '</small></span>' + (RC.id ? '' : ic('check')) + '</button>';
+  // tutto il testo protetto: il titolo arriva da un modulo, dal Mac o da un altro dispositivo
+  const qui = '<button data-a="dev-qui" class="' + (RC.id ? '' : 'acc') + '">' + ic('devs') + '<span class="l dv"><b>Questo dispositivo</b><small>' + esc(DEV.nome + (t ? ' · ' + (au.paused ? '❚❚ ' : '▶︎ ') + t.title : '')) + '</small></span>' + (RC.id ? '' : ic('check')) + '</button>';
   openSheet('<div class="grp scroll"><div class="smsg"><b>Riproduci su</b>' + (SRV ? 'I tuoi dispositivi con Atlante Musica aperto. Tocca un dispositivo per comandarlo o spostare la musica.' : 'Il Mac non risponde: per comandare gli altri dispositivi serve il Mac.') + '</div>' + qui +
     DEVS.map(devRiga).join('') + (DEVS.length ? '' : '<div class="smsg" style="border-bottom:0">Nessun altro dispositivo per ora: apri Atlante Musica sull\'altro dispositivo e aspetta qualche secondo.</div>') + '</div>' +
     castNota() + '<div class="grp"><button data-a="dev-nome"><span class="l">Rinomina questo dispositivo</span>' + ic('edit') + '</button></div>' + cancel);
@@ -4777,8 +4792,8 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   // nessuna musica qui e un altro dispositivo suona: il lettore mostra quello (si comanda subito, come Spotify)
   if (SRV && au.paused) devElenco().then(L => { const p = L.find(x => x.stato.suona && x.stato.brano); if (p && !RC.id && au.paused) rcEntra(p.id, true); });
   // modulo aperto l'ultima volta, o richiesto dall'indirizzo (?x=video&url=… da Condividi / Comandi Rapidi)
-  const qs = new URLSearchParams(location.search), qx = qs.get('x');
-  if (qx) { qs.delete('x'); const rest = qs.toString(); setTab('altro'); openX(qx, rest ? '?' + rest : ''); }
+  const da = moduloDaIndirizzo(location.search);
+  if (da) { setTab('altro'); openX(da.k, da.q); }
   else if (tab === 'altro' && ls.get('am-x', '')) openX(ls.get('am-x', ''));
   dlPill();
 })();

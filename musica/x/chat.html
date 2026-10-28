@@ -267,6 +267,9 @@ function riassunto(c) {
     case 'illeggibile': return 'Messaggio non leggibile'; default: return 'Messaggio';
   }
 }
+// tipi degli allegati: immagini solo raster (un SVG aperto dal suo blob: farebbe girare i suoi script come se fosse
+// l'app), video e audio; un tipo diverso resta vuoto e l'allegato è un file qualsiasi (application/octet-stream)
+const TIPI_ALLEGATO = /^(?:image\/(?:jpeg|png|gif|webp|heic|heif|heic-sequence|heif-sequence|avif|bmp|tiff)|(?:video|audio)\/[a-z0-9.+-]{1,40})$/;
 // contenuto arrivato da un altro telefono: si tiene solo quello che la pagina sa mostrare, con forme controllate
 function pulisci(c) {
   if (!c || typeof c !== 'object') return {tipo:'illeggibile'};
@@ -277,7 +280,7 @@ function pulisci(c) {
   if (['foto', 'video', 'vocale', 'audio'].indexOf(t) >= 0 && c.allegato) {
     const a = c.allegato;
     if (!/^[A-Za-z0-9_-]{22}$/.test(a.id) || !/^[A-Za-z0-9_-]{43}$/.test(a.chiave) || !(a.pezzi >= 1 && a.pezzi <= 25) || !(a.dimensione >= 1 && a.dimensione <= MAX_ALLEGATO)) return {tipo:'illeggibile'};
-    return {tipo:t, allegato:{id:a.id, chiave:a.chiave, pezzi:a.pezzi | 0, dimensione:a.dimensione | 0, mime:/^(image|video|audio)\/[a-z0-9.+-]{1,40}$/.test(a.mime) ? a.mime : '', nome:s(a.nome, 120)},
+    return {tipo:t, allegato:{id:a.id, chiave:a.chiave, pezzi:a.pezzi | 0, dimensione:a.dimensione | 0, mime:TIPI_ALLEGATO.test(a.mime) ? a.mime : '', nome:s(a.nome, 120)},
       anteprima:/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]{1,60000}$/.test(c.anteprima || '') ? c.anteprima : '', durata:+c.durata > 0 ? Math.min(+c.durata, 36000) : 0};
   }
   return {tipo:'illeggibile'};
@@ -510,7 +513,9 @@ async function blobDi(a) {
 }
 async function urlDi(a) {
   if (URLS.has(a.id)) return URLS.get(a.id);
-  const u = URL.createObjectURL(await blobDi(a)); URLS.set(a.id, u); return u;
+  let b = await blobDi(a);
+  if (b.type && !TIPI_ALLEGATO.test(b.type)) b = b.slice(0, b.size, 'application/octet-stream');   // anche quelli salvati prima (SVG)
+  const u = URL.createObjectURL(b); URLS.set(a.id, u); return u;
 }
 async function mostraAllegato(id, el) {
   const x = MSGS.find(m => m.id === id); if (!x) return;
@@ -862,7 +867,13 @@ function menuAllegati() {
   $('aAudio').onclick = () => { chiudiFoglio(); $('sceltaAudio').click(); };
   $('aBrano').onclick = scegliBrano;
 }
-$('sceltaMedia').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) mandaFile(f, (f.type || '').startsWith('video') ? 'video' : 'foto'); };
+$('sceltaMedia').onchange = e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const tipo = (f.type || '').startsWith('video') ? 'video' : 'foto';
+  // un'immagine che non è una foto (SVG): chi la riceve non la vedrebbe, quindi non parte
+  if (tipo === 'foto' && f.type && !TIPI_ALLEGATO.test(f.type)) { toast('Si mandano foto JPEG, PNG, HEIC, GIF o WebP: questa immagine no'); return; }
+  mandaFile(f, tipo);
+};
 $('sceltaAudio').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) mandaFile(f, 'audio'); };
 let CATALOGO = null;
 async function scegliBrano() {
