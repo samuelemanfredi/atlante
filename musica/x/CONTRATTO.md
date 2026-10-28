@@ -191,12 +191,31 @@ in IndexedDB `ax-cifra`. Il Mac mini tiene in memoria solo l'ultimo aggiornament
 Tutte rispondono 403 dalla rete di casa senza biscotto (lì non si sa chi c'è) e sono permesse agli invitati.
 ## Testo sincronizzato (karaoke) nel lettore
 Il tasto «Testo» del lettore a tutto schermo (in `index.html`, blocco «testo sincronizzato») mostra le parole del brano a
-tempo con la musica, come in Apple Music: un tocco su una riga porta la musica lì (anche durante il mix e comandando un
-altro dispositivo). Il testo viene dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC LYRICS, anche in formato LRC) o da
-LRCLIB (`lrclib.net`, gratuito, senza chiave; `ATLANTE_LRCLIB` per un indirizzo diverso), chiesto dal Mac e tenuto in
-`<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Anche per gli invitati.
+tempo con la musica, come in Apple Music: la luce scorre dentro le parole lettera per lettera (più lenta sulle vocali),
+un tocco su una riga o su una parola porta la musica lì, nei tre puntini di una pausa il punto toccato vale il suo secondo
+(anche durante il mix e comandando un altro dispositivo); sotto ogni riga, se scelta, la traduzione. Il testo viene da un
+file `.lrc` accanto al brano, dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC LYRICS, anche in formato LRC) o da LRCLIB
+(`lrclib.net`, gratuito, senza chiave; `ATLANTE_LRCLIB` per un indirizzo diverso), chiesto dal Mac una richiesta alla volta
+(al più una al secondo) e tenuto in `<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Le righe vengono dal
+testo, i tempi delle parole dalla fonte o da Whisper sul Mac (le parole dalla voce), se no si stimano dentro la riga.
+Anche per gli invitati; la traduzione per loro (e per chi non è Samuele) solo con MyMemory: l'IA del Mac solo per
+Samuele, al più 3 brani a testa e 50 in tutto in coda. La Gestione solo Samuele.
 
 | Metodo | Percorso | Risposta |
 |---|---|---|
-| GET | `testi/<id del catalogo>` | `{stato:'ok'\|'nessuno'\|'strumentale', sincronizzato, parole, fonte:'file'\|'lrclib', righe:[{t, testo, parole?:[{t,testo}], fine?}]}` — `t` in secondi (null senza tempi); 404 se il brano non c'è; 503 `{errore}` se LRCLIB non risponde e il file non ha un testo |
-| GET | `testi?titolo=&artista=&album=&durata=` | come sopra, per un brano che non è nella libreria (solo LRCLIB); 400 senza titolo |
+| GET | `testi/<id del catalogo>[?lingua=xx]` | `{stato:'ok'\|'nessuno'\|'strumentale', sincronizzato, parole, parole_da:'fonte'\|'voce'\|'stima'\|'', fonte:'file'\|'lrclib'\|'voce', lingua, v, allineamento?, traduzione?, righe:[{t, testo, parole?:[{t,testo,fine?}], fine?}]}` — `t` in secondi (null senza tempi); `fine` solo quando la dà la fonte o la voce (mai stimata); `parole` vero se i tempi delle parole sono veri (dalla fonte o dalla voce), con `parole_da:'stima'` sono stimati dentro la riga; `fonte:'voce'`: trascritto da Whisper (brano senza testo da nessuna parte); `v` cambia quando cambiano testo o tempi; `allineamento` ('in coda'\|'in corso'\|'fatto'\|'non riuscito'\|'spento') solo con il lavoro su tutta la libreria acceso o già fatto; con `lingua` (it, en, es, fr, de, pt, … 31 lingue) `traduzione:{lingua, stato:'pronta'\|'in corso'\|'uguale'\|'non riuscita'\|'senza testo'\|'lingua non disponibile', righe?:[una per riga], motore?, motivo?}` (per Samuele l'IA del Mac se c'è, se no e per tutti gli altri MyMemory; una traduzione a metà non è «pronta»: le righe che mancano restano da fare); 404 se il brano non c'è; 503 `{errore}` se LRCLIB non risponde e il file non ha un testo |
+| GET | `testi?titolo=&artista=&album=&durata=[&lingua=xx]` | come sopra, per un brano che non è nella libreria (solo LRCLIB, niente Whisper: l'audio è sul telefono); 400 senza titolo |
+| GET | `gestione/testi` | solo Samuele: `{acceso, con_whisper, totale, conteggi:{cercati, da_cercare, con_testo, strumentali, senza_testo, trascritti, parole_fonte, parole_allineate, parole_stimate, parole_nessuna, da_allineare, non_allineati}, ora:{cerca, allinea, traduce}, lrclib, whisper:{stato, modello, programma, modello_scaricato}, traduzioni:{motore, in_coda, fatte}}` |
+| POST | `gestione/testi` `{acceso?, whisper?}` | solo Samuele: accende o mette in pausa il lavoro su tutta la libreria (testi di tutti i brani e, con `whisper`, le parole dalla voce); resta così dopo un riavvio; lo stato come sopra; 400 senza `acceso` né `whisper` |
+| POST | `gestione/testi/riprova` | solo Samuele: `{ok:true}`, i lavori fermi per un errore riprovano adesso |
+
+Il lavoro su tutta la libreria è spento finché Samuele non lo accende da Gestione → Testi e karaoke: solo allora il Mac
+cerca i testi di tutti i brani e, con Whisper, la prima volta installa whisper-cpp con Homebrew e scarica il modello
+(`large-v3-turbo-q5_0`, 574 MB, in `<cache>/testi/modelli/`). Lavora un brano alla volta, con `nice`, e in pausa si
+ferma anche a metà di un brano. In `<cache>/testi/`: le risposte di LRCLIB, `lavoro.json` (acceso, whisper),
+`schede.json` (a che punto è ogni brano), `brani/<id>.json` (le parole dalla voce o il testo trascritto, per quel file),
+`traduzioni/`, `tmp/` e `figli/` (i file temporanei e i programmi accesi per Whisper: con SIGTERM il server li ferma
+prima di uscire, dopo un arresto brusco li ferma all'avvio). Il modello si scarica solo se dopo restano almeno 2 GB
+liberi, e in pausa lo scaricamento riprende da dove era. Un errore di tutto il Mac (disco della musica scollegato,
+ffmpeg o Whisper che non partono, disco pieno, rete giù) non conta contro i brani: Whisper aspetta 10 minuti.
+`ATLANTE_WHISPER=0` spegne Whisper (oppure il percorso di un whisper-cli).
