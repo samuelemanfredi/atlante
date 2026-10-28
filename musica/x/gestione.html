@@ -96,7 +96,7 @@ details.rimp summary{color:var(--link);cursor:pointer}
   <p class="small">Ogni giorno il Mac mini rilegge le classifiche più note e ne fa playlist per l'app di tutti, con i brani che hai già: dai servizi commerciali non si scarica niente. I brani nuovi arrivano da soli dai siti di musica libera (Jamendo, Internet Archive), con la licenza Creative Commons scritta nei tag, nella cartella «Musica libera».</p>
   <div id="cl"><p class="small">Un momento…</p></div>
   <h2 class="h2" id="testi">Testi e karaoke</h2>
-  <p class="small">Il Mac mini cerca il testo di ogni brano (file .lrc accanto al brano, tag, LRCLIB) e con Whisper mette ogni parola al tempo in cui viene cantata. I brani senza testo li trascrive dalla voce. La traduzione la fa l'IA del Mac se c'è, se no MyMemory.</p>
+  <p class="small">Il testo del brano che suona c'è sempre: il Mac lo prende dal file del brano o da LRCLIB quando lo ascolti. Qui si accende il lavoro su tutta la libreria: il testo di ogni brano e, con Whisper, ogni parola al tempo in cui viene cantata (i brani senza testo li trascrive dalla voce). Lavora un brano alla volta, a bassa priorità, e lo metti in pausa quando vuoi. La traduzione la fa l'IA del Mac se c'è, se no MyMemory.</p>
   <div id="ts"><p class="small">Un momento…</p></div>
   <h2 class="h2">Ascolti in Atlante</h2>
   <p class="small">Le stesse classifiche che vedono tutti: di una persona si vede solo quello che ha scelto di condividere.</p>
@@ -381,38 +381,75 @@ ascolti();
 </script>
 <script>
 // ----- Gestione → Testi e karaoke (api/extra/gestione/testi) -----
+// Spento finché non lo accendi qui: appena installato il Mac mini non fa niente di pesante. Acceso, cerca i testi di
+// tutta la libreria e, con Whisper, ascolta la voce dei brani (la prima volta installa whisper-cpp e scarica il modello).
+// La domanda prima di accendere (il lavoro, o anche solo Whisper): niente di pesante senza un sì. '' = non si chiede.
+function testiConferma(j, corpo) {
+  if (corpo.acceso !== true && corpo.whisper !== true) return '';   // spegnere non si chiede
+  const whisper = corpo.whisper === true || (corpo.whisper == null && j.con_whisper);
+  const acceso = corpo.acceso === true || (corpo.acceso == null && j.acceso), w = j.whisper || {};
+  return (whisper && !w.modello_scaricato ? 'Il Mac mini installerà whisper-cpp con Homebrew e scaricherà il modello di Whisper (574 MB), poi ascolterà i brani uno alla volta. ' :
+    whisper ? 'Whisper ascolterà i brani uno alla volta: usa il processore e circa 1 GB di memoria mentre lavora. ' : '') +
+    (acceso ? 'Puoi metterlo in pausa quando vuoi. Lo accendo?' : 'Partirà quando accendi il lavoro su tutta la libreria. Va bene?');
+}
 (function () {
   const {$, esc, toast, api} = AX;
   const n = (c, k) => (c && c[k]) || 0;
+  let j = null, conferma = null, occupato = false;   // conferma: la scelta che aspetta un sì
+  async function cambia(corpo, testo) {
+    occupato = true; conferma = null; disegna();
+    try { j = await api('gestione/testi', {method:'POST', body:corpo}); toast(testo); } catch (e) { toast(e.message); }
+    occupato = false; disegna();
+  }
   async function riprova(b) {
     b.disabled = true;
     try { await api('gestione/testi/riprova', {method:'POST'}); toast('Riprovo adesso'); } catch (e) { toast(e.message); }
-    setTimeout(disegna, 2500);
+    setTimeout(leggi, 2500);
   }
-  async function disegna() {
-    let j;
+  async function leggi() {
     try { j = await api('gestione/testi'); }
     catch (e) { $('ts').innerHTML = '<p class="small">Non riesco a leggere lo stato: ' + esc(e.message) + '</p>'; return; }
-    if (!j.attivo) { $('ts').innerHTML = '<div class="card"><p class="small">Spenti su questo Mac (ATLANTE_TESTI=0 nel servizio del server).</p></div>'; return; }
+    disegna();
+  }
+  function disegna() {
+    if (!j) return;
     const c = j.conteggi || {}, w = j.whisper || {}, tr = j.traduzioni || {}, o = j.ora || {};
     const cercati = n(c, 'cercati'), tot = j.totale || 0;
-    let h = '<div class="card"><div class="numeri"><div><b>' + n(c, 'con_testo') + '</b><span>con il testo</span></div>' +
+    let h = '<div class="card"><div class="orow"><div class="tx"><b>Lavoro su tutta la libreria</b><span>' +
+      (j.acceso ? 'Acceso: un brano alla volta, dopo tutto il resto. Spegnilo per metterlo in pausa.' : 'In pausa: il testo arriva solo quando ascolti un brano.') + '</span></div>' +
+      '<input type="checkbox" class="sw" id="tsAcceso" aria-label="Lavoro su tutta la libreria"' + (j.acceso ? ' checked' : '') + (occupato ? ' disabled' : '') + '></div>';
+    h += '<div class="orow" style="margin-top:12px"><div class="tx"><b>Parole dalla voce (Whisper)</b><span>Ogni parola al tempo in cui viene cantata. Pesante: usa il processore e circa 1 GB di memoria mentre lavora.</span></div>' +
+      '<input type="checkbox" class="sw" id="tsWhisper" aria-label="Parole dalla voce con Whisper"' + (j.con_whisper ? ' checked' : '') + (occupato ? ' disabled' : '') + '></div>';
+    if (conferma) h += '<div class="rconf"><p style="margin:0 0 8px">' + esc(testiConferma(j, conferma)) +
+      '</p><div class="btns" style="margin:0"><button class="btn sm pri" id="tsSi">Accendi</button><button class="btn sm" id="tsNo">Annulla</button></div></div>';
+    h += '<div class="numeri" style="margin-top:14px"><div><b>' + n(c, 'con_testo') + '</b><span>con il testo</span></div>' +
       '<div><b>' + (n(c, 'parole_fonte') + n(c, 'parole_allineate')) + '</b><span>parole a tempo</span></div>' +
       '<div><b>' + n(c, 'strumentali') + '</b><span>strumentali</span></div></div>';
     h += '<p class="small">' + cercati + ' brani cercati su ' + tot + (n(c, 'da_cercare') ? ' · ' + n(c, 'da_cercare') + ' da cercare' : '') +
       ' · ' + n(c, 'parole_allineate') + ' allineati alla voce · ' + n(c, 'parole_stimate') + ' con le parole stimate · ' +
       n(c, 'parole_nessuna') + ' senza tempi · ' + n(c, 'trascritti') + ' trascritti dalla voce · ' + n(c, 'senza_testo') + ' senza testo' +
       (n(c, 'da_allineare') ? ' · ' + n(c, 'da_allineare') + ' da allineare' : '') + (n(c, 'non_allineati') ? ' · ' + n(c, 'non_allineati') + ' non allineabili' : '') + '</p>';
-    h += '<p class="small">Whisper: <b>' + esc(w.stato || '') + '</b>' + (w.modello ? ' · modello ' + esc(w.modello) : '') + '</p>';
+    h += '<p class="small">Whisper: <b>' + esc(w.stato || '') + '</b>' + (w.modello ? ' · modello ' + esc(w.modello) + (w.modello_scaricato ? '' : ' (non ancora scaricato)') : '') + '</p>';
     h += '<p class="small">LRCLIB: ' + esc(j.lrclib || '') + ' · Traduzioni: ' + esc(tr.motore || 'nessun traduttore') + ' (' + (tr.fatte || 0) + ' fatte' + (tr.in_coda ? ', ' + tr.in_coda + ' in coda' : '') + ')</p>';
-    const adesso = [o.cerca && 'cerco «' + o.cerca + '»', o.allinea && 'allineo «' + o.allinea + '»', o.traduce && 'traduco «' + o.traduce + '»'].filter(Boolean);
+    const adesso = [o.cerca && 'cerco «' + o.cerca + '»', o.allinea && 'ascolto «' + o.allinea + '»', o.traduce && 'traduco «' + o.traduce + '»'].filter(Boolean);
     if (adesso.length) h += '<p class="small">Adesso: ' + esc(adesso.join(' · ')) + '</p>';
     h += '<div class="btns"><button class="btn sm" data-tsriprova>Riprova adesso</button></div></div>';
     $('ts').innerHTML = h;
     document.querySelectorAll('[data-tsriprova]').forEach(x => x.onclick = () => riprova(x));
+    // prima di accendere si chiede (anche Whisper da solo: Homebrew e il modello); spegnere no
+    $('tsAcceso').onchange = e => {
+      if (e.target.checked) { e.target.checked = false; conferma = {acceso:true}; disegna(); return; }
+      cambia({acceso:false}, 'Lavoro sui testi in pausa');
+    };
+    $('tsWhisper').onchange = e => {
+      if (e.target.checked) { e.target.checked = false; conferma = {whisper:true}; disegna(); return; }
+      cambia({whisper:false}, 'Whisper escluso: solo i testi');
+    };
+    if ($('tsSi')) $('tsSi').onclick = () => cambia(conferma, conferma.acceso ? 'Lavoro sui testi acceso' : 'Whisper compreso');
+    if ($('tsNo')) $('tsNo').onclick = () => { conferma = null; disegna(); };
   }
-  disegna();
-  setInterval(() => { if (document.visibilityState === 'visible') disegna(); }, 15000);
+  leggi();
+  setInterval(() => { if (document.visibilityState === 'visible' && !conferma && !occupato) leggi(); }, 15000);
 })();
 </script>
 <script>

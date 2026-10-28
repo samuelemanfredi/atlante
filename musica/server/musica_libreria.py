@@ -8,7 +8,6 @@ e li offre all'app Musica con queste richieste:
     GET api/musica/catalogo            elenco dei brani (JSON)
     GET api/musica/file/<id>           il brano (con Range: si può saltare avanti)
     GET api/musica/copertina/<chiave>  la copertina (JPEG o PNG)
-    GET api/musica/testo/<id>          il testo con le parole a tempo (karaoke); ?lingua=xx la traduzione
 
 Solo libreria standard di Python. Uso da solo:
 
@@ -42,6 +41,10 @@ Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve 
 Playlist di Atlante (playlist tematiche per tutti) e «Crea con l'IA»: con --tematiche (o ATLANTE_TEMATICHE=1) il Mac
 prepara in sottofondo, un brano alla volta, generi (MusicBrainz), BPM ed energia (dall'audio) di ogni brano. Le regole
 delle playlist sono in playlist-atlante.json; le proprie modifiche in <cache>/tematiche/regole.json.
+
+Testi e karaoke (api/extra/testi, vedi x/CONTRATTO.md): il testo a tempo del brano che suona, dal file o da LRCLIB.
+Il lavoro su tutta la libreria (i testi di tutti i brani e, con Whisper, le parole a tempo dalla voce) parte solo da
+Gestione → Testi e karaoke, a bassa priorità e un brano alla volta; da lì si mette anche in pausa.
 """
 import argparse
 import array
@@ -74,6 +77,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import time
 import unicodedata
 import urllib.error
@@ -776,7 +780,7 @@ class Libreria:
 
 LIB = None
 INDIRIZZO = ""   # indirizzo https fisso dell'app (facoltativo): l'app lo propone a chi la apre in http
-PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna|pezzo|testo)(?:/([^/]+))?$")
+PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna|pezzo)(?:/([^/]+))?$")
 
 
 def _invia_file(h, percorso, tipo, intestazioni=None):
@@ -899,8 +903,6 @@ def gestisci(h):
                     h.end_headers()
                     if h.command != "HEAD":
                         h.wfile.write(corpo)
-        elif cosa == "testo":   # testo, parole a tempo e traduzione (sezione «testi e karaoke»)
-            _testo_api(h, arg)
         elif cosa == "copertina":
             nome = os.path.basename(arg or "")
             p = os.path.join(LIB.dir_copertine, nome)
@@ -3432,6 +3434,2263 @@ def _clip_file(h, nome):
     if not os.path.isfile(p):
         raise ErroreExtra(404, "Videoclip non ancora scaricato")
     _invia_file(h, p, "video/mp4", {"X-Content-Type-Options": "nosniff"})
+
+
+# ----- testi sincronizzati (karaoke): dal file del brano o da LRCLIB, le parole dalla voce -----
+#
+#   GET testi/<id del catalogo>[?lingua=xx]                 il testo di un brano della libreria
+#   GET testi?titolo=&artista=&album=&durata=[&lingua=xx]   il testo di un brano che non è nella libreria (sul telefono)
+#
+# Risposta: {stato:'ok'|'nessuno'|'strumentale', sincronizzato, parole, fonte:'file'|'lrclib'|'voce', righe:[{t, testo,
+# parole?:[{t, testo, fine?}], fine?}]}: t in secondi dall'inizio del brano (null se il testo non ha i tempi), «fine»
+# quando si sa quando finisce la riga (o la parola, se dopo c'è una pausa): dalla fonte o dalla voce, mai stimata. Prima
+# un file .lrc accanto al brano, poi il testo dentro il file (ID3 SYLT e USLT, MP4 ©lyr, FLAC LYRICS; anche scritto in
+# formato LRC), poi LRCLIB (lrclib.net: gratuito, senza chiave), chiesto dal Mac una richiesta alla volta (al più una al
+# secondo) e tenuto in <cache>/testi/: un testo trovato resta per sempre, «nessun testo» si richiede dopo una settimana,
+# un errore di rete non si ricorda sul disco (si riprova dopo un minuto). Un testo a tempo di LRCLIB vale solo se la sua
+# durata coincide con quella del brano (±3 s): con un'altra versione (il videoclip con un'introduzione più lunga) le
+# righe arriverebbero fuori tempo. RIGHE DAL TESTO, PAROLE DALLA VOCE: le righe vengono dal testo (con i loro tempi, se
+# li ha); i tempi delle parole dalla fonte se li ha, se no da Whisper, che ascolta la voce del brano (sezione «parole
+# dalla voce» qui sotto: dà il tempo anche alle righe di un testo che non ce l'ha); finché non l'ha ascoltato si stimano
+# dentro la riga, dalle sillabe. Nella risposta anche: parole_da ('fonte'|'voce'|'stima': «parole» è vero solo con le
+# prime due), lingua, v (cambia quando cambiano testo o tempi), allineamento (a che punto è Whisper, quando il lavoro in
+# sottofondo è acceso o l'ha già fatto) e, con ?lingua=xx, traduzione {lingua, stato, righe?, motore?, motivo?}: con
+# l'IA del Mac solo per Samuele (agli invitati non è permessa), per gli altri MyMemory; al più 3 brani a testa e 50 in
+# tutto in coda.
+
+TESTI_LRCLIB = "https://lrclib.net"
+TESTI_TEMPO = 10                  # secondi per ogni richiesta a LRCLIB
+TESTI_INTERVALLO = 1.0            # al più una richiesta a LRCLIB al secondo (il lavoro su tutta la libreria ne fa tante)
+TESTI_NESSUNO = 7 * 86400         # «nessun testo»: dopo una settimana si richiede (LRCLIB cresce)
+TESTI_ERRORE = 60                 # LRCLIB non risponde: per un minuto non si richiede
+TESTI_SCARTO = 3.0                # secondi di differenza ammessi tra la durata del brano e quella del testo a tempo
+TESTI_PAUSA = 1.5                 # LRCLIB «occupato» (429, 5xx: capita, la volta dopo risponde): si riprova dopo 1,5 s
+TESTI_MAX = 2 * 1024 * 1024
+TESTI_MAX_LRC = 512 * 1024        # un file .lrc più grande non è un testo
+_TESTI_BLOCCO = threading.Lock()  # una richiesta a LRCLIB alla volta (il lucchetto si tiene per una richiesta, non per tutta
+#                                   la ricerca: così l'app non aspetta dietro il lavoro su tutta la libreria)
+_TESTI_ERRORI = {}                # chiave del brano → quando LRCLIB non ha risposto
+_TESTI_ULTIMA = [0.0]             # quando è partita l'ultima richiesta a LRCLIB
+_TESTI_APP = [0]                  # ricerche chieste dall'app in corso: il lavoro su tutta la libreria aspetta che finiscano
+_TESTI_APP_BLOCCO = threading.Lock()
+_TESTI_CHIAVI = {}                # chiave del brano → lucchetto: la stessa ricerca una volta sola, anche da due dispositivi
+
+_LRC_TEMPO = re.compile(r"\[(\d{1,3}):(\d{1,2}(?:[.:,]\d{1,3})?)\]")
+_LRC_PAROLA = re.compile(r"<(\d{1,3}):(\d{1,2}(?:[.:,]\d{1,3})?)>")
+_LRC_META = re.compile(r"^\[([a-z#]+)\s*:(.*)\]$", re.I)
+_LRC_RIGA = re.compile(r"^\s*\[\d{1,3}:\d{1,2}")
+
+
+def _lrc_secondi(m, s):
+    sec, _, fr = s.replace(",", ".").replace(":", ".").partition(".")
+    return int(m) * 60 + int(sec) + (int(fr) / 10 ** len(fr) if fr else 0)
+
+
+def _spazi(s):
+    return re.sub(r"\s+", " ", str(s or ""))
+
+
+def _riga(t, testo, parole=None, fine=None):
+    r = {"t": round(max(0.0, t), 3), "testo": testo}
+    if parole and len(parole) > 1:
+        r["parole"] = [{"t": round(max(0.0, a), 3), "testo": x} for a, x in parole]
+    if fine is not None and fine > t:
+        r["fine"] = round(fine, 3)
+    return r
+
+
+def _pezzi_riga(pezzi):
+    """[(tempo, testo)] delle parole di una riga: spazi semplici, niente spazi ai due capi della riga, niente pezzi vuoti."""
+    v = [[a, _spazi(x)] for a, x in pezzi if _spazi(x).strip()]
+    if v:
+        v[0][1], v[-1][1] = v[0][1].lstrip(), v[-1][1].rstrip()
+    return [(a, x) for a, x in v]
+
+
+def leggi_lrc(testo):
+    """Righe di un testo LRC, in ordine di tempo: più tempi sulla stessa riga (il ritornello), [offset:±ms], i tempi delle
+    parole <mm:ss.xx> (LRC «enhanced»). Le righe senza tempo non contano; [] se il testo non ha tempi."""
+    spost, righe = 0.0, []
+    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        r = r.strip().lstrip("﻿")
+        tempi = []
+        while True:
+            m = _LRC_TEMPO.match(r)
+            if not m:
+                break
+            tempi.append(_lrc_secondi(*m.groups()))
+            r = r[m.end():].lstrip()
+        if not tempi:
+            m = _LRC_META.match(r)
+            if m and m.group(1).lower() == "offset":
+                try:   # in avanti (+) le righe arrivano prima
+                    spost = int(m.group(2).strip()) / 1000
+                except ValueError:
+                    pass
+            continue
+        pezzi, fine = _LRC_PAROLA.split(r), None
+        parole = []
+        if len(pezzi) > 1:
+            if pezzi[0].strip():
+                parole.append((tempi[0], pezzi[0]))
+            for k in range(1, len(pezzi), 3):
+                a, x = _lrc_secondi(pezzi[k], pezzi[k + 1]), pezzi[k + 2]
+                if x.strip():
+                    parole.append((a, x))
+                else:
+                    fine = a   # un tempo senza parola: dove finisce la parola prima
+            parole = _pezzi_riga(parole)
+            testo_riga = "".join(x for _, x in parole)
+        else:
+            testo_riga = _spazi(r).strip()
+        for t in tempi:
+            d = t - tempi[0] - spost   # il ritornello ripetuto: le sue parole spostate con lui
+            righe.append(_riga(t - spost, testo_riga, [(a + d, x) for a, x in parole],
+                               None if fine is None else fine + d))
+    righe.sort(key=lambda x: x["t"])
+    return righe
+
+
+def testi_semplici(testo):
+    """Le righe di un testo senza tempi: spazi in ordine, al più una riga vuota tra le strofe."""
+    righe = []
+    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        r = _spazi(r).strip()
+        if r or (righe and righe[-1]["testo"]):
+            righe.append({"t": None, "testo": r})
+    while righe and not righe[-1]["testo"]:
+        righe.pop()
+    return righe
+
+
+def _e_lrc(testo):
+    """Un testo scritto in formato LRC (come lo salvano molti programmi anche nei tag senza tempi)?"""
+    righe = [r for r in str(testo or "").splitlines() if r.strip() and not _LRC_META.match(r.strip())]
+    a_tempo = sum(1 for r in righe if _LRC_RIGA.match(r))
+    return a_tempo > 0 and a_tempo * 2 >= len(righe)
+
+
+# ----- il Lyricsfile di LRCLIB (YAML): l'unico posto dove LRCLIB ha i tempi delle parole -----
+
+_YAML_ESC = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r", "e": "\x1b",
+             "N": "\x85", "_": "\xa0", "L": " ", "P": " "}
+
+
+def _yaml_valore(v):
+    """Un valore semplice di YAML: 'tra apici', "tra virgolette" (con \\u…), senza niente; None se manca."""
+    v = v.strip()
+    m = re.match(r"'((?:[^']|'')*)'", v)
+    if m:
+        return m.group(1).replace("''", "'")
+    m = re.match(r'"((?:[^"\\]|\\.)*)"', v)
+    if m:
+        def esc(x):
+            c = x.group(1)
+            return chr(int(c[1:], 16)) if c[0] in "xuU" else _YAML_ESC.get(c, c)
+        return re.sub(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)", esc, m.group(1))
+    v = re.sub(r"\s+#.*$", "", v)
+    return None if v in ("", "~", "null") or v[:1] in "|>" else v
+
+
+def _yaml_ms(v):
+    try:
+        return int(float(_yaml_valore(v) or "x")) / 1000
+    except ValueError:
+        return None
+
+
+def leggi_lyricsfile(testo):
+    """Le righe del Lyricsfile di LRCLIB (lines: text, start_ms, end_ms, words: …), con le parole quando hanno tutte il
+    loro tempo. Si legge solo questa forma, riga per riga (niente YAML completo: la libreria standard non ce l'ha)."""
+    voci, riga, parola, liv, dentro = [], None, None, None, False
+    for raw in str(testo or "").splitlines():
+        s = raw.rstrip()
+        if not s.strip() or s.lstrip().startswith("#"):
+            continue
+        ind = len(s) - len(s.lstrip(" "))
+        s = s.strip()
+        if ind == 0 and not s.startswith("-"):
+            dentro = s.split(":", 1)[0].strip() == "lines"
+            continue
+        if not dentro:
+            continue
+        nuovo = s == "-" or s.startswith("- ")
+        if nuovo:
+            s, ind = s[1:].strip(), ind + 2
+        k, _, v = s.partition(":")
+        k = k.strip()
+        if liv is None and nuovo:
+            liv = ind
+        if liv is None:
+            continue
+        if ind <= liv:   # i campi della riga
+            if nuovo:
+                riga, parola = {"parole": []}, None
+                voci.append(riga)
+            if riga is None:
+                continue
+            if k == "text":
+                riga["testo"] = _yaml_valore(v)
+            elif k in ("start_ms", "end_ms"):
+                riga[k] = _yaml_ms(v)
+        elif riga is not None:   # una parola (dentro words:)
+            if nuovo:
+                parola = {}
+                riga["parole"].append(parola)
+            if parola is not None and k == "text":
+                parola["testo"] = _yaml_valore(v) or ""
+            elif parola is not None and k == "start_ms":
+                parola["t"] = _yaml_ms(v)
+    righe = []
+    for r in voci:
+        if r.get("start_ms") is None:
+            continue
+        p = r["parole"]
+        pezzi = _pezzi_riga([(x["t"], x.get("testo", "")) for x in p]) if p and all(x.get("t") is not None for x in p) else []
+        testo_riga = "".join(x for _, x in pezzi) if pezzi else _spazi("".join(x.get("testo", "") for x in p) if p else r.get("testo")).strip()
+        righe.append(_riga(r["start_ms"], testo_riga, pezzi, r.get("end_ms")))
+    righe.sort(key=lambda x: x["t"])
+    return righe
+
+
+# ----- testi dentro i file: ID3 (USLT, SYLT), MP4 (©lyr), FLAC (LYRICS) -----
+
+def _testi_decodifica(enc, b):
+    if enc in (1, 2):
+        return _utf16(b, enc == 2)
+    if enc == 3:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return b.decode("latin-1")
+
+
+def _testi_stringa(enc, b, i):
+    """(testo, posizione dopo il terminatore) della stringa ID3 che comincia in b[i]."""
+    if enc in (1, 2):
+        j = i
+        while j + 1 < len(b) and b[j:j + 2] != b"\x00\x00":
+            j += 2
+        return _utf16(b[i:j], enc == 2), j + 2
+    j = b.find(b"\x00", i)
+    j = len(b) if j < 0 else j
+    return _testi_decodifica(enc, b[i:j]), j + 1
+
+
+def _testi_sylt(voci):
+    """Le voci di un SYLT [(tempo, testo)] in righe: una voce per riga, oppure pezzi di riga (parole, sillabe) quando le
+    righe nuove cominciano con «\\n», come le scrivono i programmi per il karaoke."""
+    voci = [(t, x.replace("\r\n", "\n").replace("\r", "\n")) for t, x in voci]
+    a_capo = any(x.startswith("\n") for _, x in voci[1:]) or any(x.endswith("\n") for _, x in voci[:-1])
+    gruppi, chiusa = [], True
+    for t, x in voci:
+        if not a_capo or chiusa or x.startswith("\n"):
+            gruppi.append([])
+        chiusa = x.endswith("\n")
+        gruppi[-1].append((t, x.strip("\n")))
+    righe = []
+    for g in gruppi:
+        pezzi = _pezzi_riga(g)
+        righe.append(_riga(g[0][0], "".join(x for _, x in pezzi), pezzi))
+    righe.sort(key=lambda x: x["t"])
+    return righe
+
+
+def _testi_id3(f):
+    """Testi nei tag ID3: (righe a tempo da SYLT, [testi da USLT])."""
+    h = f.read(10)
+    if len(h) < 10 or h[:3] != b"ID3":
+        return [], []
+    v, fl, size = h[3], h[5], _ss32(h, 6)
+    d = f.read(size)
+    if fl & 0x80 and v < 4:
+        d = _unsync(d)
+    p = 0
+    if fl & 0x40 and v >= 3:
+        p = _ss32(d) if v == 4 else struct.unpack(">I", d[:4])[0] + 4
+    hs, sylt, uslt = (6 if v == 2 else 10), [], []
+    while p + hs <= len(d):
+        if v == 2:
+            fid, sz = d[p:p + 3].decode("latin-1"), int.from_bytes(d[p + 3:p + 6], "big")
+        else:
+            fid = d[p:p + 4].decode("latin-1")
+            sz = _ss32(d, p + 4) if v == 4 else struct.unpack(">I", d[p + 4:p + 8])[0]
+        if not re.fullmatch(r"[A-Z0-9]{3,4}", fid) or sz <= 0 or p + hs + sz > len(d):
+            break
+        fr = d[p + hs:p + hs + sz]
+        if v == 4:
+            if d[p + 9] & 0x02:
+                fr = _unsync(fr)
+            if d[p + 9] & 0x01:
+                fr = fr[4:]
+        if fid in ("USLT", "ULT") and len(fr) > 4:
+            _, i = _testi_stringa(fr[0], fr, 4)   # dopo lingua e descrizione
+            x = _testi_decodifica(fr[0], fr[i:]).replace("\x00", "")
+            if x.strip():
+                uslt.append(x)
+        elif fid in ("SYLT", "SLT") and len(fr) > 6 and not sylt and fr[4] in (1, 2) and fr[5] <= 2:
+            enc, fmt = fr[0], fr[4]
+            _, i = _testi_stringa(enc, fr, 6)
+            voci = []
+            while i < len(fr):
+                x, i = _testi_stringa(enc, fr, i)
+                if i + 4 > len(fr):
+                    break
+                n = struct.unpack(">I", fr[i:i + 4])[0]
+                i += 4
+                voci.append((n / 1000 if fmt == 2 else n * 1152 / 44100, x))   # millisecondi o fotogrammi MPEG
+            if voci:
+                sylt = _testi_sylt(voci)
+        p += hs + sz
+    return sylt, uslt
+
+
+def _testi_mp4(f):
+    """Il testo (©lyr) di un M4A/MP4, o ''."""
+    h = f.read(8)
+    if len(h) < 8 or h[4:8] != b"ftyp":
+        return ""
+    f.seek(0, 2)
+    fine, off = f.tell(), 0
+    for _ in range(200):
+        if off + 8 > fine:
+            break
+        f.seek(off)
+        b = f.read(16)
+        sz, hs = struct.unpack(">I", b[:4])[0], 8
+        if sz == 1 and len(b) >= 16:
+            sz, hs = struct.unpack(">Q", b[8:16])[0], 16
+        elif sz == 0:
+            sz = fine - off
+        if sz < 8:
+            break
+        if b[4:8] == b"moov":
+            if sz > 64_000_000:
+                return ""
+            f.seek(off + hs)
+            moov = f.read(sz - hs)
+            i = moov.find(b"\xa9lyr")
+            while i >= 4:
+                d = moov[i + 4:i - 4 + struct.unpack(">I", moov[i - 4:i])[0]]
+                if d[4:8] == b"data":
+                    return d[16:struct.unpack(">I", d[:4])[0]].decode("utf-8", "replace")
+                i = moov.find(b"\xa9lyr", i + 4)
+            return ""
+        off += sz
+    return ""
+
+
+def _testi_flac(f):
+    """[testi] dai commenti di un FLAC: SYNCEDLYRICS, LYRICS, UNSYNCEDLYRICS."""
+    if f.read(4) != b"fLaC":
+        return []
+    for _ in range(64):
+        h = f.read(4)
+        if len(h) < 4:
+            break
+        ultimo, tipo, lun = h[0] & 0x80, h[0] & 0x7F, int.from_bytes(h[1:4], "big")
+        if tipo != 4:
+            f.seek(lun, 1)
+        else:
+            d = f.read(lun)
+            p = 4 + struct.unpack("<I", d[:4])[0]
+            n, p, testi = struct.unpack("<I", d[p:p + 4])[0], p + 4, {}
+            for _ in range(n):
+                if p + 4 > len(d):
+                    break
+                lc = struct.unpack("<I", d[p:p + 4])[0]
+                k, _, v = d[p + 4:p + 4 + lc].decode("utf-8", "replace").partition("=")
+                p += 4 + lc
+                testi.setdefault(k.strip().upper(), v)
+            return [testi[k] for k in ("SYNCEDLYRICS", "LYRICS", "UNSYNCEDLYRICS") if testi.get(k, "").strip()]
+        if ultimo:
+            break
+    return []
+
+
+def _testi_risposta(righe, fonte, sincronizzato):
+    return {"stato": "ok", "sincronizzato": sincronizzato, "parole": any("parole" in r for r in righe), "fonte": fonte,
+            "righe": righe}
+
+
+def _testo_lrc_accanto(percorso):
+    """Il testo del file .lrc accanto al brano (stesso nome, come lo salvano i programmi per il karaoke), o ''."""
+    base = os.path.splitext(percorso)[0]
+    for est in (".lrc", ".LRC", ".Lrc"):
+        try:
+            if os.path.getsize(base + est) > TESTI_MAX_LRC:
+                continue
+            with open(base + est, "rb") as f:
+                b = f.read()
+        except OSError:
+            continue
+        try:
+            return b.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return b.decode("latin-1")
+    return ""
+
+
+def testi_dal_file(percorso):
+    """Il testo del brano in un file .lrc accanto o scritto dentro il file (la risposta di api/extra/testi), o None.
+    Vince quello a tempo: prima il .lrc, poi SYLT, poi un tag scritto in formato LRC; senza tempi prima il .lrc."""
+    accanto = _testo_lrc_accanto(percorso)
+    accanto = [accanto] if accanto.strip() else []
+    try:
+        with open(percorso, "rb") as f:
+            sylt, testi = _testi_id3(f)
+            if not sylt and not testi:
+                f.seek(0)
+                testi = [x for x in [_testi_mp4(f)] if x.strip()]
+            if not sylt and not testi:
+                f.seek(0)
+                testi = _testi_flac(f)
+    except (OSError, ValueError, struct.error, IndexError):
+        if not accanto:
+            return None
+        sylt, testi = [], []
+    righe = leggi_lrc(accanto[0]) if accanto and _e_lrc(accanto[0]) else []
+    if any(r["testo"] for r in righe):
+        return _testi_risposta(righe, "file", True)
+    if any(r["testo"] for r in sylt):
+        return _testi_risposta(sylt, "file", True)
+    semplici = None
+    for x in accanto + testi:
+        righe = leggi_lrc(x) if _e_lrc(x) else []
+        if any(r["testo"] for r in righe):
+            return _testi_risposta(righe, "file", True)
+        semplici = semplici or testi_semplici(x)
+    return _testi_risposta(semplici, "file", False) if semplici else None
+
+
+# ----- LRCLIB -----
+
+def _lrclib_chiedi(percorso, parametri, riprova=True, sfondo=False):
+    """Il JSON di LRCLIB; None se non ha il brano (404). ErroreExtra 503 se non risponde. Una risposta «occupato» (429,
+    5xx) si riprova una volta; un sito che non risponde no (il telefono aspetterebbe troppo). Con sfondo (il lavoro su
+    tutta la libreria) prima passano le ricerche chieste dall'app."""
+    base = (os.environ.get("ATLANTE_LRCLIB") or TESTI_LRCLIB).rstrip("/")   # le prove usano un LRCLIB finto
+    url = base + percorso + "?" + urlencode(parametri)
+    req = urllib.request.Request(url, headers={"User-Agent": _agente_testi(), "Accept": "application/json"})
+    while sfondo and _TESTI_APP[0] > 0:
+        time.sleep(0.05)
+    with _TESTI_BLOCCO:
+        attesa = _TESTI_ULTIMA[0] + max(0.0, _numero_ambiente("ATLANTE_LRCLIB_INTERVALLO", TESTI_INTERVALLO)) - time.time()
+        if attesa > 0:   # al più una al secondo (le prove: ATLANTE_LRCLIB_INTERVALLO=0)
+            time.sleep(min(attesa, TESTI_INTERVALLO * 5))
+        _TESTI_ULTIMA[0] = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=TESTI_TEMPO, context=_ssl() if url.startswith("https:") else None) as r:
+                return json.loads(r.read(TESTI_MAX).decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if not (riprova and (e.code == 429 or e.code >= 500)):
+                raise ErroreExtra(503, "Il sito dei testi (LRCLIB) ha risposto con un errore (%d): riprova più tardi" % e.code)
+        except (OSError, ValueError, http.client.HTTPException):
+            raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova più tardi")
+    time.sleep(TESTI_PAUSA)   # «occupato»: si riprova una volta, senza tenere il lucchetto
+    return _lrclib_chiedi(percorso, parametri, False, sfondo)
+
+
+def _lrclib_scarto(v, durata):
+    try:
+        return abs(float(v.get("duration") or 0) - durata) if durata and v.get("duration") else 0.0
+    except (TypeError, ValueError):
+        return 1e9
+
+
+def _lrclib_voce(v, durata):
+    """Quello che si tiene nella cache di una voce di LRCLIB: il testo a tempo solo se la durata coincide."""
+    if v.get("instrumental"):
+        return {"stato": "strumentale"}
+    lrc, rec = v.get("syncedLyrics") or "", {"stato": "ok", "id": v.get("id"), "durata": v.get("duration")}
+    if lrc.strip() and _lrclib_scarto(v, durata) <= TESTI_SCARTO:
+        rec["lrc"] = lrc
+        if v.get("hasWordSync") and v.get("lyricsfile"):
+            rec["lyricsfile"] = v["lyricsfile"]
+    rec["semplice"] = v.get("plainLyrics") or "\n".join(r["testo"] for r in leggi_lrc(lrc))
+    return rec if rec.get("lrc") or rec["semplice"].strip() else {"stato": "nessuno"}
+
+
+def _lrclib_stesso(v, titolo, artista):
+    """Una voce della ricerca è proprio questo brano (stesso titolo, «(Live)» e ospiti a parte, e stesso artista)?"""
+    if _cl_titolo(v.get("trackName")) != _cl_titolo(titolo):
+        return False
+    a = _cl_principale(artista)
+    return not a or a in _cl_semplice(v.get("artistName"))
+
+
+def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
+    p = {"track_name": titolo, "artist_name": artista}
+    if album:
+        p["album_name"] = album
+    if durata:
+        p["duration"] = str(int(round(durata)))
+    v = _lrclib_chiedi("/api/get", p, sfondo=sfondo) if artista else None
+    v = v if isinstance(v, dict) else None
+    if v and (v.get("syncedLyrics") or v.get("instrumental")):
+        return _lrclib_voce(v, durata)
+    q = {"track_name": _titolo_pulito(titolo) or titolo}
+    if artista:
+        q["artist_name"] = _primo_artista(artista) or artista
+    trovati = _lrclib_chiedi("/api/search", q, sfondo=sfondo)
+    voci = [x for x in ([v] if v else []) + (trovati if isinstance(trovati, list) else [])
+            if isinstance(x, dict) and (x is v or _lrclib_stesso(x, titolo, artista))]
+    vicino = lambda x: _lrclib_scarto(x, durata)   # noqa: E731
+    for buona in ([x for x in voci if (x.get("syncedLyrics") or "").strip() and vicino(x) <= TESTI_SCARTO],
+                  [x for x in voci if x.get("instrumental") and vicino(x) <= TESTI_SCARTO],
+                  [x for x in voci if (x.get("plainLyrics") or x.get("syncedLyrics") or "").strip()]):
+        if buona:
+            return _lrclib_voce(min(buona, key=vicino), durata)
+    return {"stato": "nessuno"}
+
+
+def _testi_lrclib(titolo, artista, album, durata, sfondo=False):
+    """La voce di LRCLIB per il brano, dalla cache del Mac se c'è. Con sfondo: per il lavoro su tutta la libreria, che
+    lascia passare prima le ricerche dell'app."""
+    chiave = hashlib.sha1(json.dumps([_cl_semplice(artista), _cl_semplice(titolo), _cl_semplice(album),
+                                      int(round(durata or 0))]).encode("utf-8")).hexdigest()[:24]
+    file = os.path.join(_cart("cache"), "testi", chiave + ".json")
+
+    def dalla_cache():
+        rec = _leggi_json(file, None)
+        if isinstance(rec, dict) and rec.get("stato") in ("ok", "strumentale"):
+            return rec
+        if isinstance(rec, dict) and rec.get("stato") == "nessuno" and time.time() - (rec.get("quando") or 0) < TESTI_NESSUNO:
+            return rec
+        return None
+    rec = dalla_cache()
+    if rec:
+        return rec
+    if time.time() - _TESTI_ERRORI.get(chiave, 0) < TESTI_ERRORE:
+        raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova tra un minuto")
+    with _TESTI_APP_BLOCCO:
+        blocco = _TESTI_CHIAVI.setdefault(chiave, threading.Lock())
+        if not sfondo:
+            _TESTI_APP[0] += 1
+    try:
+        with blocco:
+            rec = dalla_cache()   # un altro dispositivo (o il lavoro in sottofondo) l'ha appena chiesto
+            if rec:
+                return rec
+            return _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo)
+    finally:
+        if not sfondo:
+            with _TESTI_APP_BLOCCO:
+                _TESTI_APP[0] -= 1
+
+
+def _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo):
+    """La ricerca su LRCLIB di un brano che non è nella cache del Mac, e la sua risposta messa nella cache."""
+    try:
+        rec = _lrclib_cerca(titolo, artista, album, durata, sfondo)
+    except ErroreExtra:
+        _TESTI_ERRORI[chiave] = time.time()
+        raise
+    _TESTI_ERRORI.pop(chiave, None)
+    rec.update(quando=int(time.time()), brano={"titolo": titolo, "artista": artista, "album": album, "durata": durata})
+    try:
+        _scrivi_json(file, rec)
+    except OSError as e:   # disco pieno: il testo si dà lo stesso, la prossima volta si richiede
+        print("Atlante: testo non salvato: %s" % e, flush=True)
+    return rec
+
+
+def _testi_da_lrclib(rec):
+    if rec.get("stato") != "ok":
+        return {"stato": rec.get("stato") or "nessuno"}
+    righe = leggi_lyricsfile(rec["lyricsfile"]) if rec.get("lyricsfile") else []
+    if not any("parole" in r for r in righe):
+        righe = leggi_lrc(rec.get("lrc"))
+    if any(r["testo"] for r in righe):
+        return _testi_risposta(righe, "lrclib", True)
+    righe = testi_semplici(rec.get("semplice"))
+    return _testi_risposta(righe, "lrclib", False) if righe else {"stato": "nessuno"}
+
+
+def testi_brano(titolo, artista, album, durata, percorso=None, sfondo=False):
+    """Il testo del brano: a tempo dal file, a tempo da LRCLIB, senza tempi dal file, senza tempi da LRCLIB. Con sfondo:
+    per il lavoro su tutta la libreria (l'app passa prima)."""
+    nel_file = _con_limite(lambda: testi_dal_file(percorso), 5) if percorso else None   # disco USB bloccato: si va oltre
+    if nel_file and nel_file["sincronizzato"]:
+        return nel_file
+    try:
+        da_rete = _testi_da_lrclib(_testi_lrclib(titolo, artista, album, durata, sfondo))
+    except ErroreExtra:
+        if nel_file:
+            return nel_file
+        raise
+    return da_rete if da_rete.get("sincronizzato") or not nel_file else nel_file
+
+
+# ----- testi sincronizzati: parole a tempo, lingua e risposta per l'app -----
+
+def _righe_interne(righe):
+    """Le righe dell'app ([{t, testo, fine?, parole?:[{t, testo, fine?}]}]) nella forma con cui si calcolano i tempi:
+    [{t, f, x, p: [[inizio, fine, pezzo], ...]}], None dove il tempo non si sa."""
+    return [{"t": r.get("t"), "f": r.get("fine"), "x": r.get("testo") or "",
+             "p": [[w.get("t"), w.get("fine"), w.get("testo") or ""] for w in r.get("parole") or []]} for r in righe]
+
+
+def _righe_app(righe):
+    """Dalle righe dei calcoli a quelle dell'app: le parole quando sono più d'una e hanno tutte il tempo; la fine di una
+    parola solo se prima della successiva c'è una pausa (se no è l'inizio della successiva)."""
+    out = []
+    for r in righe:
+        o = {"t": None if r.get("t") is None else round(r["t"], 3), "testo": r.get("x") or ""}
+        p = r.get("p") or []
+        if len(p) > 1 and all(x[0] is not None for x in p):
+            o["parole"] = []
+            for k, (a, f, w) in enumerate(p):
+                parola = {"t": round(a, 3), "testo": w}
+                if k + 1 < len(p) and f is not None and f < p[k + 1][0] - 0.05:
+                    parola["fine"] = round(f, 3)
+                o["parole"].append(parola)
+        if o["t"] is not None and r.get("f") is not None and r["f"] > o["t"]:
+            o["fine"] = round(r["f"], 3)
+        out.append(o)
+    return out
+
+
+def _impronta_testi(x):
+    return hashlib.sha1(json.dumps(x, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _testi_della_risposta(r):
+    """Le righe con le parole di una risposta, senza quelle vuote delle pause."""
+    return [x["testo"] for x in r.get("righe") or [] if x.get("testo")]
+
+
+def _stima_parole(righe, durata):
+    """Le parole delle righe a tempo che non le hanno, stimate dentro la riga dalle sillabe: la luce scorre anche prima
+    che Whisper abbia ascoltato il brano. La fine della riga resta solo se la dà la fonte: una fine stimata farebbe
+    apparire i puntini della pausa mentre la riga si canta ancora. True se ne ha stimata almeno una."""
+    stimare = [k for k, r in enumerate(righe) if r.get("t") is not None and r.get("testo") and not r.get("parole")]
+    if not stimare:
+        return False
+    interne = _righe_interne(righe)
+    completa_tempi(interne, durata or None)
+    for k, r in zip(stimare, _righe_app([interne[k] for k in stimare])):
+        r.pop("fine", None)
+        if righe[k].get("fine") is not None:
+            r["fine"] = righe[k]["fine"]
+        righe[k] = r
+    return True
+
+
+# --- lingua di un testo ---
+
+_LINGUE_PAROLE = {
+    "it": "il lo la gli le un una di che non per con sono mi ti si ma come io tu noi voi del della nel quando ancora "
+          "perché sei mio mia cuore amore più tutto anche questa questo",
+    "en": "the and you i to a of in it is that me my your we for on be love don't it's i'm can no oh what all "
+          "just know when baby like never",
+    "es": "el la que de y los las en un una no me te mi tu por con para es lo se como más yo quiero corazón "
+          "amor pero cuando todo",
+    "fr": "le la les de des et un une je tu il elle que qui pas pour dans ne mon ton est c'est j'ai moi toi "
+          "mais avec tout sur",
+    "de": "der die das und ich du nicht ist ein eine mit zu mich dich mein dein wir auf es sie nur noch "
+          "wie bin",
+    "pt": "o a os as de que e não um uma eu você meu minha com para no na é se do da mais quando coração",
+}
+_LINGUE_INSIEMI = {k: set(v.split()) for k, v in _LINGUE_PAROLE.items()}
+
+
+def lingua_testo(x):
+    """La lingua di un testo («it», «en», …), dalla scrittura o dalle parole più comuni; "" se non si capisce."""
+    x = str(x or "")
+    if not x.strip():
+        return ""
+    if re.search(r"[぀-ヿ]", x):
+        return "ja"
+    if re.search(r"[가-힯]", x):
+        return "ko"
+    if re.search(r"[一-鿿]", x):
+        return "zh"
+    conta = lambda r: len(re.findall(r, x))   # noqa: E731
+    lettere = max(1, conta(r"\w"))
+    for rx, l in ((r"[Ѐ-ӿ]", "ru"), (r"[Ͱ-Ͽ]", "el"), (r"[؀-ۿ]", "ar"),
+                  (r"[֐-׿]", "he"), (r"[ऀ-ॿ]", "hi"), (r"[฀-๿]", "th")):
+        if conta(rx) > lettere * 0.3:
+            return "uk" if l == "ru" and re.search(r"[іїєґ]", x.lower()) else l
+    parole = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", x.lower())
+    if not parole:
+        return ""
+    punti = {k: sum(1 for w in parole if w in s) for k, s in _LINGUE_INSIEMI.items()}
+    migliore = max(punti, key=punti.get)
+    seconda = max(v for k, v in punti.items() if k != migliore)
+    if punti[migliore] >= 3 and punti[migliore] >= seconda * 1.25:
+        return migliore
+    return ""
+
+
+# --- tempi delle parole: stima, completamento e allineamento con la voce ---
+
+SILLABA = 0.28                   # secondi per sillaba cantata (a occhio): per stimare le parole senza tempi
+_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
+_VOC = re.compile(r"[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]+", re.I)
+
+
+def _pezzi(x):
+    """Le parole di una riga, ognuna con lo spazio che la segue (unite ridanno la riga). Cinese e giapponese, che non
+    hanno spazi: un carattere alla volta."""
+    x = " ".join(str(x or "").split())
+    if _CJK.search(x) and x.count(" ") * 6 < len(x):
+        out = []
+        for c in x:
+            if c.isspace():
+                if out:
+                    out[-1] += c
+            else:
+                out.append(c)
+        return out
+    return re.findall(r"\S+\s*", x)
+
+
+def _peso(w):
+    """Quanto dura un pezzo cantato, in sillabe (gruppi di vocali), almeno 1; la punteggiatura in fondo è un respiro."""
+    s = float(max(1, len(_VOC.findall(w))))
+    if re.search(r"[,;:]\s*$", w):
+        s += 0.5
+    elif re.search(r"[.!?…]\s*$", w):
+        s += 1.0
+    return s
+
+
+def _distribuisci(pezzi, da, a, t_da, t_a, pesi):
+    """Inizi dei pezzi da..a-1 tra t_da e t_a (l'inizio del pezzo a), in proporzione ai pesi."""
+    tot = sum(pesi[da:a]) or 1.0
+    t = t_da
+    for k in range(da, a):
+        pezzi[k][0] = round(t, 3)
+        t += (t_a - t_da) * pesi[k] / tot
+
+
+def _riempi(pezzi, t0, limite):
+    """Completa i tempi dei pezzi di una riga ([inizio, fine, testo], alcuni inizi noti): tra due inizi noti in
+    proporzione alle sillabe; prima del primo dall'inizio della riga t0; dopo l'ultimo al passo del canto, senza
+    passare «limite» (la riga dopo o la fine del brano). Se c'è molto spazio (pausa, assolo) la riga dura quanto le
+    sue sillabe. Le fini mancanti sono l'inizio del pezzo dopo."""
+    n = len(pezzi)
+    if not n:
+        return
+    pesi = [_peso(w) for _, _, w in pezzi]
+    noti = [k for k in range(n) if pezzi[k][0] is not None]
+    if not noti:
+        if t0 is None:
+            return
+        pezzi[0][0], noti = round(t0, 3), [0]
+    passo = SILLABA   # secondi per sillaba: quello della riga stessa se ha almeno due tempi noti
+    if len(noti) >= 2 and sum(pesi[noti[0]:noti[-1]]) > 0 and pezzi[noti[-1]][0] > pezzi[noti[0]][0]:
+        passo = min(0.6, max(0.1, (pezzi[noti[-1]][0] - pezzi[noti[0]][0]) / sum(pesi[noti[0]:noti[-1]])))
+    k0 = noti[0]
+    if k0 > 0:
+        fine = pezzi[k0][0]
+        naturale = sum(pesi[:k0]) * passo
+        inizio = t0 if t0 is not None and fine - naturale * 2.5 <= t0 < fine else fine - naturale
+        _distribuisci(pezzi, 0, k0, max(0.0, inizio), fine, pesi)
+    for a, b in zip(noti, noti[1:]):
+        if b - a > 1:
+            _distribuisci(pezzi, a, b, pezzi[a][0], pezzi[b][0], pesi)
+    kl = noti[-1]
+    t, naturale = pezzi[kl][0], sum(pesi[kl:]) * passo + 0.25
+    # la fine della riga data dalla fonte (anche quando l'inizio dell'ultimo pezzo non si sa ancora)
+    data = pezzi[-1][1] if pezzi[-1][1] is not None and pezzi[-1][1] > t else None
+    if data is not None:
+        fine = data
+    elif limite is not None and limite > t:
+        spazio = limite - t - 0.05
+        fine = t + (spazio if spazio <= naturale * 1.8 else naturale * 1.25)
+    else:
+        fine = t + naturale
+    fine = max(fine, t + 0.08 * (n - kl))
+    if kl < n - 1:
+        _distribuisci(pezzi, kl, n, t, fine, pesi)
+    for k in range(n):
+        dopo = pezzi[k + 1][0] if k + 1 < n else fine
+        if pezzi[k][1] is None or pezzi[k][1] <= pezzi[k][0] or pezzi[k][1] > dopo + 0.001:
+            pezzi[k][1] = round(max(dopo, pezzi[k][0] + 0.05), 3)
+
+
+def _inizio_riga(r):
+    """Quando comincia una riga: il suo tempo, o quello del primo pezzo che ce l'ha (None se non si sa)."""
+    if r.get("t") is not None:
+        return r["t"]
+    return next((p[0] for p in r.get("p") or [] if p[0] is not None), None)
+
+
+def completa_tempi(righe, durata=None):
+    """Tempi di ogni pezzo delle righe che hanno un tempo (o pezzi a tempo); le righe senza pezzi li prendono dal testo.
+    Ogni riga ha poi «t» = inizio del primo pezzo e «f» = fine dell'ultimo."""
+    for k, r in enumerate(righe):
+        if not r.get("x"):
+            r["p"] = []
+            continue
+        if not r.get("p"):
+            r["p"] = [[None, None, w] for w in _pezzi(r["x"])]
+        if r.get("t") is None and all(p[0] is None for p in r["p"]):
+            continue
+        dopo = next((t for t in (_inizio_riga(x) for x in righe[k + 1:]) if t is not None), None)
+        limite = dopo if dopo is not None else (durata or None)
+        if r.get("f") is not None and (limite is None or r["f"] < limite) and r["p"][-1][1] is None \
+                and r["f"] > (r.get("t") or 0):
+            r["p"][-1][1] = r["f"]   # la fine della riga data dalla fonte
+        _riempi(r["p"], r.get("t"), limite)
+        r["t"], r["f"] = r["p"][0][0], r["p"][-1][1]
+
+
+def _chiave_parola(w):
+    s = unicodedata.normalize("NFD", str(w or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[\W_]+", "", s)
+
+
+def _somiglianza_parole(a, b, memo):
+    if a == b:
+        return 1.0
+    if len(a) < 3 or len(b) < 3 or abs(len(a) - len(b)) > max(len(a), len(b)) // 2:
+        return 0.0
+    k = (a, b)
+    v = memo.get(k)
+    if v is None:
+        v = memo[k] = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    return v
+
+
+def allinea_parole(righe, sentite, a_tempo):
+    """Dà ai pezzi delle righe il tempo delle parole sentite da Whisper ([(inizio, fine, parola)], in ordine):
+    allineamento di tutto il testo con tutte le parole sentite (un LCS pesato sulla somiglianza delle parole, che
+    regge le parole capite male e quelle inventate). Con le righe a tempo (LRC) una parola si abbina solo a quelle
+    sentite vicino alla sua riga: così i ritornelli uguali vanno al posto giusto. Solo i tempi abbinati vanno nei
+    pezzi (in ordine crescente dentro la riga); il resto lo fa completa_tempi. Restituisce la quota di parole del
+    testo abbinate (0..1)."""
+    L = []
+    for k, r in enumerate(righe):
+        lo = hi = None
+        if a_tempo and r.get("t") is not None:
+            dopo = next((x["t"] for x in righe[k + 1:] if x.get("t") is not None), None)
+            lo, hi = r["t"] - 1.5, (dopo if dopo is not None else r["t"] + 30) + 1.0
+        for j, p in enumerate(r.get("p") or []):
+            c = _chiave_parola(p[2])
+            if c:
+                L.append((k, j, c, lo, hi))
+    R = [(float(t), _chiave_parola(w)) for t, _f, w in sentite]
+    R = [x for x in R if x[1]]
+    n, m = len(L), len(R)
+    if not n or not m:
+        return 0.0
+    memo, prima, mosse = {}, [0.0] * (m + 1), []
+    for i in range(1, n + 1):
+        _k, _j, c, lo, hi = L[i - 1]
+        ora, mv = [0.0] * (m + 1), bytearray(m + 1)
+        for j in range(1, m + 1):
+            best, x = prima[j], 0                 # 0: la parola del testo non è stata sentita
+            if ora[j - 1] > best:
+                best, x = ora[j - 1], 1           # 1: parola sentita in più (inventata o ripetuta)
+            t, cr = R[j - 1]
+            if lo is None or lo <= t <= hi:
+                s = _somiglianza_parole(c, cr, memo)
+                if s >= 0.67 and prima[j - 1] + s > best:
+                    best, x = prima[j - 1] + s, 2  # 2: la stessa parola
+            ora[j], mv[j] = best, x
+        mosse.append(mv)
+        prima = ora
+    i, j, coppie = n, m, []
+    while i > 0 and j > 0:
+        x = mosse[i - 1][j]
+        if x == 2:
+            coppie.append((i - 1, j - 1))
+            i, j = i - 1, j - 1
+        elif x == 1:
+            j -= 1
+        else:
+            i -= 1
+    per_riga = {}
+    for i, j in reversed(coppie):
+        per_riga.setdefault(L[i][0], []).append((L[i][1], R[j][0]))
+    usate = 0
+    for k, r in enumerate(righe):
+        for p in r.get("p") or []:
+            p[0] = p[1] = None
+        ultimo = -1.0
+        for j, t in per_riga.get(k, []):
+            if t > ultimo + 0.04:   # dentro la riga i tempi crescono: un abbinamento fuori ordine si scarta
+                r["p"][j][0], ultimo = round(t, 3), t
+                usate += 1
+        if per_riga.get(k):
+            r["t"] = None if not a_tempo else r.get("t")
+    return usate / float(n)
+
+
+def tempi_righe_libere(righe):
+    """Testo senza tempi allineato alla voce: le righe senza nessuna parola sentita prendono il tempo tra quelle vicine,
+    in proporzione alle sillabe; prima della prima e dopo l'ultima, al passo del canto."""
+    noti = [k for k, r in enumerate(righe) if r.get("x") and any(p[0] is not None for p in r.get("p") or [])]
+    if not noti:
+        return
+    pesi = [sum(_peso(w) for w in _pezzi(r.get("x"))) if r.get("x") else 0.0 for r in righe]
+    inizio = lambda k: next(p[0] for p in righe[k]["p"] if p[0] is not None)   # noqa: E731
+    for a, b in zip(noti, noti[1:]):
+        if b - a > 1:
+            ta, tb = inizio(a), inizio(b)
+            tot = sum(pesi[a:b]) or 1.0
+            t = ta
+            for k in range(a, b):
+                if k != a and righe[k].get("x"):
+                    righe[k]["t"] = round(t, 3)
+                t += (tb - ta) * pesi[k] / tot
+    t = inizio(noti[0])
+    for k in range(noti[0] - 1, -1, -1):
+        if righe[k].get("x"):
+            t -= pesi[k] * SILLABA + 0.3
+            righe[k]["t"] = round(max(0.0, t), 3)
+    ultima = righe[noti[-1]]["p"]
+    t = max(p[0] for p in ultima if p[0] is not None) + _peso(ultima[-1][2]) * SILLABA + 0.3
+    for k in range(noti[-1] + 1, len(righe)):
+        if righe[k].get("x"):
+            righe[k]["t"] = round(t, 3)
+            t += pesi[k] * SILLABA + 0.3
+    for k in noti:
+        righe[k]["t"] = None
+
+
+# ----- parole dalla voce: Whisper (whisper.cpp) sul Mac -----
+
+TESTI_V = 1                      # schede e lavoro di Whisper: cambia quando cambia il modo di fare le parole (si rifà)
+TESTI_RIPROVA = 30 * 86400       # lavoro su tutta la libreria: un brano senza testo si cerca di nuovo dopo un mese
+TESTI_RIPROVA_ERRORE = 3600      # LRCLIB o la rete non rispondevano: dopo un'ora
+TESTI_PAUSA_RETE = 600           # LRCLIB non risponde: il lavoro su tutta la libreria aspetta 10 minuti
+TESTI_RIPOSO = 900
+# schede sul disco al più una volta al minuto: con 6000 brani il file pesa 1 MB e il disco interno non si consuma; dopo un
+# arresto si rifà al più un minuto di ricerca, dalla cache di LRCLIB
+TESTI_SALVA = 60.0
+TESTI_NICE = 15                  # ffmpeg, Whisper e Homebrew dopo tutto il resto (server, app, scaricamenti)
+WHISPER_MODELLO = "large-v3-turbo-q5_0"
+WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%s.bin"
+WHISPER_TEMPO = 1800             # un brano al più mezz'ora (Mac occupato?)
+WHISPER_RIPROVA = 6 * 3600       # installazione o modello non riusciti: si riprova dopo sei ore
+WHISPER_ERRORI = 3               # un brano che fa fallire Whisper tre volte si lascia stare (fino a un file nuovo)
+WHISPER_DI_FILA = 3              # tre brani di fila che non riescono: è il Mac, non i brani (non contano e Whisper aspetta)
+WHISPER_RIPROVA_BREVE = 300      # Homebrew occupato da un'altra installazione: si riprova dopo 5 minuti
+WHISPER_SPAZIO_MIN = 2.0         # GB che devono restare liberi dopo lo scaricamento del modello (ATLANTE_WHISPER_SPAZIO_MIN_GB)
+WHISPER_MB = 600                 # quanto pesa il modello, prima che il sito lo dica (574 MB)
+TESTI_PAUSA_VOCE = 600           # un errore di tutto il Mac (disco scollegato, ffmpeg rotto, rete giù): Whisper aspetta 10 min
+# I tempi DTW di whisper.cpp arrivano in ritardo di circa 0,19 s sull'attacco vero della parola (misurato il 27/10 con
+# large-v3-turbo-q5_0 su una canzone di prova con i tempi noti: ritardo mediano 0,19 s, scarto 0,06 s): si anticipano
+WHISPER_ANTICIPO = 0.18
+ALLINEA_MINIMO = 0.3             # sotto questa quota di parole riconosciute le parole restano stimate
+MYMEMORY_BASE = "https://api.mymemory.translated.net"
+TRAD_RIPROVA = 600               # traduzione non riuscita: l'app la può richiedere dopo 10 minuti
+TRAD_CODA_MAX = 50               # traduzioni in coda al più (chi apre tanti testi non riempie il Mac di lavoro)
+TRAD_PER_PERSONA = 3             # e al più 3 brani a testa
+
+# lingue della traduzione: codice → (nome nella lingua stessa, nome in inglese per l'IA)
+LINGUE_TRAD = {
+    "it": ("Italiano", "Italian"), "en": ("English", "English"), "es": ("Español", "Spanish"),
+    "fr": ("Français", "French"), "de": ("Deutsch", "German"), "pt": ("Português", "Portuguese"),
+    "nl": ("Nederlands", "Dutch"), "ca": ("Català", "Catalan"), "ro": ("Română", "Romanian"),
+    "pl": ("Polski", "Polish"), "cs": ("Čeština", "Czech"), "hu": ("Magyar", "Hungarian"),
+    "sv": ("Svenska", "Swedish"), "da": ("Dansk", "Danish"), "no": ("Norsk", "Norwegian"), "fi": ("Suomi", "Finnish"),
+    "el": ("Ελληνικά", "Greek"), "tr": ("Türkçe", "Turkish"), "ru": ("Русский", "Russian"),
+    "uk": ("Українська", "Ukrainian"), "hr": ("Hrvatski", "Croatian"), "sq": ("Shqip", "Albanian"),
+    "ar": ("العربية", "Arabic"), "he": ("עברית", "Hebrew"), "hi": ("हिन्दी", "Hindi"), "zh": ("中文", "Chinese"),
+    "ja": ("日本語", "Japanese"), "ko": ("한국어", "Korean"), "vi": ("Tiếng Việt", "Vietnamese"),
+    "id": ("Bahasa Indonesia", "Indonesian"), "th": ("ไทย", "Thai"),
+}
+
+
+class ErroreTesti(Exception):
+    """Whisper, ffmpeg o il traduttore non riescono: si riprova più tardi."""
+
+
+class ErroreMac(ErroreTesti):
+    """Un errore di tutto il Mac, non del brano (disco della musica scollegato, ffmpeg o Whisper che non partono, disco
+    pieno, rete giù): non conta contro il brano, e Whisper aspetta un po' per tutti."""
+
+
+class ErroreBreve(ErroreTesti):
+    """Si riprova tra pochi minuti, non tra ore (Homebrew occupato da un'altra installazione)."""
+
+
+class Pausa(Exception):
+    """Il lavoro sui testi messo in pausa da Gestione a metà di un brano: il brano resta da fare, non è un errore."""
+
+
+def _agente_testi():
+    return "AtlanteMusica/1.0 (%s)" % MB_CONTATTO
+
+
+# I programmi pesanti partiti per i testi (ffmpeg, whisper-cli, brew): ognuno ha un gruppo di processi suo e un file in
+# <cache>/testi/figli con il suo numero e l'ora in cui è partito. Un server fermato con SIGTERM li ferma prima di uscire;
+# dopo un arresto brusco (SIGKILL, il Mac spento) li ferma il server nuovo all'avvio: niente orfani, niente due Whisper
+# sullo stesso brano.
+_FIGLI = {"dir": None, "vivi": {}, "fine": False}   # fine: il server sta uscendo (un figlio fermato non è un errore)
+
+
+def _avvio_processo(pid):
+    """Quando è partito un processo, come lo dice ps: distingue il nostro da un altro nato dopo con lo stesso numero."""
+    try:
+        r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+        return r.stdout.decode("utf-8", "replace").strip()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+
+
+def _vivo_processo(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def _ferma_gruppi(pids, attesa=3.0):
+    """Ferma i gruppi di processi dati: prima con garbo, dopo `attesa` secondi con la forza."""
+    for s in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
+        for pid in pids:
+            try:
+                os.killpg(pid, s)
+            except OSError:
+                pass
+        fine = time.time() + attesa
+        while time.time() < fine and any(_vivo_processo(x) for x in pids):
+            for pid, p in list(_FIGLI["vivi"].items()):
+                p.poll()   # i nostri figli finiti si raccolgono (se no restano «zombie» e sembrano vivi)
+            time.sleep(0.05)
+        pids = [x for x in pids if _vivo_processo(x)]
+        if not pids:
+            return
+
+
+def _ferma_orfani(cartella):
+    """All'avvio: i programmi pesanti rimasti accesi da un server fermato di colpo si fermano. Solo quelli segnati e con
+    la stessa ora di partenza (un numero riusato da un altro programma non si tocca)."""
+    try:
+        nomi = os.listdir(cartella)
+    except OSError:
+        return
+    orfani = []
+    for n in nomi:
+        f = os.path.join(cartella, n)
+        try:
+            with open(f, encoding="utf-8") as x:
+                d = json.load(x)
+        except (OSError, ValueError):
+            d = {}
+        _cancella(f)
+        pid = d.get("pid") if isinstance(d, dict) else None
+        if isinstance(pid, int) and pid > 1 and d.get("avvio") and _avvio_processo(pid) == d["avvio"]:
+            print("Testi: fermo %s (processo %d) rimasto acceso dal server di prima" % (d.get("nome"), pid), flush=True)
+            orfani.append(pid)
+    if orfani:
+        _ferma_gruppi(orfani)
+
+
+def _ferma_figli():
+    """Ferma tutti i programmi pesanti dei testi ancora accesi (il server sta per uscire)."""
+    _FIGLI["fine"] = True
+    vivi = list(_FIGLI["vivi"])
+    if vivi:
+        _ferma_gruppi(vivi, 2.0)
+    for pid in vivi:
+        if _FIGLI["dir"]:
+            _cancella(os.path.join(_FIGLI["dir"], "%d.json" % pid))
+
+
+def _esegui_piano(args, tempo, fermo=None, log=None, ambiente=None):
+    """Un programma pesante (ffmpeg, whisper-cli, brew) a bassa priorità: con nice passano prima il server, l'app e gli
+    scaricamenti della musica. Si ferma se il lavoro va in pausa (fermo() vero: Pausa) o se va oltre `tempo` secondi.
+    (codice d'uscita, uscita, errori); con `log` (un file aperto) uscita ed errori vanno lì. Un programma che non c'è o
+    non parte è un errore del Mac (ErroreMac), non del brano."""
+    nome = os.path.basename(args[0])
+    if not (os.path.isfile(args[0]) and os.access(args[0], os.X_OK)):
+        raise ErroreMac("%s non c'è o non si può avviare (%s)" % (nome, args[0]))
+    nice = _programma("nice")
+    if nice:
+        args = [nice, "-n", str(TESTI_NICE)] + list(args)
+    env = _ambiente()
+    env.update(ambiente or {})
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log or out,
+                                 stderr=subprocess.STDOUT if log else err, env=env, start_new_session=os.name == "posix")
+        except OSError as e:
+            raise ErroreMac("%s non parte: %s" % (nome, e))
+        _FIGLI["vivi"][p.pid] = p
+        segno = os.path.join(_FIGLI["dir"], "%d.json" % p.pid) if _FIGLI["dir"] and os.path.isdir(_FIGLI["dir"]) else None
+        if segno:
+            try:
+                _scrivi_json(segno, {"pid": p.pid, "avvio": _avvio_processo(p.pid), "nome": nome})
+            except OSError:
+                segno = None
+        fine = time.time() + tempo
+        try:
+            while True:
+                try:
+                    p.wait(0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if fermo is not None and fermo():
+                    raise Pausa()
+                if time.time() > fine:
+                    raise ErroreTesti("%s: oltre %d minuti, fermato" % (nome, tempo // 60))
+        finally:
+            if p.poll() is None:
+                _termina(p)
+                try:
+                    p.wait(8)
+                except subprocess.TimeoutExpired:
+                    pass
+            _FIGLI["vivi"].pop(p.pid, None)
+            if segno:
+                _cancella(segno)
+        if _FIGLI["fine"]:
+            raise Pausa()   # fermato perché il server esce: il brano resta da fare
+        if p.returncode in (126, 127) and nice:   # nice non è riuscito ad avviarlo
+            err.seek(0)
+            raise ErroreMac("%s non parte: %s" % (nome, err.read().decode("utf-8", "replace").strip()[-200:]))
+        if p.returncode < 0:   # fermato dal sistema (poca memoria, il Mac che si spegne): non è colpa del brano
+            raise ErroreMac("%s fermato dal sistema (segnale %d)" % (nome, -p.returncode))
+        out.seek(0)
+        err.seek(0)
+        return p.returncode, out.read(), err.read()
+
+
+_INVENTATE = re.compile(r"sottotitol|subtit|amara\.org|thanks? for watching|grazie per la visione|iscriviti al|"
+                        r"subscribe|untertitel|sous-titr|продолжение следует|字幕|www\.|\.com\b", re.I)
+
+
+def parole_sentite(j, anticipo=0.0):
+    """[(inizio, fine, parola, probabilità)] da un JSON di whisper-cli -ojf, in ordine. L'inizio di una parola è il
+    tempo DTW del suo primo pezzo (t_dtw, in centesimi di secondo, anticipato di «anticipo» secondi), se manca quello
+    del pezzo (offsets, in ms). I token speciali ([_BEG_], [_TT_…], <|…|>) e i suoni tra parentesi ([Musica],
+    (applausi), ♪) si saltano."""
+    out = []
+    for seg in (j or {}).get("transcription") or []:
+        nuova = True
+        for tok in seg.get("tokens") or [] if isinstance(seg, dict) else []:
+            x = tok.get("text") if isinstance(tok, dict) else None
+            if not isinstance(x, str) or not x or (x.startswith("[_") and x.endswith("]")) or x.startswith("<|"):
+                continue
+            td, off = tok.get("t_dtw"), tok.get("offsets") or {}
+            if isinstance(td, (int, float)) and td >= 0:
+                t = max(0.0, td / 100.0 - anticipo)
+            elif isinstance(off.get("from"), (int, float)):
+                t = off["from"] / 1000.0
+            else:
+                continue
+            fine = off.get("to") / 1000.0 if isinstance(off.get("to"), (int, float)) else None
+            p = tok.get("p") if isinstance(tok.get("p"), (int, float)) else 1.0
+            if nuova or x[:1].isspace() or not out:
+                out.append([t, fine, x.strip(), [p]])
+                nuova = False
+            else:
+                out[-1][2] += x
+                out[-1][3].append(p)
+                if fine is not None:
+                    out[-1][1] = fine
+    pulite = []
+    for t, f, w, ps in out:
+        w = re.sub(r"[\[(♪][^\])♪]*[\])♪]?", "", w).strip()
+        if w and re.search(r"\w", w):
+            pulite.append((round(t, 3), f, w, sum(ps) / len(ps)))
+    return pulite
+
+
+def righe_da_voce(j, anticipo=0.0):
+    """Il testo trascritto da Whisper per un brano senza testo: una riga per frase (una pausa di oltre un secondo o
+    10 parole la chiudono), senza le frasi che Whisper inventa sul silenzio (sottotitoli, ringraziamenti) né quelle
+    incerte. [] se la voce non c'è (brano strumentale)."""
+    righe = []
+    for seg in (j or {}).get("transcription") or []:
+        parole = parole_sentite({"transcription": [seg]}, anticipo)
+        if not parole:
+            continue
+        testo = " ".join(w for _, _, w, _ in parole)
+        if sum(p for *_, p in parole) / len(parole) < 0.35 or _INVENTATE.search(testo):
+            continue
+        riga = []
+        for k, (t, _f, w, _p) in enumerate(parole):
+            if riga and (len(riga) >= 10 or t - parole[k - 1][0] > 1.6):
+                righe.append(riga)
+                riga = []
+            riga.append([t, None, w + " "])
+        if riga:
+            righe.append(riga)
+    out = []
+    for pezzi in righe:
+        pezzi[-1][2] = pezzi[-1][2].rstrip()
+        out.append({"t": pezzi[0][0], "x": " ".join("".join(p[2] for p in pezzi).split()), "p": pezzi})
+    if sum(len(r["p"]) for r in out) < 6:
+        return []
+    return out
+
+
+def _wav16k(percorso, dest, fermo=None):
+    """Il brano in WAV mono 16 kHz (quello che vuole Whisper), decodificato da ffmpeg."""
+    ff = _programma("ffmpeg")
+    if not ff:
+        raise ErroreMac("ffmpeg non è installato sul Mac: brew install ffmpeg")
+    codice, _, err = _esegui_piano([ff, "-nostdin", "-v", "error", "-y", "-i", percorso, "-map", "0:a:0", "-ac", "1",
+                                    "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", dest], 600, fermo)
+    if codice != 0 or not os.path.isfile(dest) or os.path.getsize(dest) < 1000:
+        raise ErroreTesti("ffmpeg: " + (err.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
+
+
+class Whisper:
+    """whisper.cpp sul Mac: il programma (Homebrew, «whisper-cli»), il modello (Hugging Face, in <cache>/testi/modelli)
+    e la trascrizione con il tempo DTW di ogni pezzo di parola. Si prepara da solo, ma solo quando il lavoro sui testi
+    è acceso da Gestione; fermo() vero (lavoro in pausa) ferma a metà lo scaricamento e la trascrizione."""
+
+    DTW = {"tiny": "tiny", "tiny.en": "tiny.en", "base": "base", "base.en": "base.en", "small": "small",
+           "small.en": "small.en", "medium": "medium", "medium.en": "medium.en", "large-v1": "large.v1",
+           "large-v2": "large.v2", "large-v3": "large.v3", "large-v3-turbo": "large.v3.turbo"}
+
+    def __init__(self, cartella, fermo=None):
+        self.dir, self.fermo = cartella, fermo
+        self.blocco = threading.Lock()
+        self.modello = (os.environ.get("ATLANTE_WHISPER_MODELLO") or WHISPER_MODELLO).strip()
+        self.file_modello = (os.environ.get("ATLANTE_WHISPER_FILE_MODELLO") or
+                             os.path.join(cartella, "ggml-%s.bin" % self.modello))
+        self.cli, self.aiuto = None, ""
+        self.stato, self.errore, self.prova = "", "", 0.0
+        self.anticipo = _numero_ambiente("ATLANTE_WHISPER_ANTICIPO", WHISPER_ANTICIPO)   # prove: 0
+        self.tmp = None   # la cartella dei file temporanei (i WAV): anche lì deve restare spazio
+
+    @staticmethod
+    def spento():
+        return os.environ.get("ATLANTE_WHISPER", "").strip() == "0"
+
+    @staticmethod
+    def programma():
+        p = os.environ.get("ATLANTE_WHISPER", "").strip()
+        if p not in ("", "0", "1"):
+            return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
+        return _programma("whisper-cli") or _programma("whisper-cpp")
+
+    def dtw(self):
+        """Le «teste d'allineamento» del modello per --dtw: large-v3-turbo-q5_0 → large.v3.turbo."""
+        return self.DTW.get(re.sub(r"-(?:q\d+_\d+|q\d+_k|f16|f32)$", "", self.modello.lower()), "")
+
+    def pronto(self):
+        return bool(self.cli) and os.path.isfile(self.file_modello)
+
+    def prepara(self):
+        """True se whisper-cli e il modello ci sono, installandoli se servono (al più ogni WHISPER_RIPROVA)."""
+        if self.spento():
+            self.stato = "spento"
+            return False
+        with self.blocco:
+            if self.pronto():
+                return True
+            if self.prova and time.time() - self.prova < WHISPER_RIPROVA:
+                return False
+            try:
+                cli = self.programma() or self._installa()
+                if not os.path.isfile(self.file_modello):
+                    self._scarica_modello()
+                codice, uscita, err = _esegui_piano([cli, "-h"], 30)
+                self.aiuto = (uscita + err).decode("utf-8", "replace")   # whisper-cli scrive l'aiuto negli errori
+                if "-ojf" not in self.aiuto:
+                    raise ErroreTesti("whisper-cli troppo vecchio (manca -ojf): brew upgrade whisper-cpp")
+                self.cli, self.stato, self.errore, self.prova = cli, "pronto", "", 0.0
+                print("Testi: Whisper pronto (%s, modello %s)" % (cli, self.modello), flush=True)
+                return True
+            except Pausa:
+                self.stato = "in pausa"
+                return False
+            except ErroreBreve as e:   # si riprova tra pochi minuti, non tra sei ore
+                self.prova, self.errore = time.time() - WHISPER_RIPROVA + WHISPER_RIPROVA_BREVE, str(e)[:300]
+                self.stato = "non pronto: " + self.errore
+                print("Testi: Whisper non pronto:", e, flush=True)
+                return False
+            except (ErroreTesti, OSError, subprocess.SubprocessError, ValueError, http.client.HTTPException) as e:
+                self.prova, self.errore = time.time(), str(e)[:300]
+                self.stato = "non pronto: " + self.errore
+                print("Testi: Whisper non pronto:", e, flush=True)
+                return False
+
+    def _installa(self):
+        if os.environ.get("ATLANTE_WHISPER_INSTALLA", "").strip() == "0":
+            raise ErroreTesti("whisper-cli non c'è (installazione automatica spenta)")
+        brew = (os.environ.get("ATLANTE_BREW") or "").strip() or _programma("brew")   # le prove: un brew finto
+        if not brew:
+            raise ErroreTesti("whisper-cli non c'è e manca Homebrew per installarlo")
+        self.stato = "installo whisper-cpp con Homebrew…"
+        print("Testi: brew install whisper-cpp", flush=True)
+        os.makedirs(self.dir, exist_ok=True)
+        log = os.path.join(self.dir, "installa.log")
+        prima = os.path.getsize(log) if os.path.isfile(log) else 0
+        # niente aggiornamenti di Homebrew né degli altri programmi (ffmpeg, yt-dlp): la musica intanto si scarica
+        with open(log, "ab") as f:   # a metà non si ferma (Homebrew resterebbe a metà): la pausa vale dopo
+            codice, _, _ = _esegui_piano([brew, "install", "whisper-cpp"], 1800, None, f, {
+                "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_INSTALL_UPGRADE": "1",
+                "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1",
+                "HOMEBREW_NO_ENV_HINTS": "1", "HOMEBREW_NO_ANALYTICS": "1", "NONINTERACTIVE": "1"})
+        cli = self.programma()
+        if codice != 0 or not cli:
+            try:
+                with open(log, "rb") as f:
+                    f.seek(prima)
+                    uscita = f.read().decode("utf-8", "replace")
+            except OSError:
+                uscita = ""
+            if re.search(r"already locked|already in progress|another active homebrew", uscita, re.I):
+                raise ErroreBreve("Homebrew è occupato da un'altra installazione: riprovo tra qualche minuto")
+            raise ErroreTesti("brew install whisper-cpp non riuscito (vedi %s)" % log)
+        if self.fermo is not None and self.fermo():
+            raise Pausa()
+        return cli
+
+    def _spazio(self, servono):
+        """Il modello si scarica solo se dopo restano almeno WHISPER_SPAZIO_MIN GB liberi, sul suo disco e su quello dei
+        file temporanei (il disco interno del Mac mini si riempie in fretta)."""
+        minimo = max(0.0, _numero_ambiente("ATLANTE_WHISPER_SPAZIO_MIN_GB", WHISPER_SPAZIO_MIN)) * 1024 ** 3
+        for d in dict.fromkeys(x for x in (os.path.dirname(self.file_modello) or ".", self.tmp) if x):
+            try:
+                libero = shutil.disk_usage(d if os.path.isdir(d) else os.path.dirname(d) or ".").free
+            except OSError:
+                continue
+            if libero - servono < minimo:
+                raise ErroreTesti("poco spazio sul disco (%.1f GB liberi): per il modello di Whisper ne servono %.1f" %
+                                  (libero / 1024 ** 3, (servono + minimo) / 1024 ** 3))
+
+    def _scarica_modello(self):
+        """Il modello da Hugging Face, in un file .part che resta se lo scaricamento si ferma (pausa, rete): la volta
+        dopo riprende da lì (Range)."""
+        url = os.environ.get("ATLANTE_WHISPER_URL_MODELLO") or WHISPER_URL % self.modello
+        os.makedirs(os.path.dirname(self.file_modello) or ".", exist_ok=True)
+        tmp = self.file_modello + ".part"
+        try:
+            n = os.path.getsize(tmp)
+            with open(tmp, "rb") as f:
+                if f.read(4) != b"lmgg":
+                    n = 0   # non è l'inizio di un modello: da capo
+        except OSError:
+            n = 0
+        self._spazio(WHISPER_MB * 1024 * 1024 - n)
+        self.stato = "scarico il modello %s…" % self.modello
+        print("Testi: scarico il modello di Whisper da", url, "(da %d byte)" % n if n else "", flush=True)
+        intest = {"User-Agent": _agente_testi()}
+        if n:
+            intest["Range"] = "bytes=%d-" % n
+        buttare = False
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=intest), timeout=60) as r:
+                if n and r.status != 206:
+                    n = 0   # il sito non riprende: da capo
+                m = re.match(r"bytes \d+-\d+/(\d+)", r.headers.get("Content-Range") or "")
+                tot = int(m.group(1)) if m else n + int(r.headers.get("Content-Length") or 0)
+                self._spazio(tot - n)
+                with open(tmp, "ab" if n else "wb") as f:
+                    while True:
+                        if self.fermo is not None and self.fermo():
+                            raise Pausa()
+                        b = r.read(1 << 20)
+                        if not b:
+                            break
+                        if n == 0 and b[:4] != b"lmgg":
+                            buttare = True
+                            raise ErroreTesti("il file scaricato non è un modello di whisper.cpp")
+                        f.write(b)
+                        n += len(b)
+                        if tot:
+                            self.stato = "scarico il modello %s: %d%%" % (self.modello, n * 100 // tot)
+            if (tot and n != tot) or n < 1024 * 1024:
+                buttare = bool(tot and n > tot)
+                raise ErroreTesti("modello scaricato a metà (%d byte su %d)" % (n, tot))
+            os.replace(tmp, self.file_modello)
+        except urllib.error.HTTPError as e:
+            buttare = e.code == 416   # il pezzo già scaricato non va più bene: da capo la prossima volta
+            raise
+        finally:
+            if buttare:
+                _cancella(tmp)
+
+    def trascrivi(self, wav, lingua="", prompt=""):
+        """Il JSON di whisper-cli -ojf per un WAV a 16 kHz: frasi, pezzi di parola e tempi (DTW se c'è)."""
+        out = wav + ".whisper"
+        args = [self.cli, "-m", self.file_modello, "-f", wav, "-ojf", "-of", out, "-l", lingua or "auto"]
+        if "-np" in self.aiuto:
+            args.append("-np")
+        if "--dtw" in self.aiuto and self.dtw():
+            args += ["--dtw", self.dtw()]
+            if "-nfa" in self.aiuto:   # con la flash attention il DTW è spento
+                args.append("-nfa")
+        if prompt and "--prompt" in self.aiuto:
+            args += ["--prompt", prompt]
+        if "-sns" in self.aiuto:
+            args.append("-sns")       # niente «[Musica]», «(applausi)»
+        args += ["-t", str(max(2, min(8, (os.cpu_count() or 4) // 2)))]
+        codice, _, err = _esegui_piano(args, WHISPER_TEMPO, self.fermo)
+        try:
+            if codice != 0 or not os.path.isfile(out + ".json"):
+                testo = err.decode("utf-8", "replace").strip()[-300:]
+                if re.search(r"failed to (?:load|initiali[sz]e|open)|out of memory|cannot allocate|insufficient memory",
+                             testo, re.I):   # il modello non si carica (file rotto, poca memoria): non è il brano
+                    raise ErroreMac("Whisper non carica il modello: " + testo[-200:])
+                raise ErroreTesti("whisper-cli: " + (testo or "nessun risultato (codice %d)" % codice))
+            with open(out + ".json", "rb") as f:
+                return json.loads(f.read().decode("utf-8", "replace"))
+        finally:
+            _cancella(out + ".json")
+
+
+# --- traduzione ---
+
+class Traduttore:
+    """Traduzioni delle righe di un testo: l'IA del Mac (Ollama) se c'è, se no MyMemory (in rete, gratis: 5000 caratteri
+    al giorno, 50 000 con ATLANTE_CONTATTO = un indirizzo email). Le righe uguali (il ritornello) si traducono una
+    volta sola."""
+
+    def __init__(self):
+        self.blocco = threading.Lock()
+        self.ultima = 0.0
+        self.pausa, self.motivo = 0.0, ""
+        self.mancate = ""   # perché l'ultima traduzione ha lasciato righe senza (quota finita, errore di MyMemory)
+
+    @staticmethod
+    def ia():
+        attiva, modelli = _modelli_ia()
+        return _scegli_modello("", modelli) if attiva else ""
+
+    def motore(self):
+        m = self.ia()
+        if m:
+            return "IA del Mac (%s)" % m
+        if os.environ.get("ATLANTE_TRADUZIONE_ONLINE", "").strip() == "0":
+            return ""
+        return "MyMemory" + (" (in pausa: %s)" % self.motivo if time.time() < self.pausa else "")
+
+    def traduci(self, righe, da, a, con_ia=False):
+        """(traduzioni, motore, motivo): una traduzione per riga, nello stesso ordine ("" per le righe vuote e per quelle
+        non riuscite: motivo dice perché). L'IA del Mac solo con con_ia (le richieste di Samuele)."""
+        uniche = list(dict.fromkeys(x.strip() for x in righe if x and x.strip()))
+        fatte, motori, self.mancate = {}, [], ""
+        modello = self.ia() if con_ia else ""
+        if modello:
+            try:
+                fatte.update(self._con_ia(modello, uniche, da, a))
+                motori.append("IA del Mac (%s)" % modello)
+            except (ErroreTesti, ErroreExtra, OSError, ValueError, http.client.HTTPException) as e:
+                print("Testi: traduzione con l'IA non riuscita:", e, flush=True)
+        mancano = [x for x in uniche if x not in fatte]
+        if mancano and os.environ.get("ATLANTE_TRADUZIONE_ONLINE", "").strip() != "0":
+            fatte.update(self._con_mymemory(mancano, da, a))
+            motori.append("MyMemory")
+        if uniche and not fatte:
+            raise ErroreTesti(self.mancate or "nessun traduttore disponibile")
+        motivo = (self.mancate or "alcune righe non tradotte") if any(x not in fatte for x in uniche) else ""
+        return [fatte.get(x.strip(), "") if x and x.strip() else "" for x in righe], " + ".join(motori), motivo
+
+    @staticmethod
+    def _con_ia(modello, righe, da, a):
+        out = {}
+        for k in range(0, len(righe), 30):
+            pezzo = righe[k:k + 30]
+            prompt = ("Translate these song lyrics%s into %s. Translate every line, keep the order, the meaning and "
+                      "the tone; no notes, no numbering. Answer only with JSON: {\"lines\": [...]} with exactly %d "
+                      "strings, one per line.\n\n%s" % (
+                          (" from " + LINGUE_TRAD[da][1]) if da in LINGUE_TRAD else "", LINGUE_TRAD[a][1], len(pezzo),
+                          "\n".join("%d. %s" % (i + 1, x) for i, x in enumerate(pezzo))))
+            with _IA_UNA:
+                j = _ollama("/api/generate", {"model": modello, "prompt": prompt, "stream": False, "format": "json",
+                                              "options": {"temperature": 0.2}}, TEMPO_IA)
+            r = json.loads((j or {}).get("response") or "{}")
+            linee = r.get("lines") if isinstance(r, dict) else None
+            if not isinstance(linee, list) or len(linee) != len(pezzo):
+                raise ErroreTesti("traduzione dell'IA incompleta")
+            for x, y in zip(pezzo, linee):
+                y = re.sub(r"^\s*\d+[.)]\s*", "", str(y or "")).strip()
+                if y:
+                    out[x] = y
+        return out
+
+    def _con_mymemory(self, righe, da, a):
+        if not da:
+            raise ErroreTesti("lingua del testo non riconosciuta")
+        if time.time() < self.pausa:
+            raise ErroreTesti(self.motivo)
+        base = (os.environ.get("ATLANTE_MYMEMORY") or MYMEMORY_BASE).rstrip("/")   # le prove: un MyMemory finto
+        email = os.environ.get("ATLANTE_CONTATTO", "").strip()
+        out = {}
+        for x in righe:
+            par = {"q": x[:450], "langpair": "%s|%s" % (da, a)}
+            if re.fullmatch(r"[^@\s]+@[^@\s]+\.\w+", email):
+                par["de"] = email
+            with self.blocco:
+                attesa = self.ultima + 0.3 - time.time()
+                if attesa > 0:
+                    time.sleep(attesa)
+                try:
+                    req = urllib.request.Request(base + "/get?" + urlencode(par), headers={"User-Agent": _agente_testi()})
+                    with urllib.request.urlopen(req, timeout=20) as r:
+                        j = json.loads(r.read(1024 * 1024).decode("utf-8"))
+                except urllib.error.HTTPError as e:
+                    j = {"responseStatus": e.code}
+                except (OSError, ValueError, http.client.HTTPException) as e:
+                    raise ErroreTesti("MyMemory non raggiungibile: %s" % e)
+                finally:
+                    self.ultima = time.time()
+            st = str((j or {}).get("responseStatus") or "")
+            y = ((j or {}).get("responseData") or {}).get("translatedText") or ""
+            if st in ("403", "429") or "MYMEMORY WARNING" in y.upper():
+                domani = time.localtime(time.time() + 86400)
+                self.pausa = time.mktime((domani.tm_year, domani.tm_mon, domani.tm_mday, 0, 5, 0, 0, 0, -1))
+                self.motivo = self.mancate = "finite le traduzioni gratuite di oggi, si riprende domani"
+                if out:
+                    break
+                raise ErroreTesti(self.motivo)
+            if st == "200" and y.strip():
+                out[x] = html.unescape(y).strip()
+            else:
+                self.mancate = "MyMemory non ha tradotto qualche riga (risposta %s)" % (st or "vuota")
+        return out
+
+
+# ----- testi: il lavoro su tutta la libreria, solo se acceso da Gestione -----
+#
+# Spento finché Samuele non lo accende da Gestione → Testi e karaoke (da lì si rimette in pausa; la scelta resta in
+# <cache>/testi/lavoro.json anche dopo un riavvio): appena installato non parte niente di pesante. Acceso, cerca il testo
+# di ogni brano (come quando lo si ascolta: stessa cache, una richiesta a LRCLIB alla volta, al più una al secondo) e,
+# con Whisper, ascolta la voce dei brani che non hanno i tempi delle parole: un brano alla volta, con nice, e a metà si
+# ferma se lo si mette in pausa. Whisper e il suo modello (574 MB) si installano da soli (Homebrew, Hugging Face) solo
+# allora. Un brano senza testo da nessuna parte: Whisper lo trascrive dalla voce (può avere errori, l'app lo dice);
+# senza voce è strumentale. Prima i brani chiesti dall'app, poi i più nuovi. Nella cartella <cache>/testi/, accanto
+# alle risposte di LRCLIB:
+#   schede.json      a che punto è ogni brano: v, f (il file), t e a (titolo e artista), s ('trovato' | 'nessuno' |
+#                    'strumentale' | 'errore'), q (quando), fo (fonte), sy (a tempo), pw (parole dalla fonte), ri (righe),
+#                    it (impronta del testo), li (lingua), al (Whisper: '' se non serve | 'attesa' | 'fatto' |
+#                    'errore' | 'non riuscito', con alq, aln, ale, qa) e vo (cosa ha fatto: 'parole' | 'testo' |
+#                    'strumentale')
+#   brani/<id>.json  quello che ha fatto Whisper: le righe del testo con le parole allineate alla voce, o il testo
+#                    trascritto (fonte 'voce'), con il file (f) per cui vale
+#   traduzioni/      le traduzioni, per testo e lingua (solo le righe tradotte davvero: le altre restano da fare)
+#   modelli/         il modello di Whisper (un .part che resta in pausa: lo scaricamento riprende da lì)
+#   tmp/, figli/     i WAV per Whisper e i programmi pesanti accesi: all'avvio si fermano e si buttano quelli rimasti da
+#                    un server fermato di colpo; con SIGTERM il server li ferma prima di uscire
+# Un errore di tutto il Mac (disco della musica scollegato, ffmpeg o Whisper che non partono, disco pieno, rete giù, tre
+# brani di fila) non conta contro i brani: Whisper aspetta 10 minuti per tutti.
+# ATLANTE_WHISPER=0 spegne Whisper (oppure un percorso: quel whisper-cli).
+
+class Testi:
+    """Le risposte di api/extra/testi (testo, parole dalla voce o stimate, traduzione) e il lavoro in sottofondo."""
+
+    def __init__(self, cartella):
+        self.dir = cartella
+        self.blocco = threading.RLock()
+        self.schede = _leggi_json(os.path.join(cartella, "schede.json"), {}).get("brani") or {}
+        lavoro = _leggi_json(os.path.join(cartella, "lavoro.json"), {})
+        self.acceso, self.con_whisper = lavoro.get("acceso") is True, lavoro.get("whisper") is not False
+        self.trad = Traduttore()
+        self.whisper = Whisper(os.path.join(cartella, "modelli"), self.fermo_voce)
+        self.subito_c, self.subito_a = [], []          # brani chiesti dall'app: prima degli altri
+        self.coda_t = collections.OrderedDict()        # file della traduzione → {righe, da, a, chi, ia}
+        self.errori_t = {}                             # file della traduzione → (quando, motivo)
+        self.sveglia_c, self.sveglia_a, self.sveglia_t = threading.Event(), threading.Event(), threading.Event()
+        self.ora_c = self.ora_a = self.ora_t = ""
+        self.id_a = ""
+        self.pausa_rete = 0.0
+        self.pausa_voce, self.motivo_voce = 0.0, ""    # un errore di tutto il Mac: Whisper aspetta per tutti
+        self.di_fila = 0                               # brani di fila che Whisper non è riuscito a fare
+        self.partiti = set()
+        self._salvato, self._sporco = 0.0, False
+        # quello che un server fermato a metà ha lasciato: programmi accesi, file temporanei, pezzi del modello
+        self.tmp = os.path.join(cartella, "tmp")
+        self.whisper.tmp = self.tmp
+        _FIGLI["dir"] = os.path.join(cartella, "figli")
+        _ferma_orfani(_FIGLI["dir"])
+        try:
+            os.makedirs(_FIGLI["dir"], exist_ok=True)
+        except OSError:
+            pass
+        self._svuota_tmp()
+        if not self.acceso:   # acceso, un pezzo del modello resta per riprendere lo scaricamento
+            try:
+                for n in os.listdir(os.path.dirname(self.whisper.file_modello)):
+                    if n.endswith(".part"):
+                        _cancella(os.path.join(os.path.dirname(self.whisper.file_modello), n))
+            except OSError:
+                pass
+
+    # file
+
+    def _svuota_tmp(self):
+        try:
+            for n in os.listdir(self.tmp):
+                p = os.path.join(self.tmp, n)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    _cancella(p)
+        except OSError:
+            pass
+
+    def chiudi(self):
+        """Il server sta per uscire (SIGTERM): le schede sul disco, via i file temporanei (i programmi pesanti li ha già
+        fermati _ferma_figli)."""
+        self.salva(True)
+        self._svuota_tmp()
+
+    def salva(self, subito=False):
+        with self.blocco:
+            if not self._sporco or (not subito and time.time() - self._salvato < TESTI_SALVA):
+                return
+            schede, self._sporco, self._salvato = dict(self.schede), False, time.time()
+        try:
+            _scrivi_json(os.path.join(self.dir, "schede.json"), {"versione": TESTI_V, "brani": schede})
+        except OSError as e:
+            self._sporco = True
+            print("Testi: schede non salvate:", e, flush=True)
+
+    def _scheda(self, i, **k):
+        with self.blocco:
+            s = dict(self.schede.get(i) or {})
+            s.update(k)
+            self.schede[i] = s
+            self._sporco = True
+        return s
+
+    def dati(self, i):
+        d = _leggi_json(os.path.join(self.dir, "brani", i + ".json"), None)
+        return d if isinstance(d, dict) and d.get("v") == TESTI_V else None
+
+    def _salva_dati(self, i, dati):
+        dati["v"] = TESTI_V
+        _scrivi_json(os.path.join(self.dir, "brani", i + ".json"), dati)
+
+    # acceso, in pausa
+
+    def fermo_voce(self):
+        """Whisper non deve lavorare adesso: lavoro in pausa, Whisper escluso da Gestione o spento (ATLANTE_WHISPER=0)."""
+        return not (self.acceso and self.con_whisper) or Whisper.spento()
+
+    def imposta(self, acceso=None, whisper=None):
+        """Da Gestione: lavoro su tutta la libreria acceso o in pausa, con o senza Whisper. Resta così dopo un riavvio."""
+        with self.blocco:
+            if acceso is not None:
+                self.acceso = acceso
+            if whisper is not None:
+                self.con_whisper = whisper
+            _scrivi_json(os.path.join(self.dir, "lavoro.json"), {"acceso": self.acceso, "whisper": self.con_whisper})
+        print("Testi: lavoro su tutta la libreria %s, Whisper %s" % ("acceso" if self.acceso else "in pausa",
+                                                                      "compreso" if self.con_whisper else "escluso"),
+              flush=True)
+        self.riprendi()
+
+    def riprendi(self):
+        """All'avvio del server e dopo ogni scelta in Gestione: i lavori partono solo se il lavoro è acceso."""
+        self._vivi()
+        for e in (self.sveglia_c, self.sveglia_a):
+            e.set()   # se è in pausa se ne accorgono subito (e Whisper a metà brano si ferma)
+
+    def _vivi(self):
+        """Con il lavoro acceso i due lavori ci sono (uno fermato da un errore inatteso riparte)."""
+        if self.acceso:
+            self._parti("cerca", self._lavora_cerca)
+            self._parti("voce", self._lavora_allinea)
+
+    def riprova(self):
+        """Da Gestione: i lavori fermi per un errore (LRCLIB, Whisper, traduttore, il Mac) riprovano adesso; i brani che
+        Whisper non era riuscito a fare ricominciano da capo."""
+        self.pausa_rete = self.pausa_voce = 0.0
+        self.motivo_voce, self.di_fila = "", 0
+        self.whisper.prova = 0.0
+        self.trad.pausa = 0.0
+        self.errori_t.clear()
+        with self.blocco:
+            for s in self.schede.values():
+                if s.get("s") == "errore":
+                    s["q"] = 0
+                if s.get("al") == "errore":
+                    s.update(al="attesa", aln=0, alq=0)
+            self._sporco = True
+        self._vivi()
+        for e in (self.sveglia_c, self.sveglia_a, self.sveglia_t):
+            e.set()
+
+    def _parti(self, nome, f):
+        """Un lavoro in un thread suo; se si ferma (anche per un errore inatteso) si può far ripartire."""
+        with self.blocco:
+            if nome in self.partiti:
+                return
+            self.partiti.add(nome)
+
+        def corri():
+            try:
+                f()
+            except Exception:   # noqa: BLE001 — un baco: lo si scrive, e il lavoro potrà ripartire
+                print("Testi: il lavoro «%s» si è fermato:\n%s" % (nome, traceback.format_exc()), flush=True)
+            finally:
+                with self.blocco:
+                    self.partiti.discard(nome)
+        threading.Thread(target=corri, daemon=True, name="testi-" + nome).start()
+
+    def _pausa_mac(self, motivo):
+        """Un errore di tutto il Mac (disco scollegato, ffmpeg rotto, rete giù): Whisper aspetta un po' per tutti i brani,
+        e nessun brano viene segnato come non riuscito."""
+        if time.time() >= self.pausa_voce:
+            print("Testi: Whisper aspetta %d minuti: %s" % (TESTI_PAUSA_VOCE // 60, motivo), flush=True)
+        self.pausa_voce, self.motivo_voce = time.time() + TESTI_PAUSA_VOCE, str(motivo)[:200]
+
+    @staticmethod
+    def _chi(chi):
+        """Chi chiede (per le traduzioni): {chi, ia}. Senza saperlo: nessuno in particolare e niente IA del Mac."""
+        chi = chi if isinstance(chi, dict) else {}
+        return {"chi": str(chi.get("chi") or ""), "ia": chi.get("ia") is True}
+
+    # brani
+
+    @staticmethod
+    def _voci():
+        if LIB is None:
+            return []
+        with LIB.blocco:
+            voci = list(LIB.brani.items())
+        via = TOLTI.ids() if TOLTI else set()
+        return [(i, b) for i, b in voci if i not in via]
+
+    @staticmethod
+    def _nomi(i, b, corr):
+        c = corr.get(i) or {}   # titolo e artista corretti da Samuele (Gestione → Contenuti)
+        return (c.get("title") or b.get("title") or "", c.get("artist") or b.get("artist") or "",
+                c.get("album") or b.get("album") or "", b.get("duration") or 0)
+
+    @staticmethod
+    def brano(i):
+        """(voce del catalogo, percorso, (titolo, artista, album, durata)) di un brano della libreria; 404 se non c'è."""
+        with LIB.blocco if LIB else threading.Lock():
+            b, p = (LIB.brani.get(i), LIB.percorsi.get(i)) if LIB else (None, None)
+        if not b or (TOLTI and i in TOLTI.ids()):
+            raise ErroreExtra(404, "Brano non trovato nella libreria")
+        return b, p, Testi._nomi(i, b, {i: CORR.di(i)} if CORR else {})
+
+    def _da_cercare(self, i, b, s, corr, ora):
+        if not s or s.get("v") != TESTI_V or s.get("f") != b.get("_f"):
+            return True
+        t, a = self._nomi(i, b, corr)[:2]
+        if s.get("t") != t or s.get("a") != a:
+            return True
+        st = s.get("s")
+        return (st == "nessuno" and ora - s.get("q", 0) > TESTI_RIPROVA) or \
+               (st == "errore" and ora - s.get("q", 0) > TESTI_RIPROVA_ERRORE)
+
+    @staticmethod
+    def _da_allineare(s, ora):
+        if not s or s.get("v") != TESTI_V:
+            return False
+        al = s.get("al") or ""
+        return al == "attesa" or (al == "errore" and s.get("aln", 0) < WHISPER_ERRORI and
+                                  ora - s.get("alq", 0) > WHISPER_RIPROVA)
+
+    @staticmethod
+    def _serve_voce(r):
+        """Whisper serve per un testo (risposta di testi_brano): non c'è, o ci sono le righe ma non i tempi delle parole."""
+        return r.get("stato") == "nessuno" or (r.get("stato") == "ok" and not r.get("parole") and
+                                               any(x.get("testo") for x in r.get("righe") or []))
+
+    def _voce(self, i, b, r):
+        """Quello che Whisper ha fatto per il brano e che vale ancora, per questo file e per il testo r: ("parole", dati)
+        con le righe di r e le parole dalla voce; se r non ha testo ("testo", dati) trascritto o ("strumentale", dati).
+        None se non c'è o non vale più (file cambiato, testo diverso: RIGHE DAL TESTO)."""
+        d = self.dati(i)
+        if not d or (d.get("f") or (self.schede.get(i) or {}).get("f")) != b.get("_f"):
+            return None
+        if d.get("fonte") == "voce":
+            if r.get("stato") != "nessuno":
+                return None   # adesso un testo c'è: vince quello
+            if d.get("stato") == "trovato" and d.get("righe"):
+                return "testo", d
+            return ("strumentale", d) if d.get("stato") == "strumentale" else None
+        if d.get("parole") == "allineate" and r.get("stato") == "ok":
+            uguale = lambda x: " ".join(str(x or "").split())   # noqa: E731
+            if [uguale(x.get("x")) for x in d.get("righe") or []] == [uguale(x.get("testo")) for x in r["righe"]]:
+                return "parole", d
+        return None
+
+    @staticmethod
+    def _impronta_di(r):
+        """L'impronta del testo di una risposta di testi_brano ("" se non ha testo)."""
+        return _impronta_testi(_testi_della_risposta(r)) if r.get("stato") == "ok" else ""
+
+    def _segna(self, i, b, t, a, r, ora=None):
+        """La scheda di un brano dopo la ricerca del testo (r: risposta di testi_brano): se serve Whisper, in coda."""
+        ora = int(ora or time.time())
+        vecchia = self.schede.get(i) or {}
+        st = {"ok": "trovato"}.get(r.get("stato"), r.get("stato") or "nessuno")
+        testi = _testi_della_risposta(r)
+        it = self._impronta_di(r)
+        voce = self._voce(i, b, r)
+        if voce:
+            al, vo = "fatto", voce[0]
+        else:
+            al, vo = ("attesa" if self._serve_voce(r) else ""), ""
+            if al and vecchia.get("v") == TESTI_V and vecchia.get("f") == b.get("_f") and vecchia.get("it") == it and \
+                    vecchia.get("al") in ("errore", "non riuscito"):
+                al = vecchia["al"]   # stesso brano, stesso testo: Whisper non ci riesce, non si ricomincia da capo
+        nuova = dict(v=TESTI_V, f=b.get("_f"), t=t, a=a, s=st, q=ora, n=0, fo=r.get("fonte") or "",
+                     sy=bool(r.get("sincronizzato")), pw=bool(r.get("parole")), ri=len(testi), it=it,
+                     li=lingua_testo(" ".join(testi)), al=al, vo=vo)
+        if al == "attesa":
+            nuova.update(aln=0, alq=0)
+        self._scheda(i, **nuova)
+        if al == "attesa":
+            self.sveglia_a.set()
+
+    def _prossimo(self, subito, serve):
+        voci = self._voci()
+        per_id = dict(voci)
+        with self.blocco:
+            for i in list(subito):
+                if i in per_id and serve(i, per_id[i]):
+                    return i, per_id[i]
+                subito.remove(i)
+        voci.sort(key=lambda x: -(x[1].get("added") or 0))   # i brani nuovi per primi
+        for i, b in voci:
+            if serve(i, b):
+                return i, b
+        return None
+
+    def _metti_prima(self, lista, i, sveglia):
+        with self.blocco:
+            if i in lista:
+                lista.remove(i)
+            lista.insert(0, i)
+        sveglia.set()
+
+    @staticmethod
+    def _aspetta_libreria():
+        while LIB is None or not LIB.ultima:
+            time.sleep(2)
+
+    # i lavori
+
+    def _lavora_cerca(self):
+        self._aspetta_libreria()
+        print("Testi: ricerca dei testi di tutta la libreria avviata", flush=True)
+        while True:
+            self.sveglia_c.clear()
+            x = None
+            if self.acceso and time.time() >= self.pausa_rete:
+                corr, ora = (CORR.tutte() if CORR else {}), time.time()
+                x = self._prossimo(self.subito_c, lambda i, b: self._da_cercare(i, b, self.schede.get(i), corr, ora))
+            if not x:
+                self.ora_c = ""
+                self.salva(True)
+                attesa = self.pausa_rete - time.time() if self.acceso and self.pausa_rete > time.time() else TESTI_RIPOSO
+                self.sveglia_c.wait(max(5.0, min(TESTI_RIPOSO, attesa)))
+                continue
+            try:
+                self.cerca(x[0], x[1], corr)
+            except Exception:   # noqa: BLE001 — un baco su un brano non ferma la ricerca degli altri
+                print("Testi: ricerca di %s non riuscita:\n%s" % (x[0], traceback.format_exc()), flush=True)
+                t, a = self._nomi(x[0], x[1], corr)[:2]
+                self._scheda(x[0], v=TESTI_V, f=x[1].get("_f"), t=t, a=a, s="errore", q=int(time.time()),
+                             n=(self.schede.get(x[0]) or {}).get("n", 0) + 1)
+            self.salva()
+
+    def _lavora_allinea(self):
+        self._aspetta_libreria()
+        while True:
+            self.sveglia_a.clear()
+            x, ora = None, time.time()
+            if not self.fermo_voce() and ora >= self.pausa_voce:
+                x = self._prossimo(self.subito_a, lambda i, b: self._da_allineare(self.schede.get(i), ora)
+                                   and (self.schede.get(i) or {}).get("f") == b.get("_f"))
+            if not x:
+                self.ora_a = ""
+                self.salva(True)
+                attesa = self.pausa_voce - ora if self.pausa_voce > ora else TESTI_RIPOSO
+                self.sveglia_a.wait(max(1.0, min(TESTI_RIPOSO, attesa)))
+                continue
+            if not self.whisper.prepara():
+                p = self.whisper.prova
+                self.sveglia_a.wait(max(5.0, min(1800, p + WHISPER_RIPROVA - time.time())) if p else 1800)
+                continue
+            # dopo un brano ascoltato le schede subito sul disco; dopo un errore veloce al più una volta al minuto
+            self.salva(self.allinea(x[0], x[1]))
+
+    def _lavora_traduci(self):
+        while True:
+            self.sveglia_t.clear()
+            with self.blocco:
+                x = next(iter(self.coda_t.items()), None)
+            if x is None:
+                self.ora_t = ""
+                self.sveglia_t.wait(TESTI_RIPOSO)
+                continue
+            try:
+                self.traduci(x[0], x[1])
+            except Exception as e:   # noqa: BLE001 — un baco: questa traduzione non riesce, le altre sì
+                print("Testi: traduzione non riuscita:\n%s" % traceback.format_exc(), flush=True)
+                self.errori_t[x[0]] = (time.time(), "errore inatteso: %s" % str(e)[:150])
+            finally:
+                with self.blocco:
+                    self.coda_t.pop(x[0], None)
+
+    # ricerca del testo
+
+    def cerca(self, i, b, corr):
+        t, a, al, dur = self._nomi(i, b, corr)
+        self.ora_c = " — ".join(v for v in (t, a) if v)
+        try:
+            r = testi_brano(t, a, al, dur, LIB.percorsi.get(i) if LIB else None, sfondo=True)
+        except ErroreExtra as e:   # LRCLIB non risponde: per un po' il lavoro su tutta la libreria aspetta
+            print("Testi: %s: %s" % (self.ora_c, e.testo), flush=True)
+            self.pausa_rete = time.time() + TESTI_PAUSA_RETE
+            n = (self.schede.get(i) or {}).get("n", 0) + 1
+            self._scheda(i, v=TESTI_V, f=b.get("_f"), t=t, a=a, s="errore", q=int(time.time()), n=n)
+            return
+        self._segna(i, b, t, a, r)
+
+    # parole dalla voce
+
+    def allinea(self, i, b):
+        """Whisper ascolta il brano: le parole del testo prendono il tempo in cui vengono cantate; senza testo lo
+        trascrive dalla voce. In pausa (da Gestione) si ferma a metà e il brano resta in coda. Un errore di tutto il Mac
+        (disco, ffmpeg, rete, Whisper che non parte, tre brani di fila) non conta contro il brano: Whisper aspetta.
+        True se Whisper ha ascoltato davvero il brano (lavoro lungo: le schede si salvano subito)."""
+        s = self.schede.get(i) or {}
+        corr = CORR.tutte() if CORR else {}
+        t, a, al, dur = self._nomi(i, b, corr)
+        self.ora_a, self.id_a = " — ".join(v for v in (t, a) if v), i
+        ora = int(time.time())
+        p = LIB.percorsi.get(i) if LIB else None
+        try:
+            if not p or not os.path.isfile(p):
+                if not p or not os.path.isdir(os.path.dirname(p)):
+                    raise ErroreMac("disco della musica scollegato (%s)" % (os.path.dirname(p) if p else "?"))
+                self._scheda(i, al="errore", alq=ora, ale="file del brano non trovato")   # spostato? si riprova poi
+                return False
+            try:
+                r = testi_brano(t, a, al, dur, p, sfondo=True)   # di solito dalla cache: il testo da allineare
+            except ErroreExtra as e:   # LRCLIB non risponde: non è colpa del brano
+                self.pausa_rete = time.time() + TESTI_PAUSA_RETE
+                raise ErroreMac(e.testo)
+            voce = self._voce(i, b, r)
+            if voce or not self._serve_voce(r):
+                self._scheda(i, al="fatto" if voce else "", vo=voce[0] if voce else "")
+                return False
+            it0, f0 = self._impronta_di(r), b.get("_f")
+            os.makedirs(self.tmp, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="voce-", dir=self.tmp) as tmp:
+                wav = os.path.join(tmp, "voce.wav")
+                _wav16k(p, wav, self.fermo_voce)
+                if r.get("stato") == "ok":
+                    testi = _testi_della_risposta(r)
+                    lingua = lingua_testo(" ".join(testi))
+                    j = self.whisper.trascrivi(wav, lingua, " ".join(testi)[:400])
+                    sentite = [(x, f, w) for x, f, w, _p in parole_sentite(j, self.whisper.anticipo)]
+                    a_tempo = bool(r.get("sincronizzato"))
+                    nuove = [{"t": x.get("t") if a_tempo else None, "f": x.get("fine") if a_tempo else None,
+                              "x": x.get("testo") or "", "p": [[None, None, w] for w in _pezzi(x.get("testo"))]}
+                             for x in r["righe"]]
+                    quota = allinea_parole(nuove, sentite, a_tempo)
+                    self.di_fila = 0
+                    if not self._stesso(i, it0, f0):
+                        return True
+                    if quota < ALLINEA_MINIMO:
+                        self._scheda(i, al="non riuscito", alq=ora, qa=round(quota, 2))
+                        return True
+                    if not a_tempo:
+                        tempi_righe_libere(nuove)
+                    completa_tempi(nuove, dur)
+                    self._salva_dati(i, {"stato": "trovato", "fonte": r.get("fonte") or "", "parole": "allineate",
+                                         "lingua": lingua, "quota": round(quota, 2), "f": f0, "durata": dur,
+                                         "righe": nuove})
+                    self._scheda(i, al="fatto", alq=ora, qa=round(quota, 2), vo="parole")
+                else:   # nessun testo da nessuna parte: lo trascrive Whisper dalla voce
+                    j = self.whisper.trascrivi(wav, "", "")
+                    righe = righe_da_voce(j, self.whisper.anticipo)
+                    self.di_fila = 0
+                    if not self._stesso(i, it0, f0):
+                        return True
+                    if righe:
+                        completa_tempi(righe, dur)
+                        lingua = ((j.get("result") or {}).get("language") or "")[:5]
+                        lingua = lingua if lingua in LINGUE_TRAD else lingua_testo(" ".join(x["x"] for x in righe))
+                        self._salva_dati(i, {"stato": "trovato", "fonte": "voce", "parole": "allineate",
+                                             "lingua": lingua, "f": f0, "durata": dur, "righe": righe})
+                        self._scheda(i, al="fatto", alq=ora, vo="testo", li=lingua)
+                    else:
+                        self._salva_dati(i, {"stato": "strumentale", "fonte": "voce", "parole": "", "lingua": "",
+                                             "f": f0, "righe": []})
+                        self._scheda(i, al="fatto", alq=ora, vo="strumentale")
+            return True
+        except Pausa:
+            print("Testi: Whisper in pausa a metà di %s: lo riprende dopo" % self.ora_a, flush=True)
+            return False
+        except (ErroreMac, OSError) as e:   # il disco, ffmpeg, la rete: tutto il Mac, non il brano
+            self._pausa_mac(e)
+            return False
+        except Exception as e:   # noqa: BLE001 — Whisper o ffmpeg non riescono con questo brano (o un baco)
+            if not isinstance(e, (ErroreTesti, subprocess.SubprocessError, ValueError)):
+                print("Testi: errore inatteso con %s:\n%s" % (self.ora_a, traceback.format_exc()), flush=True)
+            self.di_fila += 1
+            if self.di_fila >= WHISPER_DI_FILA:   # tre brani di fila: è il Mac, non i brani
+                self._pausa_mac("%d brani di fila non riusciti, l'ultimo: %s" % (self.di_fila, e))
+                return False
+            print("Testi: allineamento di %s non riuscito: %s" % (self.ora_a, e), flush=True)
+            self._scheda(i, al="errore", alq=ora, aln=s.get("aln", 0) + 1, ale=str(e)[:200])
+            return False
+        finally:
+            self.ora_a = self.id_a = ""
+
+    def _stesso(self, i, it, f):
+        """Mentre Whisper ascoltava il testo o il file del brano non sono cambiati (se sì, il lavoro non vale più)."""
+        s = self.schede.get(i) or {}
+        return s.get("it", "") == it and s.get("f") == f
+
+    # traduzione
+
+    def _file_trad(self, testi, lingua):
+        return os.path.join(self.dir, "traduzioni", "%s.%s.json" % (_impronta_testi(sorted(set(testi))), lingua))
+
+    def traduzione(self, r, lingua, chi=None):
+        """Lo stato della traduzione per l'app: pronta (una riga tradotta per ogni riga della risposta), in corso (si
+        mettono in coda le righe che mancano), uguale (il testo è già in quella lingua), non riuscita (con il motivo).
+        chi: {chi, ia} di chi chiede: l'IA del Mac solo per Samuele; al più TRAD_PER_PERSONA brani a testa in coda."""
+        chi = self._chi(chi)
+        if lingua not in LINGUE_TRAD:
+            return {"lingua": lingua, "stato": "lingua non disponibile"}
+        testi = _testi_della_risposta(r) if r.get("stato") == "ok" else []
+        if not testi:
+            return {"lingua": lingua, "stato": "senza testo"}
+        if r.get("lingua") == lingua:
+            return {"lingua": lingua, "stato": "uguale"}
+        file = self._file_trad(testi, lingua)
+        c = _leggi_json(file, None)
+        fatte = c["righe"] if isinstance(c, dict) and isinstance(c.get("righe"), dict) else {}
+        mancano = sorted({x for x in testi if not fatte.get(x)})
+        if not mancano:
+            return {"lingua": lingua, "stato": "pronta", "motore": c.get("motore") or "",
+                    "righe": [fatte[x["testo"]] if x.get("testo") else "" for x in r["righe"]]}
+        e = self.errori_t.get(file)
+        if e and time.time() - e[0] < TRAD_RIPROVA:
+            return {"lingua": lingua, "stato": "non riuscita", "motivo": e[1]}
+        with self.blocco:
+            lavoro = self.coda_t.get(file)
+            if lavoro:
+                lavoro["ia"] = lavoro["ia"] or chi["ia"]   # anche Samuele la vuole: con l'IA del Mac, se c'è
+            elif len(self.coda_t) >= TRAD_CODA_MAX:
+                return {"lingua": lingua, "stato": "non riuscita", "motivo": "troppe traduzioni in coda: riprova tra poco"}
+            elif sum(1 for x in self.coda_t.values() if x["chi"] == chi["chi"]) >= TRAD_PER_PERSONA:
+                return {"lingua": lingua, "stato": "non riuscita",
+                        "motivo": "hai già %d traduzioni in arrivo: riprova tra poco" % TRAD_PER_PERSONA}
+            else:
+                self.coda_t[file] = {"righe": mancano, "da": r.get("lingua") or "", "a": lingua, "chi": chi["chi"],
+                                     "ia": chi["ia"]}
+        self._parti("traduci", self._lavora_traduci)
+        self.sveglia_t.set()
+        return {"lingua": lingua, "stato": "in corso"}
+
+    def traduci(self, file, lavoro):
+        """Traduce le righe che mancano e le aggiunge a quelle già tradotte: solo le traduzioni vere (una riga non
+        tradotta resta da fare, e il motivo va in errori_t)."""
+        testi, a = lavoro["righe"], lavoro["a"]
+        self.ora_t = "%s → %s" % (testi[0][:40], LINGUE_TRAD[a][0])
+        try:
+            tradotte, motore, motivo = self.trad.traduci(testi, lavoro["da"], a, lavoro["ia"])
+            c = _leggi_json(file, None)
+            righe = dict(c["righe"]) if isinstance(c, dict) and isinstance(c.get("righe"), dict) else {}
+            righe.update((x, y) for x, y in zip(testi, tradotte) if y and y.strip())
+            _scrivi_json(file, {"lingua": a, "da": lavoro["da"], "motore": motore, "righe": righe})
+            if any(not righe.get(x) for x in testi):
+                self.errori_t[file] = (time.time(), motivo or "alcune righe non tradotte")
+            else:
+                self.errori_t.pop(file, None)
+        except (ErroreTesti, OSError, ValueError) as e:
+            print("Testi: traduzione non riuscita:", e, flush=True)
+            self.errori_t[file] = (time.time(), str(e)[:200])
+        finally:
+            self.ora_t = ""
+
+    # per l'app
+
+    def _risposta(self, r, durata, voce=None):
+        """La risposta per l'app: il testo r (di testi_brano) con le parole dalla voce se Whisper le ha fatte, se no
+        stimate dentro la riga; il testo trascritto dalla voce se r non ne ha."""
+        r = dict(r)
+        if "righe" in r:
+            r["righe"] = [dict(x) for x in r["righe"]]
+        if voce and voce[0] == "parole":
+            righe = [x for x in _righe_app(voce[1]["righe"]) if x["t"] is not None]
+            r.update(righe=righe, sincronizzato=True, parole=True, parole_da="voce")
+        elif voce and voce[0] == "testo":
+            r = {"stato": "ok", "sincronizzato": True, "parole": True, "fonte": "voce", "parole_da": "voce",
+                 "righe": _righe_app(voce[1]["righe"])}
+        elif voce:
+            r = {"stato": "strumentale", "fonte": "voce"}
+        elif r.get("stato") == "ok":
+            r["parole_da"] = "fonte" if r.get("parole") else ""
+            if r.get("sincronizzato") and _stima_parole(r["righe"], durata) and not r.get("parole"):
+                r["parole_da"] = "stima"
+        if r.get("stato") == "ok":
+            r["lingua"] = (voce[1].get("lingua") if voce else "") or lingua_testo(" ".join(_testi_della_risposta(r)))
+            r["v"] = _impronta_testi([r.get("fonte"), r.get("parole_da"), r["righe"]])
+        return r
+
+    def _allineamento(self, i, r, voce):
+        """A che punto è Whisper per il brano, per l'app; None quando non c'è niente da dire (non serve, o il lavoro
+        su tutta la libreria è in pausa e Whisper non l'ha mai ascoltato)."""
+        if voce:
+            return "fatto"
+        if not self._serve_voce(r) or not self.acceso:
+            return None
+        if self.fermo_voce():
+            return "spento"
+        s = self.schede.get(i) or {}
+        al = s.get("al") or "attesa"
+        if al == "attesa":
+            return "in corso" if self.id_a == i else "in coda"
+        if al == "errore":
+            return "in coda" if s.get("aln", 0) < WHISPER_ERRORI else "non riuscito"
+        return "non riuscito"
+
+    def per_brano(self, i, lingua="", chi=None):
+        """GET testi/<id>: il testo di un brano della libreria."""
+        b, p, (t, a, al, dur) = self.brano(i)
+        r = testi_brano(t, a, al, dur, p)
+        voce = self._voce(i, b, r)
+        if self.acceso:   # il brano che si ascolta passa davanti agli altri
+            self._vivi()
+            s = self.schede.get(i)
+            vecchia = not voce and self._serve_voce(r) and (s or {}).get("al") in ("fatto", "", None)
+            if vecchia or self._da_cercare(i, b, s, {i: CORR.di(i)} if CORR else {}, time.time()):
+                self._segna(i, b, t, a, r)   # anche una scheda «fatto» per un testo di prima: Whisper lo rifà
+            if self._da_allineare(self.schede.get(i), time.time()) and not self.fermo_voce():
+                self._metti_prima(self.subito_a, i, self.sveglia_a)
+        o = self._risposta(r, dur, voce)
+        al = self._allineamento(i, r, voce)
+        if al:
+            o["allineamento"] = al
+        if lingua:
+            o["traduzione"] = self.traduzione(o, lingua, chi)
+        return o
+
+    def per_dati(self, titolo, artista, album, durata, lingua="", chi=None):
+        """GET testi?titolo=…: il testo di un brano che non è nella libreria (sul telefono): niente Whisper, l'audio
+        non è sul Mac."""
+        o = self._risposta(testi_brano(titolo, artista, album, durata), durata)
+        if lingua:
+            o["traduzione"] = self.traduzione(o, lingua, chi)
+        return o
+
+    def stato(self):
+        """Per Gestione → Testi e karaoke."""
+        voci, ora = self._voci(), time.time()
+        with self.blocco:
+            schede = dict(self.schede)
+        corr = CORR.tutte() if CORR else {}
+        c = collections.Counter()
+        for i, b in voci:
+            s = schede.get(i)
+            if self._da_cercare(i, b, s, corr, ora):
+                c["da_cercare"] += 1
+                continue
+            c["cercati"] += 1
+            st, vo = s.get("s"), (s.get("vo") if s.get("al") == "fatto" else "")
+            if st == "strumentale" or (st == "nessuno" and vo == "strumentale"):
+                c["strumentali"] += 1
+            elif st == "trovato" or (st == "nessuno" and vo == "testo"):
+                c["con_testo"] += 1
+                if vo == "testo":
+                    c["trascritti"] += 1
+                c["parole_" + ("allineate" if vo in ("parole", "testo") else "fonte" if s.get("pw") else
+                               "stimate" if s.get("sy") else "nessuna")] += 1
+            elif st == "nessuno":
+                c["senza_testo"] += 1
+            if self._da_allineare(s, ora):
+                c["da_allineare"] += 1
+            if s.get("al") == "non riuscito" or (s.get("al") == "errore" and s.get("aln", 0) >= WHISPER_ERRORI):
+                c["non_allineati"] += 1
+        try:
+            fatte = sum(1 for x in os.listdir(os.path.join(self.dir, "traduzioni")) if x.endswith(".json"))
+        except OSError:
+            fatte = 0
+        w = self.whisper
+        pausa = "fino alle %s: %s" % (time.strftime("%H:%M", time.localtime(self.pausa_voce)), self.motivo_voce) \
+            if self.pausa_voce > ora else ""
+        return {"acceso": self.acceso, "con_whisper": self.con_whisper, "totale": len(voci), "conteggi": dict(c),
+                "ora": {"cerca": self.ora_c, "allinea": self.ora_a, "traduce": self.ora_t},
+                "lrclib": "in pausa fino alle %s" % time.strftime("%H:%M", time.localtime(self.pausa_rete))
+                          if self.pausa_rete > ora else "ok",
+                "whisper": {"stato": "spento" if w.spento() else w.stato or ("pronto" if w.pronto() else "da preparare"),
+                            "modello": w.modello, "programma": w.cli or w.programma() or "",
+                            "modello_scaricato": os.path.isfile(w.file_modello), "pausa": pausa},
+                "traduzioni": {"motore": self.trad.motore(), "in_coda": len(self.coda_t), "fatte": fatte}}
+
+
+TST = None
+_blocco_tst = threading.Lock()
+
+
+def _alla_fine(segnale, _quadro):
+    """SIGTERM (launchctl kickstart -k, a ogni aggiornamento): prima di uscire si fermano ffmpeg, Whisper e Homebrew
+    partiti per i testi (hanno un gruppo di processi loro: resterebbero accesi) e si buttano i loro file temporanei;
+    poi si esce come prima, per SIGTERM."""
+    try:
+        _ferma_figli()
+        if TST is not None:
+            TST.chiudi()
+    except Exception:   # noqa: BLE001 — si esce comunque
+        pass
+    finally:
+        signal.signal(segnale, signal.SIG_DFL)
+        os.kill(os.getpid(), segnale)
+
+
+def _tst():
+    """Il lavoro sui testi (preparato alla prima richiesta: leggerlo non costa niente; quello in sottofondo parte solo se
+    acceso da Gestione)."""
+    global TST
+    with _blocco_tst:
+        if TST is None:
+            TST = Testi(os.path.join(_cart("cache"), "testi"))
+        return TST
+
+
+def _testi(h, resto):
+    q = parse_qs(urlsplit(h.path).query)
+    campo = lambda k: (q.get(k) or [""])[0].strip()[:300]   # noqa: E731
+    lingua = campo("lingua").lower()[:10]   # la traduzione, nella lingua scelta nell'app
+    c = _chi_e(h)   # l'IA del Mac traduce solo per Samuele (agli invitati non è permessa): per gli altri MyMemory
+    chi = {"chi": str(c.get("persona") or c.get("chiave") or _ip_cliente(h)), "ia": c.get("ruolo") == "proprietario"}
+    if resto:
+        return _tst().per_brano(resto[0], lingua, chi)
+    try:
+        durata = max(0.0, float(campo("durata") or 0))
+    except ValueError:
+        raise ErroreExtra(400, "La durata deve essere un numero di secondi")
+    if not campo("titolo"):
+        raise ErroreExtra(400, "Serve il titolo del brano")
+    return _tst().per_dati(campo("titolo"), campo("artista"), campo("album"), durata if math.isfinite(durata) else 0,
+                           lingua, chi)
+
+
+def _gestione_testi(h, metodo, resto, corpo):
+    """Gestione → Testi e karaoke: a che punto è il lavoro; POST {acceso, whisper} lo accende o lo mette in pausa (anche
+    solo Whisper); «riprova» sveglia i lavori fermi per un errore."""
+    t = _tst()
+    if not resto and metodo == "GET":
+        return _json(h, t.stato())
+    if not resto and metodo == "POST":
+        c = corpo if isinstance(corpo, dict) else {}
+        scelte = {k: c.get(k) for k in ("acceso", "whisper") if k in c}
+        if not scelte or any(not isinstance(v, bool) for v in scelte.values()):
+            raise ErroreExtra(400, "Serve acceso e/o whisper, vero o falso")
+        t.imposta(scelte.get("acceso"), scelte.get("whisper"))
+        return _json(h, t.stato())
+    if resto == ["riprova"] and metodo == "POST":
+        t.riprova()
+        return _json(h, {"ok": True})
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/testi/%s" % "/".join(resto))
 
 
 # ----- classifiche e musica libera -----
@@ -10413,6 +12672,9 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "clip" and len(resto) == 1:
         solo("GET")
         _json(h, _clip_brano(resto[0]))
+    elif cosa == "testi" and len(resto) <= 1:   # il testo del brano, a tempo (karaoke): vedi la sua sezione
+        solo("GET")
+        _json(h, _testi(h, resto))
     elif cosa == "ascoltati":
         _ascoltati(h, metodo, resto, corpo)
     elif cosa == "gestione":
@@ -10445,6 +12707,8 @@ def _instrada(h, metodo, parti, corpo):
         if chi["ruolo"] == "proprietario" and BLOCCO is not None and BLOCCO.attivo():
             r.setdefault("nuove", {})["youtube_bloccato"] = 1   # il riquadro Gestione diventa rosso
         r["via"] = _via(h)   # «Rete e VPN»: questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet
+        if _stesso_mac(h):   # l'app aperta sul Mac stesso: «Scarica tutta la musica» non parte da solo
+            r["stesso_mac"] = True
         _json(h, r)
     elif cosa == "dispositivi" and not resto:
         solo("GET")
@@ -11437,6 +13701,42 @@ def _ip_cliente(h):
     return h.client_address[0]
 
 
+# ----- l'app aperta sul Mac stesso -----
+# Sul Mac mini la musica è già sul suo disco: l'app aperta lì non deve copiarsi tutta la libreria con «Scarica tutta
+# la musica» (il 27/10 ha riempito il disco interno in pochi minuti). api/extra/io dice all'app se la richiesta viene da
+# questo Mac: 127.0.0.1 o uno dei suoi indirizzi (anche quello di Tailscale, attraverso tailscale serve), letti da
+# ifconfig ogni 5 minuti. ATLANTE_IP_MAC ne aggiunge altri, separati da virgole (le prove lo usano).
+
+_IP_MAC = {"letti": 0.0, "ip": frozenset()}
+
+
+def _ip_del_mac():
+    ora = time.time()
+    if ora - _IP_MAC["letti"] > 300:
+        try:
+            uscita = subprocess.run(["/sbin/ifconfig"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=5).stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            uscita = ""
+        testi = re.findall(r"\binet6?\s+(\S+)", uscita) + (os.environ.get("ATLANTE_IP_MAC") or "").split(",")
+        _IP_MAC.update(letti=ora, ip=frozenset(a for a in map(_ip, testi) if a is not None))
+    return _IP_MAC["ip"]
+
+
+def _stesso_mac(h):
+    """La richiesta viene da questo Mac, direttamente o attraverso tailscale serve (che scrive l'ultimo X-Forwarded-For)."""
+    vicino = _ip(h.client_address[0])
+    if vicino is None:
+        return False
+    xff = h.headers.get("X-Forwarded-For")
+    if xff is None:
+        return vicino.is_loopback or vicino in _ip_del_mac()
+    if not vicino.is_loopback:
+        return False   # un proxy che non è tailscaled sul Mac
+    ultimo = _ip(xff.split(",")[-1])   # quelli prima si possono inventare
+    return ultimo is not None and (ultimo.is_loopback or ultimo in _ip_del_mac())
+
+
 def _biscotto_valido(h):
     """("p", scadenza, parte casuale, None) per il biscotto della password, ("o", scadenza, dispositivo, persona) per un
     invitato; None se manca, è falso, scaduto o revocato."""
@@ -11873,1709 +14173,8 @@ def _permesso(h):
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern +
                                r"|^/x/(?:posizione\.html|posizione\.js|cifra\.js|naviga\.html)$"
                                r"|^(?:/.*)?/api/extra/(?:chiavi|posizione(?:/[^/]+)?)$")
-
-
-# ----- testi e karaoke: il testo di ogni brano, le parole a tempo, la traduzione -----
-#
-# Per ogni brano del catalogo il Mac mini cerca il testo una volta sola, in sottofondo (<cache>/testi), in quest'ordine:
-#   1. un file .lrc accanto al brano (stesso nome);
-#   2. il testo nei tag del file: ID3 SYLT (con i tempi) o USLT, M4A ©lyr, FLAC LYRICS;
-#   3. LRCLIB (lrclib.net, archivio libero di testi sincronizzati), al più una richiesta al secondo.
-# Le parole a tempo, per il karaoke: quelle della fonte se le ha (LRC esteso con <mm:ss.cc>, Lyricsfile di LRCLIB con
-# le parole); se no Whisper (whisper.cpp) ascolta la voce del brano sul Mac e ogni parola del testo prende il tempo in
-# cui viene cantata: RIGHE DAL TESTO, PAROLE DALLA VOCE. Whisper e il suo modello si installano da soli (Homebrew e
-# Hugging Face); finché non ci sono, le parole si stimano dentro la riga, dalle sillabe. Un brano senza testo da
-# nessuna parte: Whisper lo trascrive dalla voce (può avere errori, l'app lo dice); senza voce è strumentale.
-# La traduzione sotto ogni riga, nella lingua scelta nell'app: con l'IA del Mac (Ollama) se c'è, se no con MyMemory.
-# Spento con ATLANTE_TESTI=0; Whisper spento con ATLANTE_WHISPER=0 (oppure un percorso: quel whisper-cli).
-
-TESTI_V = 1                      # cambia quando cambia il modo di cercare o di fare le parole: si rifà tutto
-LRCLIB_BASE = "https://lrclib.net"
-LRCLIB_INTERVALLO = 1.0          # al più una richiesta al secondo
-LRCLIB_TEMPO = 20
-TESTI_RIPROVA = 30 * 86400       # testo non trovato: si cerca di nuovo dopo un mese (LRCLIB cresce ogni giorno)
-TESTI_RIPROVA_ERRORE = 3600      # LRCLIB o la rete non rispondevano: dopo un'ora
-TESTI_PAUSA_RETE = 600
-TESTI_RIPOSO = 900
-TESTI_ATTESA = 6.0               # l'app chiede il testo di un brano mai cercato: si aspetta al più tanto la ricerca
-TESTI_SALVA = 10.0               # schede sul disco al più ogni 10 s (con 6000 brani il file pesa 1 MB)
-TESTI_MAX_FILE = 512 * 1024
-SILLABA = 0.28                   # secondi per sillaba cantata (a occhio): per stimare le parole senza tempi
-WHISPER_MODELLO = "large-v3-turbo-q5_0"
-WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%s.bin"
-WHISPER_TEMPO = 1800             # un brano al più mezz'ora (Mac occupato?)
-WHISPER_RIPROVA = 6 * 3600       # installazione o modello non riusciti: si riprova dopo sei ore
-WHISPER_ERRORI = 3               # un brano che fa fallire Whisper tre volte si lascia stare (fino a un file nuovo)
-# I tempi DTW di whisper.cpp arrivano in ritardo di circa 0,19 s sull'attacco vero della parola (misurato il 27/10 con
-# large-v3-turbo-q5_0 su una canzone di prova con i tempi noti: ritardo mediano 0,19 s, scarto 0,06 s): si anticipano
-WHISPER_ANTICIPO = 0.18
-ALLINEA_MINIMO = 0.3             # sotto questa quota di parole riconosciute le parole restano stimate
-MYMEMORY_BASE = "https://api.mymemory.translated.net"
-TRAD_RIPROVA = 600               # traduzione non riuscita: l'app la può richiedere dopo 10 minuti
-AGENTE_TESTI = "AtlanteMusica/1.0 (https://github.com/samuelemanfredi/atlante)"
-
-# lingue della traduzione: codice → (nome nella lingua stessa, nome in inglese per l'IA)
-LINGUE_TRAD = {
-    "it": ("Italiano", "Italian"), "en": ("English", "English"), "es": ("Español", "Spanish"),
-    "fr": ("Français", "French"), "de": ("Deutsch", "German"), "pt": ("Português", "Portuguese"),
-    "nl": ("Nederlands", "Dutch"), "ca": ("Català", "Catalan"), "ro": ("Română", "Romanian"),
-    "pl": ("Polski", "Polish"), "cs": ("Čeština", "Czech"), "hu": ("Magyar", "Hungarian"),
-    "sv": ("Svenska", "Swedish"), "da": ("Dansk", "Danish"), "no": ("Norsk", "Norwegian"), "fi": ("Suomi", "Finnish"),
-    "el": ("Ελληνικά", "Greek"), "tr": ("Türkçe", "Turkish"), "ru": ("Русский", "Russian"),
-    "uk": ("Українська", "Ukrainian"), "hr": ("Hrvatski", "Croatian"), "sq": ("Shqip", "Albanian"),
-    "ar": ("العربية", "Arabic"), "he": ("עברית", "Hebrew"), "hi": ("हिन्दी", "Hindi"), "zh": ("中文", "Chinese"),
-    "ja": ("日本語", "Japanese"), "ko": ("한국어", "Korean"), "vi": ("Tiếng Việt", "Vietnamese"),
-    "id": ("Bahasa Indonesia", "Indonesian"), "th": ("ไทย", "Thai"),
-}
-
-
-class ErroreTesti(Exception):
-    """Una fonte che non risponde (rete, LRCLIB, Whisper, traduttore): si riprova più tardi, il brano non è «senza
-    testo»."""
-
-
-# --- testi LRC, testo semplice e Lyricsfile di LRCLIB ---
-
-_LRC_T = re.compile(r"\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]")
-_LRC_P = re.compile(r"<(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)>")
-_LRC_META = re.compile(r"^\[([A-Za-z#]+)\s*:([^\]]*)\]$")
-_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
-
-
-def _lrc_s(m, s):
-    return int(m) * 60 + float(s.replace(":", "."))
-
-
-def _pezzi(x):
-    """Le parole di una riga, ognuna con lo spazio che la segue (unite ridanno la riga). Cinese e giapponese, che non
-    hanno spazi: un carattere alla volta."""
-    x = " ".join(str(x or "").split())
-    if _CJK.search(x) and x.count(" ") * 6 < len(x):
-        out = []
-        for c in x:
-            if c.isspace():
-                if out:
-                    out[-1] += c
-            else:
-                out.append(c)
-        return out
-    return re.findall(r"\S+\s*", x)
-
-
-def leggi_lrc(testo):
-    """Le righe di un testo LRC: [{"t": secondi, "x": testo, "p": [[t, fine, pezzo], ...]}] in ordine di tempo, [] se
-    il testo non ha tempi (è un testo semplice). LRC esteso (A2): <mm:ss.cc> prima di ogni parola o sillaba, e in fondo
-    la fine dell'ultima. [offset:±ms] sposta tutto (positivo = prima). Una riga con più tempi ([00:12.00][01:30.00],
-    il ritornello) vale per ognuno. Le righe vuote con un tempo segnano una pausa e restano (x = "")."""
-    offset, righe = 0.0, []
-    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        r = r.strip().lstrip("﻿").strip()
-        if not r:
-            continue
-        m = _LRC_META.match(r)
-        if m and not _LRC_T.match(r):
-            if m.group(1).lower() == "offset":
-                try:
-                    offset = int(m.group(2).strip()) / 1000.0
-                except ValueError:
-                    pass
-            continue
-        tempi, m = [], _LRC_T.match(r)
-        while m:
-            tempi.append(_lrc_s(*m.groups()))
-            r = r[m.end():]
-            m = _LRC_T.match(r)
-        if not tempi:
-            continue
-        x = " ".join(_LRC_P.sub("", r).split())
-        pezzi = _LRC_P.split(r)
-        parole = []
-        if len(pezzi) > 1:
-            if pezzi[0].strip():
-                parole.append([None, None, pezzi[0].lstrip()])   # prima del primo tempo: parte con la riga
-            for k in range(1, len(pezzi) - 2, 3):
-                t, w = _lrc_s(pezzi[k], pezzi[k + 1]), pezzi[k + 2]
-                if w.strip():
-                    parole.append([t, None, w.lstrip() if not parole else w])
-                elif parole and parole[-1][1] is None and parole[-1][0] is not None:
-                    parole[-1][1] = t   # un tempo senza parola dopo: la fine della parola prima
-        for t in tempi:
-            d = t - tempi[0]   # le copie di una riga ripetuta: le parole si spostano con la riga
-            p = [[round((a if a is not None else tempi[0]) + d - offset, 3),
-                  round(b + d - offset, 3) if b is not None else None, w] for a, b, w in parole]
-            righe.append({"t": round(max(0.0, t - offset), 3), "x": x, "p": p})
-    righe.sort(key=lambda r: r["t"])
-    return righe
-
-
-def righe_semplici(testo):
-    """Un testo senza tempi: una riga per riga (le righe vuote tra le strofe restano, una sola, come «»)."""
-    out = []
-    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        r = " ".join(r.split())
-        if r or (out and out[-1]["x"]):
-            out.append({"t": None, "x": r, "p": []})
-    while out and not out[-1]["x"]:
-        out.pop()
-    return out
-
-
-def _yaml_scalare(s):
-    """Uno scalare YAML su una riga: stringa tra virgolette (con i caratteri di escape), numero, booleano, null, [] e
-    {} vuoti, o testo semplice."""
-    s = s.strip()
-    if s[:1] == '"' and s[-1:] == '"' and len(s) >= 2:
-        def esc(m):
-            c = m.group(1)
-            if c[0] in "xuU":
-                return chr(int(c[1:], 16))
-            return {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "b": "\b", "f": "\f", "e": "\x1b", "a": "\a",
-                    "v": "\v", " ": " ", "/": "/", "_": "\xa0", "N": "\x85", "L": " ", "P": " "}.get(c, c)
-        return re.sub(r'\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)', esc, s[1:-1])
-    if s[:1] == "'" and s[-1:] == "'" and len(s) >= 2:
-        return s[1:-1].replace("''", "'")
-    if s in ("[]", "{}"):
-        return [] if s == "[]" else {}
-    if s in ("~", "null", "Null", "NULL", ""):
-        return None
-    if s in ("true", "True", "TRUE"):
-        return True
-    if s in ("false", "False", "FALSE"):
-        return False
-    if re.fullmatch(r"[-+]?\d+", s):
-        return int(s)
-    if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?", s):
-        return float(s)
-    return s
-
-
-def _yaml_chiave(r):
-    """(chiave, resto) di una riga «chiave: valore» (chiave anche tra virgolette), None se non è una coppia."""
-    m = re.match(r'^("(?:[^"\\]|\\.)*"|\'(?:[^\']|\'\')*\'|[^\s:#"\'][^:#]*?)\s*:(?:\s+(.*))?$', r)
-    if not m:
-        return None
-    return _yaml_scalare(m.group(1)) if m.group(1)[0] in "\"'" else m.group(1).strip(), (m.group(2) or "")
-
-
-def _yaml_min(testo):
-    """Un lettore YAML minimo, per il Lyricsfile di LRCLIB: blocchi con rientro, liste «- » (anche allo stesso rientro
-    della chiave, come le scrive serde_yaml), scalari su una riga o continuati sulle righe dopo. Niente ancore, tag
-    né blocchi | e >: lì si arrende (ValueError) e si usano i campi semplici di LRCLIB."""
-    righe = []
-    for r in str(testo or "").replace("\r\n", "\n").split("\n"):
-        if not r.strip() or r.lstrip().startswith("#") or r.strip() in ("---", "..."):
-            continue
-        if "\t" in r[:len(r) - len(r.lstrip())]:
-            raise ValueError("tabulazione nel rientro")
-        righe.append([len(r) - len(r.lstrip(" ")), r.strip()])
-
-    def valore(v, i, rientro):
-        """Il valore di una chiave: scalare (anche su più righe) o blocco sotto. (valore, indice dopo)."""
-        if v and v[0] in "|>&*!":
-            raise ValueError("YAML non supportato: %s" % v[:10])
-        if v and v[0] in "\"'" and not (len(v) >= 2 and v[-1] == v[0] and not v.endswith("\\" + v[0])):
-            pezzi = [v]
-            while i < len(righe):   # stringa tra virgolette che continua sulle righe dopo
-                pezzi.append(righe[i][1])
-                i += 1
-                if righe[i - 1][1].endswith(v[:1]) and not righe[i - 1][1].endswith("\\" + v[:1]):
-                    break
-            return _yaml_scalare(" ".join(pezzi)), i
-        if v:
-            pezzi = [v]
-            while i < len(righe) and righe[i][0] > rientro and not _yaml_chiave(righe[i][1]) \
-                    and not righe[i][1].startswith("- "):
-                pezzi.append(righe[i][1])   # testo semplice continuato sotto
-                i += 1
-            return _yaml_scalare(" ".join(pezzi)), i
-        if i < len(righe) and (righe[i][0] > rientro or (righe[i][0] == rientro and
-                                                          (righe[i][1] == "-" or righe[i][1].startswith("- ")))):
-            return blocco(i, righe[i][0])
-        return None, i
-
-    def mappa(i, rientro, o=None):
-        o = {} if o is None else o
-        while i < len(righe) and righe[i][0] == rientro and not (righe[i][1] == "-" or righe[i][1].startswith("- ")):
-            kv = _yaml_chiave(righe[i][1])
-            if not kv:
-                raise ValueError("riga YAML non capita: %r" % righe[i][1][:40])
-            o[kv[0]], i = valore(kv[1], i + 1, rientro)
-        return o, i
-
-    def lista(i, rientro):
-        out = []
-        while i < len(righe) and righe[i][0] == rientro and (righe[i][1] == "-" or righe[i][1].startswith("- ")):
-            dentro = righe[i][1][1:].lstrip()
-            if not dentro:
-                v, i = valore("", i + 1, rientro)
-                out.append(v)
-                continue
-            col = rientro + (len(righe[i][1]) - len(dentro))
-            kv = _yaml_chiave(dentro)
-            if kv:   # «- chiave: valore»: una mappa, le altre chiavi sotto, allineate alla prima
-                o = {}
-                o[kv[0]], j = valore(kv[1], i + 1, col)
-                o, i = mappa(j, col, o)
-                out.append(o)
-            else:
-                v, i = valore(dentro, i + 1, col)
-                out.append(v)
-        return out, i
-
-    def blocco(i, rientro):
-        if righe[i][1] == "-" or righe[i][1].startswith("- "):
-            return lista(i, rientro)
-        return mappa(i, rientro)
-
-    if not righe:
-        return {}
-    o, i = blocco(0, righe[0][0])
-    if i != len(righe):
-        raise ValueError("YAML: righe in più dopo la fine")
-    return o
-
-
-def leggi_lyricsfile(testo):
-    """Il Lyricsfile di LRCLIB (YAML: metadata.instrumental, lines[] con text, start_ms, end_ms e words[] con text,
-    start_ms, end_ms): (strumentale, righe) oppure None se non si legge."""
-    try:
-        doc = _yaml_min(testo)
-    except (ValueError, IndexError, OverflowError):
-        return None
-    if not isinstance(doc, dict):
-        return None
-    meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
-    ms = lambda v: round(v / 1000.0, 3) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None   # noqa: E731
-    righe = []
-    for l in doc.get("lines") or []:
-        if not isinstance(l, dict):
-            continue
-        pezzi = [[ms(w.get("start_ms")), ms(w.get("end_ms")), w["text"]] for w in l.get("words") or []
-                 if isinstance(w, dict) and isinstance(w.get("text"), str) and w["text"].strip()]
-        x = "".join(p[2] for p in pezzi) if pezzi else (l.get("text") if isinstance(l.get("text"), str) else "")
-        righe.append({"t": ms(l.get("start_ms")), "f": ms(l.get("end_ms")), "x": " ".join(x.split()), "p": pezzi})
-    righe.sort(key=lambda r: (r["t"] is None, r["t"] or 0))
-    return bool(meta.get("instrumental")), righe
-
-
-# --- testo nei tag del file ---
-
-def _dec_id3(enc, b):
-    if enc == 0:
-        return b.decode("latin-1")
-    if enc in (1, 2):
-        return _utf16(b, enc == 2)
-    try:
-        return b.decode("utf-8")
-    except UnicodeDecodeError:
-        return b.decode("latin-1")
-
-
-def _id3_stringa(b, i, enc):
-    """(testo, indice dopo il terminatore) di una stringa ID3 che comincia in i: uno zero, o due allineati in UTF-16."""
-    if enc in (1, 2):
-        j = i
-        while j + 1 < len(b) and b[j:j + 2] != b"\x00\x00":
-            j += 2
-        return _dec_id3(enc, b[i:j]), j + 2
-    j = b.find(b"\x00", i)
-    j = len(b) if j < 0 else j
-    return _dec_id3(enc, b[i:j]), j + 1
-
-
-def _id3_sylt(fr):
-    """Le righe di un SYLT con i tempi in millisecondi (quelli in fotogrammi MPEG no). Un «\\n» all'inizio di un
-    pezzo comincia una riga nuova; senza «\\n» e con pezzi lunghi, ogni pezzo è una riga."""
-    enc, formato = fr[0], fr[4]
-    if formato != 2:
-        return None
-    _, i = _id3_stringa(fr, 6, enc)
-    pezzi = []
-    while i + 4 <= len(fr):
-        x, i = _id3_stringa(fr, i, enc)
-        if i + 4 > len(fr):
-            break
-        pezzi.append((struct.unpack(">I", fr[i:i + 4])[0] / 1000.0, x))
-        i += 4
-    if not pezzi:
-        return None
-    a_capo = any(x[:1] in "\n\r" for _, x in pezzi[1:])
-    lunghi = sum(len(x.strip()) for _, x in pezzi) / len(pezzi) > 12
-    righe = []
-    for t, x in pezzi:
-        nuova = not righe or (x[:1] in "\n\r" if a_capo else lunghi)
-        x = x.lstrip("\r\n")
-        if nuova:
-            righe.append({"t": round(t, 3), "x": "", "p": []})
-        if x.strip():
-            righe[-1]["p"].append([round(t, 3), None, x])
-    for r in righe:
-        r["x"] = " ".join("".join(p[2] for p in r["p"]).split())
-        if not (a_capo or not lunghi):   # una riga per pezzo: le parole si stimano dopo
-            r["p"] = []
-        elif r["p"]:
-            r["p"][0][2] = r["p"][0][2].lstrip()
-    return [r for r in righe if r["x"] or r is not righe[0]]
-
-
-def _testo_id3(f):
-    h = f.read(10)
-    v, fl, size = h[3], h[5], _ss32(h, 6)
-    d = f.read(size)
-    if fl & 0x80 and v < 4:
-        d = _unsync(d)
-    p = 0
-    if fl & 0x40 and v >= 3:
-        p = _ss32(d) if v == 4 else struct.unpack(">I", d[:4])[0] + 4
-    hs, uslt, sylt = (6 if v == 2 else 10), None, None
-    while p + hs <= len(d):
-        if v == 2:
-            fid, sz = d[p:p + 3].decode("latin-1"), int.from_bytes(d[p + 3:p + 6], "big")
-        else:
-            fid = d[p:p + 4].decode("latin-1")
-            sz = _ss32(d, p + 4) if v == 4 else struct.unpack(">I", d[p + 4:p + 8])[0]
-        if not re.fullmatch(r"[A-Z0-9]{3,4}", fid) or sz <= 0 or p + hs + sz > len(d):
-            break
-        fr = d[p + hs:p + hs + sz]
-        if v == 4:
-            if d[p + 9] & 0x02:
-                fr = _unsync(fr)
-            if d[p + 9] & 0x01:
-                fr = fr[4:]
-        if fid in ("USLT", "ULT") and len(fr) > 4 and uslt is None:
-            _, i = _id3_stringa(fr, 4, fr[0])
-            uslt = _dec_id3(fr[0], fr[i:]).rstrip("\x00")
-        elif fid in ("SYLT", "SLT") and len(fr) > 6 and sylt is None:
-            sylt = _id3_sylt(fr)
-        p += hs + sz
-    if sylt:
-        return "righe", sylt
-    if uslt and uslt.strip():
-        return "testo", uslt
-    return None
-
-
-def _mp4_moov(f):
-    """Il contenuto della scatola moov di un M4A/MP4 (come in tag_mp4), b"" se non c'è o è troppo grande."""
-    f.seek(0, 2)
-    fine, off = f.tell(), 0
-    for _ in range(200):
-        if off >= fine:
-            break
-        f.seek(off)
-        b = f.read(16)
-        if len(b) < 8:
-            break
-        sz, ty, hs = struct.unpack(">I", b[:4])[0], b[4:8], 8
-        if sz == 1 and len(b) >= 16:
-            sz, hs = struct.unpack(">Q", b[8:16])[0], 16
-        elif sz == 0:
-            sz = fine - off
-        if sz < 8:
-            break
-        if ty == b"moov":
-            if sz < 64_000_000:
-                f.seek(off + hs)
-                return f.read(sz - hs)
-            break
-        off += sz
-    return b""
-
-
-def _testo_mp4(f):
-    moov = _mp4_moov(f)
-    for ty, a, z in _scatole(moov, 0, len(moov)):
-        metas = []
-        if ty == "udta":
-            metas = [(a2, z2) for t2, a2, z2 in _scatole(moov, a, z) if t2 == "meta"]
-        elif ty == "meta":
-            metas = [(a, z)]
-        for a2, z2 in metas:
-            for t3, a3, z3 in _scatole(moov, a2 + 4, z2):
-                if t3 != "ilst":
-                    continue
-                for t4, a4, z4 in _scatole(moov, a3, z3):
-                    if t4 != "\xa9lyr":
-                        continue
-                    for t5, a5, z5 in _scatole(moov, a4, z4):
-                        if t5 == "data":
-                            x = moov[a5 + 8:z5].decode("utf-8", "replace")
-                            if x.strip():
-                                return "testo", x
-    return None
-
-
-def _testo_flac(f):
-    f.read(4)
-    for _ in range(64):
-        h = f.read(4)
-        if len(h) < 4:
-            break
-        ultimo, tipo, lun = h[0] & 0x80, h[0] & 0x7F, int.from_bytes(h[1:4], "big")
-        if tipo == 4:
-            d = f.read(lun)
-            p = 4 + struct.unpack("<I", d[:4])[0]
-            n = struct.unpack("<I", d[p:p + 4])[0]
-            p += 4
-            trovati = {}
-            for _ in range(n):
-                if p + 4 > len(d):
-                    break
-                l = struct.unpack("<I", d[p:p + 4])[0]
-                k, _, v = d[p + 4:p + 4 + l].decode("utf-8", "replace").partition("=")
-                p += 4 + l
-                if k.upper() in ("SYNCEDLYRICS", "LYRICS", "UNSYNCEDLYRICS", "UNSYNCED LYRICS") and v.strip():
-                    trovati.setdefault(k.upper(), v)
-            for k in ("SYNCEDLYRICS", "LYRICS", "UNSYNCEDLYRICS", "UNSYNCED LYRICS"):
-                if k in trovati:
-                    return "testo", trovati[k]
-            return None
-        f.seek(lun, 1)
-        if ultimo:
-            break
-    return None
-
-
-def testo_dai_tag(percorso):
-    """Il testo scritto nei tag del brano: ("righe", righe) da un SYLT con i tempi, ("testo", testo) da USLT, ©lyr o
-    LYRICS (che può essere un LRC: lo dice leggi_lrc), None se non c'è."""
-    try:
-        with open(percorso, "rb") as f:
-            testa = f.read(12)
-            f.seek(0)
-            if testa[:3] == b"ID3":
-                return _testo_id3(f)
-            if testa[4:8] == b"ftyp":
-                return _testo_mp4(f)
-            if testa[:4] == b"fLaC":
-                return _testo_flac(f)
-    except (OSError, ValueError, struct.error, IndexError):
-        pass
-    return None
-
-
-# --- lingua di un testo ---
-
-_LINGUE_PAROLE = {
-    "it": "il lo la gli le un una di che non per con sono mi ti si ma come io tu noi voi del della nel quando ancora "
-          "perché sei mio mia cuore amore più tutto anche questa questo",
-    "en": "the and you i to a of in it is that me my your we for on be love don't it's i'm can no oh what all "
-          "just know when baby like never",
-    "es": "el la que de y los las en un una no me te mi tu por con para es lo se como más yo quiero corazón "
-          "amor pero cuando todo",
-    "fr": "le la les de des et un une je tu il elle que qui pas pour dans ne mon ton est c'est j'ai moi toi "
-          "mais avec tout sur",
-    "de": "der die das und ich du nicht ist ein eine mit zu mich dich mein dein wir auf es sie nur noch "
-          "wie bin",
-    "pt": "o a os as de que e não um uma eu você meu minha com para no na é se do da mais quando coração",
-}
-_LINGUE_INSIEMI = {k: set(v.split()) for k, v in _LINGUE_PAROLE.items()}
-
-
-def lingua_testo(x):
-    """La lingua di un testo («it», «en», …), dalla scrittura o dalle parole più comuni; "" se non si capisce."""
-    x = str(x or "")
-    if not x.strip():
-        return ""
-    if re.search(r"[぀-ヿ]", x):
-        return "ja"
-    if re.search(r"[가-힯]", x):
-        return "ko"
-    if re.search(r"[一-鿿]", x):
-        return "zh"
-    conta = lambda r: len(re.findall(r, x))   # noqa: E731
-    lettere = max(1, conta(r"\w"))
-    for rx, l in ((r"[Ѐ-ӿ]", "ru"), (r"[Ͱ-Ͽ]", "el"), (r"[؀-ۿ]", "ar"),
-                  (r"[֐-׿]", "he"), (r"[ऀ-ॿ]", "hi"), (r"[฀-๿]", "th")):
-        if conta(rx) > lettere * 0.3:
-            return "uk" if l == "ru" and re.search(r"[іїєґ]", x.lower()) else l
-    parole = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", x.lower())
-    if not parole:
-        return ""
-    punti = {k: sum(1 for w in parole if w in s) for k, s in _LINGUE_INSIEMI.items()}
-    migliore = max(punti, key=punti.get)
-    seconda = max(v for k, v in punti.items() if k != migliore)
-    if punti[migliore] >= 3 and punti[migliore] >= seconda * 1.25:
-        return migliore
-    return ""
-
-
-# --- tempi delle parole: stima, completamento e allineamento con la voce ---
-
-_VOC = re.compile(r"[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]+", re.I)
-
-
-def _peso(w):
-    """Quanto dura un pezzo cantato, in sillabe (gruppi di vocali), almeno 1; la punteggiatura in fondo è un respiro."""
-    s = float(max(1, len(_VOC.findall(w))))
-    if re.search(r"[,;:]\s*$", w):
-        s += 0.5
-    elif re.search(r"[.!?…]\s*$", w):
-        s += 1.0
-    return s
-
-
-def _distribuisci(pezzi, da, a, t_da, t_a, pesi):
-    """Inizi dei pezzi da..a-1 tra t_da e t_a (l'inizio del pezzo a), in proporzione ai pesi."""
-    tot = sum(pesi[da:a]) or 1.0
-    t = t_da
-    for k in range(da, a):
-        pezzi[k][0] = round(t, 3)
-        t += (t_a - t_da) * pesi[k] / tot
-
-
-def _riempi(pezzi, t0, limite):
-    """Completa i tempi dei pezzi di una riga ([inizio, fine, testo], alcuni inizi noti): tra due inizi noti in
-    proporzione alle sillabe; prima del primo dall'inizio della riga t0; dopo l'ultimo al passo del canto, senza
-    passare «limite» (la riga dopo o la fine del brano). Se c'è molto spazio (pausa, assolo) la riga dura quanto le
-    sue sillabe. Le fini mancanti sono l'inizio del pezzo dopo."""
-    n = len(pezzi)
-    if not n:
-        return
-    pesi = [_peso(w) for _, _, w in pezzi]
-    noti = [k for k in range(n) if pezzi[k][0] is not None]
-    if not noti:
-        if t0 is None:
-            return
-        pezzi[0][0], noti = round(t0, 3), [0]
-    passo = SILLABA   # secondi per sillaba: quello della riga stessa se ha almeno due tempi noti
-    if len(noti) >= 2 and sum(pesi[noti[0]:noti[-1]]) > 0 and pezzi[noti[-1]][0] > pezzi[noti[0]][0]:
-        passo = min(0.6, max(0.1, (pezzi[noti[-1]][0] - pezzi[noti[0]][0]) / sum(pesi[noti[0]:noti[-1]])))
-    k0 = noti[0]
-    if k0 > 0:
-        fine = pezzi[k0][0]
-        naturale = sum(pesi[:k0]) * passo
-        inizio = t0 if t0 is not None and fine - naturale * 2.5 <= t0 < fine else fine - naturale
-        _distribuisci(pezzi, 0, k0, max(0.0, inizio), fine, pesi)
-    for a, b in zip(noti, noti[1:]):
-        if b - a > 1:
-            _distribuisci(pezzi, a, b, pezzi[a][0], pezzi[b][0], pesi)
-    kl = noti[-1]
-    t, naturale = pezzi[kl][0], sum(pesi[kl:]) * passo + 0.25
-    data = pezzi[-1][1] if pezzi[-1][1] is not None and pezzi[-1][1] > pezzi[-1][0] else None
-    if data is not None and kl == n - 1:
-        fine = data
-    elif limite is not None and limite > t:
-        spazio = limite - t - 0.05
-        fine = t + (spazio if spazio <= naturale * 1.8 else naturale * 1.25)
-    else:
-        fine = t + naturale
-    fine = max(fine, t + 0.08 * (n - kl))
-    if kl < n - 1:
-        _distribuisci(pezzi, kl, n, t, fine, pesi)
-    for k in range(n):
-        dopo = pezzi[k + 1][0] if k + 1 < n else fine
-        if pezzi[k][1] is None or pezzi[k][1] <= pezzi[k][0] or pezzi[k][1] > dopo + 0.001:
-            pezzi[k][1] = round(max(dopo, pezzi[k][0] + 0.05), 3)
-
-
-def _inizio_riga(r):
-    """Quando comincia una riga: il suo tempo, o quello del primo pezzo che ce l'ha (None se non si sa)."""
-    if r.get("t") is not None:
-        return r["t"]
-    return next((p[0] for p in r.get("p") or [] if p[0] is not None), None)
-
-
-def completa_tempi(righe, durata=None):
-    """Tempi di ogni pezzo delle righe che hanno un tempo (o pezzi a tempo); le righe senza pezzi li prendono dal testo.
-    Ogni riga ha poi «t» = inizio del primo pezzo e «f» = fine dell'ultimo."""
-    for k, r in enumerate(righe):
-        if not r.get("x"):
-            r["p"] = []
-            continue
-        if not r.get("p"):
-            r["p"] = [[None, None, w] for w in _pezzi(r["x"])]
-        if r.get("t") is None and all(p[0] is None for p in r["p"]):
-            continue
-        dopo = next((t for t in (_inizio_riga(x) for x in righe[k + 1:]) if t is not None), None)
-        limite = dopo if dopo is not None else (durata or None)
-        if r.get("f") is not None and (limite is None or r["f"] < limite) and r["p"][-1][1] is None \
-                and r["f"] > (r.get("t") or 0):
-            r["p"][-1][1] = r["f"]   # la fine della riga data dalla fonte
-        _riempi(r["p"], r.get("t"), limite)
-        r["t"], r["f"] = r["p"][0][0], r["p"][-1][1]
-
-
-def _chiave_parola(w):
-    s = unicodedata.normalize("NFD", str(w or "").lower())
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return re.sub(r"[\W_]+", "", s)
-
-
-def _somiglianza_parole(a, b, memo):
-    if a == b:
-        return 1.0
-    if len(a) < 3 or len(b) < 3 or abs(len(a) - len(b)) > max(len(a), len(b)) // 2:
-        return 0.0
-    k = (a, b)
-    v = memo.get(k)
-    if v is None:
-        v = memo[k] = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
-    return v
-
-
-def allinea_parole(righe, sentite, a_tempo):
-    """Dà ai pezzi delle righe il tempo delle parole sentite da Whisper ([(inizio, fine, parola)], in ordine):
-    allineamento di tutto il testo con tutte le parole sentite (un LCS pesato sulla somiglianza delle parole, che
-    regge le parole capite male e quelle inventate). Con le righe a tempo (LRC) una parola si abbina solo a quelle
-    sentite vicino alla sua riga: così i ritornelli uguali vanno al posto giusto. Solo i tempi abbinati vanno nei
-    pezzi (in ordine crescente dentro la riga); il resto lo fa completa_tempi. Restituisce la quota di parole del
-    testo abbinate (0..1)."""
-    L = []
-    for k, r in enumerate(righe):
-        lo = hi = None
-        if a_tempo and r.get("t") is not None:
-            dopo = next((x["t"] for x in righe[k + 1:] if x.get("t") is not None), None)
-            lo, hi = r["t"] - 1.5, (dopo if dopo is not None else r["t"] + 30) + 1.0
-        for j, p in enumerate(r.get("p") or []):
-            c = _chiave_parola(p[2])
-            if c:
-                L.append((k, j, c, lo, hi))
-    R = [(float(t), _chiave_parola(w)) for t, _f, w in sentite]
-    R = [x for x in R if x[1]]
-    n, m = len(L), len(R)
-    if not n or not m:
-        return 0.0
-    memo, prima, mosse = {}, [0.0] * (m + 1), []
-    for i in range(1, n + 1):
-        _k, _j, c, lo, hi = L[i - 1]
-        ora, mv = [0.0] * (m + 1), bytearray(m + 1)
-        for j in range(1, m + 1):
-            best, x = prima[j], 0                 # 0: la parola del testo non è stata sentita
-            if ora[j - 1] > best:
-                best, x = ora[j - 1], 1           # 1: parola sentita in più (inventata o ripetuta)
-            t, cr = R[j - 1]
-            if lo is None or lo <= t <= hi:
-                s = _somiglianza_parole(c, cr, memo)
-                if s >= 0.67 and prima[j - 1] + s > best:
-                    best, x = prima[j - 1] + s, 2  # 2: la stessa parola
-            ora[j], mv[j] = best, x
-        mosse.append(mv)
-        prima = ora
-    i, j, coppie = n, m, []
-    while i > 0 and j > 0:
-        x = mosse[i - 1][j]
-        if x == 2:
-            coppie.append((i - 1, j - 1))
-            i, j = i - 1, j - 1
-        elif x == 1:
-            j -= 1
-        else:
-            i -= 1
-    per_riga = {}
-    for i, j in reversed(coppie):
-        per_riga.setdefault(L[i][0], []).append((L[i][1], R[j][0]))
-    usate = 0
-    for k, r in enumerate(righe):
-        for p in r.get("p") or []:
-            p[0] = p[1] = None
-        ultimo = -1.0
-        for j, t in per_riga.get(k, []):
-            if t > ultimo + 0.04:   # dentro la riga i tempi crescono: un abbinamento fuori ordine si scarta
-                r["p"][j][0], ultimo = round(t, 3), t
-                usate += 1
-        if per_riga.get(k):
-            r["t"] = None if not a_tempo else r.get("t")
-    return usate / float(n)
-
-
-def tempi_righe_libere(righe):
-    """Testo senza tempi allineato alla voce: le righe senza nessuna parola sentita prendono il tempo tra quelle vicine,
-    in proporzione alle sillabe; prima della prima e dopo l'ultima, al passo del canto."""
-    noti = [k for k, r in enumerate(righe) if r.get("x") and any(p[0] is not None for p in r.get("p") or [])]
-    if not noti:
-        return
-    pesi = [sum(_peso(w) for w in _pezzi(r.get("x"))) if r.get("x") else 0.0 for r in righe]
-    inizio = lambda k: next(p[0] for p in righe[k]["p"] if p[0] is not None)   # noqa: E731
-    for a, b in zip(noti, noti[1:]):
-        if b - a > 1:
-            ta, tb = inizio(a), inizio(b)
-            tot = sum(pesi[a:b]) or 1.0
-            t = ta
-            for k in range(a, b):
-                if k != a and righe[k].get("x"):
-                    righe[k]["t"] = round(t, 3)
-                t += (tb - ta) * pesi[k] / tot
-    t = inizio(noti[0])
-    for k in range(noti[0] - 1, -1, -1):
-        if righe[k].get("x"):
-            t -= pesi[k] * SILLABA + 0.3
-            righe[k]["t"] = round(max(0.0, t), 3)
-    ultima = righe[noti[-1]]["p"]
-    t = max(p[0] for p in ultima if p[0] is not None) + _peso(ultima[-1][2]) * SILLABA + 0.3
-    for k in range(noti[-1] + 1, len(righe)):
-        if righe[k].get("x"):
-            righe[k]["t"] = round(t, 3)
-            t += pesi[k] * SILLABA + 0.3
-    for k in noti:
-        righe[k]["t"] = None
-
-
-# --- parole sentite da Whisper ---
-
-_INVENTATE = re.compile(r"sottotitol|subtit|amara\.org|thanks? for watching|grazie per la visione|iscriviti al|"
-                        r"subscribe|untertitel|sous-titr|продолжение следует|字幕|www\.|\.com\b", re.I)
-
-
-def parole_sentite(j, anticipo=0.0):
-    """[(inizio, fine, parola, probabilità)] da un JSON di whisper-cli -ojf, in ordine. L'inizio di una parola è il
-    tempo DTW del suo primo pezzo (t_dtw, in centesimi di secondo, anticipato di «anticipo» secondi), se manca quello
-    del pezzo (offsets, in ms). I token speciali ([_BEG_], [_TT_…], <|…|>) e i suoni tra parentesi ([Musica],
-    (applausi), ♪) si saltano."""
-    out = []
-    for seg in (j or {}).get("transcription") or []:
-        nuova = True
-        for tok in seg.get("tokens") or [] if isinstance(seg, dict) else []:
-            x = tok.get("text") if isinstance(tok, dict) else None
-            if not isinstance(x, str) or not x or (x.startswith("[_") and x.endswith("]")) or x.startswith("<|"):
-                continue
-            td, off = tok.get("t_dtw"), tok.get("offsets") or {}
-            if isinstance(td, (int, float)) and td >= 0:
-                t = max(0.0, td / 100.0 - anticipo)
-            elif isinstance(off.get("from"), (int, float)):
-                t = off["from"] / 1000.0
-            else:
-                continue
-            fine = off.get("to") / 1000.0 if isinstance(off.get("to"), (int, float)) else None
-            p = tok.get("p") if isinstance(tok.get("p"), (int, float)) else 1.0
-            if nuova or x[:1].isspace() or not out:
-                out.append([t, fine, x.strip(), [p]])
-                nuova = False
-            else:
-                out[-1][2] += x
-                out[-1][3].append(p)
-                if fine is not None:
-                    out[-1][1] = fine
-    pulite = []
-    for t, f, w, ps in out:
-        w = re.sub(r"[\[(♪][^\])♪]*[\])♪]?", "", w).strip()
-        if w and re.search(r"\w", w):
-            pulite.append((round(t, 3), f, w, sum(ps) / len(ps)))
-    return pulite
-
-
-def righe_da_voce(j, anticipo=0.0):
-    """Il testo trascritto da Whisper per un brano senza testo: una riga per frase (una pausa di oltre un secondo o
-    10 parole la chiudono), senza le frasi che Whisper inventa sul silenzio (sottotitoli, ringraziamenti) né quelle
-    incerte. [] se la voce non c'è (brano strumentale)."""
-    righe = []
-    for seg in (j or {}).get("transcription") or []:
-        parole = parole_sentite({"transcription": [seg]}, anticipo)
-        if not parole:
-            continue
-        testo = " ".join(w for _, _, w, _ in parole)
-        if sum(p for *_, p in parole) / len(parole) < 0.35 or _INVENTATE.search(testo):
-            continue
-        riga = []
-        for k, (t, _f, w, _p) in enumerate(parole):
-            if riga and (len(riga) >= 10 or t - parole[k - 1][0] > 1.6):
-                righe.append(riga)
-                riga = []
-            riga.append([t, None, w + " "])
-        if riga:
-            righe.append(riga)
-    out = []
-    for pezzi in righe:
-        pezzi[-1][2] = pezzi[-1][2].rstrip()
-        out.append({"t": pezzi[0][0], "x": " ".join("".join(p[2] for p in pezzi).split()), "p": pezzi})
-    if sum(len(r["p"]) for r in out) < 6:
-        return []
-    return out
-
-
-# --- LRCLIB ---
-
-class Lrclib:
-    """Richieste a LRCLIB, al più una ogni LRCLIB_INTERVALLO secondi, con un User-Agent che dice chi siamo."""
-
-    def __init__(self):
-        self.blocco = threading.Lock()
-        self.ultima = 0.0
-        self.intervallo = max(0.0, _numero_ambiente("ATLANTE_LRCLIB_INTERVALLO", LRCLIB_INTERVALLO))   # prove: 0
-
-    def chiedi(self, percorso, parametri):
-        base = (os.environ.get("ATLANTE_LRCLIB") or LRCLIB_BASE).rstrip("/")   # le prove usano un LRCLIB finto
-        url = base + percorso + "?" + urlencode(parametri)
-        with self.blocco:
-            attesa = self.ultima + self.intervallo - time.time()
-            if attesa > 0:
-                time.sleep(attesa)
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": AGENTE_TESTI, "Lrclib-Client": AGENTE_TESTI,
-                                                           "Accept": "application/json"})
-                with urllib.request.urlopen(req, timeout=LRCLIB_TEMPO) as r:
-                    return json.loads(r.read(8 * 1024 * 1024).decode("utf-8"))
-            except urllib.error.HTTPError as e:
-                if e.code in (400, 404):
-                    return None
-                raise ErroreTesti("LRCLIB: errore %d" % e.code)
-            except (OSError, ValueError, http.client.HTTPException) as e:
-                raise ErroreTesti("LRCLIB non raggiungibile: %s" % e)
-            finally:
-                self.ultima = time.time()
-
-    @staticmethod
-    def _voto(v, nt, na, durata):
-        """Quanto una voce di LRCLIB va bene per il brano (None se no): nomi uguali, durata entro 3 s, e prima le
-        voci con le parole a tempo, poi quelle con le righe a tempo."""
-        if not isinstance(v, dict):
-            return None
-        vt, va = _norm(_titolo_pulito(v.get("trackName") or v.get("name"))), _norm(_primo_artista(v.get("artistName")))
-        if not vt or not (vt == nt or vt.startswith(nt + " ") or nt.startswith(vt + " ")):
-            return None
-        if na and va and not (va == na or na in va or va in na):
-            return None
-        d = v.get("duration")
-        if durata and isinstance(d, (int, float)) and d > 0 and abs(d - durata) > 3:
-            return None
-        if not (v.get("syncedLyrics") or v.get("plainLyrics") or v.get("instrumental") or v.get("lyricsfile")):
-            return None
-        return ((3 if v.get("hasWordSync") else 2 if v.get("syncedLyrics") else 1 if v.get("plainLyrics") else 0),
-                1 if vt == nt else 0, -abs((d or 0) - (durata or 0)))
-
-    def trova(self, titolo, artista, album, durata):
-        """La voce di LRCLIB del brano, o None: prima la ricerca esatta (/api/get, con la durata), poi /api/search."""
-        t, a = _titolo_pulito(titolo), _primo_artista(artista)
-        nt, na = _norm(t), _norm(a)
-        if not nt:
-            return None
-        if a:
-            par = {"track_name": t, "artist_name": a}
-            if album:
-                par["album_name"] = album
-            if durata:
-                par["duration"] = str(int(round(durata)))
-            v = self.chiedi("/api/get", par)
-            if self._voto(v, nt, na, durata) is not None:
-                return v
-        el = self.chiedi("/api/search", {"track_name": t, "artist_name": a} if a else {"q": t})
-        voti = [(self._voto(v, nt, na, durata), k, v) for k, v in enumerate(el if isinstance(el, list) else [])]
-        voti = [x for x in voti if x[0] is not None]
-        if not voti:
-            return None
-        return max(voti, key=lambda x: (x[0], -x[1]))[2]
-
-
-# --- Whisper ---
-
-def _wav16k(percorso, dest):
-    """Il brano in WAV mono 16 kHz (quello che vuole Whisper), decodificato da ffmpeg."""
-    ff = _programma("ffmpeg")
-    if not ff:
-        raise ErroreTesti("ffmpeg non è installato sul Mac: brew install ffmpeg")
-    r = subprocess.run([ff, "-nostdin", "-v", "error", "-y", "-i", percorso, "-map", "0:a:0", "-ac", "1", "-ar", "16000",
-                        "-c:a", "pcm_s16le", "-f", "wav", dest], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, timeout=600, env=_ambiente())
-    if r.returncode != 0 or not os.path.isfile(dest) or os.path.getsize(dest) < 1000:
-        raise ErroreTesti("ffmpeg: " + (r.stderr.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
-
-
-class Whisper:
-    """whisper.cpp sul Mac: il programma (Homebrew, «whisper-cli»), il modello (Hugging Face, in <cache>/testi/modelli)
-    e la trascrizione con il tempo DTW di ogni pezzo di parola. Si prepara da solo la prima volta che serve."""
-
-    DTW = {"tiny": "tiny", "tiny.en": "tiny.en", "base": "base", "base.en": "base.en", "small": "small",
-           "small.en": "small.en", "medium": "medium", "medium.en": "medium.en", "large-v1": "large.v1",
-           "large-v2": "large.v2", "large-v3": "large.v3", "large-v3-turbo": "large.v3.turbo"}
-
-    def __init__(self, cartella):
-        self.dir = cartella
-        os.makedirs(cartella, exist_ok=True)
-        self.blocco = threading.Lock()
-        self.modello = (os.environ.get("ATLANTE_WHISPER_MODELLO") or WHISPER_MODELLO).strip()
-        self.file_modello = (os.environ.get("ATLANTE_WHISPER_FILE_MODELLO") or
-                             os.path.join(cartella, "ggml-%s.bin" % self.modello))
-        self.cli, self.aiuto = None, ""
-        self.stato, self.errore, self.prova = "", "", 0.0
-        self.anticipo = _numero_ambiente("ATLANTE_WHISPER_ANTICIPO", WHISPER_ANTICIPO)   # prove: 0
-
-    @staticmethod
-    def spento():
-        return os.environ.get("ATLANTE_WHISPER", "").strip() == "0"
-
-    @staticmethod
-    def programma():
-        p = os.environ.get("ATLANTE_WHISPER", "").strip()
-        if p not in ("", "0", "1"):
-            return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
-        return _programma("whisper-cli") or _programma("whisper-cpp")
-
-    def dtw(self):
-        """Le «teste d'allineamento» del modello per --dtw: large-v3-turbo-q5_0 → large.v3.turbo."""
-        return self.DTW.get(re.sub(r"-(?:q\d+_\d+|q\d+_k|f16|f32)$", "", self.modello.lower()), "")
-
-    def pronto(self):
-        return bool(self.cli) and os.path.isfile(self.file_modello)
-
-    def prepara(self):
-        """True se whisper-cli e il modello ci sono, installandoli se servono (al più ogni WHISPER_RIPROVA)."""
-        if self.spento():
-            self.stato = "spento"
-            return False
-        with self.blocco:
-            if self.pronto():
-                return True
-            if self.prova and time.time() - self.prova < WHISPER_RIPROVA:
-                return False
-            try:
-                cli = self.programma() or self._installa()
-                if not os.path.isfile(self.file_modello):
-                    self._scarica_modello()
-                r = subprocess.run([cli, "-h"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, timeout=30, env=_ambiente())
-                self.aiuto = r.stdout.decode("utf-8", "replace")
-                if "-ojf" not in self.aiuto:
-                    raise ErroreTesti("whisper-cli troppo vecchio (manca -ojf): brew upgrade whisper-cpp")
-                self.cli, self.stato, self.errore, self.prova = cli, "pronto", "", 0.0
-                print("Testi: Whisper pronto (%s, modello %s)" % (cli, self.modello), flush=True)
-                return True
-            except (ErroreTesti, OSError, subprocess.SubprocessError, ValueError, http.client.HTTPException) as e:
-                self.prova, self.errore = time.time(), str(e)[:300]
-                self.stato = "non pronto: " + self.errore
-                print("Testi: Whisper non pronto:", e, flush=True)
-                return False
-
-    def _installa(self):
-        if os.environ.get("ATLANTE_WHISPER_INSTALLA", "").strip() == "0":
-            raise ErroreTesti("whisper-cli non c'è (installazione automatica spenta)")
-        brew = _programma("brew")
-        if not brew:
-            raise ErroreTesti("whisper-cli non c'è e manca Homebrew per installarlo")
-        self.stato = "installo whisper-cpp con Homebrew…"
-        print("Testi: brew install whisper-cpp", flush=True)
-        env = _ambiente()
-        env.update(HOMEBREW_NO_AUTO_UPDATE="1", HOMEBREW_NO_INSTALL_CLEANUP="1", HOMEBREW_NO_ENV_HINTS="1",
-                   HOMEBREW_NO_ANALYTICS="1", NONINTERACTIVE="1")
-        log = os.path.join(self.dir, "installa.log")
-        with open(log, "ab") as f:
-            r = subprocess.run([brew, "install", "whisper-cpp"], stdin=subprocess.DEVNULL, stdout=f,
-                               stderr=subprocess.STDOUT, timeout=1800, env=env)
-        cli = self.programma()
-        if r.returncode != 0 or not cli:
-            raise ErroreTesti("brew install whisper-cpp non riuscito (vedi %s)" % log)
-        return cli
-
-    def _scarica_modello(self):
-        url = os.environ.get("ATLANTE_WHISPER_URL_MODELLO") or WHISPER_URL % self.modello
-        tmp = self.file_modello + ".part"
-        self.stato = "scarico il modello %s…" % self.modello
-        print("Testi: scarico il modello di Whisper da", url, flush=True)
-        req = urllib.request.Request(url, headers={"User-Agent": AGENTE_TESTI})
-        n = 0
-        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
-            tot = int(r.headers.get("Content-Length") or 0)
-            while True:
-                b = r.read(1 << 20)
-                if not b:
-                    break
-                if n == 0 and b[:4] != b"lmgg":
-                    raise ErroreTesti("il file scaricato non è un modello di whisper.cpp")
-                f.write(b)
-                n += len(b)
-                if tot:
-                    self.stato = "scarico il modello %s: %d%%" % (self.modello, n * 100 // tot)
-        if (tot and n != tot) or n < 1024 * 1024:
-            _cancella(tmp)
-            raise ErroreTesti("modello scaricato a metà (%d byte)" % n)
-        os.replace(tmp, self.file_modello)
-
-    def trascrivi(self, wav, lingua="", prompt=""):
-        """Il JSON di whisper-cli -ojf per un WAV a 16 kHz: frasi, pezzi di parola e tempi (DTW se c'è)."""
-        out = wav + ".whisper"
-        args = [self.cli, "-m", self.file_modello, "-f", wav, "-ojf", "-of", out, "-l", lingua or "auto"]
-        if "-np" in self.aiuto:
-            args.append("-np")
-        if "--dtw" in self.aiuto and self.dtw():
-            args += ["--dtw", self.dtw()]
-            if "-nfa" in self.aiuto:   # con la flash attention il DTW è spento
-                args.append("-nfa")
-        if prompt and "--prompt" in self.aiuto:
-            args += ["--prompt", prompt]
-        if "-sns" in self.aiuto:
-            args.append("-sns")       # niente «[Musica]», «(applausi)»
-        args += ["-t", str(max(2, min(8, (os.cpu_count() or 4) // 2)))]
-        nice = _programma("nice")
-        if nice:
-            args = [nice, "-n", "10"] + args   # il Mac mini fa anche da server: Whisper passa dopo il resto
-        r = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=WHISPER_TEMPO, env=_ambiente())
-        try:
-            if r.returncode != 0 or not os.path.isfile(out + ".json"):
-                raise ErroreTesti("whisper-cli: " + (r.stderr.decode("utf-8", "replace").strip()[-300:] or
-                                                     "nessun risultato (codice %d)" % r.returncode))
-            with open(out + ".json", "rb") as f:
-                return json.loads(f.read().decode("utf-8", "replace"))
-        finally:
-            _cancella(out + ".json")
-
-
-# --- traduzione ---
-
-class Traduttore:
-    """Traduzioni delle righe di un testo: l'IA del Mac (Ollama) se c'è, se no MyMemory (in rete, gratis: 5000 caratteri
-    al giorno, 50 000 con ATLANTE_CONTATTO = un indirizzo email). Le righe uguali (il ritornello) si traducono una
-    volta sola."""
-
-    def __init__(self):
-        self.blocco = threading.Lock()
-        self.ultima = 0.0
-        self.pausa, self.motivo = 0.0, ""
-
-    @staticmethod
-    def ia():
-        attiva, modelli = _modelli_ia()
-        return _scegli_modello("", modelli) if attiva else ""
-
-    def motore(self):
-        m = self.ia()
-        if m:
-            return "IA del Mac (%s)" % m
-        if os.environ.get("ATLANTE_TRADUZIONE_ONLINE", "").strip() == "0":
-            return ""
-        return "MyMemory" + (" (in pausa: %s)" % self.motivo if time.time() < self.pausa else "")
-
-    def traduci(self, righe, da, a):
-        """(traduzioni, motore): una traduzione per riga, nello stesso ordine ("" per le righe vuote)."""
-        uniche = list(dict.fromkeys(x.strip() for x in righe if x and x.strip()))
-        fatte, motori = {}, []
-        modello = self.ia()
-        if modello:
-            try:
-                fatte.update(self._con_ia(modello, uniche, da, a))
-                motori.append("IA del Mac (%s)" % modello)
-            except (ErroreTesti, ErroreExtra, OSError, ValueError, http.client.HTTPException) as e:
-                print("Testi: traduzione con l'IA non riuscita:", e, flush=True)
-        mancano = [x for x in uniche if x not in fatte]
-        if mancano and os.environ.get("ATLANTE_TRADUZIONE_ONLINE", "").strip() != "0":
-            fatte.update(self._con_mymemory(mancano, da, a))
-            motori.append("MyMemory")
-        if uniche and not fatte:
-            raise ErroreTesti("nessun traduttore disponibile")
-        return [fatte.get(x.strip(), "") if x and x.strip() else "" for x in righe], " + ".join(motori)
-
-    @staticmethod
-    def _con_ia(modello, righe, da, a):
-        out = {}
-        for k in range(0, len(righe), 30):
-            pezzo = righe[k:k + 30]
-            prompt = ("Translate these song lyrics%s into %s. Translate every line, keep the order, the meaning and "
-                      "the tone; no notes, no numbering. Answer only with JSON: {\"lines\": [...]} with exactly %d "
-                      "strings, one per line.\n\n%s" % (
-                          (" from " + LINGUE_TRAD[da][1]) if da in LINGUE_TRAD else "", LINGUE_TRAD[a][1], len(pezzo),
-                          "\n".join("%d. %s" % (i + 1, x) for i, x in enumerate(pezzo))))
-            with _IA_UNA:
-                j = _ollama("/api/generate", {"model": modello, "prompt": prompt, "stream": False, "format": "json",
-                                              "options": {"temperature": 0.2}}, TEMPO_IA)
-            r = json.loads((j or {}).get("response") or "{}")
-            linee = r.get("lines") if isinstance(r, dict) else None
-            if not isinstance(linee, list) or len(linee) != len(pezzo):
-                raise ErroreTesti("traduzione dell'IA incompleta")
-            for x, y in zip(pezzo, linee):
-                y = re.sub(r"^\s*\d+[.)]\s*", "", str(y or "")).strip()
-                if y:
-                    out[x] = y
-        return out
-
-    def _con_mymemory(self, righe, da, a):
-        if not da:
-            raise ErroreTesti("lingua del testo non riconosciuta")
-        if time.time() < self.pausa:
-            raise ErroreTesti(self.motivo)
-        base = (os.environ.get("ATLANTE_MYMEMORY") or MYMEMORY_BASE).rstrip("/")
-        email = os.environ.get("ATLANTE_CONTATTO", "").strip()
-        out = {}
-        for x in righe:
-            par = {"q": x[:450], "langpair": "%s|%s" % (da, a)}
-            if re.fullmatch(r"[^@\s]+@[^@\s]+\.\w+", email):
-                par["de"] = email
-            with self.blocco:
-                attesa = self.ultima + 0.3 - time.time()
-                if attesa > 0:
-                    time.sleep(attesa)
-                try:
-                    req = urllib.request.Request(base + "/get?" + urlencode(par), headers={"User-Agent": AGENTE_TESTI})
-                    with urllib.request.urlopen(req, timeout=20) as r:
-                        j = json.loads(r.read(1024 * 1024).decode("utf-8"))
-                except urllib.error.HTTPError as e:
-                    j = {"responseStatus": e.code}
-                except (OSError, ValueError, http.client.HTTPException) as e:
-                    raise ErroreTesti("MyMemory non raggiungibile: %s" % e)
-                finally:
-                    self.ultima = time.time()
-            st = str((j or {}).get("responseStatus") or "")
-            y = ((j or {}).get("responseData") or {}).get("translatedText") or ""
-            if st in ("403", "429") or "MYMEMORY WARNING" in y.upper():
-                domani = time.localtime(time.time() + 86400)
-                self.pausa = time.mktime((domani.tm_year, domani.tm_mon, domani.tm_mday, 0, 5, 0, 0, 0, -1))
-                self.motivo = "finite le traduzioni gratuite di oggi, si riprende domani"
-                if out:
-                    break
-                raise ErroreTesti(self.motivo)
-            if st == "200" and y.strip():
-                out[x] = html.unescape(y).strip()
-        return out
-
-
-# --- il lavoro in sottofondo ---
-
-class Testi:
-    """Testi di tutta la libreria, in sottofondo: un lavoro cerca i testi (veloce, rete), uno fa le parole con Whisper
-    (lento, un brano alla volta), uno traduce quando l'app lo chiede. Prima i brani chiesti dall'app, poi i più nuovi."""
-
-    def __init__(self, cartella):
-        self.dir = cartella
-        for d in ("brani", "esterni", "traduzioni", "modelli"):
-            os.makedirs(os.path.join(cartella, d), exist_ok=True)
-        self.blocco = threading.RLock()
-        self.schede = self._leggi("schede.json").get("brani") or {}
-        self.lrclib, self.trad = Lrclib(), Traduttore()
-        self.whisper = Whisper(os.path.join(cartella, "modelli"))
-        self.subito_c, self.subito_a = [], []          # brani chiesti dall'app: prima degli altri
-        self.coda_t = collections.OrderedDict()        # (chiave, lingua) da tradurre
-        self.errori_t = {}                             # (chiave, lingua) → (quando, motivo)
-        self.sveglia_c, self.sveglia_a, self.sveglia_t = threading.Event(), threading.Event(), threading.Event()
-        self.ora_c = self.ora_a = self.ora_t = ""
-        self.id_a = ""
-        self.pausa_rete = 0.0
-        self.attivo = False
-        self._salvato, self._sporco = 0.0, False
-
-    # file
-
-    def _leggi(self, nome):
-        try:
-            with open(os.path.join(self.dir, nome), encoding="utf-8") as f:
-                o = json.load(f)
-            return o if isinstance(o, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _scrivi(self, nome, dati):
-        p = os.path.join(self.dir, nome)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".testi.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(dati, f, ensure_ascii=False, separators=(",", ":"))
-            os.replace(tmp, p)
-        except BaseException:
-            _cancella(tmp)
-            raise
-
-    def salva(self, subito=False):
-        with self.blocco:
-            if not self._sporco or (not subito and time.time() - self._salvato < TESTI_SALVA):
-                return
-            schede, self._sporco, self._salvato = dict(self.schede), False, time.time()
-        try:
-            self._scrivi("schede.json", {"versione": TESTI_V, "brani": schede})
-        except OSError as e:
-            self._sporco = True
-            print("Testi: schede non salvate:", e, flush=True)
-
-    def _scheda(self, i, **k):
-        with self.blocco:
-            s = dict(self.schede.get(i) or {})
-            s.update(k)
-            self.schede[i] = s
-            self._sporco = True
-        return s
-
-    def dati(self, chiave):
-        try:
-            with open(os.path.join(self.dir, chiave[0], chiave[1] + ".json"), encoding="utf-8") as f:
-                o = json.load(f)
-            return o if isinstance(o, dict) and o.get("v") == TESTI_V else None
-        except (OSError, ValueError):
-            return None
-
-    @staticmethod
-    def _impronta(dati):
-        """Impronta di testo e tempi: l'app capisce che sono cambiati (parole allineate, testo nuovo)."""
-        return hashlib.sha1(json.dumps([dati.get("stato"), dati.get("righe") or []], ensure_ascii=False,
-                                       sort_keys=True).encode("utf-8")).hexdigest()[:12]
-
-    def _salva_dati(self, chiave, dati):
-        dati["v"], dati["h"] = TESTI_V, self._impronta(dati)
-        self._scrivi(os.path.join(chiave[0], chiave[1] + ".json"), dati)
-
-    # brani
-
-    @staticmethod
-    def _voci():
-        if LIB is None:
-            return []
-        with LIB.blocco:
-            voci = list(LIB.brani.items())
-        via = TOLTI.ids() if TOLTI else set()
-        return [(i, b) for i, b in voci if i not in via]
-
-    @staticmethod
-    def _nomi(i, b, corr):
-        c = corr.get(i) or {}
-        return (c.get("title") or b.get("title") or "", c.get("artist") or b.get("artist") or "",
-                c.get("album") or b.get("album") or "", b.get("duration") or 0)
-
-    def _da_cercare(self, i, b, s, corr, ora):
-        if not s or s.get("v") != TESTI_V or s.get("f") != b.get("_f"):
-            return True
-        t, a = self._nomi(i, b, corr)[:2]
-        if s.get("t") != t or s.get("a") != a:
-            return True
-        st = s.get("s")
-        return (st == "nessuno" and ora - s.get("q", 0) > TESTI_RIPROVA) or \
-               (st == "errore" and ora - s.get("q", 0) > TESTI_RIPROVA_ERRORE)
-
-    def _da_allineare(self, s, ora):
-        if not s or s.get("v") != TESTI_V or s.get("s") not in ("trovato", "nessuno"):
-            return False
-        if s.get("ti") == "parole" or (s.get("s") == "trovato" and not s.get("ri")):
-            return False
-        al = s.get("al") or ""
-        return al == "attesa" or (al == "errore" and s.get("aln", 0) < WHISPER_ERRORI and
-                                  ora - s.get("alq", 0) > WHISPER_RIPROVA)
-
-    def avvia(self):
-        with self.blocco:
-            if self.attivo:
-                return
-            self.attivo = True
-        for f in (self._lavora_cerca, self._lavora_allinea, self._lavora_traduci):
-            threading.Thread(target=f, daemon=True).start()
-
-    def _aspetta_libreria(self):
-        while LIB is None or not LIB.ultima:
-            time.sleep(2)
-
-    def _prossimo(self, subito, serve):
-        voci = self._voci()
-        per_id = dict(voci)
-        with self.blocco:
-            for i in list(subito):
-                if i in per_id and serve(i, per_id[i]):
-                    return i, per_id[i]
-                subito.remove(i)
-        voci.sort(key=lambda x: -(x[1].get("added") or 0))   # i brani nuovi per primi
-        for i, b in voci:
-            if serve(i, b):
-                return i, b
-        return None
-
-    def _lavora_cerca(self):
-        self._aspetta_libreria()
-        print("Testi: ricerca dei testi in sottofondo avviata", flush=True)
-        while True:
-            corr, ora = (CORR.tutte() if CORR else {}), time.time()
-            x = None
-            if ora >= self.pausa_rete:
-                x = self._prossimo(self.subito_c, lambda i, b: self._da_cercare(i, b, self.schede.get(i), corr, ora))
-            if not x:
-                self.ora_c = ""
-                self.salva(True)
-                self.sveglia_c.wait(max(5.0, min(TESTI_RIPOSO, self.pausa_rete - time.time()))
-                                    if self.pausa_rete > time.time() else TESTI_RIPOSO)
-                self.sveglia_c.clear()
-                continue
-            self.cerca(x[0], x[1], corr)
-            self.salva()
-
-    def _lavora_allinea(self):
-        self._aspetta_libreria()
-        while True:
-            ora = time.time()
-            x = self._prossimo(self.subito_a, lambda i, b: self._da_allineare(self.schede.get(i), ora)
-                               and self.schede.get(i, {}).get("f") == b.get("_f"))
-            if not x or self.whisper.spento():
-                self.ora_a = ""
-                self.salva(True)
-                self.sveglia_a.wait(TESTI_RIPOSO)
-                self.sveglia_a.clear()
-                continue
-            if not self.whisper.prepara():
-                self.sveglia_a.wait(min(WHISPER_RIPROVA, 1800))
-                self.sveglia_a.clear()
-                continue
-            self.allinea(x[0], x[1])
-            self.salva()
-
-    def _lavora_traduci(self):
-        while True:
-            with self.blocco:
-                x = next(iter(self.coda_t), None)
-            if x is None:
-                self.ora_t = ""
-                self.sveglia_t.wait(TESTI_RIPOSO)
-                self.sveglia_t.clear()
-                continue
-            self.traduci(*x)
-            with self.blocco:
-                self.coda_t.pop(x, None)
-
-    # ricerca
-
-    def _da_lrclib(self, v):
-        """(stato, fonte, tempi, righe) da una voce di LRCLIB."""
-        if v.get("instrumental"):
-            return "strumentale", "lrclib", "nessuno", []
-        if v.get("hasWordSync") and isinstance(v.get("lyricsfile"), str):
-            lf = leggi_lyricsfile(v["lyricsfile"])
-            if lf and lf[0]:
-                return "strumentale", "lrclib", "nessuno", []
-            if lf and any(p[0] is not None for r in lf[1] for p in r["p"]):
-                return "trovato", "lrclib", "parole", lf[1]
-        if v.get("syncedLyrics"):
-            righe = leggi_lrc(v["syncedLyrics"])
-            if righe:
-                return "trovato", "lrclib", "parole" if any(p for r in righe for p in r["p"]) else "righe", righe
-        if v.get("plainLyrics"):
-            return "trovato", "lrclib", "nessuno", righe_semplici(v["plainLyrics"])
-        return "nessuno", "", "nessuno", []
-
-    @staticmethod
-    def _da_testo(testo, fonte):
-        righe = leggi_lrc(testo)
-        if righe:
-            return "trovato", fonte, "parole" if any(p for r in righe for p in r["p"]) else "righe", righe
-        righe = righe_semplici(testo)
-        return ("trovato", fonte, "nessuno", righe) if righe else None
-
-    def cerca_fonti(self, percorso, titolo, artista, album, durata, rete=True):
-        """(stato, fonte, tempi, righe): file .lrc accanto al brano, tag del file, LRCLIB."""
-        if percorso:
-            base = os.path.splitext(percorso)[0]
-            for est in (".lrc", ".LRC", ".Lrc"):
-                q = base + est
-                try:
-                    if os.path.isfile(q) and os.path.getsize(q) <= TESTI_MAX_FILE:
-                        with open(q, "rb") as f:
-                            b = f.read()
-                        try:
-                            x = b.decode("utf-8-sig")
-                        except UnicodeDecodeError:
-                            x = b.decode("latin-1")
-                        r = self._da_testo(x, "file")
-                        if r:
-                            return r
-                except OSError:
-                    pass
-            t = testo_dai_tag(percorso)
-            if t and t[0] == "righe":
-                return "trovato", "tag", "parole" if any(p for r in t[1] for p in r["p"]) else "righe", t[1]
-            if t:
-                r = self._da_testo(t[1], "tag")
-                if r:
-                    return r
-        if rete:
-            v = self.lrclib.trova(titolo, artista, album, durata)
-            if v:
-                return self._da_lrclib(v)
-        return "nessuno", "", "nessuno", []
-
-    def _dati_da(self, stato, fonte, tempi, righe, durata):
-        righe = [{"t": r.get("t"), "f": r.get("f"), "x": r.get("x") or "", "p": [list(p) for p in r.get("p") or []]}
-                 for r in righe]
-        if tempi in ("parole", "righe"):
-            completa_tempi(righe, durata)
-        testo = " ".join(r["x"] for r in righe)
-        return {"stato": stato, "fonte": fonte, "tempi": tempi,
-                "parole": "fonte" if tempi == "parole" else "stimate" if tempi == "righe" else "",
-                "lingua": lingua_testo(testo), "durata": durata, "righe": righe}
-
-    def cerca(self, i, b, corr):
-        t, a, al, dur = self._nomi(i, b, corr)
-        self.ora_c = " — ".join(v for v in (t, a) if v)
-        ora = int(time.time())
-        vecchia = self.schede.get(i) or {}
-        try:
-            stato, fonte, tempi, righe = self.cerca_fonti(b.get("_p") or (LIB.percorsi.get(i) if LIB else None),
-                                                          t, a, al, dur)
-        except ErroreTesti as e:
-            print("Testi: %s: %s" % (self.ora_c, e), flush=True)
-            self.pausa_rete = time.time() + TESTI_PAUSA_RETE
-            self._scheda(i, v=TESTI_V, f=b.get("_f"), t=t, a=a, s="errore", q=ora, n=vecchia.get("n", 0) + 1)
-            return
-        stesso_file = vecchia.get("v") == TESTI_V and vecchia.get("f") == b.get("_f") and \
-            self.dati(("brani", i)) is not None
-        if stato == "nessuno" and stesso_file and vecchia.get("fo") == "voce" and vecchia.get("al") == "fatto":
-            # ancora nessun testo in giro, ma Whisper l'aveva già trascritto (o sentito che è strumentale): si tiene
-            self._scheda(i, t=t, a=a, q=ora, n=0)
-            return
-        dati = self._dati_da(stato, fonte, tempi, righe, dur)
-        hs = self._impronta(dati)
-        if stesso_file and vecchia.get("hs") == hs and vecchia.get("al") == "fatto":
-            self._scheda(i, t=t, a=a, q=ora, n=0)   # stesso testo, già allineato alla voce: si tengono le parole
-            return
-        self._salva_dati(("brani", i), dati)
-        al = "" if tempi == "parole" or stato == "strumentale" else "attesa"
-        self._scheda(i, v=TESTI_V, f=b.get("_f"), t=t, a=a, s=stato, fo=fonte, ti=tempi, q=ora, n=0,
-                     ri=sum(1 for r in righe if r.get("x")), hs=hs, li=dati["lingua"], pa=dati["parole"], al=al,
-                     aln=0, qa=None)
-        if al == "attesa":
-            self.sveglia_a.set()
-
-    # allineamento con la voce
-
-    def allinea(self, i, b):
-        s = self.schede.get(i) or {}
-        dati = self.dati(("brani", i)) or {}
-        self.ora_a, self.id_a = " — ".join(v for v in (s.get("t"), s.get("a")) if v), i
-        ora = int(time.time())
-        p = LIB.percorsi.get(i) if LIB else None
-        try:
-            if not p or not os.path.isfile(p):
-                raise ErroreTesti("brano non raggiungibile (disco scollegato?)")
-            with tempfile.TemporaryDirectory(prefix="atlante-testi-") as tmp:
-                wav = os.path.join(tmp, "voce.wav")
-                _wav16k(p, wav)
-                righe = dati.get("righe") or []
-                if s.get("s") == "trovato" and any(r.get("x") for r in righe):
-                    testo = " ".join(r["x"] for r in righe if r.get("x"))
-                    j = self.whisper.trascrivi(wav, dati.get("lingua") or "", testo[:400])
-                    sentite = [(t, f, w) for t, f, w, _p in parole_sentite(j, self.whisper.anticipo)]
-                    a_tempo = dati.get("tempi") == "righe"
-                    nuove = [{"t": r.get("t"), "f": r.get("f") if a_tempo else None, "x": r.get("x") or "",
-                              "p": [[None, None, x[2]] for x in r.get("p") or []] or
-                                   [[None, None, w] for w in _pezzi(r.get("x"))]} for r in righe]
-                    for r in nuove:
-                        if not r["x"]:
-                            r["p"] = []
-                    quota = allinea_parole(nuove, sentite, a_tempo)
-                    if quota >= ALLINEA_MINIMO:
-                        if not a_tempo:
-                            tempi_righe_libere(nuove)
-                        completa_tempi(nuove, dati.get("durata") or b.get("duration"))
-                        dati.update(righe=nuove, parole="allineate", quota=round(quota, 2))
-                        self._salva_dati(("brani", i), dati)
-                        self._scheda(i, al="fatto", alq=ora, pa="allineate", qa=round(quota, 2))
-                    else:
-                        self._scheda(i, al="non riuscito", alq=ora, qa=round(quota, 2))
-                else:   # nessun testo da nessuna parte: lo trascrive Whisper dalla voce
-                    j = self.whisper.trascrivi(wav, "", "")
-                    righe = righe_da_voce(j, self.whisper.anticipo)
-                    lingua = ((j.get("result") or {}).get("language") or "")[:5]
-                    if righe:
-                        completa_tempi(righe, b.get("duration"))
-                        dati = {"stato": "trovato", "fonte": "voce", "tempi": "parole", "parole": "allineate",
-                                "lingua": lingua if lingua in LINGUE_TRAD else lingua_testo(
-                                    " ".join(r["x"] for r in righe)),
-                                "durata": b.get("duration"), "righe": righe}
-                        self._salva_dati(("brani", i), dati)
-                        self._scheda(i, s="trovato", fo="voce", ti="parole", al="fatto", alq=ora, pa="allineate",
-                                     ri=len(righe), li=dati["lingua"])
-                    else:
-                        self._salva_dati(("brani", i), {"stato": "strumentale", "fonte": "voce", "tempi": "nessuno",
-                                                        "parole": "", "lingua": "", "righe": []})
-                        self._scheda(i, s="strumentale", fo="voce", ti="nessuno", al="fatto", alq=ora, ri=0)
-        except (ErroreTesti, OSError, subprocess.SubprocessError, ValueError) as e:
-            print("Testi: allineamento di %s non riuscito: %s" % (self.ora_a, e), flush=True)
-            self._scheda(i, al="errore", alq=ora, aln=s.get("aln", 0) + 1, ale=str(e)[:200])
-        finally:
-            self.ora_a = self.id_a = ""
-
-    # traduzione
-
-    def _file_trad(self, chiave, lingua):
-        return os.path.join(self.dir, "traduzioni", "%s-%s.%s.json" % (chiave[0][0], chiave[1], lingua))
-
-    def traduzione(self, chiave, dati, lingua):
-        """Lo stato della traduzione per l'app: pronta (con le righe), in corso (si mette in coda), uguale (il testo è
-        già in quella lingua), non riuscita (con il motivo)."""
-        if lingua not in LINGUE_TRAD:
-            return {"lingua": lingua, "stato": "lingua non disponibile"}
-        righe = (dati or {}).get("righe") or []
-        if not any(r.get("x") for r in righe):
-            return {"lingua": lingua, "stato": "senza testo"}
-        if (dati.get("lingua") or "") == lingua:
-            return {"lingua": lingua, "stato": "uguale"}
-        try:
-            with open(self._file_trad(chiave, lingua), encoding="utf-8") as f:
-                c = json.load(f)
-            if c.get("h") == dati.get("h") and len(c.get("righe") or []) == len(righe):
-                return {"lingua": lingua, "stato": "pronta", "righe": c["righe"], "motore": c.get("motore", "")}
-        except (OSError, ValueError, AttributeError):
-            pass
-        e = self.errori_t.get((chiave, lingua))
-        if e and time.time() - e[0] < TRAD_RIPROVA:
-            return {"lingua": lingua, "stato": "non riuscita", "motivo": e[1]}
-        with self.blocco:
-            self.coda_t[(chiave, lingua)] = None
-        self.sveglia_t.set()
-        return {"lingua": lingua, "stato": "in corso"}
-
-    def traduci(self, chiave, lingua):
-        dati = self.dati(chiave)
-        if not dati:
-            return
-        righe = [r.get("x") or "" for r in dati.get("righe") or []]
-        self.ora_t = "%s → %s" % (next((x for x in righe if x), "")[:40], LINGUE_TRAD[lingua][0])
-        try:
-            tradotte, motore = self.trad.traduci(righe, dati.get("lingua") or "", lingua)
-            p = self._file_trad(chiave, lingua)
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".trad.", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump({"h": dati.get("h"), "lingua": lingua, "motore": motore, "righe": tradotte}, f,
-                          ensure_ascii=False)
-            os.replace(tmp, p)
-            self.errori_t.pop((chiave, lingua), None)
-        except (ErroreTesti, OSError, ValueError) as e:
-            print("Testi: traduzione non riuscita:", e, flush=True)
-            self.errori_t[(chiave, lingua)] = (time.time(), str(e)[:200])
-        finally:
-            self.ora_t = ""
-
-    # per l'app
-
-    def _risposta(self, dati, s=None, chiave=None, lingua=""):
-        dati = dati or {}
-        o = {"stato": dati.get("stato") or "nessuno", "fonte": dati.get("fonte") or "", "parole": dati.get("parole") or "",
-             "lingua": dati.get("lingua") or "", "v": dati.get("h") or "", "righe": dati.get("righe") or []}
-        if s is not None:
-            al = s.get("al") or ""
-            if self.whisper.spento() and al in ("attesa", "errore"):
-                al = "spento"
-            elif al == "attesa":
-                al = "in corso" if self.id_a and chiave and chiave[1] == self.id_a else "in coda"
-            elif al == "errore":
-                al = "non riuscito" if s.get("aln", 0) >= WHISPER_ERRORI else "in coda"
-            o["allineamento"] = al
-        if lingua and chiave:
-            o["traduzione"] = self.traduzione(chiave, dati, lingua)
-        return o
-
-    def per_brano(self, i, lingua=""):
-        b = LIB.brani.get(i) if LIB else None
-        if not b:
-            raise ErroreExtra(404, "Brano non trovato")
-        corr, ora = (CORR.tutte() if CORR else {}), time.time()
-        if self._da_cercare(i, b, self.schede.get(i), corr, ora):
-            with self.blocco:
-                if i in self.subito_c:
-                    self.subito_c.remove(i)
-                self.subito_c.insert(0, i)
-            self.sveglia_c.set()
-            fine = time.time() + TESTI_ATTESA
-            while time.time() < fine and self._da_cercare(i, b, self.schede.get(i), corr, ora):
-                time.sleep(0.1)
-        s = self.schede.get(i)
-        if self._da_cercare(i, b, s, corr, ora):
-            return {"stato": "cerco", "righe": [], "v": ""}
-        if self._da_allineare(s, ora) and not self.whisper.spento():
-            with self.blocco:
-                if i in self.subito_a:
-                    self.subito_a.remove(i)
-                self.subito_a.insert(0, i)
-            self.sveglia_a.set()
-        return self._risposta(self.dati(("brani", i)), s, ("brani", i), lingua)
-
-    def per_dati(self, titolo, artista, album, durata, lingua=""):
-        """Il testo di un brano che non è nella libreria del Mac (sul telefono, di un modulo): solo LRCLIB, niente
-        Whisper (l'audio sta sul telefono). Conservato in <cache>/testi/esterni."""
-        if not (titolo or "").strip():
-            raise ErroreExtra(400, "Serve il titolo del brano")
-        chiave = ("esterni", hashlib.sha1(("%s\n%s\n%d" % (_norm(_titolo_pulito(titolo)), _norm(_primo_artista(artista)),
-                                                         int(round(durata or 0)))).encode("utf-8")).hexdigest()[:20])
-        dati = self.dati(chiave)
-        if not dati or (dati.get("stato") == "nessuno" and time.time() - dati.get("q", 0) > TESTI_RIPROVA):
-            if time.time() < self.pausa_rete:
-                return {"stato": "errore", "righe": [], "v": "", "motivo": "LRCLIB non risponde, riprovo più tardi"}
-            try:
-                dati = self._dati_da(*self.cerca_fonti(None, titolo, artista, album, durata), durata)
-            except ErroreTesti as e:
-                self.pausa_rete = time.time() + TESTI_PAUSA_RETE
-                return {"stato": "errore", "righe": [], "v": "", "motivo": str(e)}
-            dati["q"] = int(time.time())
-            self._salva_dati(chiave, dati)
-        return self._risposta(dati, None, chiave, lingua)
-
-    def stato(self):
-        voci, ora = self._voci(), time.time()
-        with self.blocco:
-            schede = dict(self.schede)
-        corr = CORR.tutte() if CORR else {}
-        c = collections.Counter()
-        for i, b in voci:
-            s = schede.get(i)
-            if self._da_cercare(i, b, s, corr, ora):
-                c["da_cercare"] += 1
-                continue
-            c["cercati"] += 1
-            st = s.get("s")
-            if st == "strumentale":
-                c["strumentali"] += 1
-            elif st == "trovato":
-                c["con_testo"] += 1
-                c["parole_" + (s.get("pa") or "nessuna")] += 1
-                if s.get("fo") == "voce":
-                    c["trascritti"] += 1
-            elif st == "nessuno":
-                c["senza_testo"] += 1
-            if self._da_allineare(s, ora):
-                c["da_allineare"] += 1
-            if s.get("al") == "non riuscito" or (s.get("al") == "errore" and s.get("aln", 0) >= WHISPER_ERRORI):
-                c["non_allineati"] += 1
-        o = {"attivo": self.attivo, "totale": len(voci), "conteggi": dict(c),
-             "ora": {"cerca": self.ora_c, "allinea": self.ora_a, "traduce": self.ora_t},
-             "lrclib": "in pausa fino alle %s" % time.strftime("%H:%M", time.localtime(self.pausa_rete))
-                       if self.pausa_rete > ora else "ok",
-             "whisper": {"stato": "spento" if self.whisper.spento() else self.whisper.stato or "da preparare",
-                         "modello": self.whisper.modello, "programma": self.whisper.cli or self.whisper.programma() or ""},
-             "traduzioni": {"motore": self.trad.motore(), "in_coda": len(self.coda_t),
-                            "fatte": sum(1 for x in os.listdir(os.path.join(self.dir, "traduzioni"))
-                                         if x.endswith(".json"))}}
-        return o
-
-
-TST = None
-
-
-def avvia_testi(cache):
-    """I testi e il karaoke, accesi di serie (ATLANTE_TESTI=0 li spegne)."""
-    global TST
-    if os.environ.get("ATLANTE_TESTI", "").strip() == "0":
-        print("Testi: spenti (ATLANTE_TESTI=0)", flush=True)
-        return None
-    TST = Testi(os.path.join(os.path.abspath(os.path.expanduser(cache)), "testi"))
-    TST.avvia()
-    return TST
-
-
-def _testo_api(h, arg):
-    """GET api/musica/testo/<id>[?lingua=xx]: il testo di un brano del Mac, con le parole a tempo e la traduzione.
-    GET api/musica/testo?titolo=&artista=&album=&durata=[&lingua=]: quello di un brano che il Mac non ha."""
-    if TST is None:
-        return _json(h, {"stato": "spento", "righe": [], "v": ""})
-    q = parse_qs(urlsplit(h.path).query)
-    v = lambda k: (q.get(k) or [""])[0].strip()   # noqa: E731
-    lingua = v("lingua").lower()
-    try:
-        if arg:
-            return _json(h, TST.per_brano(arg, lingua))
-        try:
-            durata = float(v("durata") or 0)
-        except ValueError:
-            durata = 0.0
-        return _json(h, TST.per_dati(v("titolo")[:300], v("artista")[:300], v("album")[:300], durata, lingua))
-    except ErroreExtra as e:
-        return _json(h, {"errore": e.testo}, e.codice)
-
-
-def _gestione_testi(h, metodo, resto, corpo):
-    """Gestione → Testi e karaoke: a che punto è il lavoro; «riprova» sveglia i lavori fermi."""
-    if not resto and metodo == "GET":
-        return _json(h, TST.stato() if TST else {"attivo": False})
-    if resto == ["riprova"] and metodo == "POST":
-        if TST:
-            TST.pausa_rete = 0.0
-            TST.whisper.prova = 0.0
-            TST.trad.pausa = 0.0
-            TST.errori_t.clear()
-            for e in (TST.sveglia_c, TST.sveglia_a, TST.sveglia_t):
-                e.set()
-        return _json(h, {"ok": True})
-    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/testi/%s" % "/".join(resto))
-
-
-# i testi li leggono anche gli invitati (ascoltano la stessa musica)
-PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/musica/testo(?:/[^/]+)?$")
+# ----- testi sincronizzati: anche per gli invitati (ascoltano la musica, quindi ne vedono anche il testo) -----
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extra/testi(?:/[^/]+)?$")
 
 
 def _numero_ambiente(nome, predefinito):
@@ -13705,7 +14304,8 @@ def main():
     except OSError as e:
         print("Atlante: chat non pronta: %s" % e, flush=True)
     avvia_classifiche(a.cache, a.classifiche)
-    avvia_testi(a.cache)   # testi di tutti i brani, karaoke e traduzioni (ATLANTE_TESTI=0 li spegne)
+    _tst().riprendi()   # il lavoro sui testi di tutta la libreria riparte solo se Samuele l'ha acceso da Gestione
+    signal.signal(signal.SIGTERM, _alla_fine)   # launchctl kickstart -k (aggiornamento): prima si ferma Whisper
     if a.tematiche or a.tematiche_prova > 0:
         _tem().prova = max(0, a.tematiche_prova)
         _tem().avvia()

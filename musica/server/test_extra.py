@@ -356,9 +356,15 @@ class Server:
         # la musica libera si ferma sotto i 200 GB liberi: qui non deve contare il disco di chi lancia le prove
         # (l'aggiornamento automatico le lancia sul Mac mini, dove il disco interno può averne meno)
         env.setdefault("ATLANTE_CLASSIFICHE_SPAZIO_MIN_GB", "0")
-        # testi e karaoke: spenti nelle prove che non li riguardano (niente LRCLIB vero, niente Whisper né Homebrew);
-        # le loro prove li accendono con LRCLIB, ffmpeg e Whisper finti (TestTesti)
-        env.setdefault("ATLANTE_TESTI", "0")
+        # LRCLIB finto: senza la pausa di un secondo tra una richiesta e l'altra (quello vero ne vuole al più una al secondo)
+        env.setdefault("ATLANTE_LRCLIB_INTERVALLO", "0")
+        # testi e karaoke: mai i siti veri (LRCLIB, MyMemory, Hugging Face) né un'installazione vera con Homebrew; le prove
+        # che li usano danno i loro finti
+        chiuso = "http://127.0.0.1:9"
+        # e il modello finto si scarica anche dove il disco interno ha poco spazio (sul Mac mini le prove girano lì)
+        for k, v in (("ATLANTE_LRCLIB", chiuso), ("ATLANTE_MYMEMORY", chiuso), ("ATLANTE_WHISPER_INSTALLA", "0"),
+                     ("ATLANTE_WHISPER_URL_MODELLO", chiuso + "/modello.bin"), ("ATLANTE_WHISPER_SPAZIO_MIN_GB", "0")):
+            env.setdefault(k, v)
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         self.log = open(os.path.join(self.base, "server-%d.log" % self.porta), "wb")
@@ -7013,7 +7019,417 @@ class TestPosizioneJS(unittest.TestCase):
             shutil.rmtree(base, ignore_errors=True)
 
 
-# ----- testi e karaoke: fonti dei testi, parole a tempo (Whisper finto), traduzioni, API -----
+
+# ----- testi sincronizzati (karaoke): dal file del brano o da LRCLIB -----
+
+def _id3_frame(fid, dati, v=3):
+    n = len(dati)
+    dim = bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) if v == 4 else struct.pack(">I", n)
+    return fid.encode() + dim + b"\x00\x00" + dati
+
+
+def uslt(testo, enc=1):
+    """Frame USLT: testo senza tempi (UTF-16 con BOM, oppure UTF-8 con enc=3)."""
+    if enc == 3:
+        return b"\x03ita\x00" + testo.encode("utf-8")
+    return b"\x01ita" + "".encode("utf-16") + b"\x00\x00" + testo.encode("utf-16")
+
+
+def sylt(voci, fmt=2):
+    """Frame SYLT in UTF-16: (testo, tempo in ms) per ogni voce, contenuto «testo» (1)."""
+    return (b"\x01ita" + bytes([fmt, 1]) + "".encode("utf-16") + b"\x00\x00" +
+            b"".join(x.encode("utf-16") + b"\x00\x00" + struct.pack(">I", ms) for x, ms in voci))
+
+
+def mp3_con_testo(percorso, titolo, artista, album="", ms=0, frame=b"", v=3):
+    """MP3 piccolissimo con titolo, artista, album, durata (TLEN, in ms) e altri frame ID3 già pronti (USLT, SYLT)."""
+    corpo = b"".join(_id3_frame(f, b"\x01" + t.encode("utf-16"), v) for f, t in
+                     (("TIT2", titolo), ("TPE1", artista), ("TALB", album), ("TLEN", str(ms) if ms else "")) if t) + frame
+    n = len(corpo)
+    os.makedirs(os.path.dirname(percorso), exist_ok=True)
+    with open(percorso, "wb") as f:
+        f.write(b"ID3" + bytes([v, 0, 0, (n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo)
+        f.write((b"\xff\xfb\x90\x00" + bytes(413)) * 3)
+
+
+def m4a_con_testo(percorso, testo):
+    """M4A minimo con titolo e testo (©lyr) nei tag, come li scrive Musica."""
+    def scatola(t, d):
+        return struct.pack(">I", 8 + len(d)) + t + d
+
+    def dato(b):
+        return scatola(b"data", struct.pack(">I", 1) + bytes(4) + b)
+    ilst = scatola(b"ilst", scatola(b"\xa9nam", dato(b"Titolo")) + scatola(b"\xa9lyr", dato(testo.encode("utf-8"))))
+    moov = scatola(b"moov", scatola(b"mvhd", bytes(12) + struct.pack(">II", 1000, 200000) + bytes(80)) +
+                   scatola(b"udta", scatola(b"meta", bytes(4) + scatola(b"hdlr", bytes(25)) + ilst)))
+    with open(percorso, "wb") as f:
+        f.write(scatola(b"ftyp", b"M4A \0\0\0\0M4A mp42isom") + moov)
+
+
+def flac_con_testo(percorso, commenti):
+    """FLAC minimo (STREAMINFO e commenti Vorbis)."""
+    info = bytes(10) + ((44100 << 44) | (44100 * 200)).to_bytes(8, "big") + bytes(16)
+    d = struct.pack("<I", 5) + b"prova" + struct.pack("<I", len(commenti)) + b"".join(
+        struct.pack("<I", len(c.encode("utf-8"))) + c.encode("utf-8") for c in commenti)
+    with open(percorso, "wb") as f:
+        f.write(b"fLaC" + bytes([0]) + len(info).to_bytes(3, "big") + info + bytes([0x80 | 4]) + len(d).to_bytes(3, "big") + d)
+
+
+class TestTesti(unittest.TestCase):
+    """Lettura dei testi: LRC (più tempi su una riga, [offset], parole <mm:ss.xx>), il Lyricsfile di LRCLIB con le parole,
+    i testi dentro i file (ID3 USLT e SYLT, MP4 ©lyr, FLAC LYRICS) e il permesso per gli invitati."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_testi")
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_lrc_righe(self):
+        r = self.m.leggi_lrc("[ar:Ava Max]\n[ti:Kings & Queens]\n[offset:+500]\n"
+                             "[00:01.48] If all of the kings\r\n[00:04.96][01:04.5]We would pop champagne\n"
+                             "[00:08]\n[00:09:50]  To all   of the queens \nriga senza tempo\n[1:02.123]Ultima")
+        self.assertEqual([(x["t"], x["testo"]) for x in r],
+                         [(0.98, "If all of the kings"), (4.46, "We would pop champagne"), (7.5, ""),
+                          (9.0, "To all of the queens"), (61.623, "Ultima"), (64.0, "We would pop champagne")])
+        self.assertFalse(any("parole" in x for x in r))
+        self.assertEqual(self.m.leggi_lrc("[offset:-1500]\n[00:01.00]Presto"), [{"t": 2.5, "testo": "Presto"}])
+        self.assertEqual(self.m.leggi_lrc("solo testo\nsenza tempi"), [])
+        self.assertEqual(self.m.leggi_lrc(None), [])
+
+    def test_lrc_parole(self):
+        r = self.m.leggi_lrc("[00:12.00]<00:12.00>Hello <00:12.50>big  <00:13.10>world<00:14.00>\n[00:15.00]Senza parole\n"
+                             "[00:20.00]Prima <00:21.00>dopo")
+        self.assertEqual(r[0], {"t": 12.0, "testo": "Hello big world", "fine": 14.0, "parole": [
+            {"t": 12.0, "testo": "Hello "}, {"t": 12.5, "testo": "big "}, {"t": 13.1, "testo": "world"}]})
+        self.assertEqual(r[1], {"t": 15.0, "testo": "Senza parole"})
+        # il pezzo prima del primo tempo di parola comincia con la riga
+        self.assertEqual(r[2]["parole"], [{"t": 20.0, "testo": "Prima "}, {"t": 21.0, "testo": "dopo"}])
+
+    def test_testi_semplici(self):
+        self.assertEqual(self.m.testi_semplici("\n\nPrima riga\r\n  Seconda  \n\n\n\nTerza\n\n"),
+                         [{"t": None, "testo": "Prima riga"}, {"t": None, "testo": "Seconda"}, {"t": None, "testo": ""},
+                          {"t": None, "testo": "Terza"}])
+        self.assertEqual(self.m.testi_semplici("  \n "), [])
+
+    def test_lyricsfile_parole(self):
+        lf = ("version: '1.0'\nmetadata:\n  title: Prova\n  instrumental: false\nlines:\n"
+              "- text: Hello world\n  start_ms: 1000\n  end_ms: 2600\n  words:\n"
+              "  - text: 'Hello '\n    start_ms: 1000\n    end_ms: 1500\n"
+              "  - text: \"w\\u00f6rld \\\"x\\\"\"\n    start_ms: 1600\n"
+              "- text: 'It''s fine' # commento\n  start_ms: 3000\n"
+              "plain: |\n  Hello world\n  start_ms: 99\n")
+        self.assertEqual(self.m.leggi_lyricsfile(lf), [
+            {"t": 1.0, "testo": "Hello wörld \"x\"", "fine": 2.6,
+             "parole": [{"t": 1.0, "testo": "Hello "}, {"t": 1.6, "testo": "wörld \"x\""}]},
+            {"t": 3.0, "testo": "It's fine"}])
+        # rientri diversi (come negli esempi di LRCLIB); parole senza tempi: resta la riga
+        lf2 = ("metadata:\n  instrumental: false\nlines:\n  - text: ignored\n    start_ms: 12492\n    words:\n"
+               "      - text: \"Word \"\n        start_ms: 12492\n      - text: sync\n        start_ms: 12900\n"
+               "  - text: Senza\n    start_ms: 14000\n    words:\n      - text: \"Sen\"\n      - text: za\n")
+        self.assertEqual(self.m.leggi_lyricsfile(lf2), [
+            {"t": 12.492, "testo": "Word sync", "parole": [{"t": 12.492, "testo": "Word "}, {"t": 12.9, "testo": "sync"}]},
+            {"t": 14.0, "testo": "Senza"}])
+        self.assertEqual(self.m.leggi_lyricsfile("non: [yaml"), [])
+
+    def test_nei_file(self):
+        p = os.path.join(self.base, "sylt.mp3")   # SYLT a pezzi di riga (karaoke) e USLT: vince SYLT
+        voci = [("\nHel", 1000), ("lo ", 1400), ("world", 1800), ("\nSeconda riga", 4000)]
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("SYLT", sylt(voci)) + _id3_frame("USLT", uslt("Hello world")))
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["stato"], r["sincronizzato"], r["parole"], r["fonte"]), ("ok", True, True, "file"))
+        self.assertEqual(r["righe"], [
+            {"t": 1.0, "testo": "Hello world", "parole": [{"t": 1.0, "testo": "Hel"}, {"t": 1.4, "testo": "lo "},
+                                                          {"t": 1.8, "testo": "world"}]},
+            {"t": 4.0, "testo": "Seconda riga"}])
+        p = os.path.join(self.base, "sylt-righe.mp3")   # una voce per riga
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("SYLT", sylt([("Uno", 500), ("Due", 2500)])))
+        self.assertEqual(self.m.testi_dal_file(p)["righe"], [{"t": 0.5, "testo": "Uno"}, {"t": 2.5, "testo": "Due"}])
+        p = os.path.join(self.base, "uslt-lrc.mp3")   # ID3v2.4, USLT in UTF-8 scritto in formato LRC
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("USLT", uslt("[00:01.00]Uno\n[00:02.50]Due", enc=3), 4), v=4)
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["sincronizzato"], r["righe"]), (True, [{"t": 1.0, "testo": "Uno"}, {"t": 2.5, "testo": "Due"}]))
+        p = os.path.join(self.base, "uslt.mp3")
+        mp3_con_testo(p, "Prova", "Anna", frame=_id3_frame("USLT", uslt("Riga uno\r\nRiga due")))
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["sincronizzato"], r["parole"], r["righe"]),
+                         (False, False, [{"t": None, "testo": "Riga uno"}, {"t": None, "testo": "Riga due"}]))
+        p = os.path.join(self.base, "testo.m4a")
+        m4a_con_testo(p, "[00:03.00]Tre\n[00:04.00]Quattro")
+        self.assertEqual(self.m.testi_dal_file(p)["righe"], [{"t": 3.0, "testo": "Tre"}, {"t": 4.0, "testo": "Quattro"}])
+        p = os.path.join(self.base, "testo.flac")
+        flac_con_testo(p, ["TITLE=Prova", "lyrics=Solo testo\nseconda"])
+        r = self.m.testi_dal_file(p)
+        self.assertEqual((r["sincronizzato"], [x["testo"] for x in r["righe"]]), (False, ["Solo testo", "seconda"]))
+        p = os.path.join(self.base, "niente.mp3")
+        mp3_con_testo(p, "Prova", "Anna")
+        self.assertIsNone(self.m.testi_dal_file(p))
+        self.assertIsNone(self.m.testi_dal_file(os.path.join(self.base, "non-ce.mp3")))
+
+    def test_invitati(self):
+        for x in ("/api/extra/testi/abc123", "/api/extra/testi", "/musica/api/extra/testi/abc"):
+            self.assertTrue(self.m.PERMESSE_INVITATI.match(x), x)
+        self.assertFalse(self.m.PERMESSE_INVITATI.match("/api/extra/testi/a/b"))
+
+
+KINGS = {"id": 941156, "trackName": "Kings & Queens", "artistName": "Ava Max", "albumName": "Heaven & Hell", "duration": 162.0,
+         "instrumental": False, "hasWordSync": False, "plainLyrics": "If all of the kings\nWe would pop champagne",
+         "syncedLyrics": "[00:00.48] If all of the kings\n[00:03.96] We would pop champagne"}
+LRCLIB_GET = {
+    "Kings & Queens": KINGS,
+    "Parole": {"id": 2, "trackName": "Parole", "artistName": "Anna", "duration": 180.0, "instrumental": False,
+               "hasWordSync": True, "plainLyrics": "Ciao mondo", "syncedLyrics": "[00:01.00]Ciao mondo",
+               "lyricsfile": "version: '1.0'\nmetadata:\n  title: Parole\n  instrumental: false\nlines:\n- text: Ciao mondo\n"
+                             "  start_ms: 1000\n  words:\n  - text: 'Ciao '\n    start_ms: 1000\n  - text: mondo\n"
+                             "    start_ms: 1500\n"},
+    "Strumentale": {"id": 3, "trackName": "Strumentale", "artistName": "Anna", "duration": 120.0, "instrumental": True,
+                    "plainLyrics": None, "syncedLyrics": None},
+    "Occupato": {"id": 9, "trackName": "Occupato", "artistName": "Duo", "duration": 90.0, "instrumental": False,
+                 "plainLyrics": "Riprovato", "syncedLyrics": "[00:01.00]Riprovato"},
+    "Semplice nel file": {"id": 4, "trackName": "Semplice nel file", "artistName": "Anna", "duration": 150.0,
+                          "instrumental": False, "plainLyrics": "Dal sito", "syncedLyrics": "[00:05.00]Dal sito"},
+}
+LRCLIB_CERCA = {
+    # una versione lunga 30 s in più (fuori tempo), una «(Live)» con la durata giusta, un altro brano con la stessa durata
+    "Altra versione": [
+        {"id": 5, "trackName": "Altra versione", "artistName": "Duo", "duration": 230.0, "instrumental": False,
+         "syncedLyrics": "[00:01.00]Fuori tempo", "plainLyrics": "Fuori tempo"},
+        {"id": 6, "trackName": "Altra versione (Live)", "artistName": "Duo feat. X", "duration": 201.0, "instrumental": False,
+         "syncedLyrics": "[00:02.00]A tempo", "plainLyrics": "A tempo"},
+        {"id": 7, "trackName": "Un altro brano", "artistName": "Duo", "duration": 200.0, "instrumental": False,
+         "syncedLyrics": "[00:01.00]Sbagliato", "plainLyrics": "Sbagliato"}],
+    "Solo versione lunga": [
+        {"id": 8, "trackName": "Solo versione lunga", "artistName": "Duo", "duration": 260.0, "instrumental": False,
+         "syncedLyrics": "[00:01.00]Solo lunga\n[00:03.00]Seconda", "plainLyrics": None}],
+}
+
+
+class FintoLrclib(http.server.BaseHTTPRequestHandler):
+    """LRCLIB finto: /api/get e /api/search con le risposte qui sopra; ricorda ogni richiesta (percorso, parametri, agente)."""
+    chieste = []
+
+    def manda(self, stato, d):
+        dati = json.dumps(d).encode("utf-8")
+        self.send_response(stato)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoLrclib.chieste.append((u.path, q, self.headers.get("User-Agent", "")))
+        titolo = q.get("track_name", "")
+        if u.path == "/api/get":
+            if titolo == "Rotto":
+                return self.manda(500, {"code": 500, "name": "InternalError"})
+            if titolo == "Occupato" and sum(1 for x in FintoLrclib.chieste if x[1].get("track_name") == titolo) == 1:
+                return self.manda(503, {"code": 503})   # come il vero LRCLIB, ogni tanto: la volta dopo risponde
+            v = LRCLIB_GET.get(titolo)
+            if v and abs(float(q.get("duration") or 0) - v["duration"]) <= 2:
+                return self.manda(200, v)
+            return self.manda(404, {"code": 404, "name": "TrackNotFound", "message": "Failed to find specified track"})
+        if u.path == "/api/search":
+            return self.manda(200, LRCLIB_CERCA.get(titolo, []))
+        self.manda(404, {})
+
+    def log_message(self, *x):
+        pass
+
+
+class TestTestiServer(unittest.TestCase):
+    """api/extra/testi: il testo del brano dal file o da LRCLIB (finto), con la cache sul Mac; a tempo da LRCLIB solo se
+    la durata coincide; senza rete un errore chiaro (e per un minuto LRCLIB non si richiede)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-srv-")
+        cls.c = prepara_cartelle(cls.base)
+        mu = cls.c["musica"]
+        for artista, titolo, ms, album, frame in (
+                ("Ava Max", "Kings & Queens", 162696, "Heaven & Hell", b""),
+                ("Anna", "Parole", 180000, "", b""), ("Anna", "Strumentale", 120000, "", b""),
+                ("Duo", "Altra versione", 200000, "", b""), ("Duo", "Solo versione lunga", 200000, "", b""),
+                ("Nessuno", "Sconosciuto", 100000, "", b""), ("Nessuno", "Rotto", 100000, "", b""),
+                ("Duo", "Occupato", 90000, "", b""),
+                ("Anna", "Nel file", 100000, "", _id3_frame("SYLT", sylt([("Dal file", 1000)]))),
+                ("Anna", "Semplice nel file", 150000, "", _id3_frame("USLT", uslt("Dal file senza tempi"))),
+                ("Anna", "Solo nel file", 140000, "", _id3_frame("USLT", uslt("Riga uno\nRiga due")))):
+            mp3_con_testo(os.path.join(mu, "%s - %s.mp3" % (artista, titolo)), titolo, artista, album, ms, frame)
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclib)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        FintoLrclib.chieste = []
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.web.server_address[1],
+                                                   "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) >= 11 else None)(cls.s.json("GET", "/api/musica/catalogo")["brani"]),
+                        30, 0.2)
+        cls.id = {x["title"]: x["id"] for x in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiesti(self, titolo):
+        return [x for x in FintoLrclib.chieste if x[1].get("track_name") == titolo]
+
+    def chiedi(self, titolo, codice=200):
+        return self.s.json("GET", "/api/extra/testi/" + self.id[titolo], codice=codice)
+
+    def test_a_tempo_da_lrclib_e_cache(self):
+        r = self.chiedi("Kings & Queens")
+        self.assertEqual((r["stato"], r["sincronizzato"], r["parole"], r["fonte"]), ("ok", True, False, "lrclib"))
+        self.assertEqual([(x["t"], x["testo"]) for x in r["righe"]], [(0.48, "If all of the kings"), (3.96, "We would pop champagne")])
+        get = self.chiesti("Kings & Queens")
+        self.assertEqual([x[0] for x in get], ["/api/get"])
+        self.assertEqual({k: get[0][1].get(k) for k in ("track_name", "artist_name", "album_name", "duration")},
+                         {"track_name": "Kings & Queens", "artist_name": "Ava Max", "album_name": "Heaven & Hell", "duration": "163"})
+        self.assertIn("AtlanteMusica", get[0][2])
+        # la seconda volta dalla cache del Mac: a LRCLIB non si chiede più
+        self.assertEqual(self.chiedi("Kings & Queens"), r)
+        self.assertEqual(len(self.chiesti("Kings & Queens")), 1)
+        self.assertTrue([n for n in os.listdir(os.path.join(self.c["cache"], "testi")) if n.endswith(".json")])
+        # un brano che non è nella libreria (solo sul telefono): con titolo, artista e durata
+        q = self.s.json("GET", "/api/extra/testi?titolo=%s&artista=%s&durata=162.4" % (quote("Kings & Queens"), quote("Ava Max")))
+        self.assertEqual(q["righe"], r["righe"])
+        self.assertEqual(self.chiesti("Kings & Queens")[-1][1].get("duration"), "162")
+        self.assertNotIn("album_name", self.chiesti("Kings & Queens")[-1][1])
+
+    def test_parole_dal_lyricsfile(self):
+        r = self.chiedi("Parole")
+        self.assertEqual((r["sincronizzato"], r["parole"]), (True, True))
+        self.assertEqual(r["righe"], [{"t": 1.0, "testo": "Ciao mondo", "parole": [{"t": 1.0, "testo": "Ciao "},
+                                                                                   {"t": 1.5, "testo": "mondo"}]}])
+
+    def test_ricerca_a_tempo_solo_con_la_durata_giusta(self):
+        r = self.chiedi("Altra versione")
+        self.assertEqual([x[0] for x in self.chiesti("Altra versione")], ["/api/get", "/api/search"])
+        self.assertEqual(self.chiesti("Altra versione")[1][1].get("artist_name"), "Duo")
+        self.assertEqual((r["sincronizzato"], [(x["t"], x["testo"]) for x in r["righe"]]), (True, [(2.0, "A tempo")]))
+        r = self.chiedi("Solo versione lunga")   # c'è solo una versione più lunga di un minuto: il testo, senza tempi
+        self.assertEqual((r["stato"], r["sincronizzato"], r["fonte"]), ("ok", False, "lrclib"))
+        self.assertEqual(r["righe"], [{"t": None, "testo": "Solo lunga"}, {"t": None, "testo": "Seconda"}])
+
+    def test_strumentale_e_nessun_testo(self):
+        self.assertEqual(self.chiedi("Strumentale"), {"stato": "strumentale"})
+        self.assertEqual(self.chiedi("Sconosciuto"), {"stato": "nessuno"})
+        n = len(FintoLrclib.chieste)
+        self.assertEqual(self.chiedi("Sconosciuto"), {"stato": "nessuno"})   # ricordato: a LRCLIB non si richiede
+        self.assertEqual(len(FintoLrclib.chieste), n)
+
+    def test_testo_nel_file(self):
+        r = self.chiedi("Nel file")
+        self.assertEqual((r["fonte"], r["sincronizzato"], [(x["t"], x["testo"]) for x in r["righe"]]),
+                         ("file", True, [(1.0, "Dal file")]))
+        # la riga ha solo il suo tempo: le parole si stimano dentro la riga (la luce scorre lo stesso)
+        self.assertEqual((r["parole"], r["parole_da"]), (False, "stima"))
+        self.assertEqual([(w["t"], w["testo"]) for w in r["righe"][0]["parole"][:1]], [(1.0, "Dal ")])
+        self.assertNotIn("fine", r["righe"][0])   # stimata: non si manda come vera
+        self.assertEqual(self.chiesti("Nel file"), [])   # a tempo nel file: LRCLIB non serve
+        r = self.chiedi("Semplice nel file")   # nel file senza tempi, su LRCLIB a tempo: vince LRCLIB
+        self.assertEqual((r["fonte"], r["sincronizzato"], [(x["t"], x["testo"]) for x in r["righe"]]),
+                         ("lrclib", True, [(5.0, "Dal sito")]))
+        r = self.chiedi("Solo nel file")   # LRCLIB non ce l'ha: quello del file, senza tempi
+        self.assertEqual((r["fonte"], r["sincronizzato"], [x["testo"] for x in r["righe"]]), ("file", False, ["Riga uno", "Riga due"]))
+
+    def test_lrclib_occupato_si_riprova(self):
+        r = self.chiedi("Occupato")   # LRCLIB a volte risponde 503 (occupato): dopo un attimo si riprova, una volta
+        self.assertEqual((r["stato"], r["sincronizzato"], [(x["t"], x["testo"]) for x in r["righe"]]),
+                         ("ok", True, [(1.0, "Riprovato")]))
+        self.assertEqual(r["righe"], [{"t": 1.0, "testo": "Riprovato"}])   # una parola sola: niente da stimare
+        self.assertEqual([x[0] for x in self.chiesti("Occupato")], ["/api/get", "/api/get"])
+
+    def test_lrclib_non_risponde(self):
+        r = self.chiedi("Rotto", 503)
+        self.assertIn("LRCLIB", r["errore"])
+        n = len(FintoLrclib.chieste)
+        self.chiedi("Rotto", 503)   # per un minuto non lo si richiede
+        self.assertEqual(len(FintoLrclib.chieste), n)
+
+    def test_richieste_sbagliate(self):
+        self.s.json("GET", "/api/extra/testi/0123456789abcdef", codice=404)
+        self.s.json("GET", "/api/extra/testi?artista=Anna", codice=400)
+        self.s.json("GET", "/api/extra/testi?titolo=x&durata=abc", codice=400)
+        self.s.json("POST", "/api/extra/testi/" + self.id["Parole"], {}, codice=405)
+        self.s.json("GET", "/api/extra/testi/a/b", codice=404)
+
+
+class TestTestiApp(unittest.TestCase):
+    """Il testo nel lettore dell'app (riga e parola del momento, tocco su una riga: col mix e col telecomando) gira in
+    JavaScriptCore, come test_mix.js: test_testi.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_testi_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_testi.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        gest = os.path.abspath(os.path.join(QUI, "..", "x", "gestione.html"))   # anche Gestione → Testi e karaoke
+        r = subprocess.run([osa, "-l", "JavaScript", js, app, gest], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestStessoMac(unittest.TestCase):
+    """L'app aperta sul Mac mini stesso (la musica è già sul suo disco): api/extra/io lo dice, così l'app non si copia
+    tutta la libreria sul disco interno (il 27/10 lo ha riempito in pochi minuti). Gli indirizzi del Mac li legge il
+    server; qui li dà ATLANTE_IP_MAC."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-stessomac-")
+        cls.c = prepara_cartelle(cls.base)
+        os.environ["ATLANTE_IP_MAC"] = "100.71.110.38,fd7a:115c:a1e0::71"
+        try:
+            cls.s = Server(cls.base, cls.c).avvia()
+        finally:
+            del os.environ["ATLANTE_IP_MAC"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def io(self, intest=None):
+        st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io", intest=intest)
+        self.assertEqual(st, 200, b)
+        return json.loads(b.decode("utf-8"))
+
+    def test_1_dal_mac_stesso(self):
+        self.assertIs(self.io()["stesso_mac"], True)   # senza proxy davanti, da 127.0.0.1
+        for ip in ("100.71.110.38", "fd7a:115c:a1e0::71", "127.0.0.1"):   # attraverso tailscale serve
+            intest = {"X-Forwarded-For": ip, "Tailscale-User-Login": "samuele@example.com"}
+            self.assertIs(self.io(intest)["stesso_mac"], True, ip)
+
+    def test_2_da_un_altro_dispositivo(self):
+        for intest in ({"X-Forwarded-For": "100.127.102.35", "Tailscale-User-Login": "samuele@example.com"},   # l'iPhone
+                       # i primi indirizzi si possono inventare: conta l'ultimo, quello scritto da tailscaled
+                       {"X-Forwarded-For": "100.71.110.38, 100.127.102.35", "Tailscale-User-Login": "samuele@example.com"}):
+            self.assertNotIn("stesso_mac", self.io(intest), intest)   # per gli altri la risposta resta com'era
+
+    def test_3_app(self):
+        """L'app: sul Mac stesso «Scarica tutta la musica» non parte da solo (test_tutto.js, in JavaScriptCore)."""
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_tutto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+# ----- karaoke: parole dalla voce (Whisper finto), lavoro su tutta la libreria (solo da Gestione), traduzioni -----
 
 FINTO_FFMPEG_TESTI = r'''
 import os, shutil, struct, sys
@@ -7031,9 +7447,10 @@ if os.path.isfile(ingresso + ".parole.json"):
 '''
 
 # whisper-cli finto: l'aiuto con le opzioni, e per ogni WAV le parole scritte accanto al brano ({lingua, parole: [[t, w]]})
-# in JSON «pieno» (-ojf) come lo scrive whisper.cpp, con il tempo DTW (t_dtw, centesimi di secondo) di ogni pezzo
+# in JSON «pieno» (-ojf) come lo scrive whisper.cpp, con il tempo DTW (t_dtw, centesimi di secondo) di ogni pezzo. Scrive
+# anche con che priorità gira (whisper-nice.log); con «lento» nelle parole aspetta (per la prova della pausa).
 FINTO_WHISPER = r'''
-import json, os, sys
+import json, os, sys, time
 a = sys.argv[1:]
 if a[:1] == ["-h"]:
     sys.stderr.write("usage: whisper-cli [options] file0 file1 ...\n  -ojf,      --output-json-full\n  -np,       --no-prints\n"
@@ -7042,12 +7459,18 @@ if a[:1] == ["-h"]:
     sys.exit(0)
 with open(os.path.join(os.environ["FINTO_DIR"], "whisper.log"), "a", encoding="utf-8") as f:
     f.write(json.dumps(a) + "\n")
+with open(os.path.join(os.environ["FINTO_DIR"], "whisper-nice.log"), "a", encoding="utf-8") as f:
+    f.write("%d\n" % os.nice(0))
 wav, out = a[a.index("-f") + 1], a[a.index("-of") + 1]
 try:
     with open(wav + ".parole.json", encoding="utf-8") as f:
         d = json.load(f)
 except OSError:
     d = {"lingua": "en", "parole": []}
+if d.get("lento"):
+    with open(os.path.join(os.environ["FINTO_DIR"], "whisper-lento.pid"), "w") as f:
+        f.write(str(os.getpid()))
+    time.sleep(120)
 tok = [{"text": "[_BEG_]", "offsets": {"from": 0, "to": 0}, "id": 50365, "p": 0.9, "t_dtw": -1}]
 for t, w in d["parole"]:
     pezzi = [w] if len(w) < 6 else [w[:3], w[3:]]   # le parole lunghe in due pezzi, come i token veri
@@ -7059,6 +7482,19 @@ j = {"result": {"language": d.get("lingua", "en")},
      "transcription": [{"offsets": {"from": 0, "to": 10000}, "text": " ".join(w for _, w in d["parole"]), "tokens": tok}]}
 with open(out + ".json", "w", encoding="utf-8") as f:
     json.dump(j, f)
+'''
+
+# brew finto: «brew install whisper-cpp» mette il whisper-cli finto dove dice FINTO_WHISPER_DEST; scrive ogni chiamata
+# e la sua priorità in brew.log
+FINTO_BREW = r'''
+import json, os, shutil, sys
+with open(os.path.join(os.environ["FINTO_DIR"], "brew.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"args": sys.argv[1:], "nice": os.nice(0)}) + "\n")
+if sys.argv[1:3] == ["install", "whisper-cpp"]:
+    dest = os.environ["FINTO_WHISPER_DEST"]
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copy(os.environ["FINTO_WHISPER_SORGENTE"], dest)
+    os.chmod(dest, 0o755)
 '''
 
 LRC_SINCRO = "[ar:Artista A]\n[00:10.00]Il sole sorge piano sul mare\n[00:14.00]e tu mi guardi ancora\n" \
@@ -7089,8 +7525,8 @@ lines:
 """
 
 
-class FintoLrclib(http.server.BaseHTTPRequestHandler):
-    """LRCLIB finto: /api/get (con la durata chiesta) e /api/search, e le richieste ricevute."""
+class FintoLrclibKaraoke(http.server.BaseHTTPRequestHandler):
+    """LRCLIB finto per il karaoke: /api/get (con la durata chiesta) e /api/search, e le richieste ricevute."""
     richieste = []
     VOCI = {
         "canzone sincronizzata": {"trackName": "Canzone sincronizzata", "artistName": "Artista A", "albumName": "Album",
@@ -7108,7 +7544,7 @@ class FintoLrclib(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlsplit(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
-        FintoLrclib.richieste.append((u.path, q))
+        FintoLrclibKaraoke.richieste.append((u.path, q))
         v = self.VOCI.get((q.get("track_name") or q.get("q") or "").lower())
         if u.path == "/api/get":
             if not v or v["trackName"] == "Solo testo":   # «Solo testo» si trova solo cercando
@@ -7149,67 +7585,124 @@ class FintoMyMemory(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def mp3_con_testo(percorso, titolo, artista, uslt):
-    """MP3 piccolissimo con titolo, artista e il testo in un frame USLT (UTF-16)."""
-    def frame(fid, d):
-        return fid.encode() + len(d).to_bytes(4, "big") + b"\x00\x00" + d
-    corpo = frame("TIT2", b"\x01" + titolo.encode("utf-16")) + frame("TPE1", b"\x01" + artista.encode("utf-16")) + \
-        frame("USLT", b"\x01ita" + "".encode("utf-16") + b"\x00\x00" + uslt.encode("utf-16"))
-    n = len(corpo)
-    with open(percorso, "wb") as f:
-        f.write(b"ID3\x03\x00\x00" + bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127]) + corpo)
-        f.write((b"\xff\xfb\x90\x00" + bytes(413)) * 3)
+class FintoModello(http.server.BaseHTTPRequestHandler):
+    """Hugging Face finto: un «modello» di whisper.cpp piccolo (lmgg e poco più di un MB), e quante volte lo si chiede."""
+    chiesti = 0
+    DATI = b"lmgg" + bytes(1024 * 1024 + 100)
+
+    def do_GET(self):
+        FintoModello.chiesti += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(self.DATI)))
+        self.end_headers()
+        self.wfile.write(self.DATI)
+
+    def log_message(self, *a):
+        pass
 
 
-class TestTestiLettori(unittest.TestCase):
-    """Le parti senza server: LRC (anche esteso), Lyricsfile YAML, tag, stima e allineamento delle parole, Whisper."""
+def _scrivi_programma(percorso, codice):
+    with open(percorso, "w", encoding="utf-8") as f:
+        f.write("#!%s\n%s" % (sys.executable, codice))
+    os.chmod(percorso, 0o755)
+
+
+def _brano_con_voce(cartella, nome, titolo, artista, parole, lingua="it", **altro):
+    """Un MP3 della libreria con accanto le parole che il Whisper finto «sente» ([[t, parola]])."""
+    p = os.path.join(cartella, nome)
+    scrivi_mp3(p, titolo, artista)
+    with open(p + ".parole.json", "w", encoding="utf-8") as f:
+        json.dump(dict({"lingua": lingua, "parole": parole}, **altro), f)
+    return p
+
+
+def _accendi(s, **scelte):
+    return s.json("POST", "/api/extra/gestione/testi", dict({"acceso": True}, **scelte))
+
+
+def _vivo(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:   # un processo finito ma non ancora raccolto conta come finito
+        return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL).stdout.decode().strip()[:1] not in ("", "Z")
+    except OSError:
+        return True
+
+
+class TestKaraokeLettori(unittest.TestCase):
+    """Le parti senza server: LRC (anche esteso), Lyricsfile, tag e file .lrc accanto, stima e allineamento delle parole,
+    Whisper, i programmi pesanti a bassa priorità e fermabili, il lavoro di Whisper lasciato dalla versione di prova."""
 
     @classmethod
     def setUpClass(cls):
-        cls.m = carica_modulo("musica_libreria_testi")
+        cls.m = modulo_server("musica_libreria_karaoke")
 
     def test_lrc(self):
         m = self.m
         r = m.leggi_lrc("[ar:X]\n[offset:+500]\n[00:10.50]Prima riga\n[00:15.00][01:00.00]Ritornello\n[00:20.00]\n")
-        self.assertEqual([(x["t"], x["x"]) for x in r], [(10.0, "Prima riga"), (14.5, "Ritornello"), (19.5, ""),
-                                                        (59.5, "Ritornello")])
+        self.assertEqual([(x["t"], x["testo"]) for x in r], [(10.0, "Prima riga"), (14.5, "Ritornello"), (19.5, ""),
+                                                            (59.5, "Ritornello")])
         r = m.leggi_lrc("[00:12.00]<00:12.00>Ciao <00:12.50>bella <00:13.40>gente<00:14.00>\n[00:15.00]Ri<00:15.30>pe")
-        self.assertEqual(r[0]["p"], [[12.0, None, "Ciao "], [12.5, None, "bella "], [13.4, 14.0, "gente"]])
-        self.assertEqual(r[1]["p"], [[15.0, None, "Ri"], [15.3, None, "pe"]])
+        self.assertEqual((r[0]["parole"], r[0]["fine"]), ([{"t": 12.0, "testo": "Ciao "}, {"t": 12.5, "testo": "bella "},
+                                                           {"t": 13.4, "testo": "gente"}], 14.0))
+        self.assertEqual(r[1]["parole"], [{"t": 15.0, "testo": "Ri"}, {"t": 15.3, "testo": "pe"}])
         self.assertEqual(m.leggi_lrc("solo testo\nsenza tempi"), [])
 
     def test_lyricsfile(self):
-        strum, righe = self.m.leggi_lyricsfile(LYRICSFILE)
-        self.assertFalse(strum)
-        self.assertEqual(righe[0]["p"], [[5.0, 5.6, "Hello "], [5.7, 6.5, "world"]])
-        self.assertEqual((righe[1]["t"], righe[1]["x"]), (8.0, "Second line"))
+        righe = self.m.leggi_lyricsfile(LYRICSFILE)
+        self.assertEqual(righe[0]["parole"], [{"t": 5.0, "testo": "Hello "}, {"t": 5.7, "testo": "world"}])
+        self.assertEqual((righe[0]["fine"], righe[1]["t"], righe[1]["testo"]), (6.5, 8.0, "Second line"))
         rientrato = 'metadata:\n  instrumental: false\nlines:\n  - text: "A \\"b\\" \\u00e8"\n    start_ms: 1000\n' \
                     '    words: []\n'
-        self.assertEqual(self.m.leggi_lyricsfile(rientrato)[1][0]["x"], 'A "b" è')
-        self.assertEqual(self.m.leggi_lyricsfile("metadata:\n  instrumental: true\nlines: []\n"), (True, []))
-        self.assertIsNone(self.m.leggi_lyricsfile("lines:\n- text: |\n    blocco\n"))
+        self.assertEqual(self.m.leggi_lyricsfile(rientrato)[0]["testo"], 'A "b" è')
+        self.assertEqual(self.m.leggi_lyricsfile("metadata:\n  instrumental: true\nlines: []\n"), [])
+        self.assertEqual(self.m.leggi_lyricsfile("lines:\n- text: |\n    blocco\n"), [])
+        # strumentale: lo dice la voce di LRCLIB
+        self.assertEqual(self.m._lrclib_voce({"instrumental": True}, 0), {"stato": "strumentale"})
 
-    def test_tag(self):
-        m, d = self.m, tempfile.mkdtemp(prefix="atlante-testi-tag-")
+    def test_tag_e_file_lrc(self):
+        m, d = self.m, tempfile.mkdtemp(prefix="atlante-karaoke-tag-")
         try:
             p = os.path.join(d, "a.mp3")
-            mp3_con_testo(p, "T", "A", "Prima riga\nSeconda riga")
-            self.assertEqual(m.testo_dai_tag(p), ("testo", "Prima riga\nSeconda riga"))
-
-            def box(t, x):
-                return struct.pack(">I", 8 + len(x)) + t + x
-            dati = box(b"data", struct.pack(">I", 1) + bytes(4) + "[00:01.00]Riga M4A".encode())
-            moov = box(b"moov", box(b"udta", box(b"meta", bytes(4) + box(b"ilst", box(b"\xa9lyr", dati)))))
+            mp3_con_testo(p, "T", "A", frame=_id3_frame("USLT", uslt("Prima riga\nSeconda riga")))
+            r = m.testi_dal_file(p)
+            self.assertEqual((r["fonte"], r["sincronizzato"], [x["testo"] for x in r["righe"]]),
+                             ("file", False, ["Prima riga", "Seconda riga"]))
             q = os.path.join(d, "b.m4a")
-            with open(q, "wb") as f:
-                f.write(box(b"ftyp", b"M4A " + bytes(4)) + moov)
-            self.assertEqual(m.testo_dai_tag(q), ("testo", "[00:01.00]Riga M4A"))
+            m4a_con_testo(q, "[00:01.00]Riga M4A")
+            self.assertEqual(m.testi_dal_file(q)["righe"], [{"t": 1.0, "testo": "Riga M4A"}])
+            # un file .lrc accanto al brano (stesso nome): vince sui tag
+            q = os.path.join(d, "c.mp3")
+            mp3_con_testo(q, "T", "A", frame=_id3_frame("USLT", uslt("Nel tag")))
+            with open(os.path.join(d, "c.lrc"), "wb") as f:
+                f.write("\ufeff[00:02.00]Dal file lrc è".encode("utf-8"))
+            r = m.testi_dal_file(q)
+            self.assertEqual((r["fonte"], r["sincronizzato"], r["righe"]), ("file", True, [{"t": 2.0, "testo": "Dal file lrc è"}]))
+            # senza tempi nel .lrc ma a tempo nel tag: vince quello a tempo; tutti e due senza tempi: il .lrc
+            q = os.path.join(d, "e.mp3")
+            mp3_con_testo(q, "T", "A", frame=_id3_frame("USLT", uslt("[00:03.00]A tempo nel tag")))
+            with open(os.path.join(d, "e.LRC"), "w", encoding="latin-1") as f:
+                f.write("Senza tempi, perché")
+            self.assertEqual(m.testi_dal_file(q)["righe"], [{"t": 3.0, "testo": "A tempo nel tag"}])
+            mp3_con_testo(q, "T", "A", frame=_id3_frame("USLT", uslt("Nel tag")))
+            self.assertEqual([x["testo"] for x in m.testi_dal_file(q)["righe"]], ["Senza tempi, perché"])
+            # il disco non legge il brano ma il .lrc sì
+            os.unlink(q)
+            self.assertEqual([x["testo"] for x in m.testi_dal_file(q)["righe"]], ["Senza tempi, perché"])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
     def test_stima(self):
-        righe = self.m.leggi_lrc("[00:10.00]Questa è una riga cantata\n[00:13.00]E poi un'altra\n[00:40.00]Dopo l'assolo")
-        self.m.completa_tempi(righe, 50)
+        m = self.m
+        righe = m._righe_interne(m.leggi_lrc("[00:10.00]Questa è una riga cantata\n[00:13.00]E poi un'altra\n"
+                                             "[00:40.00]Dopo l'assolo"))
+        m.completa_tempi(righe, 50)
         for k, r in enumerate(righe):
             t = [p[0] for p in r["p"]]
             self.assertEqual(t, sorted(t))
@@ -7217,6 +7710,26 @@ class TestTestiLettori(unittest.TestCase):
             if k + 1 < len(righe):
                 self.assertLessEqual(r["f"], righe[k + 1]["t"])
         self.assertLess(righe[1]["f"], 20)   # prima dell'assolo la riga dura quanto le sue sillabe
+        # nella risposta per l'app: le parole stimate solo nelle righe che non le hanno
+        app = m.leggi_lrc("[00:10.00]Questa è una riga cantata\n[00:13.00]<00:13.00>E <00:13.50>poi\n[00:40.00]Fine")
+        self.assertTrue(m._stima_parole(app, 50))
+        self.assertEqual([w["testo"] for w in app[0]["parole"]], ["Questa ", "è ", "una ", "riga ", "cantata"])
+        self.assertEqual((app[0]["parole"][0]["t"], app[0]["t"], "fine" in app[0]), (10.0, 10.0, False))
+        self.assertLess(app[0]["parole"][-1]["t"], 13.0)
+        self.assertEqual(app[1], {"t": 13.0, "testo": "E poi", "parole": [{"t": 13.0, "testo": "E "}, {"t": 13.5, "testo": "poi"}]})
+        self.assertEqual(app[2], {"t": 40.0, "testo": "Fine"})
+        self.assertFalse(m._stima_parole(m.testi_semplici("senza\ntempi"), 50))
+
+    def test_righe_app(self):
+        m = self.m
+        interne = [{"t": 1.0, "f": 4.0, "x": "Uno due tre", "p": [[1.0, 1.5, "Uno "], [1.5, 2.0, "due "], [3.0, 4.0, "tre"]]},
+                   {"t": 6.0, "f": None, "x": "Sola", "p": [[6.0, None, "Sola"]]}, {"t": None, "f": None, "x": "", "p": []}]
+        self.assertEqual(m._righe_app(interne), [
+            {"t": 1.0, "testo": "Uno due tre", "fine": 4.0,   # la fine di «due» perché dopo c'è una pausa
+             "parole": [{"t": 1.0, "testo": "Uno "}, {"t": 1.5, "testo": "due ", "fine": 2.0}, {"t": 3.0, "testo": "tre"}]},
+            {"t": 6.0, "testo": "Sola"}, {"t": None, "testo": ""}])
+        self.assertEqual(m._righe_interne(m._righe_app(interne))[0]["p"],
+                         [[1.0, None, "Uno "], [1.5, 2.0, "due "], [3.0, None, "tre"]])
 
     def test_allineamento(self):
         m = self.m
@@ -7232,7 +7745,8 @@ class TestTestiLettori(unittest.TestCase):
                 t += 0.6
         sentite.insert(3, (6.0, None, "eh"))   # e se ne inventa una
         righe = m.leggi_lrc("\n".join("[00:%05.2f]%s" % (t0, x) for x, t0 in testo))
-        nuove = [{"t": r["t"], "f": None, "x": r["x"], "p": [[None, None, w] for w in m._pezzi(r["x"])]} for r in righe]
+        nuove = [{"t": r["t"], "f": None, "x": r["testo"], "p": [[None, None, w] for w in m._pezzi(r["testo"])]}
+                 for r in righe]
         quota = m.allinea_parole(nuove, sentite, True)
         m.completa_tempi(nuove, 45)
         self.assertGreaterEqual(quota, 0.7)
@@ -7273,14 +7787,54 @@ class TestTestiLettori(unittest.TestCase):
             shutil.rmtree(w.dir, ignore_errors=True)
 
     def test_invitati(self):
-        self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/musica/testo/abc123"))
-        self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/musica/testo"))
+        self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/extra/testi/abc123"))
+        self.assertTrue(self.m.PERMESSE_INVITATI.match("/api/extra/testi"))
         self.assertFalse(self.m.PERMESSE_INVITATI.match("/api/extra/gestione/testi"))
+        self.assertFalse(self.m.PERMESSE_INVITATI.match("/api/musica/testo/abc123"))   # una sola API dei testi
+
+    def test_programmi_pesanti(self):
+        """ffmpeg, Whisper e Homebrew girano con nice e si fermano subito se il lavoro va in pausa."""
+        codice, uscita, _ = self.m._esegui_piano([sys.executable, "-c", "import os; print(os.nice(0))"], 30)
+        self.assertEqual(codice, 0)
+        self.assertGreaterEqual(int(uscita.decode().strip()), min(19, os.nice(0) + 10))
+        prima = time.time()
+        with self.assertRaises(self.m.Pausa):
+            self.m._esegui_piano([sys.executable, "-c", "import time; time.sleep(60)"], 90, fermo=lambda: True)
+        self.assertLess(time.time() - prima, 5)
+        with self.assertRaises(self.m.ErroreTesti):
+            self.m._esegui_piano([sys.executable, "-c", "import time; time.sleep(60)"], 1)
+
+    def test_lavoro_del_ramo_si_legge(self):
+        """Le parole allineate dalla prima versione (ramo testi-karaoke: <cache>/testi/brani, schede.json) valgono ancora
+        se testo e file sono quelli: Whisper non le rifà."""
+        m, d = self.m, tempfile.mkdtemp(prefix="atlante-karaoke-ramo-")
+        try:
+            os.makedirs(os.path.join(d, "brani"))
+            with open(os.path.join(d, "schede.json"), "w", encoding="utf-8") as f:
+                json.dump({"versione": 1, "brani": {"x1": {"v": 1, "f": "F1", "s": "trovato", "al": "fatto"}}}, f)
+            with open(os.path.join(d, "brani", "x1.json"), "w", encoding="utf-8") as f:
+                json.dump({"v": 1, "h": "abc", "stato": "trovato", "fonte": "lrclib", "tempi": "righe", "parole": "allineate",
+                           "lingua": "it", "durata": 40, "righe": [
+                               {"t": 10.4, "f": 12.9, "x": "Il sole", "p": [[10.4, 10.8, "Il "], [10.8, 12.9, "sole"]]}]}, f)
+            t = m.Testi(d)
+            r = {"stato": "ok", "sincronizzato": True, "parole": False, "fonte": "lrclib", "righe": [{"t": 10.0, "testo": "Il sole"}]}
+            voce = t._voce("x1", {"_f": "F1"}, r)
+            self.assertEqual(voce[0], "parole")
+            o = t._risposta(r, 40, voce)
+            self.assertEqual((o["parole"], o["parole_da"], o["lingua"]), (True, "voce", "it"))
+            self.assertEqual(o["righe"], [{"t": 10.4, "testo": "Il sole", "fine": 12.9,
+                                           "parole": [{"t": 10.4, "testo": "Il "}, {"t": 10.8, "testo": "sole"}]}])
+            self.assertIsNone(t._voce("x1", {"_f": "F2"}, r))   # il file è cambiato
+            self.assertIsNone(t._voce("x1", {"_f": "F1"}, dict(r, righe=[{"t": 10.0, "testo": "Un altro testo"}])))
+            self.assertFalse(t.acceso)   # e il lavoro resta spento finché non lo si accende da Gestione
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
-class TestTestiServer(unittest.TestCase):
-    """Il lavoro in sottofondo sul server vero: LRCLIB, ffmpeg, Whisper e MyMemory finti; testi dal file .lrc, dai tag,
-    da LRCLIB (righe, parole, solo testo, strumentale), trascritti dalla voce; traduzioni; ripresa dopo un riavvio."""
+class TestKaraokeServer(unittest.TestCase):
+    """Il lavoro su tutta la libreria sul server vero, acceso da Gestione: LRCLIB, ffmpeg, Whisper e MyMemory finti; testi
+    dal file .lrc, dai tag, da LRCLIB (righe, parole, solo testo, strumentale), trascritti dalla voce; traduzioni;
+    ripresa dopo un riavvio. Tutto da api/extra/testi."""
 
     BRANI = {   # nome del file: (titolo, artista, parole sentite da Whisper [[t, parola]], lingua)
         "A - Canzone sincronizzata.mp3": ("Canzone sincronizzata", "Artista A",
@@ -7299,38 +7853,31 @@ class TestTestiServer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.base = tempfile.mkdtemp(prefix="atlante-testi-srv-")
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-srv-")
         cls.c = prepara_cartelle(cls.base)
-        for nome, codice in (("ffmpeg", FINTO_FFMPEG_TESTI), ("whisper-cli", FINTO_WHISPER)):
-            p = os.path.join(cls.c["bin"], nome)
-            with open(p, "w", encoding="utf-8") as f:
-                f.write("#!%s\n%s" % (sys.executable, codice))
-            os.chmod(p, 0o755)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        _scrivi_programma(os.path.join(cls.c["bin"], "whisper-cli"), FINTO_WHISPER)
         for nome, (titolo, artista, parole, lingua) in cls.BRANI.items():
-            p = os.path.join(cls.c["musica"], nome)
-            scrivi_mp3(p, titolo, artista)
-            with open(p + ".parole.json", "w", encoding="utf-8") as f:
-                json.dump({"lingua": lingua, "parole": parole}, f)
+            _brano_con_voce(cls.c["musica"], nome, titolo, artista, parole, lingua)
         # testo nei tag (USLT, senza tempi) e un file .lrc esteso accanto al brano
         p = os.path.join(cls.c["musica"], "F - Nei tag.mp3")
-        mp3_con_testo(p, "Nei tag", "Artista F", "Canto nel tag\nsenza i tempi")
+        mp3_con_testo(p, "Nei tag", "Artista F", frame=_id3_frame("USLT", uslt("Canto nel tag\nsenza i tempi")))
         with open(p + ".parole.json", "w", encoding="utf-8") as f:
             json.dump({"lingua": "it", "parole": [[1.0, "Canto"], [1.4, "nel"], [1.7, "tag"], [4.0, "senza"], [4.5, "i"],
                                                   [4.7, "tempi"]]}, f)
-        p = os.path.join(cls.c["musica"], "G - Con il file.mp3")
-        scrivi_mp3(p, "Con il file", "Artista G")
+        scrivi_mp3(os.path.join(cls.c["musica"], "G - Con il file.mp3"), "Con il file", "Artista G")
         with open(os.path.join(cls.c["musica"], "G - Con il file.lrc"), "w", encoding="utf-8") as f:
             f.write("[00:02.00]<00:02.00>Parole <00:02.70>dal <00:03.10>file<00:03.80>\n")
         cls.modello = os.path.join(cls.base, "ggml-finto.bin")
         with open(cls.modello, "wb") as f:
             f.write(b"lmgg")
-        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclib)
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
         cls.mm = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoMyMemory)
         for s in (cls.lrc, cls.mm):
             threading.Thread(target=s.serve_forever, daemon=True).start()
-        FintoLrclib.richieste, FintoMyMemory.richieste = [], []
-        cls.ambiente = {"ATLANTE_TESTI": "1", "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
-                        "ATLANTE_LRCLIB_INTERVALLO": "0", "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"),
+        FintoLrclibKaraoke.richieste, FintoMyMemory.richieste = [], []
+        cls.ambiente = {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                        "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"),
                         "ATLANTE_WHISPER_FILE_MODELLO": cls.modello, "ATLANTE_WHISPER_ANTICIPO": "0",
                         "ATLANTE_MYMEMORY": "http://127.0.0.1:%d" % cls.mm.server_address[1]}
         cls.s = cls.avvia()
@@ -7339,6 +7886,7 @@ class TestTestiServer(unittest.TestCase):
             cls.s.json("GET", "/api/musica/catalogo")), 30)
         for b in cat["brani"]:
             cls.ids[b["title"]] = b["id"]
+        _accendi(cls.s)
 
     @classmethod
     def avvia(cls):
@@ -7363,27 +7911,30 @@ class TestTestiServer(unittest.TestCase):
         return j
 
     def leggi(self, titolo, lingua=""):
-        return self.s.json("GET", "/api/musica/testo/%s%s" % (self.ids[titolo], "?lingua=" + lingua if lingua else ""))
+        return self.s.json("GET", "/api/extra/testi/%s%s" % (self.ids[titolo], "?lingua=" + lingua if lingua else ""))
 
     def test_1_tutti_i_brani(self):
         j = self.finito()
         c = j["conteggi"]
         self.assertEqual((c.get("strumentali"), c.get("con_testo"), c.get("trascritti")), (1, 6, 1), j)
-        self.assertEqual(j["whisper"]["stato"], "pronto")
+        self.assertEqual((j["acceso"], j["con_whisper"], j["whisper"]["stato"]), (True, True, "pronto"))
         self.assertIn("MyMemory", j["traduzioni"]["motore"])   # l'IA del Mac non risponde nelle prove
 
     def test_2_lrclib_righe_allineate_alla_voce(self):
         self.finito()
         t = self.leggi("Canzone sincronizzata")
-        self.assertEqual((t["stato"], t["fonte"], t["parole"], t["lingua"], t["allineamento"]),
-                         ("trovato", "lrclib", "allineate", "it", "fatto"))
+        self.assertEqual((t["stato"], t["fonte"], t["parole"], t["parole_da"], t["lingua"], t["allineamento"]),
+                         ("ok", "lrclib", True, "voce", "it", "fatto"))
         r = t["righe"]
-        self.assertEqual([x["x"] for x in r], ["Il sole sorge piano sul mare", "e tu mi guardi ancora",
-                                               "Il sole sorge piano sul mare"])
-        self.assertEqual([p[0] for p in r[0]["p"]], [10.4, 10.8, 11.3, 11.9, 12.4, 12.8])   # i tempi della voce
-        self.assertEqual(r[2]["p"][0][0], 30.5)   # il ritornello ripetuto prende i tempi suoi
-        self.assertTrue(all(p[1] > p[0] for x in r for p in x["p"]))
-        # a Whisper: lingua del testo, testo come suggerimento, DTW del modello e niente flash attention
+        self.assertEqual([x["testo"] for x in r], ["Il sole sorge piano sul mare", "e tu mi guardi ancora",
+                                                   "Il sole sorge piano sul mare"])
+        self.assertEqual([w["t"] for w in r[0]["parole"]], [10.4, 10.8, 11.3, 11.9, 12.4, 12.8])   # i tempi della voce
+        self.assertEqual(r[2]["parole"][0]["t"], 30.5)   # il ritornello ripetuto prende i tempi suoi
+        for x in r:
+            tempi = [w["t"] for w in x["parole"]]
+            self.assertEqual(tempi, sorted(tempi))
+            self.assertGreater(x["fine"], tempi[-1])
+        # a Whisper: lingua del testo, testo come suggerimento, DTW del modello e niente flash attention, a bassa priorità
         with open(os.path.join(self.c["finto"], "whisper.log"), encoding="utf-8") as f:
             chiamate = [json.loads(x) for x in f]
         a = next(x for x in chiamate if "Il sole sorge" in " ".join(x))
@@ -7391,27 +7942,30 @@ class TestTestiServer(unittest.TestCase):
         self.assertEqual(a[a.index("--dtw") + 1], "large.v3.turbo")
         self.assertIn("-nfa", a)
         self.assertTrue(a[a.index("--prompt") + 1].startswith("Il sole sorge piano sul mare"))
+        with open(os.path.join(self.c["finto"], "whisper-nice.log"), encoding="utf-8") as f:
+            self.assertTrue(all(int(x) >= 10 for x in f.read().split()))
 
     def test_3_altre_fonti(self):
         self.finito()
         t = self.leggi("Parole esatte")   # Lyricsfile di LRCLIB con le parole: niente Whisper
-        self.assertEqual((t["fonte"], t["parole"], t["allineamento"]), ("lrclib", "fonte", ""))
-        self.assertEqual(t["righe"][0]["p"], [[5.0, 5.6, "Hello "], [5.7, 6.5, "world"]])
+        self.assertEqual((t["fonte"], t["parole_da"]), ("lrclib", "fonte"))
+        self.assertNotIn("allineamento", t)
+        self.assertEqual(t["righe"][0]["parole"], [{"t": 5.0, "testo": "Hello "}, {"t": 5.7, "testo": "world"}])
         t = self.leggi("Solo testo")      # solo testo (trovato cercando): i tempi delle righe li dà la voce
-        self.assertEqual((t["fonte"], t["parole"]), ("lrclib", "allineate"))
+        self.assertEqual((t["fonte"], t["sincronizzato"], t["parole_da"]), ("lrclib", True, "voce"))
         self.assertEqual([x["t"] for x in t["righe"]], [3.0, 7.0])
-        t = self.leggi("Strumentale")
-        self.assertEqual((t["stato"], t["righe"]), ("strumentale", []))
+        self.assertEqual(self.leggi("Strumentale"), {"stato": "strumentale"})
         t = self.leggi("Mai sentita")     # nessun testo in giro: lo trascrive Whisper
-        self.assertEqual((t["stato"], t["fonte"], t["parole"]), ("trovato", "voce", "allineate"))
-        self.assertEqual(t["righe"][0]["x"], "questa canzone non la conosce nessuno proprio")
+        self.assertEqual((t["stato"], t["fonte"], t["parole_da"]), ("ok", "voce", "voce"))
+        self.assertEqual(t["righe"][0]["testo"], "questa canzone non la conosce nessuno proprio")
         t = self.leggi("Nei tag")
-        self.assertEqual((t["fonte"], t["parole"], [x["x"] for x in t["righe"]]),
-                         ("tag", "allineate", ["Canto nel tag", "senza i tempi"]))
-        self.assertEqual(t["righe"][1]["p"][0][0], 4.0)
+        self.assertEqual((t["fonte"], t["parole_da"], [x["testo"] for x in t["righe"]]),
+                         ("file", "voce", ["Canto nel tag", "senza i tempi"]))
+        self.assertEqual(t["righe"][1]["parole"][0]["t"], 4.0)
         t = self.leggi("Con il file")     # LRC esteso accanto al brano: le parole sono quelle del file
-        self.assertEqual((t["fonte"], t["parole"]), ("file", "fonte"))
-        self.assertEqual(t["righe"][0]["p"], [[2.0, 2.7, "Parole "], [2.7, 3.1, "dal "], [3.1, 3.8, "file"]])
+        self.assertEqual((t["fonte"], t["parole_da"], t["righe"][0]["fine"]), ("file", "fonte", 3.8))
+        self.assertEqual(t["righe"][0]["parole"], [{"t": 2.0, "testo": "Parole "}, {"t": 2.7, "testo": "dal "},
+                                                   {"t": 3.1, "testo": "file"}])
 
     def test_4_traduzione(self):
         self.finito()
@@ -7430,31 +7984,760 @@ class TestTestiServer(unittest.TestCase):
         self.assertEqual(self.leggi("Strumentale", "en")["traduzione"]["stato"], "senza testo")
 
     def test_5_brano_che_il_mac_non_ha(self):
-        j = self.s.json("GET", "/api/musica/testo?titolo=Canzone%20sincronizzata%20(Official%20Video)"
-                               "&artista=Artista%20A&album=&durata=200")
-        self.assertEqual((j["stato"], j["fonte"], j["parole"]), ("trovato", "lrclib", "stimate"))
-        self.assertNotIn("allineamento", j)
-        self.assertEqual(j["righe"][1]["p"][0][0], 14.0)
-        n = len(FintoLrclib.richieste)
-        self.s.json("GET", "/api/musica/testo?titolo=Canzone%20sincronizzata&artista=Artista%20A&durata=200")
-        self.assertEqual(len(FintoLrclib.richieste), n)   # la seconda volta dalla cache del Mac
-        self.assertEqual(self.s.json("GET", "/api/musica/testo?titolo=", codice=400)["errore"], "Serve il titolo del brano")
-        self.s.json("GET", "/api/musica/testo/sconosciuto", codice=404)
+        u = "/api/extra/testi?titolo=Canzone%20sincronizzata%20(Official%20Video)&artista=Artista%20A&album=&durata=200"
+        j = self.s.json("GET", u)
+        self.assertEqual((j["stato"], j["fonte"], j["parole_da"]), ("ok", "lrclib", "stima"))
+        self.assertNotIn("allineamento", j)   # l'audio è sul telefono: niente Whisper
+        self.assertEqual(j["righe"][1]["parole"][0]["t"], 14.0)
+        n = len(FintoLrclibKaraoke.richieste)
+        self.assertEqual(self.s.json("GET", u), j)
+        self.assertEqual(len(FintoLrclibKaraoke.richieste), n)   # la seconda volta dalla cache del Mac
+        self.assertEqual(self.s.json("GET", "/api/extra/testi?titolo=", codice=400)["errore"], "Serve il titolo del brano")
+        self.s.json("GET", "/api/extra/testi/sconosciuto", codice=404)
+        # una sola API dei testi: quella della prima versione non c'è più
+        self.assertEqual(self.s.get("/api/musica/testo/" + self.ids["Canzone sincronizzata"])[0], 404)
 
     def test_6_ripresa_dopo_un_riavvio(self):
         self.finito()
         type(self).s.ferma()
-        n, w = len(FintoLrclib.richieste), os.path.getsize(os.path.join(self.c["finto"], "whisper.log"))
+        n, w = len(FintoLrclibKaraoke.richieste), os.path.getsize(os.path.join(self.c["finto"], "whisper.log"))
         type(self).s = self.avvia()
+        self.assertIs(self.s.json("GET", "/api/extra/gestione/testi")["acceso"], True)   # resta acceso
         self.finito()
         t = self.leggi("Canzone sincronizzata")
-        self.assertEqual(t["parole"], "allineate")
-        self.assertEqual(len(FintoLrclib.richieste), n)   # niente ricerche né allineamenti rifatti
+        self.assertEqual(t["parole_da"], "voce")
+        self.assertEqual(len(FintoLrclibKaraoke.richieste), n)   # niente ricerche né allineamenti rifatti
         self.assertEqual(os.path.getsize(os.path.join(self.c["finto"], "whisper.log")), w)
 
     def test_7_gestione_riprova(self):
         self.assertEqual(self.s.json("POST", "/api/extra/gestione/testi/riprova", {}), {"ok": True})
         self.s.json("GET", "/api/extra/gestione/testi/altro", codice=404)
+        self.s.json("POST", "/api/extra/gestione/testi", {"acceso": "sì"}, codice=400)
+        self.s.json("POST", "/api/extra/gestione/testi", {}, codice=400)
+
+
+class TestKaraokeAccensione(unittest.TestCase):
+    """Appena installato non parte niente di pesante: niente Homebrew, niente modello da 574 MB, niente lavoro su tutta la
+    libreria, niente Whisper, finché Samuele non lo accende da Gestione; il testo del brano che suona c'è lo stesso.
+    Acceso: whisper-cpp con Homebrew (finto) e il modello (da un Hugging Face finto), a bassa priorità."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-acc-")
+        cls.c = prepara_cartelle(cls.base)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        cls.brew = os.path.join(cls.c["bin"], "brew")
+        _scrivi_programma(cls.brew, FINTO_BREW)
+        cls.sorgente = os.path.join(cls.base, "whisper-finto")
+        _scrivi_programma(cls.sorgente, FINTO_WHISPER)
+        cls.whisper = os.path.join(cls.base, "installato", "whisper-cli")   # non c'è finché brew non lo mette
+        _brano_con_voce(cls.c["musica"], "A - Canzone sincronizzata.mp3", "Canzone sincronizzata", "Artista A",
+                        TestKaraokeServer.BRANI["A - Canzone sincronizzata.mp3"][2])
+        _brano_con_voce(cls.c["musica"], "B - Parole esatte.mp3", "Parole esatte", "Artista B", [], "en")
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
+        cls.hf = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoModello)
+        for s in (cls.lrc, cls.hf):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        FintoLrclibKaraoke.richieste, FintoModello.chiesti = [], 0
+        with unittest.mock.patch.dict(os.environ, {
+                "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1], "ATLANTE_BREW": cls.brew,
+                "ATLANTE_WHISPER": cls.whisper, "ATLANTE_WHISPER_INSTALLA": "1",
+                "ATLANTE_WHISPER_URL_MODELLO": "http://127.0.0.1:%d/ggml.bin" % cls.hf.server_address[1],
+                "FINTO_WHISPER_DEST": cls.whisper, "FINTO_WHISPER_SORGENTE": cls.sorgente}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        cat = aspetta(lambda: (lambda j: j if len(j.get("brani") or []) == 2 else None)(
+            cls.s.json("GET", "/api/musica/catalogo")), 30)
+        cls.ids = {b["title"]: b["id"] for b in cat["brani"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.lrc.shutdown()
+        cls.hf.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def finto(self, nome):
+        return os.path.join(self.c["finto"], nome)
+
+    def test_1_niente_prima_del_tasto(self):
+        time.sleep(2)   # la libreria è letta: se qualcosa partisse da solo, partirebbe adesso
+        j = self.s.json("GET", "/api/extra/gestione/testi")
+        self.assertEqual((j["acceso"], j["con_whisper"], j["conteggi"].get("cercati", 0), j["totale"]), (False, True, 0, 2))
+        self.assertEqual((j["whisper"]["stato"], j["whisper"]["modello_scaricato"]), ("da preparare", False))
+        self.assertEqual(FintoLrclibKaraoke.richieste, [])
+        self.assertEqual(FintoModello.chiesti, 0)
+        for nome in ("brew.log", "whisper.log"):
+            self.assertFalse(os.path.exists(self.finto(nome)), nome)
+        self.assertFalse(os.path.exists(os.path.join(self.c["cache"], "testi", "modelli")))
+        # il testo del brano che suona c'è anche così (come prima): dal Mac, con le parole stimate dentro la riga
+        t = self.s.json("GET", "/api/extra/testi/" + self.ids["Canzone sincronizzata"])
+        self.assertEqual((t["stato"], t["sincronizzato"], t["parole"], t["parole_da"]), ("ok", True, False, "stima"))
+        self.assertNotIn("allineamento", t)
+        self.assertEqual([x[0] for x in FintoLrclibKaraoke.richieste], ["/api/get"])
+        time.sleep(1)
+        self.assertFalse(os.path.exists(self.finto("brew.log")))
+        self.assertEqual(self.s.json("GET", "/api/extra/gestione/testi")["conteggi"].get("cercati", 0), 0)
+
+    def test_2_acceso_installa_e_allinea(self):
+        j = _accendi(self.s)
+        self.assertIs(j["acceso"], True)
+        t = aspetta(lambda: (lambda x: x if x.get("parole_da") == "voce" else None)(
+            self.s.json("GET", "/api/extra/testi/" + self.ids["Canzone sincronizzata"])), 60, 0.3)
+        self.assertTrue(t, "%s\n%s" % (self.s.json("GET", "/api/extra/gestione/testi"), self.s.leggi_log()[-3000:]))
+        self.assertEqual(t["allineamento"], "fatto")
+        # i tempi DTW di Whisper anticipati di 0,18 s (qui senza ATLANTE_WHISPER_ANTICIPO): 10,4 s sentito → 10,22 s
+        self.assertEqual([w["t"] for w in t["righe"][0]["parole"]], [10.22, 10.62, 11.12, 11.72, 12.22, 12.62])
+        with open(self.finto("brew.log"), encoding="utf-8") as f:
+            brew = [json.loads(x) for x in f]
+        self.assertEqual([x["args"] for x in brew], [["install", "whisper-cpp"]])   # una volta sola
+        self.assertGreaterEqual(brew[0]["nice"], 10)
+        self.assertEqual(FintoModello.chiesti, 1)
+        modello = os.path.join(self.c["cache"], "testi", "modelli", "ggml-large-v3-turbo-q5_0.bin")
+        self.assertEqual(os.path.getsize(modello), len(FintoModello.DATI))
+        self.assertFalse(os.path.exists(modello + ".part"))
+        j = aspetta(lambda: (lambda x: x if x["conteggi"].get("cercati") == 2 else None)(
+            self.s.json("GET", "/api/extra/gestione/testi")), 20)
+        self.assertEqual((j["whisper"]["stato"], j["whisper"]["programma"], j["whisper"]["modello_scaricato"]),
+                         ("pronto", self.whisper, True))
+
+
+class TestKaraokePausa(unittest.TestCase):
+    """In pausa da Gestione Whisper si ferma a metà del brano (il programma finisce, il brano resta da fare, non è un
+    errore) e riprende quando lo si riaccende; anche solo Whisper si può escludere."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-pausa-")
+        cls.c = prepara_cartelle(cls.base)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        _scrivi_programma(os.path.join(cls.c["bin"], "whisper-cli"), FINTO_WHISPER)
+        _brano_con_voce(cls.c["musica"], "Lenta.mp3", "Lenta", "Nessuno", [[1.0, "una"]], lento=True)
+        cls.modello = os.path.join(cls.base, "ggml-finto.bin")
+        with open(cls.modello, "wb") as f:
+            f.write(b"lmgg")
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
+        threading.Thread(target=cls.lrc.serve_forever, daemon=True).start()
+        with unittest.mock.patch.dict(os.environ, {
+                "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"), "ATLANTE_WHISPER_FILE_MODELLO": cls.modello}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        aspetta(lambda: len(cls.s.json("GET", "/api/musica/catalogo").get("brani") or []) == 1, 30)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.lrc.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def pid(self, diverso_da=None):
+        f = os.path.join(self.c["finto"], "whisper-lento.pid")
+
+        def letto():
+            try:
+                with open(f) as x:
+                    p = int(x.read() or 0)
+            except (OSError, ValueError):
+                return None
+            return p if p and p != diverso_da else None
+        p = aspetta(letto, 30, 0.1)
+        self.assertTrue(p, self.s.leggi_log()[-3000:])
+        return p
+
+    def chiamate(self):
+        try:
+            with open(os.path.join(self.c["finto"], "whisper.log"), encoding="utf-8") as f:
+                return len(f.readlines())
+        except OSError:
+            return 0
+
+    def test_pausa_e_ripresa(self):
+        _accendi(self.s)
+        p = self.pid()   # Whisper sta ascoltando il brano (lento)
+        j = self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False})
+        self.assertIs(j["acceso"], False)
+        self.assertTrue(aspetta(lambda: not _vivo(p), 10, 0.1), "Whisper non si è fermato")
+        j = aspetta(lambda: (lambda x: x if not x["ora"]["allinea"] else None)(
+            self.s.json("GET", "/api/extra/gestione/testi")), 10)
+        self.assertEqual((j["conteggi"].get("da_allineare"), j["conteggi"].get("non_allineati", 0)), (1, 0))
+        self.assertIn("in pausa", self.s.leggi_log())
+        n = self.chiamate()
+        time.sleep(1.5)
+        self.assertEqual(self.chiamate(), n)   # in pausa non riparte
+        # acceso senza Whisper: i testi sì, Whisper no
+        j = _accendi(self.s, whisper=False)
+        self.assertEqual((j["acceso"], j["con_whisper"]), (True, False))
+        time.sleep(1.5)
+        self.assertEqual(self.chiamate(), n)
+        self.assertEqual(self.s.json("GET", "/api/extra/testi/" + self.s.json("GET", "/api/musica/catalogo")["brani"][0]["id"]),
+                         {"stato": "nessuno", "allineamento": "spento"})
+        # di nuovo con Whisper: riprende il brano da capo
+        _accendi(self.s, whisper=True)
+        q = self.pid(diverso_da=p)
+        self.assertEqual(self.chiamate(), n + 1)
+        self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False})
+        self.assertTrue(aspetta(lambda: not _vivo(q), 10, 0.1))
+
+
+class TestKaraokeInvitati(unittest.TestCase):
+    """Gli invitati leggono i testi (come prima); Gestione → Testi e karaoke resta solo di Samuele."""
+    ORIGINE, IPHONE = TestAccesso.ORIGINE, TestAccesso.IPHONE
+    da_fuori, invitato = TestAccesso.da_fuori, TestAccesso.invitato
+    biscotto = staticmethod(TestAccesso.biscotto)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-inv-")
+        cls.c = prepara_cartelle(cls.base)
+        _brano_con_voce(cls.c["musica"], "A.mp3", "Canzone sincronizzata", "Artista A", [])
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
+        threading.Thread(target=cls.lrc.serve_forever, daemon=True).start()
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1]}):
+            cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"]).avvia()
+        cat = aspetta(lambda: (lambda j: j if j.get("brani") else None)(cls.s.json("GET", "/api/musica/catalogo")), 30)
+        cls.id = cat["brani"][0]["id"]
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("musica_libreria_karaoke_inv", SERVER)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.lrc.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_invitato(self):
+        _, v, _ = self.invitato("Gina", ip="203.0.113.140")
+
+        def gina(metodo, p, corpo=None):
+            st, h, b = self.da_fuori(metodo, p, corpo, biscotto=v, extra={"Origin": self.ORIGINE["Origin"]})
+            return st, (json.loads(b.decode("utf-8")) if b.startswith(b"{") else b)
+        st, j = gina("GET", "/api/extra/testi/" + self.id + "?lingua=en")
+        self.assertEqual((st, j.get("stato"), j.get("parole_da")), (200, "ok", "stima"), j)
+        st, j = gina("GET", "/api/extra/testi?titolo=Strumentale&artista=Artista%20D")
+        self.assertEqual((st, j), (200, {"stato": "strumentale"}))
+        self.assertEqual(gina("GET", "/api/extra/gestione/testi")[0], 403)
+        self.assertEqual(gina("POST", "/api/extra/gestione/testi", {"acceso": True})[0], 403)
+        self.assertIs(self.s.json("GET", "/api/extra/gestione/testi")["acceso"], False)
+
+
+class _LibFinta:
+    """Quanto basta di Libreria per il lavoro sui testi: brani (con _f) e percorsi."""
+
+    def __init__(self, brani, percorsi):
+        self.blocco, self.ultima, self.brani, self.percorsi = threading.Lock(), 1, brani, percorsi
+
+
+class FintoMyMemoryQuota(http.server.BaseHTTPRequestHandler):
+    """MyMemory finto che finisce la quota gratuita dopo «concesse» righe; ricorda le righe chieste."""
+    concesse, chieste = 2, []
+
+    def do_GET(self):
+        q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        FintoMyMemoryQuota.chieste.append(q.get("q"))
+        if len(FintoMyMemoryQuota.chieste) <= FintoMyMemoryQuota.concesse:
+            d = {"responseStatus": 200, "responseData": {"translatedText": "EN: " + q.get("q", "")}}
+        else:
+            d = {"responseStatus": 429, "responseData": {"translatedText": "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE "
+                                                                             "TRANSLATIONS FOR TODAY"}}
+        b = json.dumps(d).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+
+class FintoModelloRange(FintoModello):
+    """Hugging Face finto che sa riprendere uno scaricamento (Range: bytes=N-) e ricorda i Range chiesti."""
+    range_chiesti = []
+
+    def do_GET(self):
+        FintoModello.chiesti += 1
+        r = self.headers.get("Range")
+        FintoModelloRange.range_chiesti.append(r)
+        m = re.match(r"bytes=(\d+)-$", r or "")
+        if m:
+            da = int(m.group(1))
+            self.send_response(206)
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (da, len(self.DATI) - 1, len(self.DATI)))
+            self.send_header("Content-Length", str(len(self.DATI) - da))
+            self.end_headers()
+            self.wfile.write(self.DATI[da:])
+            return
+        super().do_GET()
+        FintoModello.chiesti -= 1   # contata una volta sola
+
+
+class FintoLrclibLento(http.server.BaseHTTPRequestHandler):
+    """LRCLIB finto lento per «Lento» (ogni richiesta 2 s), subito per gli altri brani."""
+
+    def do_GET(self):
+        q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        if (q.get("track_name") or "").startswith("Lento"):
+            time.sleep(2)
+        b = b'{"code":404}'
+        self.send_response(404)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+
+class TestKaraokeRevisione(unittest.TestCase):
+    """Le correzioni dopo la revisione dell'unione: righe con la fine e senza parole, errori di tutto il Mac (disco,
+    ffmpeg, rete) che non sono colpa del brano, traduzioni a metà, l'IA del Mac solo per Samuele, code limitate, fini
+    stimate che non diventano pause, modello di Whisper (spazio, ripresa), lavori che non muoiono, Homebrew, LRCLIB
+    prima per l'app che per il lavoro in sottofondo, l'anticipo dei tempi di Whisper."""
+
+    def setUp(self):
+        self.m = modulo_server("musica_libreria_revisione_%s" % self._testMethodName)
+        self.d = tempfile.mkdtemp(prefix="atlante-karaoke-rev-")
+        self.m.CONF["cache"] = self.d
+        self.m.CONF["ia_indirizzo"] = "http://127.0.0.1:9"
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def prepara_testi(self, n=0, percorso=None, **scheda):
+        """Un lavoro sui testi con n brani finti (file in percorso(i), schede già cercate come «scheda»)."""
+        m = self.m
+        brani = {"id%d" % k: {"title": "T%d" % k, "artist": "A", "_f": "F%d" % k, "added": k, "duration": 200}
+                 for k in range(n)}
+        m.LIB, m.TOLTI, m.CORR = _LibFinta(brani, {i: (percorso or (lambda x: "/Volumes/Non c'è/%s.mp3" % x))(i)
+                                                   for i in brani}), None, None
+        os.makedirs(os.path.join(self.d, "testi", "modelli"), exist_ok=True)
+        with open(os.path.join(self.d, "testi", "modelli", "ggml-large-v3-turbo-q5_0.bin"), "wb") as f:
+            f.write(b"lmgg")
+        t = m.Testi(os.path.join(self.d, "testi"))
+        t.acceso = True
+        t.whisper.cli = "/usr/bin/true"
+        for i, b in brani.items():
+            t.schede[i] = dict(dict(v=m.TESTI_V, f=b["_f"], t=b["title"], a="A", s="trovato", q=int(time.time()), n=0,
+                                    fo="lrclib", sy=True, pw=False, ri=2, it="x" * 16, li="it", al="attesa", vo="",
+                                    aln=0, alq=0), **scheda)
+        return t
+
+    def lrc(self, testo):
+        return self.m._testi_risposta(self.m.leggi_lrc(testo), "lrclib", True)
+
+    # 1: una riga a tempo con la fine ma senza i tempi delle parole
+
+    def test_01_riga_con_fine_senza_parole(self):
+        m = self.m
+        r = m.leggi_lrc("[00:12.00]Hello world<00:14.00>\n[00:20.00]Next line")
+        self.assertTrue(m._stima_parole(r, 100))
+        self.assertEqual(([w["t"] for w in r[0]["parole"]][0], r[0]["fine"]), (12.0, 14.0))
+        self.assertTrue(12.0 < r[0]["parole"][1]["t"] < 14.0)
+        lf = ("version: '1.0'\nmetadata:\n  instrumental: false\nlines:\n- text: Hello world\n  start_ms: 1000\n"
+              "  end_ms: 2600\n  words:\n  - text: 'Hello '\n    start_ms: 1000\n  - text: world\n    start_ms: 1600\n"
+              "- text: Oh yeah baby\n  start_ms: 3000\n  end_ms: 4500\n")
+        r = m._testi_da_lrclib({"stato": "ok", "lyricsfile": lf, "lrc": "[00:01.00]Hello world\n[00:03.00]Oh yeah baby"})
+        o = m.Testi(os.path.join(self.d, "testi"))._risposta(r, 100)
+        self.assertEqual((o["righe"][1]["fine"], [w["testo"] for w in o["righe"][1]["parole"]]),
+                         (4.5, ["Oh ", "yeah ", "baby"]))
+        # come in allinea(): Whisper sente le prime parole ma non l'ultima
+        r = self.lrc("[00:12.00]Hello my world<00:14.00>\n[00:20.00]Next line here")
+        nuove = [{"t": x["t"], "f": x.get("fine"), "x": x["testo"], "p": [[None, None, w] for w in m._pezzi(x["testo"])]}
+                 for x in r["righe"]]
+        m.allinea_parole(nuove, [(12.1, None, "Hello"), (12.6, None, "my"), (20.1, None, "Next"), (20.5, None, "line"),
+                                 (21.0, None, "here")], True)
+        m.completa_tempi(nuove, 100)
+        self.assertTrue(12.6 < nuove[0]["p"][2][0] < 14.0 and nuove[0]["f"] == 14.0, nuove[0])
+        # e nessun testo LRC a caso fa saltare la stima o l'allineamento
+        import random
+        rnd = random.Random(7)
+        pezzi = ["[00:%02d.%02d]" % (rnd.randint(0, 59), rnd.randint(0, 99)) for _ in range(20)] + \
+                ["<00:%02d.%02d>" % (rnd.randint(0, 59), rnd.randint(0, 99)) for _ in range(20)] + \
+                ["ciao ", "amore", " ", "あい", "...", "[offset:+300]", "\n", "שלום", "♪"]
+        for _ in range(1500):
+            x = "".join(rnd.choice(pezzi) for _ in range(rnd.randint(1, 30)))
+            righe = m.leggi_lrc(x) or m.testi_semplici(x)
+            m._stima_parole([dict(y) for y in righe], rnd.choice([0, 30, 200, None]))
+            nuove = [{"t": y.get("t"), "f": y.get("fine"), "x": y.get("testo") or "",
+                      "p": [[None, None, w] for w in m._pezzi(y.get("testo"))]} for y in m.leggi_lrc(x)]
+            m.allinea_parole(nuove, sorted((round(rnd.uniform(0, 70), 2), None, rnd.choice(["ciao", "amore", "x"]))
+                                           for _ in range(rnd.randint(0, 20))), True)
+            m.completa_tempi(nuove, rnd.choice([0, 30, 200]))
+            m._righe_app(nuove)
+
+    # 2: gli errori di tutto il Mac non sono colpa del brano
+
+    def test_02_disco_scollegato_pausa_per_tutti(self):
+        m, t = self.m, self.prepara_testi(200)
+        scritture = [0]
+        scrivi = m._scrivi_json
+
+        def conta(f, x):
+            scritture[0] += f.endswith("schede.json")
+            return scrivi(f, x)
+        m._scrivi_json = conta
+        threading.Thread(target=t._lavora_allinea, daemon=True).start()
+        time.sleep(1.5)
+        self.assertLessEqual(scritture[0], 2)
+        self.assertEqual({(s["al"], s["aln"]) for s in t.schede.values()}, {("attesa", 0)})
+        self.assertGreater(t.pausa_voce, time.time() + 60)
+        self.assertIn("disco", t.stato()["whisper"]["pausa"])
+
+    def test_03_rete_giu_non_conta(self):
+        m = self.m
+        f = os.path.join(self.d, "a.mp3")
+        scrivi_mp3(f, "T", "A")
+        t = self.prepara_testi(1, lambda i: f)
+
+        def giu(*a, **k):
+            raise m.ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde")
+        m.testi_brano = giu
+        t.allinea("id0", m.LIB.brani["id0"])
+        self.assertEqual((t.schede["id0"]["al"], t.schede["id0"]["aln"]), ("attesa", 0))
+        self.assertGreater(t.pausa_voce, time.time())
+
+    def test_04_errori_di_fila_sono_del_mac(self):
+        m = self.m
+        f = os.path.join(self.d, "a.mp3")
+        scrivi_mp3(f, "T", "A")
+        t = self.prepara_testi(4, lambda i: f)
+        m.testi_brano = lambda *a, **k: self.lrc("[00:01.00]Una riga\n[00:05.00]Altra riga")
+
+        def rotto(*a, **k):
+            raise m.ErroreTesti("ffmpeg: dyld: Library not loaded")
+        m._wav16k = rotto
+        for i in ("id0", "id1", "id2"):
+            t.allinea(i, m.LIB.brani[i])
+        self.assertEqual([t.schede[i]["aln"] for i in ("id0", "id1", "id2")], [1, 1, 0])
+        self.assertEqual(t.schede["id2"]["al"], "attesa")
+        self.assertGreater(t.pausa_voce, time.time())
+
+    def test_05_riprova_azzera_gli_errori(self):
+        t = self.prepara_testi(3, al="errore", aln=3, alq=int(time.time()))
+        t._parti = lambda *a: None   # i lavori che riprova() fa ripartire qui non servono (e cambierebbero le schede)
+        t.pausa_voce = time.time() + 3600
+        t.riprova()
+        self.assertEqual({(s["al"], s["aln"]) for s in t.schede.values()}, {("attesa", 0)})
+        self.assertEqual(t.pausa_voce, 0)
+        self.assertEqual(t.stato()["conteggi"].get("da_allineare"), 3)
+
+    # 4: una traduzione a metà non è «pronta»
+
+    def test_06_traduzione_a_meta(self):
+        mm = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoMyMemoryQuota)
+        threading.Thread(target=mm.serve_forever, daemon=True).start()
+        FintoMyMemoryQuota.concesse, FintoMyMemoryQuota.chieste = 2, []
+        try:
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_MYMEMORY": "http://127.0.0.1:%d" % mm.server_address[1]}):
+                t = self.m.Testi(os.path.join(self.d, "testi"))
+                r = {"stato": "ok", "lingua": "it", "righe": [{"t": 1, "testo": x} for x in ("uno", "due", "tre", "quattro")]}
+                self.assertEqual(t.traduzione(r, "en")["stato"], "in corso")
+                x = aspetta(lambda: (lambda y: y if y["stato"] != "in corso" else None)(t.traduzione(r, "en")), 10, 0.1)
+                self.assertEqual(x["stato"], "non riuscita", x)
+                self.assertIn("gratuite", x["motivo"])
+                with open(t._file_trad(["uno", "due", "tre", "quattro"], "en"), encoding="utf-8") as f:
+                    self.assertEqual(sorted(json.load(f)["righe"].values()), ["EN: due", "EN: quattro"])
+                # il giorno dopo: si traducono solo le righe che mancano
+                FintoMyMemoryQuota.concesse, FintoMyMemoryQuota.chieste = 99, []
+                t.trad.pausa, t.errori_t = 0.0, {}
+                self.assertEqual(t.traduzione(r, "en")["stato"], "in corso")
+                x = aspetta(lambda: (lambda y: y if y["stato"] == "pronta" else None)(t.traduzione(r, "en")), 10, 0.1)
+                self.assertEqual(x["righe"], ["EN: uno", "EN: due", "EN: tre", "EN: quattro"])
+                self.assertEqual(sorted(FintoMyMemoryQuota.chieste), ["tre", "uno"])
+        finally:
+            mm.shutdown()
+
+    # 5: l'IA del Mac solo per Samuele; code limitate
+
+    def test_07_ia_del_mac_solo_per_samuele(self):
+        t = self.m.Testi(os.path.join(self.d, "testi"))
+        usate = []
+        t.trad.ia = lambda: "llama3.2"
+        t.trad._con_ia = lambda modello, righe, da, a: (usate.append("ia"), {x: "IA: " + x for x in righe})[1]
+        t.trad._con_mymemory = lambda righe, da, a: (usate.append("mm"), {x: "MM: " + x for x in righe})[1]
+        r = {"stato": "ok", "lingua": "it", "righe": [{"t": 1, "testo": "ciao"}]}
+        t.traduzione(r, "en", {"chi": "anna", "ia": False})
+        aspetta(lambda: t.traduzione(r, "en", {"chi": "anna", "ia": False})["stato"] == "pronta", 10, 0.05)
+        self.assertEqual(usate, ["mm"])   # un'invitata: solo MyMemory
+        r = {"stato": "ok", "lingua": "it", "righe": [{"t": 1, "testo": "buongiorno"}]}
+        t.traduzione(r, "en", {"chi": "samuele", "ia": True})
+        x = aspetta(lambda: (lambda y: y if y["stato"] == "pronta" else None)(
+            t.traduzione(r, "en", {"chi": "samuele", "ia": True})), 10, 0.05)
+        self.assertEqual((usate, x["righe"]), (["mm", "ia"], ["IA: buongiorno"]))
+        # senza sapere chi è: niente IA
+        self.assertEqual(t._chi(None), {"chi": "", "ia": False})
+
+    def test_08_code_limitate(self):
+        t = self.m.Testi(os.path.join(self.d, "testi"))
+        t._parti = lambda *a: None   # i lavori restano in coda
+        r = lambda k: {"stato": "ok", "lingua": "it", "righe": [{"t": 1, "testo": "riga %d" % k}]}   # noqa: E731
+        anna, bruno = {"chi": "anna", "ia": False}, {"chi": "bruno", "ia": False}
+        self.assertEqual([t.traduzione(r(k), "en", anna)["stato"] for k in range(4)], ["in corso"] * 3 + ["non riuscita"])
+        self.assertIn("3 traduzioni", t.traduzione(r(3), "en", anna)["motivo"])
+        self.assertEqual(t.traduzione(r(0), "en", anna)["stato"], "in corso")   # la stessa di prima: già in coda
+        for k in range(10, 57):
+            t.traduzione(r(k), "en", {"chi": "p%d" % k, "ia": False})
+        self.assertEqual(len(t.coda_t), 50)
+        x = t.traduzione(r(99), "en", bruno)
+        self.assertEqual((x["stato"], len(t.coda_t)), ("non riuscita", 50))
+        self.assertIn("troppe", x["motivo"])
+
+    # 6: le fini stimate non si mandano come vere
+
+    def test_09_fini_stimate_non_si_mandano(self):
+        m = self.m
+        r = m.leggi_lrc("[00:50.00]And I will always love you\n[01:00.00]I will always love you\n"
+                        "[01:12.00]<01:12.00>You, <01:13.00>my darling<01:15.00>\n[01:20.00]Con la fine<01:22.00>")
+        self.assertTrue(m._stima_parole(r, 200))
+        self.assertEqual(["fine" in x for x in r], [False, False, True, True])   # solo quelle della fonte
+        self.assertEqual(r[3]["fine"], 82.0)
+        self.assertTrue(all(len(x["parole"]) > 1 for x in r))
+
+    # 7: il modello di Whisper: spazio sul disco, ripresa, pezzi vecchi
+
+    def test_10_modello_spazio_e_ripresa(self):
+        m = self.m
+        hf = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoModelloRange)
+        threading.Thread(target=hf.serve_forever, daemon=True).start()
+        FintoModello.chiesti, FintoModelloRange.range_chiesti = 0, []
+        url = "http://127.0.0.1:%d/ggml.bin" % hf.server_address[1]
+        try:
+            fermo = [False]
+            w = m.Whisper(os.path.join(self.d, "modelli"), lambda: fermo[0])
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_WHISPER_URL_MODELLO": url,
+                                                       "ATLANTE_WHISPER_SPAZIO_MIN_GB": "1000000"}):
+                with self.assertRaises(m.ErroreTesti) as e:
+                    w._scarica_modello()
+                self.assertIn("spazio", str(e.exception))
+                self.assertEqual(FintoModello.chiesti, 0)   # con il disco pieno non si comincia nemmeno
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_WHISPER_URL_MODELLO": url,
+                                                       "ATLANTE_WHISPER_SPAZIO_MIN_GB": "0"}):
+                scritto = os.path.getsize
+                w.fermo = lambda: os.path.exists(w.file_modello + ".part") and scritto(w.file_modello + ".part") > 0
+                with self.assertRaises(m.Pausa):
+                    w._scarica_modello()
+                self.assertEqual(os.path.getsize(w.file_modello + ".part"), 1024 * 1024)   # in pausa il pezzo resta
+                w.fermo = lambda: False
+                w._scarica_modello()   # e si riprende da lì
+                with open(w.file_modello, "rb") as f:
+                    self.assertEqual(f.read(), FintoModello.DATI)
+                self.assertEqual(FintoModelloRange.range_chiesti, [None, "bytes=1048576-"])
+                self.assertFalse(os.path.exists(w.file_modello + ".part"))
+        finally:
+            hf.shutdown()
+        # all'avvio, col lavoro spento, i pezzi vecchi del modello si buttano (acceso restano, per riprendere)
+        cart = os.path.join(self.d, "testi")
+        os.makedirs(os.path.join(cart, "modelli"), exist_ok=True)
+        pezzo = os.path.join(cart, "modelli", "ggml-large-v3-turbo-q5_0.bin.part")
+        with open(pezzo, "wb") as f:
+            f.write(b"lmgg" + bytes(10))
+        m._scrivi_json(os.path.join(cart, "lavoro.json"), {"acceso": True, "whisper": True})
+        m.Testi(cart)
+        self.assertTrue(os.path.exists(pezzo))
+        m._scrivi_json(os.path.join(cart, "lavoro.json"), {"acceso": False, "whisper": True})
+        m.Testi(cart)
+        self.assertFalse(os.path.exists(pezzo))
+
+    # 8: «in coda» solo se è in coda davvero; un testo cambiato a metà non diventa «fatto»
+
+    def test_11_in_coda_davvero(self):
+        m = self.m
+        f = os.path.join(self.d, "a.mp3")
+        scrivi_mp3(f, "T0", "A")
+        t = self.prepara_testi(1, lambda i: f, al="fatto", it="vecchio" * 2)
+        t._parti = lambda *a: None   # Whisper lo si fa lavorare qui sotto, non in un thread
+        m.Whisper.spento = staticmethod(lambda: False)
+        r = self.lrc("[00:01.00]Una riga\n[00:05.00]Altra riga")
+        m.testi_brano = lambda *a, **k: r
+        o = t.per_brano("id0")
+        self.assertEqual(o["allineamento"], "in coda")
+        self.assertEqual((t.schede["id0"]["al"], t.subito_a), ("attesa", ["id0"]))
+        # il testo cambia mentre Whisper ascolta: il lavoro non vale per il testo nuovo
+        m._wav16k = lambda p, dest, fermo=None: open(dest, "wb").close()
+
+        def ascolta(wav, lingua="", prompt=""):
+            t._scheda("id0", it="un altro testo..")
+            return {"transcription": [{"tokens": [{"text": " Una", "t_dtw": 110, "p": 0.9}, {"text": " riga", "t_dtw": 150,
+                                                                                            "p": 0.9}]}]}
+        t.whisper.trascrivi = ascolta
+        t.allinea("id0", m.LIB.brani["id0"])
+        self.assertNotEqual(t.schede["id0"]["al"], "fatto")
+
+    # 9: un errore inatteso non ferma i lavori per sempre
+
+    def test_12_lavori_che_non_muoiono(self):
+        t = self.prepara_testi(2)
+        for s in t.schede.values():
+            s["v"] = 0   # da cercare
+        fatti = []
+
+        def cerca(i, b, corr):
+            if i == "id1":
+                raise RuntimeError("baco")
+            fatti.append(i)
+            t._scheda(i, v=self.m.TESTI_V, s="nessuno", q=int(time.time()))
+        t.cerca = cerca
+        t._parti("cerca", t._lavora_cerca)
+        self.assertTrue(aspetta(lambda: fatti == ["id0"], 5))
+        self.assertIn("cerca", t.partiti)   # vivo: id1 è segnato non riuscito, id0 fatto
+        self.assertEqual(t.schede["id1"]["s"], "errore")
+        giri = []
+        t._parti("prova", lambda: giri.append(1))
+        self.assertTrue(aspetta(lambda: "prova" not in t.partiti, 5))
+        t._parti("prova", lambda: giri.append(1))   # finito: si può far ripartire
+        self.assertTrue(aspetta(lambda: len(giri) == 2, 5))
+
+    # 3 e 11: Homebrew senza aggiornare il resto; occupato da un'altra installazione: si riprova presto
+
+    def test_13_brew(self):
+        m, bin_ = self.m, os.path.join(self.d, "bin")
+        os.makedirs(bin_)
+        brew, dest = os.path.join(bin_, "brew"), os.path.join(self.d, "installato", "whisper-cli")
+        _scrivi_programma(brew, FINTO_BREW_TESTI)
+        _scrivi_programma(os.path.join(self.d, "whisper-finto"), FINTO_WHISPER)
+        amb = {"ATLANTE_BREW": brew, "ATLANTE_WHISPER": dest, "ATLANTE_WHISPER_INSTALLA": "1", "FINTO_DIR": self.d,
+               "FINTO_WHISPER_DEST": dest, "FINTO_WHISPER_SORGENTE": os.path.join(self.d, "whisper-finto"),
+               "FINTO_BREW_BLOCCATO": "1"}
+        with unittest.mock.patch.dict(os.environ, amb):
+            w = m.Whisper(os.path.join(self.d, "modelli"))
+            self.assertFalse(w.prepara())   # un'altra installazione tiene il lucchetto di Homebrew
+            self.assertIn("Homebrew", w.stato)
+            self.assertLessEqual(m.WHISPER_RIPROVA - (time.time() - w.prova), 330)   # si riprova tra pochi minuti
+            os.environ["FINTO_BREW_BLOCCATO"] = ""
+            self.assertEqual(w._installa(), dest)
+        with open(os.path.join(self.d, "brew.log"), encoding="utf-8") as f:
+            env = json.loads(f.readlines()[-1])["env"]
+        for k in ("HOMEBREW_NO_AUTO_UPDATE", "HOMEBREW_NO_INSTALL_UPGRADE", "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"):
+            self.assertEqual(env.get(k), "1", k)
+
+    # i tempi DTW di Whisper arrivano tardi: si anticipano di 0,18 s
+
+    def test_14_anticipo_di_whisper(self):
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop("ATLANTE_WHISPER_ANTICIPO", None)
+            w = self.m.Whisper(os.path.join(self.d, "modelli"))
+        self.assertEqual(w.anticipo, 0.18)
+        j = {"transcription": [{"tokens": [{"text": " Ciao", "t_dtw": 45, "p": 0.9}, {"text": " mondo", "t_dtw": 100, "p": 0.9},
+                                           {"text": " su", "t_dtw": 10, "p": 0.9}]}]}
+        self.assertEqual([x[0] for x in self.m.parole_sentite(j, w.anticipo)], [0.27, 0.82, 0.0])
+
+    # 13: l'app non aspetta dietro il lavoro su tutta la libreria
+
+    def test_15_lrclib_prima_per_lapp(self):
+        m = self.m
+        web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibLento)
+        threading.Thread(target=web.serve_forever, daemon=True).start()
+        try:
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % web.server_address[1],
+                                                       "ATLANTE_LRCLIB_INTERVALLO": "0"}):
+                t = self.prepara_testi(1, s="errore", v=0)
+                m.LIB.brani["id0"]["title"] = "Lento"
+                sotto = threading.Thread(target=lambda: t.cerca("id0", m.LIB.brani["id0"], {}), daemon=True)
+                sotto.start()   # il lavoro su tutta la libreria: /api/get e /api/search, 2 s l'una
+                time.sleep(0.3)
+                prima = time.time()
+                self.assertEqual(m.testi_brano("Veloce", "A", "", 100), {"stato": "nessuno"})
+                self.assertLess(time.time() - prima, 3.0)   # al più dietro la richiesta già partita, non tutta la ricerca
+                sotto.join(10)
+        finally:
+            web.shutdown()
+
+
+# brew finto per le prove di Homebrew: scrive le variabili HOMEBREW_* che riceve; con FINTO_BREW_BLOCCATO risponde come
+# quando un'altra installazione tiene il lucchetto
+FINTO_BREW_TESTI = r'''
+import json, os, shutil, sys
+with open(os.path.join(os.environ["FINTO_DIR"], "brew.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"args": sys.argv[1:], "env": {k: v for k, v in os.environ.items() if k.startswith("HOMEBREW_")}}) + "\n")
+if os.environ.get("FINTO_BREW_BLOCCATO"):
+    sys.stderr.write("Error: A `brew install whisper-cpp` process has already locked /opt/homebrew/Cellar/whisper-cpp.\n"
+                     "Please wait for it to finish or terminate it to continue.\n")
+    sys.exit(1)
+if sys.argv[1:3] == ["install", "whisper-cpp"]:
+    dest = os.environ["FINTO_WHISPER_DEST"]
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copy(os.environ["FINTO_WHISPER_SORGENTE"], dest)
+    os.chmod(dest, 0o755)
+'''
+
+
+class TestKaraokeRiavvio(unittest.TestCase):
+    """Un riavvio del server (l'aggiornamento automatico: launchctl kickstart -k) a metà di Whisper: con SIGTERM il
+    server ferma Whisper e pulisce i file temporanei; dopo un arresto brusco (SIGKILL) il server nuovo ferma il Whisper
+    rimasto orfano prima di partire, così non ce ne sono due sullo stesso brano."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-riavvio-")
+        cls.c = prepara_cartelle(cls.base)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        _scrivi_programma(os.path.join(cls.c["bin"], "whisper-cli"), FINTO_WHISPER)
+        _brano_con_voce(cls.c["musica"], "Lenta.mp3", "Lenta", "Nessuno", [[1.0, "una"]], lento=True)
+        cls.modello = os.path.join(cls.base, "ggml-finto.bin")
+        with open(cls.modello, "wb") as f:
+            f.write(b"lmgg")
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
+        threading.Thread(target=cls.lrc.serve_forever, daemon=True).start()
+        cls.ambiente = {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                        "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"),
+                        "ATLANTE_WHISPER_FILE_MODELLO": cls.modello}
+        cls.s = None
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.s:
+            cls.s.ferma()
+        cls.lrc.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def avvia(self):
+        with unittest.mock.patch.dict(os.environ, self.ambiente):
+            type(self).s = Server(self.base, self.c).avvia()
+        aspetta(lambda: len(self.s.json("GET", "/api/musica/catalogo").get("brani") or []) == 1, 30)
+
+    def pid(self, diverso_da=None):
+        f = os.path.join(self.c["finto"], "whisper-lento.pid")
+
+        def letto():
+            try:
+                with open(f) as x:
+                    p = int(x.read() or 0)
+            except (OSError, ValueError):
+                return None
+            return p if p and p != diverso_da and _vivo(p) else None
+        p = aspetta(letto, 30, 0.1)
+        self.assertTrue(p, self.s.leggi_log()[-3000:])
+        return p
+
+    def temporanei(self):
+        d = os.path.join(self.c["cache"], "testi", "tmp")
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def test_1_sigterm_ferma_whisper(self):
+        self.avvia()
+        _accendi(self.s)
+        p = self.pid()
+        self.assertTrue(self.temporanei())   # il WAV del brano sta in <cache>/testi/tmp
+        self.s.ferma()   # SIGTERM, come launchctl kickstart -k
+        self.assertTrue(aspetta(lambda: not _vivo(p), 10, 0.1), "Whisper è sopravvissuto al server")
+        self.assertEqual(self.temporanei(), [])
+        type(self).s = None
+
+    def test_2_orfano_dopo_un_arresto_brusco(self):
+        self.avvia()   # il lavoro è rimasto acceso: Whisper riparte da solo
+        p = self.pid()
+        self.s.p.kill()   # SIGKILL: il server non fa in tempo a fermare niente
+        self.s.p.wait()
+        self.s.log.close()
+        time.sleep(0.5)
+        self.assertTrue(_vivo(p))   # l'orfano c'è
+        self.avvia()
+        self.assertTrue(aspetta(lambda: not _vivo(p), 10, 0.1), "l'orfano è ancora vivo")
+        q = self.pid(diverso_da=p)   # e il server nuovo ha il suo, uno solo
+        self.assertNotEqual(q, p)
+        self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False})
+        self.assertTrue(aspetta(lambda: not _vivo(q), 10, 0.1))
 
 
 if __name__ == "__main__":
