@@ -10850,10 +10850,17 @@ def _rete(h, metodo, resto, corpo):
     return _json(h, _rete_stato(porta_server, _via(h)))
 
 
+def _da_tunnel(h):
+    """Richiesta arrivata da Internet attraverso un tunnel sul Mac: `tailscale funnel` (Tailscale-Funnel-Request) o
+    Cloudflare Tunnel (cloudflared, che si collega da 127.0.0.1 e porta sempre Cf-Ray e Cf-Connecting-Ip). Sembrano
+    venire dal Mac stesso, ma sono Internet: serve la password o un codice."""
+    return any(h.headers.get(k) is not None for k in ("Tailscale-Funnel-Request", "Cf-Ray", "Cf-Connecting-Ip"))
+
+
 def _via(h):
     """Da dove arriva questa richiesta: "tailscale" (rete Tailscale, anche attraverso tailscale serve), "casa" (il Mac
     stesso o la rete di casa) o "internet" (tailscale funnel, o un proxy che non è tailscaled sul Mac)."""
-    if h.headers.get("Tailscale-Funnel-Request") is not None:
+    if _da_tunnel(h):
         return "internet"
     vicino = _ip(h.client_address[0])
     xff = h.headers.get("X-Forwarded-For")
@@ -11409,7 +11416,7 @@ def _ip_tailscale(a):
 
 def _fidato(h):
     """Richiesta dal Mac stesso, dalla rete di casa o dalla rete Tailscale: non da Internet."""
-    if h.headers.get("Tailscale-Funnel-Request") is not None:
+    if _da_tunnel(h):
         return False
     vicino = _ip(h.client_address[0])
     xff = h.headers.get("X-Forwarded-For")
@@ -11424,6 +11431,9 @@ def _fidato(h):
 
 
 def _ip_cliente(h):
+    cf = h.headers.get("Cf-Connecting-Ip")
+    if cf and _ip(h.client_address[0]) is not None and _ip(h.client_address[0]).is_loopback:
+        return cf.strip()[:64]   # cloudflared: l'indirizzo vero di chi chiede (per il limite dei tentativi)
     xff = h.headers.get("X-Forwarded-For")
     vicino = _ip(h.client_address[0])
     if xff and vicino is not None and vicino.is_loopback:
@@ -11455,7 +11465,7 @@ def _biscotto_valido(h):
 def _proprietario_rete(h):
     """Il Mac stesso o Samuele dalla rete Tailscale (con ATLANTE_PROPRIETARI, solo quei login): non serve il biscotto.
     La rete di casa no: lì si ascolta, ma senza diventare Samuele."""
-    if h.headers.get("Tailscale-Funnel-Request") is not None:
+    if _da_tunnel(h):
         return False
     vicino = _ip(h.client_address[0])
     xff = h.headers.get("X-Forwarded-For")
