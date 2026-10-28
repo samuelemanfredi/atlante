@@ -5428,6 +5428,413 @@ class TestLibreriaGrande(unittest.TestCase):
         self.assertEqual(len(self.lib.brani), 3)
 
 
+# ----- due dischi (principale e backup) e playlist del Mac (dal disco e dalla vecchia radio) -----
+# Sul Mac mini la musica sta sul disco principale (Cloud) e una copia sul disco di backup (Cippo2); le playlist sono le
+# cartelle di «Musica Cloud/Playlist» (link ai brani) e quelle della vecchia radio (~/.cloud-web/playlist.json). Qui
+# tutto è finto, in una cartella temporanea: niente rete, niente dischi veri, e quei file non si scrivono mai.
+
+import hashlib as _hashlib
+import unicodedata as _unicodedata
+
+for _k in ("ATLANTE_BACKUP_DIR", "ATLANTE_PLAYLIST_DIR", "ATLANTE_PLAYLIST_JSON"):
+    os.environ.pop(_k, None)   # i server delle prove non devono mai vedere i dischi veri di chi le lancia
+
+
+def _id_di(percorso):
+    """L'id che la libreria dà a un file visto per la prima volta: sha1 del percorso, primi 16 caratteri."""
+    return _hashlib.sha1(_unicodedata.normalize("NFC", percorso).encode("utf-8")).hexdigest()[:16]
+
+
+def _am(nome):
+    """Id di una playlist del disco, come nell'app del Cloud (:8447)."""
+    return "AM-" + _hashlib.sha1(nome.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def due_dischi(base):
+    """Come sul Mac mini: «Da YouTube» sul disco principale, i brani scaricati da Atlante accanto e la copia di «Da
+    YouTube» sul backup. Uno e Due stanno su tutti e due i dischi, Tre solo sul backup, «Due [abc]» è lo stesso brano
+    di Due con un altro nome (solo sul backup), Quattro solo sul principale, Cinque tra gli scaricati."""
+    d = {"cloud": os.path.join(base, "Cloud"), "cippo": os.path.join(base, "Cippo2"),
+         "principale": os.path.join(base, "Cloud", "Musica Cloud", "Da YouTube"),
+         "scaricati": os.path.join(base, "Cloud", "Atlante Musica", "Musica"),
+         "backup": os.path.join(base, "Cippo2", "Backup Cloud", "Musica Cloud", "Da YouTube"),
+         "cache": os.path.join(base, "cache")}
+    for nome, titolo, artista in (("Artista A - Uno.mp3", "Uno", "Artista A"), ("Artista B - Due.mp3", "Due", "Artista B"),
+                                  ("Quattro.mp3", "Quattro", "Artista D")):
+        scrivi_mp3(os.path.join(d["principale"], nome), titolo, artista)
+    os.makedirs(d["backup"])
+    for nome in ("Artista A - Uno.mp3", "Artista B - Due.mp3"):   # come rsync -a: stessi byte, stessa data
+        shutil.copy2(os.path.join(d["principale"], nome), os.path.join(d["backup"], nome))
+    shutil.copy2(os.path.join(d["principale"], "Artista B - Due.mp3"), os.path.join(d["backup"], "Artista B - Due [abc].mp3"))
+    scrivi_mp3(os.path.join(d["backup"], "Artista C - Tre.mp3"), "Tre", "Artista C")
+    scrivi_mp3(os.path.join(d["scaricati"], "Cinque.mp3"), "Cinque", "Artista E")
+    return d
+
+
+class TestDueDischi(unittest.TestCase):
+    """Il disco principale prima, poi il backup: un brano che sta su tutti e due compare una volta (la copia del
+    principale); se il principale manca arriva dal backup con lo stesso id (preferiti, playlist e copie sull'iPhone
+    restano). Il backup non si tocca mai."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_dischi")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-dischi-")
+        self.d = due_dischi(self.base)
+        self.cartelle = [self.d["principale"], self.d["scaricati"]]
+
+    def tearDown(self):
+        self.m.LIB = self.m.TOLTI = None
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def lib(self, cache=None):
+        return self.m.LibreriaDueDischi(self.cartelle, cache or self.d["cache"], [self.d["backup"]])
+
+    def stacca(self, chiave):
+        os.rename(self.d[chiave], self.d[chiave] + "-staccato")
+
+    def attacca(self, chiave):
+        os.rename(self.d[chiave] + "-staccato", self.d[chiave])
+
+    @staticmethod
+    def per_titolo(lib):
+        return {b["title"]: b for b in lib.catalogo()["brani"]}
+
+    def test_1_un_brano_una_volta(self):
+        sola = self.m.Libreria(self.cartelle, os.path.join(self.base, "cache-sola"))   # come oggi, senza backup
+        sola.scansiona()
+        lib = self.lib()
+        self.assertEqual(lib.scansiona(), 5)
+        cat = self.per_titolo(lib)
+        self.assertEqual(sorted(cat), ["Cinque", "Due", "Quattro", "Tre", "Uno"])   # niente doppioni, Tre dal backup
+        self.assertEqual({t: b["id"] for t, b in cat.items() if t != "Tre"},
+                         {b["title"]: b["id"] for b in sola.catalogo()["brani"]})   # gli stessi id di prima
+        p = os.path.join
+        self.assertEqual(lib.percorsi[cat["Uno"]["id"]], p(self.d["principale"], "Artista A - Uno.mp3"))   # la copia del principale
+        self.assertEqual(lib.percorsi[cat["Tre"]["id"]], p(self.d["backup"], "Artista C - Tre.mp3"))
+        self.assertEqual(cat["Tre"]["id"], _id_di(p(self.d["principale"], "Artista C - Tre.mp3")))   # quello che avrà sul principale
+
+    def test_2_principale_staccato_stessi_id(self):
+        lib = self.lib()
+        lib.scansiona()
+        prima = self.per_titolo(lib)
+        self.stacca("cloud")
+        self.assertEqual(lib.scansiona(), 3)
+        cat = self.per_titolo(lib)
+        self.assertEqual(sorted(cat), ["Due", "Tre", "Uno"])   # Quattro e Cinque stanno solo sul disco staccato
+        for t in ("Uno", "Due", "Tre"):
+            self.assertEqual(cat[t], prima[t], t)   # stesso id, stessi dati (anche «added»): per l'iPhone non cambia niente
+        uno = lib.percorsi[cat["Uno"]["id"]]
+        self.assertEqual(uno, os.path.join(self.d["backup"], "Artista A - Uno.mp3"))
+        self.assertTrue(os.path.isfile(uno))
+        self.assertNotIn(os.path.join(self.d["backup"], "Artista B - Due [abc].mp3"), lib.percorsi.values())
+        self.assertIn(self.d["principale"], lib._mancanti)
+        # dopo un riavvio col principale ancora staccato: subito dall'indice, prima di rileggere i dischi
+        dopo = self.lib()
+        self.assertEqual(self.per_titolo(dopo), cat)
+        self.assertEqual(dopo.percorsi[cat["Uno"]["id"]], uno)
+        # il principale torna: di nuovo le sue copie, con gli stessi id
+        self.attacca("cloud")
+        self.assertEqual(dopo.scansiona(), 5)
+        self.assertEqual(self.per_titolo(dopo), prima)
+        self.assertEqual(dopo.percorsi[cat["Uno"]["id"]], os.path.join(self.d["principale"], "Artista A - Uno.mp3"))
+
+    def test_3_principale_mai_letto(self):
+        """Il Mac si accende col principale staccato e senza indice: i brani del backup prendono già l'id che avranno sul
+        principale, così quando torna non cambia niente."""
+        self.stacca("cloud")
+        lib = self.lib()
+        self.assertEqual(lib.scansiona(), 3)
+        prima = self.per_titolo(lib)
+        p = os.path.join
+        self.assertEqual(prima["Due"]["id"], _id_di(p(self.d["principale"], "Artista B - Due.mp3")))   # non quello di «Due [abc]»
+        self.attacca("cloud")
+        self.assertEqual(lib.scansiona(), 5)
+        cat = self.per_titolo(lib)
+        for t in ("Uno", "Due", "Tre"):
+            self.assertEqual(cat[t]["id"], prima[t]["id"], t)
+
+    def test_4_doppione_con_un_altro_nome(self):
+        """Sul backup c'è solo «Due [abc]» (stesso artista, titolo e durata): col principale staccato fa da copia di Due."""
+        os.unlink(os.path.join(self.d["backup"], "Artista B - Due.mp3"))
+        lib = self.lib()
+        lib.scansiona()
+        due = self.per_titolo(lib)["Due"]
+        self.stacca("cloud")
+        lib.scansiona()
+        self.assertEqual(self.per_titolo(lib)["Due"], due)
+        self.assertEqual(lib.percorsi[due["id"]], os.path.join(self.d["backup"], "Artista B - Due [abc].mp3"))
+
+    def test_5_backup_staccato(self):
+        lib = self.lib()
+        lib.scansiona()
+        self.stacca("cippo")
+        self.assertEqual(lib.scansiona(), 4)
+        self.assertNotIn("Tre", self.per_titolo(lib))
+        self.assertIn(self.d["backup"], lib._mancanti)
+        self.attacca("cippo")
+        self.assertIn("Tre", self.per_titolo(lib))   # ricollegato: il catalogo lo rilegge da sé
+
+    def test_6_il_backup_resta_com_e(self):
+        """Dal backup non si sposta niente: «Togli» (Gestione → Contenuti) su un brano che arriva da lì si rifiuta."""
+        self.m.LIB = lib = self.lib()
+        lib.scansiona()
+        uno = self.per_titolo(lib)["Uno"]["id"]
+        self.stacca("cloud")
+        lib.scansiona()
+        with self.assertRaises(self.m.ErroreExtra) as e:
+            self.m._togli(uno)
+        self.assertEqual(e.exception.codice, 409)
+        self.assertTrue(os.path.isfile(os.path.join(self.d["backup"], "Artista A - Uno.mp3")))
+        self.assertEqual(lib.percorsi[uno], os.path.join(self.d["backup"], "Artista A - Uno.mp3"))
+
+    def test_7_un_brano_tolto_non_torna_dal_backup(self):
+        lib = self.lib()
+        lib.scansiona()
+        uno = os.path.join(self.d["principale"], "Artista A - Uno.mp3")
+        os.makedirs(os.path.join(self.base, "Tolti"))
+        os.rename(uno, os.path.join(self.base, "Tolti", "Artista A - Uno.mp3"))   # come fa «Togli»
+        self.m.TOLTI = self.m.Tolti(os.path.join(self.base, "tolti.json"))
+        self.m.TOLTI.aggiungi({"id": self.per_titolo(lib)["Uno"]["id"], "percorso": uno})
+        lib.scansiona()
+        self.assertNotIn(os.path.join(self.d["backup"], "Artista A - Uno.mp3"), lib.percorsi.values())
+        self.assertNotIn("Uno", self.per_titolo(lib))
+
+    def test_8_nomi_scritti_in_due_modi(self):
+        """Lo stesso nome con le lettere accentate scritte in due modi (NFC sul principale, NFD sul backup)."""
+        nfc = _unicodedata.normalize("NFC", "Città.mp3")
+        scrivi_mp3(os.path.join(self.d["principale"], nfc), "Città", "Artista F")
+        shutil.copy2(os.path.join(self.d["principale"], nfc), os.path.join(self.d["backup"], _unicodedata.normalize("NFD", nfc)))
+        lib = self.lib()
+        self.assertEqual(lib.scansiona(), 6)
+        citta = self.per_titolo(lib)["Città"]
+        self.stacca("cloud")
+        lib.scansiona()
+        self.assertEqual(self.per_titolo(lib)["Città"], citta)
+
+    def test_9_senza_backup_come_oggi(self):
+        """Senza backup avvia() prepara la Libreria di sempre (nessun file nuovo nella cache)."""
+        self.assertIs(type(self.m._libreria_per(self.cartelle, self.d["cache"], [])), self.m.Libreria)
+        self.assertIs(type(self.m._libreria_per(self.cartelle, self.d["cache"], None)), self.m.Libreria)
+        lib = self.m._libreria_per(self.cartelle, self.d["cache"], [])
+        lib.scansiona()
+        self.assertEqual(sorted(os.listdir(self.d["cache"])), ["copertine", "indice.json"])
+        self.assertIsInstance(self.m._libreria_per(self.cartelle, self.d["cache"], [self.d["backup"]]), self.m.LibreriaDueDischi)
+
+
+class TestPlaylistMac(unittest.TestCase):
+    """Le playlist del disco (una cartella per playlist, con i link ai brani) e quelle della vecchia radio: di sola
+    lettura, con gli id dei brani della libreria (non doppioni dei file)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_playlist")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-playlist-")
+        self.d = due_dischi(self.base)
+        self.cartelle = [self.d["principale"], self.d["scaricati"]]
+        mc = os.path.dirname(self.d["principale"])
+        os.makedirs(os.path.join(self.base, "casa"))
+        casa = os.path.join(self.base, "casa", "Musica Cloud")   # come ~/Musica Cloud, link al disco
+        os.symlink(mc, casa)
+        self.pl = os.path.join(mc, "Playlist")
+        power = os.path.join(self.pl, "POWER")
+        os.makedirs(power)
+        os.symlink(os.path.join(casa, "Da YouTube", "Artista B - Due.mp3"), os.path.join(power, "001 - Artista B - Due.mp3"))
+        os.symlink(os.path.join("..", "..", "Da YouTube", "Artista A - Uno.mp3"), os.path.join(power, "002 - Artista A - Uno.mp3"))
+        os.symlink(os.path.join(casa, "Da YouTube", "Sparito.mp3"), os.path.join(power, "003 - Sparito.mp3"))
+        os.symlink(os.path.join(casa, "Da YouTube", "Artista A - Uno.mp3"), os.path.join(power, "004 - Artista A - Uno.mp3"))
+        sara = os.path.join(self.pl, "Sara❤️")
+        os.makedirs(sara)
+        shutil.copy2(os.path.join(self.d["principale"], "Quattro.mp3"), os.path.join(sara, "001 - Quattro.mp3"))   # una copia, non un link
+        os.makedirs(os.path.join(self.pl, "Vuota"))
+        os.symlink(os.path.join(casa, "Da YouTube", "Niente.mp3"), os.path.join(self.pl, "Vuota", "001 - Niente.mp3"))
+        os.makedirs(os.path.join(self.pl, ".nascosta"))
+        with open(os.path.join(self.pl, "Controllo playlist.txt"), "w", encoding="utf-8") as f:
+            f.write("non è una playlist\n")
+        b = lambda s: base64.urlsafe_b64encode(s.encode("utf-8")).rstrip(b"=").decode("ascii")   # noqa: E731
+        self.radio = os.path.join(self.base, "cloud-web", "playlist.json")
+        os.makedirs(os.path.dirname(self.radio))
+        with open(self.radio, "w", encoding="utf-8") as f:
+            json.dump({"playlist": [
+                {"id": "01e71680ece589d0", "di": "samuele@example.com", "nome": "Allenamento", "condivisa": True,
+                 "brani": [b("Da YouTube/Artista A - Uno.mp3"), b("Scaricati/Ottobre 2026/Nessuno.m4a"), "%%%",
+                           b("Da YouTube/Artista B - Due.mp3"), b("Scaricati/Ottobre 2026/Cinque.mp3")]},
+                {"id": "f855eaf17d25f15b", "nome": "Vuota", "brani": [b("Da YouTube/Non c'è.mp3")]},
+                {"nome": "Senza id", "brani": [b("Da YouTube/Artista C - Tre.mp3")]},
+                "non una playlist"]}, f, indent=1)
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def fotografia(self):
+        """Tutto quello che c'è nella cartella Playlist e nel file della radio: nomi, link, date, contenuto."""
+        out = []
+        for cart, sotto, files in os.walk(self.pl):
+            for n in sorted(sotto + files):
+                q = os.path.join(cart, n)
+                st = os.lstat(q)
+                out.append((q, st.st_mtime_ns, st.st_size, os.readlink(q) if os.path.islink(q) else None))
+        with open(self.radio, "rb") as f:
+            out.append((self.radio, os.stat(self.radio).st_mtime_ns, f.read()))
+        return sorted(out, key=repr)
+
+    def ids(self, lib):
+        return {b["title"]: b["id"] for b in lib.catalogo()["brani"]}
+
+    def test_1_cartelle_e_radio(self):
+        lib = self.m.LibreriaDueDischi(self.cartelle, self.d["cache"], [self.d["backup"]])
+        lib.scansiona()
+        i = self.ids(lib)
+        prima = self.fotografia()
+        pm = self.m.PlaylistMac(self.pl, self.radio, self.d["cache"])
+        r = pm.elenco(lib)["playlist"]
+        self.assertEqual(r, [
+            {"id": _am("POWER"), "nome": "POWER", "fonte": "disco", "brani": [i["Due"], i["Uno"]], "fuori": 1},
+            {"id": _am("Sara❤️"), "nome": "Sara❤️", "fonte": "disco", "brani": [i["Quattro"]], "fuori": 0},
+            {"id": "RA-01e71680ece589d0", "nome": "Allenamento", "fonte": "radio", "brani": [i["Uno"], i["Due"], i["Cinque"]], "fuori": 2},
+            {"id": "RA-" + _hashlib.sha1("Senza id".encode("utf-8")).hexdigest()[:12].upper(), "nome": "Senza id", "fonte": "radio",
+             "brani": [i["Tre"]], "fuori": 0}])   # le vuote no; «Controllo playlist.txt» e le cartelle col punto non sono playlist
+        self.assertEqual(len(lib.catalogo()["brani"]), 5)   # i brani delle playlist sono quelli della libreria, niente di nuovo
+        self.assertEqual(self.fotografia(), prima)           # sola lettura: né la cartella Playlist né playlist.json cambiano
+
+    def test_2_disco_staccato_tiene_le_ultime(self):
+        lib = self.m.LibreriaDueDischi(self.cartelle, self.d["cache"], [self.d["backup"]])
+        lib.scansiona()
+        i = self.ids(lib)
+        pm = self.m.PlaylistMac(self.pl, self.radio, self.d["cache"])
+        prima = pm.elenco(lib)["playlist"]
+        self.assertEqual(len(prima), 4)
+        os.rename(self.d["cloud"], self.d["cloud"] + "-staccato")   # col disco principale se ne va anche la cartella Playlist
+        lib.scansiona()
+        self.assertEqual(pm.elenco(lib)["playlist"], prima)
+        dopo = self.m.PlaylistMac(self.pl, self.radio, self.d["cache"])   # anche dopo un riavvio del server
+        self.assertEqual(dopo.elenco(lib)["playlist"], prima)
+        self.assertEqual(lib.percorsi[i["Uno"]], os.path.join(self.d["backup"], "Artista A - Uno.mp3"))   # e suonano dal backup
+
+    def test_3_radio_illeggibile(self):
+        lib = self.m.Libreria(self.cartelle, self.d["cache"])
+        lib.scansiona()
+        pm = self.m.PlaylistMac(None, self.radio, self.d["cache"])
+        prima = pm.elenco(lib)["playlist"]
+        self.assertEqual([p["nome"] for p in prima], ["Allenamento"])   # senza backup Tre non c'è: «Senza id» è vuota
+        with open(self.radio, "w", encoding="utf-8") as f:
+            f.write('{"playlist": [')   # la radio lo sta scrivendo proprio adesso
+        self.assertEqual(pm.elenco(lib)["playlist"], prima)   # restano quelle dell'ultima volta
+        with open(self.radio, encoding="utf-8") as f:
+            self.assertEqual(f.read(), '{"playlist": [')       # e il file non si sposta né si riscrive
+        self.assertEqual(os.listdir(os.path.dirname(self.radio)), ["playlist.json"])
+        os.unlink(self.radio)
+        self.assertEqual(pm.elenco(lib)["playlist"], [])       # tolto: niente playlist della radio
+
+    def test_4_senza_niente(self):
+        lib = self.m.Libreria(self.cartelle, self.d["cache"])
+        lib.scansiona()
+        self.assertEqual(self.m.PlaylistMac(None, None, self.d["cache"]).elenco(lib), {"playlist": []})
+        self.assertFalse(os.path.exists(os.path.join(self.d["cache"], "playlist-mac.json")))
+
+    def test_5_solo_samuele(self):
+        self.assertIsNone(self.m.PERMESSE_INVITATI.match("/api/extra/playlist"))   # gli invitati non le vedono
+
+    def test_6_app(self):
+        """L'app: elenco dal Mac tenuto sul telefono, righe «Dal disco»/«Dalla radio», pagina di sola lettura e «Copia
+        nelle mie playlist» (test_playlist_mac.js, in JavaScriptCore)."""
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_playlist_mac.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestDueDischiServer(unittest.TestCase):
+    """Il server come lo avvia il LaunchAgent: con le variabili d'ambiente (o con gli argomenti) per il backup e le
+    playlist, e senza (come oggi)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-dischi-server-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.backup = os.path.join(cls.base, "Backup", "musica")
+        os.makedirs(cls.backup)
+        for nome, titolo in (("Uno.mp3", "Uno"), ("Due.mp3", "Due")):
+            scrivi_mp3(os.path.join(cls.c["musica"], nome), titolo, "Artista")
+            shutil.copy2(os.path.join(cls.c["musica"], nome), os.path.join(cls.backup, nome))
+        scrivi_mp3(os.path.join(cls.backup, "Tre.mp3"), "Tre", "Artista")
+        cls.pl = os.path.join(cls.base, "Playlist")
+        os.makedirs(os.path.join(cls.pl, "Mia"))
+        os.symlink(os.path.join(cls.c["musica"], "Due.mp3"), os.path.join(cls.pl, "Mia", "001 - Due.mp3"))
+        cls.radio = os.path.join(cls.base, "playlist.json")
+        with open(cls.radio, "w", encoding="utf-8") as f:
+            json.dump({"playlist": [{"id": "r1", "nome": "Radio", "brani": [
+                base64.urlsafe_b64encode(b"musica/Tre.mp3").rstrip(b"=").decode("ascii")]}]}, f)
+        variabili = {"ATLANTE_BACKUP_DIR": cls.backup, "ATLANTE_PLAYLIST_DIR": cls.pl, "ATLANTE_PLAYLIST_JSON": cls.radio}
+        os.environ.update(variabili)
+        try:
+            cls.s = Server(cls.base, cls.c).avvia()
+        finally:
+            for k in variabili:
+                del os.environ[k]
+        aspetta(lambda: len(cls.s.json("GET", "/api/musica/catalogo")["brani"]) == 3, 20)
+        # gli stessi, dati come argomenti (una cache sua)
+        cls.c2 = dict(cls.c, cache=os.path.join(cls.base, "cache-argomenti"))
+        os.makedirs(cls.c2["cache"])
+        cls.s2 = Server(cls.base, cls.c2, ["--backup-dir", cls.backup, "--playlist-dir", cls.pl,
+                                           "--playlist-json", cls.radio]).avvia()
+        # e senza niente, come oggi
+        cls.c3 = dict(cls.c, cache=os.path.join(cls.base, "cache-come-oggi"))
+        os.makedirs(cls.c3["cache"])
+        cls.s3 = Server(cls.base, cls.c3).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        for s in (cls.s, cls.s2, cls.s3):
+            s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def catalogo(self, s):
+        aspetta(lambda: len(s.json("GET", "/api/musica/catalogo")["brani"]) >= 2, 20)
+        return {b["title"]: b["id"] for b in s.json("GET", "/api/musica/catalogo")["brani"]}
+
+    def test_1_catalogo_e_playlist(self):
+        for s in (self.s, self.s2):
+            cat = self.catalogo(s)
+            self.assertEqual(sorted(cat), ["Due", "Tre", "Uno"])
+            st, _, b = s.get("/api/musica/file/" + cat["Tre"])   # solo sul backup: arriva da lì
+            with open(os.path.join(self.backup, "Tre.mp3"), "rb") as f:
+                self.assertEqual((st, b), (200, f.read()))
+            pl = s.json("GET", "/api/extra/playlist")["playlist"]
+            self.assertEqual([(p["id"], p["fonte"], p["brani"]) for p in pl],
+                             [(_am("Mia"), "disco", [cat["Due"]]), ("RA-r1", "radio", [cat["Tre"]])])
+
+    def test_2_come_oggi_senza_configurazione(self):
+        cat = self.catalogo(self.s3)
+        self.assertEqual(sorted(cat), ["Due", "Uno"])
+        self.assertEqual(self.s3.json("GET", "/api/extra/playlist"), {"playlist": []})
+        for n in ("indice-backup.json", "playlist-mac.json"):   # nessun file nuovo nella cache
+            self.assertNotIn(n, os.listdir(self.c3["cache"]))
+        self.assertEqual(cat, {t: i for t, i in self.catalogo(self.s).items() if t != "Tre"})   # gli stessi id
+
+    def test_3_principale_staccato(self):
+        cat = self.catalogo(self.s)
+        os.rename(self.c["musica"], self.c["musica"] + "-staccato")
+        try:
+            self.s.json("GET", "/api/musica/aggiorna")
+            self.assertEqual(self.catalogo(self.s), cat)   # stessi brani, stessi id
+            st, _, b = self.s.get("/api/musica/file/" + cat["Uno"])
+            with open(os.path.join(self.backup, "Uno.mp3"), "rb") as f:
+                self.assertEqual((st, b), (200, f.read()))
+        finally:
+            os.rename(self.c["musica"] + "-staccato", self.c["musica"])
+            self.s.json("GET", "/api/musica/aggiorna")
+
+
 # ----- chat cifrata da telefono a telefono (fase 5a) -----
 #
 # Il Mac mini non decifra niente: qui i messaggi sono byte a caso della grandezza giusta e le chiavi pubbliche punti

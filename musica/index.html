@@ -861,6 +861,7 @@ async function loadServer() {
   scaricaTutto();
   CATET = et;
   clCarica();
+  mplCarica();   // playlist del Mac (dal disco e dalla vecchia radio)
   return true;
 }
 // playlist e coda della versione precedente: i brani del Mac mai ascoltati né preferiti avevano l'id senza «r».
@@ -1439,7 +1440,7 @@ function topBar(right) {
 }
 function routeTitle(r) {
   return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche', atl:'Playlist di Atlante', iaprev:'Anteprima', ritmo:'Per ritmo'}[r.v] || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
-    (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : r.v === 'atlpl' ? ((atlPl(r.k) || {}).nome || 'Playlist') : '');
+    (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : r.v === 'atlpl' ? ((atlPl(r.k) || {}).nome || 'Playlist') : r.v === 'macpl' ? mplNome(r.k) : '');
 }
 function emptyState() {
   if (SRV && SRVSCAN) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Il Mac sta leggendo il disco…</h3><p>La prima volta ci vuole qualche minuto: i brani compaiono man mano.</p></div>';
@@ -1553,6 +1554,7 @@ const pages = {
     h += '<button class="trk" data-a="newpl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:24px">' + ic('plus') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Nuova playlist…</span></span></span></button>';
     h += '<button class="trk" data-a="impl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('down') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Importa da Apple Music…</span><span class="t2">File esportato da Musica sul Mac</span></span></span></button>';
     h += P.map(p => { const tr = plTracks(p); return '<button class="trk" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>'; }).join('');
+    h += mplRighe();   // dopo le proprie, quelle del Mac (dal disco e dalla vecchia radio)
     return h + '</div>';
   },
   playlist(r) {
@@ -1680,6 +1682,74 @@ pages.classifica = function (r) {
   }
   return h;
 };
+
+/* ---------- playlist del Mac: le cartelle di «Playlist» sul disco e quelle della vecchia radio (sola lettura) ---------- */
+// Le prepara il Mac mini (api/extra/playlist, solo per Samuele): ogni cartella di «Musica Cloud/Playlist» con i suoi link
+// ai brani (id «AM-…», come nell'app del Cloud) e le playlist della vecchia pagina radio («RA-…»). I brani sono quelli
+// della libreria, con i loro id: si scaricano sull'iPhone come gli altri e restano anche col disco principale staccato
+// (arrivano dal backup). L'ultimo elenco ricevuto resta sul telefono (am-mpl): senza rete si vede lo stesso e suonano i
+// brani già salvati. Qui non si cambiano (le rifà il Mac): «Copia nelle mie playlist» ne fa una propria da modificare.
+let MPL = ls.get('am-mpl', []), mplT = 0;   // mplT: ultima richiesta al Mac
+if (!Array.isArray(MPL)) MPL = [];
+function mplDi(k) { return MPL.find(p => p.id === k) || null; }
+function mplNome(k) { const p = mplDi(k); return p ? p.nome : 'Playlist'; }
+function mplTracce(p) { return (p.brani || []).map(i => T.get('r' + i)).filter(Boolean); }
+function mplFonte(p) { return p.fonte === 'radio' ? 'Dalla radio' : 'Dal disco'; }
+function mplN(n) { return n === 1 ? '1 brano' : n + ' brani'; }
+async function mplCarica() {
+  mplT = Date.now();
+  try {
+    const r = await fetchT(XAPI + 'playlist', {cache:'no-store'}, 15000);
+    if (r.status === 403) { if (MPL.length) { MPL = []; ls.set('am-mpl', MPL); } return; }   // invitato: non sono sue
+    if (!r.ok) return;   // il Mac non risponde bene: resta l'ultimo elenco
+    const j = await r.json();
+    if (!j || !Array.isArray(j.playlist) || JSON.stringify(j.playlist) === JSON.stringify(MPL)) return;
+    MPL = j.playlist; ls.set('am-mpl', MPL);
+    if (['playlists', 'macpl'].indexOf(curRoute().v) >= 0) render(true);
+  } catch (e) {}   // senza rete: resta l'ultimo elenco
+}
+function mplRighe() {   // in Libreria › Playlist, dopo le proprie: solo quelle con brani della libreria
+  if (SRV && Date.now() - mplT > 120000) mplCarica();   // aperta la pagina, l'elenco si rinfresca (al più ogni 2 minuti)
+  const righe = MPL.map(p => [p, mplTracce(p)]).filter(x => x[1].length);
+  if (!righe.length) return '';
+  return '<h2 class="h2">Dal Mac</h2>' + righe.map(([p, tr]) => '<button class="trk" data-a="go" data-v="macpl" data-k="' + esc(p.id) + '">' + mosaic(tr) +
+    '<span class="rt"><span class="tx"><span class="t1">' + esc(p.nome) + '</span><span class="t2">' + mplFonte(p) + ' · ' + mplN(tr.length) + '</span></span>' +
+    '<span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('');
+}
+function mplPagina(r) {
+  const p = mplDi(r.k);
+  if (!p) return topBar() + '<div class="empty"><h3>Playlist non trovata</h3><p>Sul Mac non c\'è più.</p></div>';
+  const tr = mplTracce(p), l = regList(tr.map(t => t.id), p.nome);
+  const tot = tr.length && tr.every(t => t.duration > 0) ? tr.reduce((s, t) => s + t.duration, 0) : 0;
+  const menu = '<button class="round" data-a="mpl-menu" data-k="' + esc(p.id) + '" aria-label="Opzioni playlist">' + ic('more') + '</button>';
+  let h = topBar(menu) + '<div class="hero">' + mosaic(tr) + '<div class="hb"><div class="ht">' + esc(p.nome) + '</div><div class="hm">' + mplFonte(p) + ' · ' + mplN(tr.length) + (tot ? ' · ' + Math.round(tot / 60) + ' min' : '') + '</div></div></div>';
+  if (!tr.length) return h + '<div class="empty"><h3>Nessun brano della libreria</h3><p>I brani di questa playlist non sono nella libreria del Mac.</p></div>';
+  h += pbtns(l) + trackRows(tr, {label:p.nome});   // senza «pl»: dal menu ⋯ di un brano niente «Rimuovi dalla playlist»
+  if (p.fuori) h += '<p class="foot">' + (p.fuori === 1 ? '1 brano della playlist non è' : p.fuori + ' brani della playlist non sono') + ' nella libreria del Mac.</p>';
+  return h + '<p class="foot">' + (p.fonte === 'radio' ? 'Playlist della vecchia radio' : 'Playlist del disco') + ' sul Mac: si aggiorna da sola. Per cambiarla, dal menu ⋯ fanne una copia nelle tue playlist.</p>';
+}
+pages.macpl = mplPagina;
+async function mplCopia(k) {   // una playlist del telefono con gli stessi brani, da modificare come le altre
+  const p = mplDi(k); if (!p) return null;
+  const ids = mplTracce(p).map(t => t.id);
+  if (!ids.length) { toast('In questa playlist non ci sono brani della libreria'); return null; }
+  const n = {id:uid(), name:p.nome, ids, created:Date.now()};
+  P.push(n); await savePl(n);
+  return n;
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const a = b.dataset.a, k = b.dataset.k;
+  if (a === 'mpl-menu') {
+    const p = mplDi(k); if (!p) return;
+    openSheet('<div class="grp"><div class="smsg"><b>' + esc(p.nome) + '</b>' + (p.fonte === 'radio' ? 'Playlist della vecchia radio' : 'Playlist del disco') + ' sul Mac: si aggiorna da sola e qui non si cambia.</div>' +
+      '<button data-a="mpl-copia" data-k="' + esc(k) + '"><span class="l">Copia nelle mie playlist</span>' + ic('plus') + '</button></div>' + cancel);
+  } else if (a === 'mpl-copia') {
+    closeSheet();
+    const n = await mplCopia(k);
+    if (n) toast('Copiata in «Playlist»: «' + n.name + '»');
+  }
+});
 
 /* ---------- rendering e navigazione ---------- */
 function render(keepScroll) {
