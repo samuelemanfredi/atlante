@@ -643,6 +643,7 @@ class Libreria:
         uguale = (not riletti and len(indice) == len(self.vecchie) and all(v["_p"] in self.vecchie for v in indice)
                   and os.path.isfile(self.file_indice))
         self._mancanti = set(self.cartelle) - set(radici_ok)
+        nuovi, percorsi, comp = _con_backup(self, nuovi, percorsi, comp, indice)   # disco di backup: vedi «due dischi»
         with self.blocco:
             self.brani, self.percorsi, self.compilation = nuovi, percorsi, comp
             self.vecchie = {v["_p"]: v for v in indice}
@@ -917,10 +918,10 @@ def gestisci(h):
     return True
 
 
-def avvia(cartelle, cache, intervallo=600, indirizzo=""):
+def avvia(cartelle, cache, intervallo=600, indirizzo="", backup=None):
     """Prepara la libreria e la tiene aggiornata in sottofondo (nuovi brani, disco ricollegato)."""
     global LIB, INDIRIZZO
-    LIB = Libreria(cartelle, cache)
+    LIB = _libreria_per(cartelle, cache, backup)   # senza backup la Libreria di sempre
     INDIRIZZO = indirizzo or ""
 
     def ciclo():
@@ -1048,6 +1049,432 @@ def _aggiungi_brano(lib, percorso):
         lib.vecchie[p] = voce
         lib._sporco = True   # la prossima lettura salva l'indice anche se per lei non è cambiato niente
         return voce["id"]
+
+
+# ----- due dischi: il principale e il backup, senza doppioni -----
+# Sul Mac mini la musica sta sul disco Cloud e una sua copia (rsync) sul disco di backup, Cippo2. Con --backup-dir (o
+# ATLANTE_BACKUP_DIR) la libreria legge anche il backup, dopo il principale: un brano che sta su tutti e due compare una
+# volta sola, con la copia del principale. Se quella copia manca (disco staccato) arriva quella del backup con lo stesso
+# id e gli stessi dati, così preferiti, playlist e copie sull'iPhone restano come sono; i brani che stanno solo sul
+# backup entrano con l'id che avranno sul principale. Doppioni: lo stesso percorso nella cartella (anche con gli accenti
+# scritti in un altro modo), oppure stessi artista, titolo e durata (±2 s) senza due album diversi (lo stesso brano con
+# un altro nome, come «Titolo [id].mp3»). Ogni backup è la copia della cartella con lo stesso nome (es. «Da YouTube»),
+# se no della prima. Sul backup non si scrive né si sposta niente: il suo indice sta nella cache (indice-backup.json).
+# Senza backup la libreria è quella di sempre (classe Libreria) e questa sezione non fa niente.
+
+def _nfc(s):
+    return unicodedata.normalize("NFC", s)
+
+
+def _per_confronto(s):
+    """Artista o titolo ridotti all'osso, per riconoscere un doppione: minuscole, senza accenti né punteggiatura."""
+    s = unicodedata.normalize("NFKD", s or "").casefold()
+    return " ".join(re.findall(r"\w+", "".join(c for c in s if not unicodedata.combining(c))))
+
+
+def _chiave_doppione(v):
+    """(artista e titolo, durata, album) di una voce; None se mancano: senza durata non si unisce niente (live, remix…)."""
+    a, t, dur = _per_confronto(v.get("artist")), _per_confronto(v.get("title")), v.get("duration") or 0
+    if not a or not t or dur <= 0:
+        return None
+    return a + "\x00" + t, dur, _per_confronto(v.get("album"))
+
+
+def _stesso_brano(k, c):
+    """Lo stesso brano: stessi artista e titolo, durata entro 2 s e non due album diversi (lo stesso brano in due album
+    resta due volte, come in Musica)."""
+    return k[0] == c[0] and abs(k[1] - c[1]) <= 2 and not (k[2] and c[2] and k[2] != c[2])
+
+
+def _id_dal_percorso(p):
+    """L'id che la libreria dà a un file visto per la prima volta in quel percorso (vedi Libreria._id_nuovo)."""
+    return hashlib.sha1(_nfc(p).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def _file_musica(radice):
+    """[(percorso, stat, firma)] dei file audio sotto radice, saltati come nella lettura del principale (nascosti,
+    cartelle dei caricamenti) e in più i file vuoti (una copia a metà)."""
+    qui = []
+    for cart, sotto, files in os.walk(radice):
+        sotto[:] = [s for s in sotto if not s.startswith(".") and os.path.join(cart, s) not in ESCLUSE]
+        for nome in files:
+            if nome.startswith(".") or os.path.splitext(nome)[1].lower() not in ESTENSIONI:
+                continue
+            p = os.path.join(cart, nome)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if st.st_size > 0:
+                qui.append((p, st, "%d:%d" % (st.st_size, int(st.st_mtime))))
+    return qui
+
+
+class LibreriaDueDischi(Libreria):
+    """La Libreria con uno o più dischi di backup dietro alle cartelle (vedi sopra). Il backup si legge alla fine di ogni
+    lettura delle cartelle, prima che il catalogo nuovo si veda (_con_backup), così non c'è mai un catalogo a metà."""
+
+    def __init__(self, cartelle, cache, backup):
+        principali = [os.path.abspath(os.path.expanduser(c)) for c in cartelle]
+        self.backup = []   # [(cartella del backup, cartella di cui è la copia)]
+        for b in backup or []:
+            b = os.path.abspath(os.path.expanduser(b))
+            if any(b == c or _dentro(b, c) or _dentro(c, b) for c in principali) or any(b == x for x, _ in self.backup):
+                print("Musica: %s è già tra le cartelle della musica, non la leggo come backup" % b, flush=True)
+                continue
+            copia_di = next((c for c in principali if os.path.basename(c) == os.path.basename(b)), principali[0] if principali else None)
+            if copia_di:
+                self.backup.append((b, copia_di))
+                print("Musica: backup %s (copia di %s)" % self.backup[-1], flush=True)
+        self.file_backup = os.path.join(os.path.abspath(os.path.expanduser(cache)), "indice-backup.json")
+        self._letti_backup = {}     # percorso sul backup -> voce dai suoi tag (solo i file che il principale non ha)
+        self._serviti = []          # [[id, percorso sul backup]] dell'ultima lettura: dopo un riavvio si servono subito
+        self._dal_principale = {}   # percorso sul principale (NFC) -> id dei brani che stanno solo sul backup
+        super().__init__(cartelle, cache)
+        try:
+            with open(self.file_backup, encoding="utf-8") as f:
+                salvato = json.load(f)
+            if salvato.get("versione") == VERSIONE:
+                self._letti_backup = {v["_p"]: v for v in salvato.get("letti", []) if isinstance(v, dict) and v.get("_p") and v.get("id")}
+                self._serviti = [x for x in salvato.get("serviti", []) if isinstance(x, list) and len(x) == 2]
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+        self._firma_backup = self._firma_indice_backup(self._serviti, self._letti_backup)
+        # come la Libreria: dopo un riavvio si serve subito l'indice (dal backup raggiungibile solo i brani che il
+        # principale ora non ha), la lettura in sottofondo poi lo aggiorna
+        ok = [b for b, _ in self.backup if os.path.isdir(b)]
+        del_principale = {v["id"]: v for v in self.vecchie.values()}
+        for i, bp in self._serviti:
+            if i in self.brani or not any(_dentro(bp, b) for b in ok):
+                continue
+            v = del_principale.get(i) or self._letti_backup.get(bp)
+            if v and v.get("id") == i:
+                self.brani[i], self.percorsi[i] = v, bp
+        self.compilation = self._compilation(self.brani.values())
+        self._mancanti = self._mancanti | {b for b, _ in self.backup if b not in ok}
+        if self.brani and not self.ultima:
+            try:
+                self.ultima = os.path.getmtime(self.file_backup)
+            except OSError:
+                pass
+
+    def dal_backup(self, p):
+        return any(_dentro(p, b) for b, _ in self.backup)
+
+    @staticmethod
+    def _firma_indice_backup(serviti, letti):
+        return sorted(map(tuple, serviti)), sorted((p, v.get("_f")) for p, v in letti.items())
+
+    def _unisci_backup(self, nuovi, percorsi, comp, indice):
+        """I brani del backup da aggiungere a quelli appena letti dalle cartelle: (brani, percorsi, compilation)."""
+        presenti = {_nfc(p) for p in percorsi.values()}
+        noti, per_id = {}, {}   # brani delle cartelle, anche di un disco staccato: per percorso (NFC) e per id
+        for v in indice:
+            noti.setdefault(_nfc(v["_p"]), v)
+            per_id.setdefault(v["id"], v)
+        tolti = {_nfc(x.get("percorso") or "") for x in TOLTI.elenco()} if TOLTI else set()   # non tornano dal backup
+        usati, aggiunti, dove, dal_principale = set(nuovi), {}, {}, {}
+        radici_ok, file_backup = [], []
+        for rb, rp in self.backup:
+            if not os.path.isdir(rb):
+                continue
+            qui = _file_musica(rb)
+            if not os.path.isdir(rb) or (not qui and any(_dentro(bp, rb) for _, bp in self._serviti)):
+                continue   # staccato a metà lettura, o cartella rimasta vuota (disco smontato male): come staccato
+            radici_ok.append(rb)
+            file_backup += [(bp, st, firma, _nfc(os.path.join(rp, os.path.relpath(bp, rb)))) for bp, st, firma in qui]
+
+        def servi(v, bp):
+            usati.add(v["id"])
+            aggiunti[v["id"]], dove[v["id"]] = v, bp
+
+        # 1. copie dei brani delle cartelle (stesso percorso): servono solo se la copia del principale manca
+        resto = []
+        for x in sorted(file_backup, key=lambda x: x[0]):
+            v = noti.get(x[3])
+            if x[3] in presenti or x[3] in tolti:
+                continue
+            if v is None:
+                resto.append(x)
+            elif v["id"] not in usati:
+                servi(v, x[0])   # la voce del principale com'è (anche «added»): per l'iPhone non cambia niente
+        # 2. file che il principale non ha (o non ha più): tag letti una volta sola, niente doppioni. Prima i nomi più
+        # corti: tra «Titolo.mp3» e «Titolo [id].mp3» resta il primo, quello che ha il nome del principale
+        simili = {}
+
+        def ricorda(v):
+            k = _chiave_doppione(v)
+            if k:
+                simili.setdefault(k[0], []).append((k, v))
+        for v in list(nuovi.values()) + [v for v in indice if v["id"] not in nuovi]:
+            ricorda(v)
+        letti = {}
+        for bp, st, firma, mp in sorted(resto, key=lambda x: (len(x[3]), x[3])):
+            v = self._letti_backup.get(bp)
+            if not v or v.get("_f") != firma or v.get("_v") != VERSIONE:
+                v = self._voce(bp, st, firma)
+            v["id"] = _id_dal_percorso(mp)
+            letti[bp] = v
+            k = _chiave_doppione(v)
+            gemello = next((g for c, g in simili.get(k[0], ()) if _stesso_brano(k, c)), None) if k else None
+            # lo stesso id l'ha già un brano delle cartelle: è questo file, spostato o rinominato sul principale
+            gemello = gemello or per_id.get(v["id"])
+            if gemello is not None:
+                if gemello["id"] not in usati:
+                    servi(gemello, bp)   # brano del principale staccato: arriva da qui, con i suoi dati
+                continue
+            if v["id"] in usati:
+                continue
+            servi(v, bp)
+            dal_principale[mp] = v["id"]
+            ricorda(v)
+        for bp, v in self._letti_backup.items():   # di un backup staccato si tengono i tag per quando torna
+            if not any(_dentro(bp, r) for r in radici_ok):
+                letti.setdefault(bp, v)
+        self._mancanti = self._mancanti | {rb for rb, _ in self.backup if rb not in radici_ok}
+        self._dal_principale = dal_principale
+        self._serviti = sorted([i, bp] for i, bp in dove.items())
+        self._letti_backup = letti
+        firma = self._firma_indice_backup(self._serviti, letti)
+        if firma != self._firma_backup or not os.path.isfile(self.file_backup):
+            fd, tmp = tempfile.mkstemp(dir=self.cache, prefix="indice-backup.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({"versione": VERSIONE, "letti": list(letti.values()), "serviti": self._serviti}, f, ensure_ascii=False)
+                os.replace(tmp, self.file_backup)
+                self._firma_backup = firma
+            except (OSError, ValueError) as e:   # disco interno pieno? la prossima lettura ci riprova; il catalogo intanto c'è
+                _cancella(tmp)
+                print("Musica: indice del backup non salvato:", e, flush=True)
+        if not aggiunti:
+            return nuovi, percorsi, comp
+        brani, dov = dict(nuovi), dict(percorsi)
+        brani.update(aggiunti)
+        dov.update(dove)
+        return brani, dov, self._compilation(brani.values())
+
+
+def _con_backup(lib, nuovi, percorsi, comp, indice):
+    """Da Libreria._scansiona, prima di mostrare il catalogo nuovo: con un disco di backup ci aggiunge i suoi brani
+    (vedi LibreriaDueDischi); senza, restituisce tutto com'era."""
+    if not getattr(lib, "backup", None):
+        return nuovi, percorsi, comp
+    return lib._unisci_backup(nuovi, percorsi, comp, indice)
+
+
+def _libreria_per(cartelle, cache, backup=None):
+    """Con un disco di backup LibreriaDueDischi, se no la Libreria di sempre."""
+    return LibreriaDueDischi(cartelle, cache, backup) if backup else Libreria(cartelle, cache)
+
+
+def _backup_sola_lettura(p):
+    """Sul disco di backup non si sposta niente: un brano che adesso arriva da lì non si toglie (vedi _togli)."""
+    if LIB is not None and getattr(LIB, "backup", None) and LIB.dal_backup(p):
+        raise ErroreExtra(409, "Questo brano adesso arriva dal disco di backup, che resta com'è: ricollega il disco "
+                               "principale e riprova")
+
+
+# ----- playlist del Mac: le cartelle di «Playlist» sul disco e quelle della vecchia radio -----
+# Con --playlist-dir (o ATLANTE_PLAYLIST_DIR) ogni cartella dentro è una playlist con i link (symlink) ai brani, come
+# «Musica Cloud/Playlist» sul Mac mini (le rifà playlist.py ogni giorno, «001 - …mp3» in ordine): id «AM-…» come
+# nell'app del Cloud (:8447). Con --playlist-json (o ATLANTE_PLAYLIST_JSON) anche quelle della vecchia pagina radio
+# (~/.cloud-web/playlist.json, {"playlist": [{id, nome, brani: [percorso dentro «Musica Cloud» in base64url]}]}): id
+# «RA-…». I brani sono quelli della libreria, con i loro id (anche quando arrivano dal backup), mai i file della
+# playlist; quelli che la libreria non ha si contano in «fuori». Si leggono soltanto: le cartelle le scrive playlist.py,
+# il file la radio. Le ultime lette restano in <cache>/playlist-mac.json per quando il disco è staccato o il file è a
+# metà. Le vede solo Samuele (api/extra/playlist): ci sono le sue playlist personali.
+
+PLAYLIST_MAC = None   # PlaylistMac, preparato da main()
+ID_RADIO = re.compile(r"^[\w.-]{1,64}$")
+
+
+def _da_base64url(s):
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode("utf-8")
+    except (ValueError, TypeError):
+        return None
+
+
+class PlaylistMac:
+    def __init__(self, cartella, radio, cache):
+        self.cartella = os.path.abspath(os.path.expanduser(cartella)) if cartella else None
+        self.radio = os.path.abspath(os.path.expanduser(radio)) if radio else None
+        self.file = os.path.join(os.path.abspath(os.path.expanduser(cache)), "playlist-mac.json")
+        self.blocco = threading.Lock()
+        self._firma, self._risposta = None, None
+        s = _leggi_json(self.file, {}) if (self.cartella or self.radio) else {}
+        # le ultime lette, se vengono dalla stessa cartella e dallo stesso file
+        self._disco = s["disco"] if s.get("cartella") == self.cartella and isinstance(s.get("disco"), list) else []
+        self._radio = s["radio"] if s.get("file_radio") == self.radio and isinstance(s.get("radio"), list) else []
+
+    def elenco(self, lib):
+        if not self.cartella and not self.radio:
+            return {"playlist": []}
+        if lib is None or not lib.ultima:   # il Mac sta ancora leggendo il disco la prima volta: le ultime
+            return {"playlist": self._disco + self._radio}
+        firma = (lib.letture, lib.ultima, len(lib.brani), self._firma_cartella(), self._firma_radio(),
+                 frozenset(TOLTI.ids()) if TOLTI else frozenset())
+        with self.blocco:   # più telefoni insieme: si legge una volta sola
+            if firma != self._firma or self._risposta is None:
+                self._risposta, self._firma = self._leggi(lib), firma
+            return self._risposta
+
+    def _firma_cartella(self):
+        """Cambia quando cambiano le playlist (la data di una cartella cambia con i link che ci sono dentro)."""
+        if not self.cartella:
+            return None
+        try:
+            return tuple((n, os.stat(os.path.join(self.cartella, n)).st_mtime_ns) for n in sorted(os.listdir(self.cartella)))
+        except OSError:
+            return "staccato"
+
+    def _firma_radio(self):
+        try:
+            st = os.stat(self.radio) if self.radio else None
+            return (st.st_mtime_ns, st.st_size) if st else None
+        except OSError:
+            return "manca"
+
+    @staticmethod
+    def _mappa(lib):
+        """(percorso NFC -> id, nome del file NFC minuscolo -> id) dei brani della libreria: anche quelli di un disco ora
+        staccato e attraverso il percorso vero delle cartelle (un link come «~/Musica Cloud» porta sul disco)."""
+        with lib.blocco:
+            percorsi = list(lib.percorsi.items())
+        voci = [(v["id"], v["_p"]) for v in list(lib.vecchie.values())]
+        radici = list(lib.cartelle) + [b for b, _ in getattr(lib, "backup", ())]
+        vere = [(r, os.path.realpath(r)) for r in radici]
+        vere = [(r, v) for r, v in vere if v != r]
+        per_p, per_nome = {}, {}
+        for i, p in percorsi + voci:
+            per_p.setdefault(_nfc(p), i)
+            for r, v in vere:
+                if _dentro(p, r):
+                    per_p.setdefault(_nfc(v + p[len(r):]), i)
+            per_nome.setdefault(_nfc(os.path.basename(p)).casefold(), i)
+        for p, i in getattr(lib, "_dal_principale", {}).items():
+            per_p.setdefault(p, i)
+        return per_p, per_nome, [os.path.dirname(r) for r in radici]
+
+    @staticmethod
+    def _cerca(mappa, percorsi, nomi):
+        per_p, per_nome, _ = mappa
+        for p in percorsi:
+            i = per_p.get(_nfc(p))
+            if i:
+                return i
+        for n in nomi:   # ultima prova: il nome del file (senza il «001 - » della playlist)
+            i = per_nome.get(_nfc(n).casefold())
+            if i:
+                return i
+        return None
+
+    @staticmethod
+    def _voce(pid, nome, fonte, ids, via):
+        brani, fuori, visti = [], 0, set()
+        for i in ids:
+            if not i or i in via:
+                fuori += 1
+            elif i not in visti:   # lo stesso brano due volte: una sola, come nell'app del Cloud
+                visti.add(i)
+                brani.append(i)
+        return {"id": pid, "nome": nome, "fonte": fonte, "brani": brani, "fuori": fuori} if brani else None
+
+    def _leggi_cartella(self, mappa, via):
+        """Le playlist del disco; None se la cartella ora non si legge (disco staccato)."""
+        try:
+            nomi = sorted(os.listdir(self.cartella), key=lambda n: (n.casefold(), n))
+        except OSError:
+            return None
+        vere, out = {}, []   # cartella a cui portano i link -> il suo percorso vero (una volta per cartella)
+        for nome in nomi:
+            cart = os.path.join(self.cartella, nome)
+            if nome.startswith(".") or not os.path.isdir(cart):
+                continue   # «Controllo playlist.txt» e simili non sono playlist
+            try:
+                voci = sorted(n for n in os.listdir(cart) if not n.startswith("."))
+            except OSError:
+                continue
+            ids = []
+            for v in voci:
+                q, senza_numero = os.path.join(cart, v), re.sub(r"^\s*\d+\s*-\s*", "", v)
+                if os.path.islink(q):
+                    try:
+                        a = os.path.normpath(os.path.join(cart, os.readlink(q)))
+                    except OSError:
+                        ids.append(None)
+                        continue
+                    d = os.path.dirname(a)
+                    if d not in vere:
+                        vere[d] = os.path.realpath(d)
+                    ids.append(self._cerca(mappa, [a, os.path.join(vere[d], os.path.basename(a))], [os.path.basename(a), senza_numero]))
+                elif os.path.splitext(v)[1].lower() in ESTENSIONI:   # una copia del file: il brano della libreria con quel nome
+                    ids.append(self._cerca(mappa, [], [senza_numero, v]))
+            x = self._voce("AM-" + hashlib.sha1(nome.encode("utf-8", "surrogateescape")).hexdigest()[:12].upper(),
+                           nome.strip() or nome, "disco", ids, via)
+            if x:   # le playlist senza brani della libreria non si mostrano
+                out.append(x)
+        return out
+
+    def _leggi_radio(self, mappa, via):
+        """Le playlist della radio; None se il file c'è ma ora non si legge (la radio lo sta scrivendo?)."""
+        try:
+            with open(self.radio, "rb") as f:
+                dati = json.loads(f.read().decode("utf-8"))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError):
+            return None
+        lista = dati.get("playlist") if isinstance(dati, dict) else None
+        if not isinstance(lista, list):
+            return None   # forma che non conosco: restano le ultime
+        out, visti = [], set()
+        for p in lista:
+            if not isinstance(p, dict) or not isinstance(p.get("brani"), list) or p.get("eliminata"):
+                continue
+            nome = p.get("nome") if isinstance(p.get("nome"), str) and p["nome"].strip() else "Playlist"
+            pid = str(p.get("id")) if isinstance(p.get("id"), (str, int)) and ID_RADIO.match(str(p.get("id"))) else \
+                hashlib.sha1(nome.encode("utf-8", "surrogateescape")).hexdigest()[:12].upper()
+            if "RA-" + pid in visti:
+                continue
+            visti.add("RA-" + pid)
+            ids = []
+            for b in p["brani"]:
+                t = (_da_base64url(b) or "").replace("\\", "/").strip("/")
+                ids.append(self._cerca(mappa, [os.path.join(c, t) for c in mappa[2]], [t.rsplit("/", 1)[-1]]) if t else None)
+            x = self._voce("RA-" + pid, nome, "radio", ids, via)
+            if x:
+                out.append(x)
+        return out
+
+    def _leggi(self, lib):
+        mappa, via = self._mappa(lib), (TOLTI.ids() if TOLTI else set())
+        disco = self._leggi_cartella(mappa, via) if self.cartella else []
+        radio = self._leggi_radio(mappa, via) if self.radio else []
+        disco = self._disco if disco is None else disco   # disco staccato o file a metà: le ultime lette
+        radio = self._radio if radio is None else radio
+        if (disco, radio) != (self._disco, self._radio) or not os.path.isfile(self.file):
+            try:
+                _scrivi_json(self.file, {"cartella": self.cartella, "disco": disco, "file_radio": self.radio, "radio": radio})
+            except OSError as e:
+                print("Musica: playlist del Mac non salvate:", e, flush=True)
+        self._disco, self._radio = disco, radio
+        return {"playlist": disco + radio}
+
+
+def avvia_playlist_mac(cartella, radio, cache):
+    global PLAYLIST_MAC
+    PLAYLIST_MAC = PlaylistMac(cartella, radio, cache) if (cartella or radio) else None
+    return PLAYLIST_MAC
+
+
+def _playlist_mac(h):
+    """api/extra/playlist: le playlist del Mac, solo per Samuele (vuote per gli altri)."""
+    if PLAYLIST_MAC is None or _chi_e(h)["ruolo"] != "proprietario":
+        return {"playlist": []}
+    return PLAYLIST_MAC.elenco(LIB)
 
 
 # ---------- moduli extra (pagine in x/): API sotto api/extra/ ----------
@@ -6710,6 +7137,7 @@ def _togli(bid):
     """Il file va in «Tolti» sullo stesso disco (ATLANTE_TOLTI_DIR se è sullo stesso disco del brano, se no la cartella
     «.Tolti» nella cartella della libreria: si sposta, non si copia) e il brano esce dal catalogo di tutti."""
     p = _brano_libreria(bid)
+    _backup_sola_lettura(p)   # dal disco di backup non si sposta niente: vedi «due dischi»
     v = next((x for x, _ in _brani_corretti() if x["id"] == bid), {})
     radice = next((r for r in LIB.cartelle if _dentro(p, r)), os.path.dirname(p))
     dove = _cart("tolti_dir")
@@ -11034,6 +11462,9 @@ def _instrada(h, metodo, parti, corpo):
         _json(h, dispositivo())
     elif cosa == "chiamate":
         _chiamate(h, metodo, resto, corpo)
+    elif cosa == "playlist" and not resto:   # playlist del Mac (dal disco e dalla vecchia radio): vedi la loro sezione
+        solo("GET")
+        _json(h, _playlist_mac(h))
     else:
         raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join(parti))
 
@@ -12502,6 +12933,16 @@ def main():
     # mentre un argomento che non conosce la farebbe uscire subito (e l'aggiornamento automatico tornerebbe indietro)
     ap.add_argument("--musica-dir", default=os.environ.get("ATLANTE_MUSICA_DIR") or CONF["musica_dir"],
                     help="dove salvare i brani scaricati da internet (fa parte della libreria; anche ATLANTE_MUSICA_DIR)")
+    # due dischi e playlist del Mac (vedi le loro sezioni): anche da variabili d'ambiente, per lo stesso motivo
+    ap.add_argument("--backup-dir", action="append", default=None,
+                    help="copia della musica su un altro disco, letta dopo le cartelle: niente doppioni, e se il disco "
+                    "principale manca i brani arrivano da qui con lo stesso id (si può ripetere; anche ATLANTE_BACKUP_DIR)")
+    ap.add_argument("--playlist-dir", "--playlist", default=os.environ.get("ATLANTE_PLAYLIST_DIR", ""),
+                    help="cartella con una cartella per playlist, con i link ai brani, es. «Musica Cloud/Playlist» "
+                    "(sola lettura; anche ATLANTE_PLAYLIST_DIR)")
+    ap.add_argument("--playlist-json", default=os.environ.get("ATLANTE_PLAYLIST_JSON", ""),
+                    help="playlist.json della vecchia pagina radio, es. ~/.cloud-web/playlist.json (sola lettura; anche "
+                    "ATLANTE_PLAYLIST_JSON)")
     # videoclip sincronizzati: anche da variabili d'ambiente (nel LaunchAgent una versione vecchia del server le ignora)
     ap.add_argument("--clip-piano", default=os.environ.get("ATLANTE_CLIP_PIANO", ""),
                     help="JSON {nome del file del brano: {\"id\": ID YouTube}} dei videoclip (anche ATLANTE_CLIP_PIANO)")
@@ -12575,7 +13016,9 @@ def main():
         cartelle.append(scaricati)
     # prima della prima lettura della libreria: le cartelle dei caricamenti non entrano nel catalogo
     avvia_caricamenti(a.cache, a.controllo_dir, a.film_dir, a.tolti_dir, a.limite_giorno_gb, a.spazio_min_gb)
-    avvia(cartelle, a.cache, indirizzo=indirizzo)
+    backup = a.backup_dir or [x for x in [os.environ.get("ATLANTE_BACKUP_DIR", "").strip()] if x]
+    avvia(cartelle, a.cache, indirizzo=indirizzo, backup=backup)
+    avvia_playlist_mac(a.playlist_dir.strip(), a.playlist_json.strip(), a.cache)
     avvia_extra(cache=a.cache, video_dir=a.video_dir, libri_dir=a.libri_dir, ia_modello=a.ia_modello.strip(),
                 ia_indirizzo=a.ia_indirizzo.strip(), musica_dir=a.musica_dir)
     # la chat pronta da subito (dopo avvia_extra, che sceglie la cartella della cache): le chiamate ne usano le
