@@ -11352,5 +11352,22 @@ class TestTitoliScorrono(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+class TestControlloRemoto(unittest.TestCase):
+    """Il riquadro «Controllo remoto» (scheda Altro, solo per Samuele) apre Atlante Accessi sulla porta 8449 dello stesso
+    nome Tailscale, in una finestra a parte; da Internet o dal Mac stesso lo spiega. Gira in JavaScriptCore come
+    test_titoli.js: test_remoto.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_remoto(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_remoto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
