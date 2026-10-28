@@ -58,10 +58,16 @@ self.addEventListener('fetch', e => {
   })));
 });
 
-/* ---------- chat (fase 5a): notifiche senza contenuto ----------
-   La notifica arriva vuota (il Mac mini non conosce i testi): qui si chiede al Mac mini chi ha scritto, con il biscotto
-   di questo telefono e l'id del suo dispositivo della chat (in IndexedDB, «ax-chat»), e si mostra «Nuovo messaggio da
-   …». Safari vuole una notifica per ogni push: se il Mac mini non risponde, se ne mostra una generica.
+/* ---------- chat (fase 5a) e chiamate (fasi 5b e 5c): notifiche senza contenuto ----------
+   La notifica arriva vuota (il Mac mini non conosce i testi): qui si chiede al Mac mini (chat/avvisi) chi ha scritto e
+   quali chiamate ci sono, con il biscotto di questo telefono e l'id del suo dispositivo della chat (in IndexedDB,
+   «ax-chat»), e si mostra «Nuovo messaggio da …», «Chiamata da …», «Videochiamata da …» o «Chiamata persa da …».
+   Ogni chiamata ha una notifica sola (etichetta «chiamata-<id>»): «persa» prende il posto di «arriva», e quando si è
+   risposto o rifiutato, anche da un altro dispositivo («chiusa»), la notifica si toglie. Toccandola si apre l'app: se
+   squilla ancora, la chiamata compare da sola.
+   Safari vuole una notifica per ogni push (dopo tre push senza notifica smette di mandarle): se il Mac mini non risponde
+   se ne mostra una generica; se risponde ma non c'è niente di nuovo, se ne mostra una che si chiude subito. Mai un
+   «Nuovo messaggio» senza chi l'ha scritto: il push può essere anche una chiamata.
    Sull'iPhone le notifiche ci sono solo con l'app sulla schermata Home (iOS 16.4 o successivo). */
 function chatDispositivo() {
   return new Promise(ok => {
@@ -79,29 +85,74 @@ function chatDispositivo() {
     };
   });
 }
-self.addEventListener('push', e => {
-  e.waitUntil((async () => {
-    let avvisi = [];
-    try {
-      const disp = await chatDispositivo();
-      if (disp) {
-        const r = await fetch(new URL('api/extra/chat/avvisi?disp=' + encodeURIComponent(disp), self.registration.scope), {credentials:'same-origin', cache:'no-store'});
-        if (r.ok) avvisi = ((await r.json()).avvisi || []).filter(a => a && typeof a.nome === 'string');
+// le chiamate già mostrate («id istante» → quando), in una cache a parte che gli aggiornamenti dell'app non toccano: una
+// chiamata persa tolta a mano non torna a ogni messaggio dell'ora dopo (il Mac mini la ricorda per un'ora)
+const VISTE = 'atlante-chiamate';
+async function chiamateViste() {
+  try {
+    const r = await (await caches.open(VISTE)).match('viste');
+    const v = r ? await r.json() : {};
+    return v && typeof v === 'object' ? v : {};
+  } catch (e) { return {}; }
+}
+async function segnaViste(v) {
+  try { await (await caches.open(VISTE)).put('viste', new Response(JSON.stringify(v), {headers:{'Content-Type':'application/json'}})); } catch (e) {}
+}
+async function chatNotifiche() {
+  let avvisi = [], chiamate = [], risposto = false;
+  try {
+    const disp = await chatDispositivo();
+    if (disp) {
+      const r = await fetch(new URL('api/extra/chat/avvisi?disp=' + encodeURIComponent(disp), self.registration.scope), {credentials:'same-origin', cache:'no-store'});
+      if (r.ok) {
+        const j = await r.json();
+        avvisi = (j.avvisi || []).filter(a => a && typeof a.nome === 'string');
+        chiamate = (j.chiamate || []).filter(c => c && c.id && typeof c.nome === 'string' && ['arriva', 'persa', 'chiusa'].indexOf(c.evento) >= 0);
+        risposto = true;
       }
-    } catch (err) {}
-    const icona = new URL('icon-192.png?v=2', self.registration.scope).href;
-    if (!avvisi.length) return self.registration.showNotification('Atlante Musica', {body:'Nuovo messaggio', tag:'chat', icon:icona, data:{conv:''}});
-    return Promise.all(avvisi.slice(0, 4).map(a => self.registration.showNotification('Nuovo messaggio da ' + a.nome, {
-      body:a.gruppo ? 'Nel gruppo «' + a.gruppo + '»' : (a.n > 1 ? a.n + ' messaggi nuovi' : 'Tocca per leggerlo'), tag:'chat-' + a.conv, icon:icona, data:{conv:a.conv}})));
-  })());
-});
+    }
+  } catch (err) {}
+  const reg = self.registration, icona = new URL('icon-192.png?v=2', reg.scope).href;
+  // il Mac mini non risponde: non si sa se è un messaggio o una chiamata. Il tocco apre la chat (una chiamata che squilla
+  // ancora compare lo stesso, sopra tutto)
+  if (!risposto) return reg.showNotification('Atlante Musica', {body:'Un messaggio o una chiamata: tocca per aprire', tag:'chat', icon:icona, data:{conv:''}});
+  const mostra = avvisi.slice(0, 4).map(a => reg.showNotification('Nuovo messaggio da ' + a.nome, {
+    body:a.gruppo ? 'Nel gruppo «' + a.gruppo + '»' : (a.n > 1 ? a.n + ' messaggi nuovi' : 'Tocca per leggerlo'), tag:'chat-' + a.conv, icon:icona, data:{conv:a.conv}}));
+  const viste = await chiamateViste(), ora = Date.now(), chiuse = [];
+  for (const k in viste) if (!(ora - viste[k] < 2 * 3600e3)) delete viste[k];   // dopo due ore il Mac mini non le ha più
+  for (const c of chiamate) {
+    const tag = 'chiamata-' + c.id, tipo = c.video ? 'Videochiamata' : 'Chiamata', data = {chiamata:String(c.id)};
+    if (c.evento === 'chiusa') { chiuse.push({tag, titolo:tipo + ' da ' + c.nome, data}); continue; }
+    const k = c.id + ' ' + c.t;   // ogni avviso del Mac mini ha il suo istante: «arriva» e poi «persa» sono due avvisi
+    if (viste[k]) continue;   // già mostrato (e forse tolto a mano): non si ripete
+    viste[k] = ora;
+    mostra.push(reg.showNotification(c.evento === 'persa' ? 'Chiamata persa da ' + c.nome : tipo + ' da ' + c.nome, {
+      body:c.evento === 'persa' ? (c.video ? 'Videochiamata senza risposta' : 'Chiamata vocale senza risposta') : 'Tocca per rispondere', tag, icon:icona, data}));
+  }
+  // niente da mostrare (già letto nell'app, chiamata finita o già vista): Safari vuole lo stesso una notifica. Prende il
+  // posto di quella da togliere (o della generica) e si chiude subito, insieme alle chiamate chiuse
+  if (!mostra.length) {
+    const x = chiuse[0] || {tag:'chat', titolo:'Atlante Musica', data:{conv:''}};
+    await reg.showNotification(x.titolo, {body:chiuse.length ? 'Non squilla più' : 'Niente di nuovo', tag:x.tag, icon:icona, data:x.data, silent:true});
+    if (!chiuse.length) chiuse.push(x);
+  }
+  await Promise.all(mostra);
+  await segnaViste(viste);
+  // risposto o rifiutato (anche da un altro dispositivo): via la notifica che squillava
+  for (const x of chiuse) for (const n of await reg.getNotifications({tag:x.tag})) n.close();
+}
+// tocco su una notifica: una chiamata apre l'app (se squilla ancora, la chiamata compare da sola), un messaggio la chat
+async function apriNotifica(d) {
+  const conv = d.conv || '';
+  const base = new URL('./', self.registration.scope);
+  const L = await self.clients.matchAll({type:'window', includeUncontrolled:true});
+  const w = L.find(c => c.frameType !== 'nested' && new URL(c.url).pathname.startsWith(base.pathname));
+  if (d.chiamata) return w ? w.focus() : self.clients.openWindow(base.href);
+  if (w) { w.postMessage({tipo:'apri-chat', conv}); return w.focus(); }
+  return self.clients.openWindow(new URL('./?x=chat' + (conv ? '&c=' + encodeURIComponent(conv) : ''), base).href);
+}
+self.addEventListener('push', e => { e.waitUntil(chatNotifiche()); });
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  const conv = (e.notification.data || {}).conv || '';
-  const base = new URL('./', self.registration.scope);
-  e.waitUntil(self.clients.matchAll({type:'window', includeUncontrolled:true}).then(L => {
-    const w = L.find(c => c.frameType !== 'nested' && new URL(c.url).pathname.startsWith(base.pathname));
-    if (w) { w.postMessage({tipo:'apri-chat', conv}); return w.focus(); }
-    return self.clients.openWindow(new URL('./?x=chat' + (conv ? '&c=' + encodeURIComponent(conv) : ''), base).href);
-  }));
+  e.waitUntil(apriNotifica(e.notification.data || {}));
 });

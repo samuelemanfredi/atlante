@@ -9147,5 +9147,22 @@ class TestKaraokeRiavvio(unittest.TestCase):
         self.assertTrue(aspetta(lambda: not _vivo(q), 10, 0.1))
 
 
+class TestNotificheSW(unittest.TestCase):
+    """Le notifiche nel service worker (musica/sw.js): messaggi e chiamate («Chiamata da…», «Videochiamata da…»,
+    «Chiamata persa da…», tolta quando è «chiusa»), mai un «Nuovo messaggio» vuoto, e il tocco. Gira in JavaScriptCore
+    come test_tutto.js: test_notifiche.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_notifiche(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, sw = os.path.join(QUI, "test_notifiche.js"), os.path.abspath(os.path.join(QUI, "..", "sw.js"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, sw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

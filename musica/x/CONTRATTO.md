@@ -76,7 +76,7 @@ Per Samuele (`"p"`) e per gli invitati; dalla rete di casa senza biscotto 403. I
 | POST / GET | `chat/allegati/<id>/<n>` | il pezzo cifrato (`application/octet-stream`); si scarica solo se si è ricevuto il messaggio |
 | POST / DELETE | `chat/blocchi` `{persona}` · `chat/blocchi/<persona>` | `{bloccati}` |
 | POST / DELETE | `chat/push` `{disp, endpoint}` · `chat/push/<disp>` | notifiche (solo servizi di Apple, Google, Mozilla, Microsoft) |
-| GET | `chat/avvisi?disp=` | `{avvisi:[{conv,da,nome,gruppo,n,t}]}` — per il testo della notifica, letto dal service worker |
+| GET | `chat/avvisi?disp=` | `{avvisi:[{conv,da,nome,gruppo,n,t}], chiamate:[{id,evento:'arriva'\|'persa'\|'chiusa',nome,video,t}]}` — per il testo della notifica, letto dal service worker (`sw.js`: «Chiamata da…», «Videochiamata da…», «Chiamata persa da…», etichetta `chiamata-<id>`; «chiusa» la toglie) |
 
 ## API dell'app che ospita (`AX.player`, oppure `parent.AM`)
 `playExternal(items, start, from)`, `toggle()`, `next()`, `prev()`, `seek(sec)`,
