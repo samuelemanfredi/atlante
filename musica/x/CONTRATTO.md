@@ -97,6 +97,18 @@ Per Samuele (`"p"`) e per gli invitati; dalla rete di casa senza biscotto 403. I
 | `idee.html` | «Idee»: l'invito a proporre miglioramenti dell'app, il modulo per mandarne una e «Le tue idee» con lo stato (aperto anche agli invitati); le idee di tutti sono in Gestione → Idee |
 | `studio.html` | Atlante UCI (accesso con le proprie credenziali), notizie di ciclismo, allenamenti creati dall'IA su qualsiasi argomento, Assistente Idee |
 
+## Playlist del Mac e disco di backup (nell'app, non nei moduli)
+In Libreria › Playlist, sotto «Dal Mac», l'app mostra le playlist del Mac, di sola lettura: le cartelle di
+`Musica Cloud/Playlist` (una per playlist, con i link ai brani; id `AM-…` come nell'app del Cloud) e quelle della vecchia
+pagina radio (`~/.cloud-web/playlist.json`, id `RA-…`). I brani sono quelli del catalogo; «Copia nelle mie playlist» ne fa
+una del telefono. Sul server: `--playlist-dir` o `ATLANTE_PLAYLIST_DIR`, `--playlist-json` o `ATLANTE_PLAYLIST_JSON`; il
+disco di backup con `--backup-dir` o `ATLANTE_BACKUP_DIR` (letto dopo le cartelle, senza doppioni; col disco principale
+staccato i brani arrivano da lì con lo stesso id). Cartelle, file della radio e backup si leggono soltanto.
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `playlist` | `{playlist:[{id, nome, fonte:'disco'\|'radio', brani:[id del catalogo], fuori}]}` — solo Samuele (vuoto per gli altri, 403 agli invitati); `fuori` = voci che la libreria non ha; quelle senza brani della libreria non ci sono |
+
 ## Rete: Tailscale (Gestione → Rete e modulo «Rete e VPN»)
 Un'app web non può accendere il VPN del telefono: si comanda Tailscale sul Mac mini e si guida il telefono.
 
