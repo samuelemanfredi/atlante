@@ -16,7 +16,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
+import socketserver
 import struct
 import subprocess
 import sys
@@ -365,8 +367,10 @@ class Server:
         # che li usano danno i loro finti
         chiuso = "http://127.0.0.1:9"
         # e il modello finto si scarica anche dove il disco interno ha poco spazio (sul Mac mini le prove girano lì)
+        # (anche la cache dei testi, che sotto i 5 GB liberi non si scrive)
         for k, v in (("ATLANTE_LRCLIB", chiuso), ("ATLANTE_MYMEMORY", chiuso), ("ATLANTE_WHISPER_INSTALLA", "0"),
-                     ("ATLANTE_WHISPER_URL_MODELLO", chiuso + "/modello.bin"), ("ATLANTE_WHISPER_SPAZIO_MIN_GB", "0")):
+                     ("ATLANTE_WHISPER_URL_MODELLO", chiuso + "/modello.bin"), ("ATLANTE_WHISPER_SPAZIO_MIN_GB", "0"),
+                     ("ATLANTE_TESTI_SPAZIO_MIN_GB", "0")):
             env.setdefault(k, v)
         # i link da scaricare si controllano risolvendo il nome (solo indirizzi pubblici): qui senza chiedere al DNS vero,
         # così le prove non dipendono dalla rete (93.184.215.14 è un indirizzo pubblico qualsiasi)
@@ -1173,6 +1177,21 @@ class TestProxyInterno(unittest.TestCase):
                         self.wfile.write(corpo)
                     except OSError:
                         pass
+                elif self.path == "/parziale":   # un audio che sa rispondere a un pezzo (Range), come i siti veri
+                    tutto = bytes(range(256)) * 40
+                    m_ = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range") or "")
+                    if m_:
+                        da, a = int(m_.group(1)), min(int(m_.group(2) or len(tutto) - 1), len(tutto) - 1)
+                        self.send_response(206)
+                        self.send_header("Content-Range", "bytes %d-%d/%d" % (da, a, len(tutto)))
+                        tutto = tutto[da:a + 1]
+                    else:
+                        self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Content-Length", str(len(tutto)))
+                    self.end_headers()
+                    self.wfile.write(tutto)
                 elif self.path == "/ua":
                     corpo = (self.headers.get("User-Agent") or "").encode()
                     self.send_response(200)
@@ -1242,6 +1261,21 @@ class TestProxyInterno(unittest.TestCase):
         self.assertEqual(len(b), 80 * 262144)
         # aperto come pagina non può fare niente con i dati dell'app
         self.assertEqual((h["Content-Security-Policy"], h["X-Content-Type-Options"]), ("sandbox", "nosniff"))
+
+    def test_pezzo_di_un_audio(self):
+        # il lettore audio chiede un pezzo (Range: per andare avanti senza scaricare tutto): passa al sito, e torna il 206
+        url = "http://127.0.0.1:%d/parziale" % self.sito.server_port
+        st, h, b = richiesta(self.proxy.server_port, "GET", "/api/extra/proxy?url=" + quote(url),
+                             intest={"Range": "bytes=1000-1099"})
+        self.assertEqual((st, h["Content-Range"], h["Content-Type"]), (206, "bytes 1000-1099/10240", "audio/mpeg"))
+        self.assertEqual(b, (bytes(range(256)) * 40)[1000:1100])
+        self.assertEqual(h["Accept-Ranges"], "bytes")
+        st, h, b = richiesta(self.proxy.server_port, "GET", "/api/extra/proxy?url=" + quote(url))   # senza Range: tutto
+        self.assertEqual((st, len(b)), (200, 10240))
+        # solo un pezzo semplice passa al sito (più pezzi insieme o un Range strano no: torna tutto)
+        for r in ("bytes=1-2,5-6", "bytes=-100", "righe=1-2"):
+            st, h, b = richiesta(self.proxy.server_port, "GET", "/api/extra/proxy?url=" + quote(url), intest={"Range": r})
+            self.assertEqual((st, len(b)), (200, 10240), r)
 
     def test_tipi_degli_audio(self):
         # un tipo solo, audio/… o video/…, rimandato pulito; due tipi, un elenco o un tipo strano non sono un audio
@@ -3595,7 +3629,9 @@ class TestRete(unittest.TestCase):
     def invitato(self, nome):
         a = self.pers.crea(nome)
         did = self.pers.usa_invito(self.pers.invito(a["id"])[0], "iphone")
-        return dict(FUNNEL, Cookie="am_accesso=" + self.pers.biscotto(did))
+        # da Internet con il nome di --pubblico di questo server (un altro nome *.ts.net non è di Atlante: 421)
+        return dict(FUNNEL, Cookie="am_accesso=" + self.pers.biscotto(did), Host="mac-mini.tail1234.ts.net:10000",
+                    **{"X-Forwarded-Host": "mac-mini.tail1234.ts.net:10000"})
 
     def test_1_stato(self):
         import calendar
@@ -5085,8 +5121,9 @@ class TestInterfaccia(unittest.TestCase):
     def setUpClass(cls):
         cls.base = tempfile.mkdtemp(prefix="atlante-interfaccia-")
         cls.c = prepara_cartelle(cls.base)
+        # --pubblico: gli invitati arrivano da Internet con quel nome (un altro nome *.ts.net non è di Atlante: 421)
         with unittest.mock.patch.dict(os.environ, {"ATLANTE_PROPRIETARI": "samuele@example.com"}):
-            cls.s = Server(cls.base, cls.c).avvia()
+            cls.s = Server(cls.base, cls.c, ["--pubblico", cls.ORIGINE]).avvia()
         sys.dont_write_bytecode = True
         spec = importlib.util.spec_from_file_location("musica_libreria_interfaccia", SERVER)
         cls.m = importlib.util.module_from_spec(spec)
@@ -7927,7 +7964,7 @@ if a[:1] == ["-h"]:
 with open(os.path.join(os.environ["FINTO_DIR"], "whisper.log"), "a", encoding="utf-8") as f:
     f.write(json.dumps(a) + "\n")
 with open(os.path.join(os.environ["FINTO_DIR"], "whisper-nice.log"), "a", encoding="utf-8") as f:
-    f.write("%d\n" % os.nice(0))
+    f.write("%d\n" % os.getpriority(os.PRIO_PROCESS, 0))
 wav, out = a[a.index("-f") + 1], a[a.index("-of") + 1]
 try:
     with open(wav + ".parole.json", encoding="utf-8") as f:
@@ -7956,7 +7993,7 @@ with open(out + ".json", "w", encoding="utf-8") as f:
 FINTO_BREW = r'''
 import json, os, shutil, sys
 with open(os.path.join(os.environ["FINTO_DIR"], "brew.log"), "a", encoding="utf-8") as f:
-    f.write(json.dumps({"args": sys.argv[1:], "nice": os.nice(0)}) + "\n")
+    f.write(json.dumps({"args": sys.argv[1:], "nice": os.getpriority(os.PRIO_PROCESS, 0)}) + "\n")
 if sys.argv[1:3] == ["install", "whisper-cpp"]:
     dest = os.environ["FINTO_WHISPER_DEST"]
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -8261,9 +8298,9 @@ class TestKaraokeLettori(unittest.TestCase):
 
     def test_programmi_pesanti(self):
         """ffmpeg, Whisper e Homebrew girano con nice e si fermano subito se il lavoro va in pausa."""
-        codice, uscita, _ = self.m._esegui_piano([sys.executable, "-c", "import os; print(os.nice(0))"], 30)
+        codice, uscita, _ = self.m._esegui_piano([sys.executable, "-c", "import os; print(os.getpriority(os.PRIO_PROCESS, 0))"], 30)
         self.assertEqual(codice, 0)
-        self.assertGreaterEqual(int(uscita.decode().strip()), min(19, os.nice(0) + 10))
+        self.assertGreaterEqual(int(uscita.decode().strip()), min(19, os.getpriority(os.PRIO_PROCESS, 0) + 10))
         prima = time.time()
         with self.assertRaises(self.m.Pausa):
             self.m._esegui_piano([sys.executable, "-c", "import time; time.sleep(60)"], 90, fermo=lambda: True)
@@ -8922,7 +8959,7 @@ class TestKaraokeRevisione(unittest.TestCase):
         usate = []
         t.trad.ia = lambda: "llama3.2"
         t.trad._con_ia = lambda modello, righe, da, a: (usate.append("ia"), {x: "IA: " + x for x in righe})[1]
-        t.trad._con_mymemory = lambda righe, da, a: (usate.append("mm"), {x: "MM: " + x for x in righe})[1]
+        t.trad._con_mymemory = lambda righe, da, a, *chi: (usate.append("mm"), {x: "MM: " + x for x in righe})[1]
         r = {"stato": "ok", "lingua": "it", "righe": [{"t": 1, "testo": "ciao"}]}
         t.traduzione(r, "en", {"chi": "anna", "ia": False})
         aspetta(lambda: t.traduzione(r, "en", {"chi": "anna", "ia": False})["stato"] == "pronta", 10, 0.05)
@@ -9207,6 +9244,836 @@ class TestKaraokeRiavvio(unittest.TestCase):
         self.assertTrue(aspetta(lambda: not _vivo(q), 10, 0.1))
 
 
+# ----- testi e karaoke: la revisione di sicurezza del 28/10 (su LRCLIB chiunque può pubblicare un testo) -----
+
+class FintoLrclibCattivo(http.server.BaseHTTPRequestHandler):
+    """LRCLIB (e MyMemory) finto per le prove di sicurezza: «modo» dice come risponde: «lento» (ogni richiesta «pausa»
+    secondi, poi 404), «rimando» (302 verso /altrove), «gocce» (le intestazioni subito, poi un byte ogni 0,2 s: ogni
+    lettura arriva in tempo, la risposta intera mai), «surrogati» (un testo con dei surrogati soli, \\ud800, nel JSON).
+    Ricorda le richieste ricevute (percorso, parametri)."""
+    modo, pausa, richieste = "", 0.0, []
+
+    def manda(self, codice, b):
+        self.send_response(codice)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoLrclibCattivo.richieste.append((u.path, q))
+        modo = FintoLrclibCattivo.modo
+        if u.path == "/altrove":
+            return self.manda(200, json.dumps({"id": 1, "trackName": "x", "artistName": "y", "duration": 100,
+                                               "syncedLyrics": "[00:01.00]Da un altro sito", "responseStatus": 200,
+                                               "responseData": {"translatedText": "Da un altro sito"}}).encode())
+        if modo == "rimando":
+            self.send_response(302)
+            self.send_header("Location", "/altrove")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if modo == "gocce":
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            try:
+                for _ in range(300):
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.2)
+            except OSError:
+                pass
+            return
+        if modo == "lento":
+            time.sleep(FintoLrclibCattivo.pausa)
+        if modo == "surrogati" and u.path == "/api/get":
+            v = {"id": 7, "trackName": q.get("track_name"), "artistName": q.get("artist_name"), "duration": 200.0,
+                 "instrumental": False, "plainLyrics": "Ciao \ud800 mondo\nseconda",
+                 "syncedLyrics": "[00:01.00]Ciao \ud800 mondo\n[00:03.00]seconda \udfff"}
+            return self.manda(200, json.dumps(v).encode())   # json.dumps scrive \ud800: JSON valido, Unicode no
+        self.manda(404, b'{"code":404,"name":"TrackNotFound"}')
+
+    def log_message(self, *a):
+        pass
+
+
+class FintoModelloStrano(http.server.BaseHTTPRequestHandler):
+    """Hugging Face finto per le prove del modello: «modo» = «senza lunghezza» (nessun Content-Length: la fine la dice
+    la connessione che si chiude), «rimando» (302 verso un altro indirizzo sul Mac stesso, in http), «fuori» (302
+    verso un sito che non è Hugging Face); ricorda i percorsi chiesti."""
+    protocol_version = "HTTP/1.0"
+    modo, chiesti = "", []
+    DATI = b"lmgg" + bytes(1024 * 1024 + 100)
+
+    def do_GET(self):
+        FintoModelloStrano.chiesti.append(self.path)
+        if self.path == "/altro.bin":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(self.DATI)))
+            self.end_headers()
+            self.wfile.write(self.DATI)
+            return
+        if FintoModelloStrano.modo in ("rimando", "fuori"):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:%d/altro.bin" % self.server.server_address[1]
+                             if FintoModelloStrano.modo == "rimando" else "https://example.com/ggml.bin")
+            self.end_headers()
+            return
+        self.send_response(200)   # «senza lunghezza»
+        self.end_headers()
+        self.wfile.write(self.DATI)
+
+    def log_message(self, *a):
+        pass
+
+
+# come li puliva il server prima della correzione (lineare adesso, ma con lo stesso risultato)
+TITOLI_DI_PRIMA = {
+    'FE!N (feat. Playboi Carti)':
+        ['fen',
+         'fe n',
+         'FE!N (',
+         'FE!N',
+         'FE!N (feat. Playboi Carti)',
+         'FE!N (feat. Playboi Carti)',
+         False,
+         ['FE!N (feat. Playboi Carti)', 'FE!N (feat. Playboi Carti)']],
+    ' - A - B':
+        ['ab', 'a b', '- A - B', '- A - B', '- A - B', ' - A - B', False, ['- A', 'B']],
+    'Song  -  Remastered 2011':
+        ['song',
+         'song remastered 2011',
+         'Song  -  Remastered 2011',
+         'Song',
+         'Song - Remastered 2011',
+         'Song  -  Remastered 2011',
+         False,
+         ['Song', 'Remastered 2011']],
+    'Title [Official Video] (Live)':
+        ['title',
+         'title official video live',
+         'Title [Official Video] (Live)',
+         'Title (Live)',
+         'Title [Official Video] (Live)',
+         'Title (Live)',
+         False,
+         ['Title [Official Video] (Live)', 'Title (Live)']],
+    'Kings & Queens':
+        ['kingsandqueens',
+         'kings',
+         'Kings',
+         'Kings & Queens',
+         'Kings',
+         'Kings & Queens',
+         False,
+         ['Kings & Queens', 'Kings & Queens']],
+    'Altra versione (Live)':
+        ['altraversione',
+         'altra versione live',
+         'Altra versione (Live)',
+         'Altra versione (Live)',
+         'Altra versione (Live)',
+         'Altra versione (Live)',
+         False,
+         ['Altra versione (Live)', 'Altra versione (Live)']],
+    'A  feat.  B':
+        ['a', 'a', 'A', 'A', 'A', 'A  feat.  B', False, ['A  feat.  B', 'A  feat.  B']],
+    'Sfera Ebbasta, Shiva':
+        ['sferaebbastashiva',
+         'sfera ebbasta',
+         'Sfera Ebbasta',
+         'Sfera Ebbasta, Shiva',
+         'Sfera Ebbasta',
+         'Sfera Ebbasta, Shiva',
+         False,
+         ['Sfera Ebbasta, Shiva', 'Sfera Ebbasta, Shiva']],
+    'Rosé & Bruno Mars':
+        ['roseandbrunomars',
+         'rose',
+         'Rosé',
+         'Rosé & Bruno Mars',
+         'Rosé',
+         'Rosé & Bruno Mars',
+         False,
+         ['Rosé & Bruno Mars', 'Rosé & Bruno Mars']],
+    'Brano (con X) - 2009 Remaster':
+        ['brano',
+         'brano con',
+         'Brano (con',
+         'Brano',
+         'Brano (con X) - 2009 Remaster',
+         'Brano (con X) - 2009 Remaster',
+         False,
+         ['Brano (con X)', '2009 Remaster']],
+    'Ciao\n- radio edit':
+        ['ciao',
+         'ciao radio edit',
+         'Ciao\n- radio edit',
+         'Ciao',
+         'Ciao - radio edit',
+         'Ciao\n- radio edit',
+         True,
+         ['Ciao\n- radio edit', 'Ciao\n- radio edit']],
+    'Song (Clean)':
+        ['song',
+         'song clean',
+         'Song (Clean)',
+         'Song (Clean)',
+         'Song (Clean)',
+         'Song (Clean)',
+         True,
+         ['Song (Clean)', 'Song (Clean)']],
+    'Song - Radio Edit':
+        ['song',
+         'song radio edit',
+         'Song - Radio Edit',
+         'Song',
+         'Song - Radio Edit',
+         'Song - Radio Edit',
+         True,
+         ['Song', 'Radio Edit']],
+    'Clean Bandit':
+        ['cleanbandit',
+         'clean bandit',
+         'Clean Bandit',
+         'Clean Bandit',
+         'Clean Bandit',
+         'Clean Bandit',
+         False,
+         ['Clean Bandit', 'Clean Bandit']],
+    '  spazi  ai  lati  ':
+        ['spaziailati',
+         'spazi ai lati',
+         'spazi  ai  lati',
+         'spazi ai lati',
+         'spazi ai lati',
+         '  spazi  ai  lati  ',
+         False,
+         ['spazi  ai  lati', 'spazi  ai  lati']],
+    'X ft. Y & Z':
+        ['x', 'y', 'Y', 'X', 'X', 'X ft. Y & Z', False, ['X ft. Y & Z', 'X ft. Y & Z']],
+    'Artist x Other':
+        ['artistxother',
+         'artist',
+         'Artist',
+         'Artist x Other',
+         'Artist',
+         'Artist x Other',
+         False,
+         ['Artist x Other', 'Artist x Other']],
+    'A / B; C':
+        ['abc', 'a', 'A', 'A / B; C', 'A', 'A / B; C', False, ['A / B; C', 'A / B; C']],
+    'Tutto [HD] {bonus}':
+        ['tutto',
+         'tutto hd bonus',
+         'Tutto [HD] {bonus}',
+         'Tutto {bonus}',
+         'Tutto [HD] {bonus}',
+         'Tutto {bonus}',
+         False,
+         ['Tutto [HD] {bonus}', 'Tutto {bonus}']],
+    'Canale - Topic':
+        ['canale',
+         'canale topic',
+         'Canale - Topic',
+         'Canale - Topic',
+         'Canale - Topic',
+         'Canale - Topic',
+         False,
+         ['Canale', 'Topic']],
+    'Canale VEVO':
+        ['canalevevo',
+         'canale vevo',
+         'Canale VEVO',
+         'Canale VEVO',
+         'Canale VEVO',
+         'Canale VEVO',
+         False,
+         ['Canale', 'Canale VEVO']],
+    'Title - feat. Someone':
+        ['title',
+         'title',
+         'Title -',
+         'Title -',
+         'Title -',
+         'Title - feat. Someone',
+         False,
+         ['Title', 'feat. Someone']],
+    'Live - Wembley':
+        ['live',
+         'live wembley',
+         'Live - Wembley',
+         'Live - Wembley',
+         'Live - Wembley',
+         'Live - Wembley',
+         False,
+         ['Live', 'Wembley']],
+    '':
+        ['', '', '', '', '', '', False, ['', '']],
+    'Solo':
+        ['solo', 'solo', 'Solo', 'Solo', 'Solo', 'Solo', False, ['Solo', 'Solo']],
+}
+
+
+class TestTestiSicurezza(unittest.TestCase):
+    """La revisione di sicurezza del karaoke (28/10). Un testo pubblicato su LRCLIB (lo può fare chiunque) non deve
+    fermare il server (espressioni regolari che diventano lentissime con tanti spazi), né riempire il disco interno, né
+    far cadere la risposta (caratteri impossibili); i siti dei testi e delle traduzioni non possono rimandare altrove
+    né tenere ferma una richiesta; il modello di Whisper si controlla; un server che si ferma non accende programmi
+    nuovi; le traduzioni gratuite di MyMemory non le finisce un invitato."""
+
+    def setUp(self):
+        self.m = modulo_server("musica_libreria_testi_sic_%s" % self._testMethodName)
+        self.d = tempfile.mkdtemp(prefix="atlante-testi-sic-")
+        self.m.CONF["cache"] = self.d
+        self.m.CONF["ia_indirizzo"] = "http://127.0.0.1:9"   # l'IA del Mac (Ollama) mai, nelle prove
+        self.m.TRAD_INTERVALLO = 0.0   # MyMemory finto: senza la pausa tra una riga e l'altra
+        self.web = None
+
+    def tearDown(self):
+        if self.web:
+            self.web.shutdown()
+            self.web.server_close()
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def finto(self, gestore, modo=""):
+        """Un sito finto sul Mac (http://127.0.0.1:porta)."""
+        gestore.modo = modo
+        if hasattr(gestore, "richieste"):
+            gestore.richieste = []
+        if hasattr(gestore, "chiesti"):
+            gestore.chiesti = []
+        self.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), gestore)
+        self.web.handle_error = lambda *a: None   # il Mac che chiude a metà (apposta) non è un errore da stampare
+        threading.Thread(target=self.web.serve_forever, daemon=True).start()
+        return "http://127.0.0.1:%d" % self.web.server_address[1]
+
+    def presto(self, f, *a, limite=0.5):
+        """f(*a) e quanto ci ha messo: deve restare sotto «limite» secondi."""
+        prima = time.time()
+        r = f(*a)
+        durata = time.time() - prima
+        self.assertLess(durata, limite, "%s: %.2f s" % (getattr(f, "__name__", f), durata))
+        return r
+
+    # 1. espressioni regolari lente (ReDoS): una riga con 200 000 spazi si legge in meno di mezzo secondo
+
+    def test_01_redos_lyricsfile(self):
+        m = self.m
+        v = self.presto(m._yaml_valore, "la" + " " * 200000 + "la")
+        self.assertEqual((v[:2], v[-2:], len(v)), ("la", "la", 200004))
+        self.assertEqual(m._yaml_valore("ciao  \t# un commento"), "ciao")
+        self.assertEqual(m._yaml_valore("'a # b'  # c"), "a # b")
+        self.assertEqual(m._yaml_valore("a#b"), "a#b")   # senza spazio prima non è un commento
+        lf = "lines:\n- text: la" + " " * 200000 + "la\n  start_ms: 1000\n- text: ok # nota\n  start_ms: 2000\n"
+        r = self.presto(m.leggi_lyricsfile, lf)
+        self.assertEqual([(x["t"], x["testo"][:2]) for x in r], [(1.0, "la"), (2.0, "ok")])
+        self.assertEqual(r[1]["testo"], "ok")
+        self.assertLessEqual(len(r[0]["testo"]), m.TESTI_MAX_RIGA)   # una riga lunghissima si tronca
+
+    def test_02_redos_titoli(self):
+        """Pulizia dei titoli (testi, classifiche, ricerca su YouTube): lineare anche con tanti spazi o trattini, e con
+        i titoli normali uguale a prima."""
+        m = self.m
+        n = 200000
+        cattivi = ["a" + " " * n + "b", "a" + "\t " * (n // 2) + "b", "-" * n, " -" * (n // 2), ", " * (n // 2),
+                   " feat" * (n // 5), "(" + "a" * n, " x" * (n // 2)]
+        for f in (m._cl_titolo, m._cl_principale, m._titolo_pulito, m._primo_artista, lambda s: m.RUMORE.sub("", s),
+                  lambda s: m.CENSURATA.search(s), lambda s: m._da_titolo_video(s, s)):
+            prima = time.time()
+            for s in cattivi:
+                f(s)
+            self.assertLess(time.time() - prima, 2.0, getattr(f, "__name__", f))
+        for s, atteso in TITOLI_DI_PRIMA.items():
+            self.assertEqual([m._cl_titolo(s), m._cl_principale(s), m._cl_principale_testo(s), m._titolo_pulito(s),
+                              m._primo_artista(s), m.RUMORE.sub("", s), bool(m.CENSURATA.search(s)),
+                              list(m._da_titolo_video(s, s))], atteso, s)
+        # trackName e artistName di LRCLIB lunghissimi: si confrontano solo i primi 300 caratteri
+        v = {"trackName": "Canzone" + " " * n + "(", "artistName": "Anna" + " " * n + "x"}
+        self.assertFalse(self.presto(m._lrclib_stesso, v, "Altra", "Anna"))
+        self.assertTrue(m._lrclib_stesso({"trackName": "Canzone (Live)", "artistName": "Anna feat. X"}, "Canzone", "Anna"))
+
+    def test_03_redos_dal_sito(self):
+        """Il caso della revisione: api/extra/testi?titolo=… con un Lyricsfile ostile da LRCLIB. Le due richieste
+        finiscono subito, gli altri fili del server intanto lavorano, e la seconda volta il testo non si rilegge."""
+        m = self.m
+        lf = ("version: '1.0'\nlines:\n- text: la" + " " * 200000 + "la\n  start_ms: 1000\n  end_ms: 3000\n  words:\n"
+              "  - text: la\n    start_ms: 1000\n  - text: ' la'\n    start_ms: 2000\n")
+        voce = {"id": 1, "trackName": "Evil", "artistName": "X", "albumName": "", "duration": 200, "instrumental": False,
+                "hasWordSync": True, "plainLyrics": "la la", "syncedLyrics": "[00:01.00] la la", "lyricsfile": lf}
+        chiamate, letture = [], [0]
+        m._lrclib_chiedi = lambda percorso, *a, **k: (chiamate.append(percorso), voce if percorso == "/api/get" else [])[1]
+        leggi = m.leggi_lyricsfile
+
+        def conta(x):
+            letture[0] += 1
+            return leggi(x)
+        m.leggi_lyricsfile = conta
+        t = m.Testi(os.path.join(self.d, "testi"))
+        giri, fine = [0], [False]
+
+        def gira():
+            while not fine[0]:
+                giri[0] += 1
+                time.sleep(0.01)
+        th = threading.Thread(target=gira, daemon=True)
+        th.start()
+        try:
+            for _ in range(2):
+                giri[0] = 0
+                o = self.presto(t.per_dati, "Evil", "X", "", 200.0)
+                self.assertEqual((o["stato"], o["parole"], [w["t"] for w in o["righe"][0]["parole"]]), ("ok", True, [1.0, 2.0]))
+        finally:
+            fine[0] = True
+            th.join()
+        self.assertEqual((chiamate, letture[0]), (["/api/get"], 1))   # la seconda volta né LRCLIB né la lettura
+
+    def test_04_limiti_dei_testi(self):
+        m = self.m
+        grande = "x" * (m.TESTI_MAX_TESTO + 10)
+        rec = m._lrclib_voce({"id": 1, "duration": 100, "syncedLyrics": "[00:01.00]" + grande, "plainLyrics": grande,
+                              "hasWordSync": True, "lyricsfile": grande}, 100)
+        self.assertEqual(rec, {"stato": "nessuno"})   # testi oltre 256 KB: non sono un testo
+        rec = m._lrclib_voce({"id": 1, "duration": 100, "syncedLyrics": "[00:01.00]Uno", "plainLyrics": grande,
+                              "hasWordSync": True, "lyricsfile": grande}, 100)
+        self.assertEqual((rec["lrc"], "lyricsfile" in rec, rec["semplice"]), ("[00:01.00]Uno", False, "Uno"))
+        r = m.leggi_lrc("[00:01.00]" + "parola " * 2000)
+        self.assertLessEqual(len(r[0]["testo"]), m.TESTI_MAX_RIGA)
+        self.assertLessEqual(len(m.testi_semplici("parola " * 2000)[0]["testo"]), m.TESTI_MAX_RIGA)
+        # tante righe e tanti tempi: si legge in fretta e le righe hanno un limite
+        r = self.presto(m.leggi_lrc, "[00:01.00]a\n" * 40000, limite=1.0)
+        self.assertLessEqual(len(r), m.TESTI_RIGHE_MAX)
+        r = self.presto(m.leggi_lrc, ("[00:01.00]" * 150 + "a b c\n") * 1500, limite=1.5)
+        self.assertLessEqual(len(r), m.TESTI_RIGHE_MAX)
+        self.assertLessEqual(sum(len(x.get("parole") or []) for x in r), m.TESTI_PAROLE_MAX)
+        r = m.leggi_lrc("".join("[%02d:%02d.00]riga %d\n" % (k // 60, k % 60, k) for k in range(3000)))
+        self.presto(m._stima_parole, r, 3600, limite=1.5)   # nessun calcolo che cresce col quadrato delle righe
+        interne = [{"t": float(k), "f": None, "x": "", "p": []} for k in range(30000)] + \
+                  [{"t": 30000.0, "f": None, "x": "fine", "p": []}]
+        self.presto(m.completa_tempi, interne, None, limite=1.0)
+        self.presto(m.allinea_parole, [dict(x) for x in interne], [(1.0, None, "fine")], True, limite=1.0)
+
+    # 2. un invitato non ferma il server: il turno di LRCLIB passa prima a Samuele
+
+    def test_05_turno_samuele_prima(self):
+        m, ordine = self.m, []
+
+        def prendi(p, nome):
+            with m._TESTI_TURNO.turno(p):
+                ordine.append(nome)
+        with m._TESTI_TURNO.turno(1):
+            fili = []
+            for p, nome in ((1, "ospite"), (2, "sottofondo"), (0, "samuele")):
+                fili.append(threading.Thread(target=prendi, args=(p, nome), daemon=True))
+                fili[-1].start()
+                time.sleep(0.15)
+        for f in fili:
+            f.join(5)
+        self.assertEqual(ordine, ["samuele", "ospite", "sottofondo"])
+
+    def test_06_durata_e_permessi(self):
+        m = self.m
+        self.assertEqual([m._durata_testi(x) for x in ("", "0", "-5", "0.2", "200.4", "99999", "inf", "nan")],
+                         [0, 0, 0, 1, 200.4, 3600, 0, 0])
+        # gli invitati: una ricerca nuova alla volta, e al più TESTI_OSPITE_ORA all'ora
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_TESTI_OSPITE_ORA": "3"}):
+            ospite = {"chi": "gina", "ia": False}
+            for _ in range(3):
+                m._testi_permesso(ospite, in_corso=0)
+            with self.assertRaises(m.ErroreExtra) as e:
+                m._testi_permesso(ospite, in_corso=0)
+            self.assertEqual(e.exception.codice, 429)
+            self.assertIn("riprova", e.exception.testo)
+            with self.assertRaises(m.ErroreExtra) as e:
+                m._testi_permesso({"chi": "ugo", "ia": False}, in_corso=1)   # ne ha già una in corso
+            self.assertEqual(e.exception.codice, 429)
+            for _ in range(10):
+                m._testi_permesso({"chi": "samuele", "ia": True}, in_corso=0)   # Samuele no
+
+    # 3. la cache dei testi non riempie il disco interno
+
+    def test_07_cache_limitata(self):
+        m = self.m
+        cart = os.path.join(self.d, "testi")
+        os.makedirs(cart)
+        risposta = {"v": {"stato": "ok", "lrc": "[00:01.00]Riga", "semplice": "Riga " * 150}}
+        m._lrclib_cerca = lambda *a, **k: dict(risposta["v"])
+        m.TESTI_CACHE_MAX = 30000
+        file = lambda k: os.path.join(cart, k + ".json")   # noqa: E731
+        for k in range(60):
+            m._testi_lrclib_cerca(file("%024x" % k), "%024x" % k, "T%d" % k, "A", "", 100, False)
+            if k == 5:
+                vecchio = os.path.getmtime(file("%024x" % 0))
+                os.utime(file("%024x" % 0), (vecchio - 9e5, vecchio - 9e5))
+        tot = sum(os.path.getsize(os.path.join(cart, n)) for n in os.listdir(cart))
+        self.assertLessEqual(tot, 30000)
+        self.assertTrue(os.path.exists(file("%024x" % 59)))   # i più recenti restano
+        self.assertFalse(os.path.exists(file("%024x" % 0)))   # i più vecchi no
+        # una risposta oltre 256 KB: si dà ma non si tiene
+        risposta["v"] = {"stato": "ok", "lrc": "[00:01.00]" + "x" * 150000, "semplice": "y" * 150000}
+        r = m._testi_lrclib_cerca(file("a" * 24), "a" * 24, "Grande", "A", "", 100, False)
+        self.assertEqual(r["stato"], "ok")
+        self.assertFalse(os.path.exists(file("a" * 24)))
+        # poco spazio sul disco: niente cache
+        risposta["v"] = {"stato": "nessuno"}
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_TESTI_SPAZIO_MIN_GB": "1000000000"}):
+            m._testi_lrclib_cerca(file("b" * 24), "b" * 24, "Poco spazio", "A", "", 100, False)
+        self.assertFalse(os.path.exists(file("b" * 24)))
+
+    def test_08_lucchetti_ed_errori_che_non_crescono(self):
+        m = self.m
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB_INTERVALLO": "0"}):
+            m._lrclib_chiedi = lambda *a, **k: None   # 404 ogni volta
+            prima = len(m._TESTI_CHIAVI)
+            for k in range(300):
+                m.testi_brano("t%d" % k, "a", "", float(k))
+            self.assertEqual(len(m._TESTI_CHIAVI), prima)
+
+            def giu(*a, **k):
+                raise m.ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde")
+            m._lrclib_chiedi = giu
+            for k in range(m.TESTI_ERRORI_MAX + 200):
+                with self.assertRaises(m.ErroreExtra):
+                    m.testi_brano("e%d" % k, "a", "", 100)
+            self.assertLessEqual(len(m._TESTI_ERRORI), m.TESTI_ERRORI_MAX)
+
+    # 4. MyMemory: un tetto al giorno per ogni invitato, una parte tenuta per Samuele, al più tot righe per brano
+
+    def test_09_mymemory_a_testa(self):
+        m = self.m
+        url = self.finto(FintoMyMemory)
+        FintoMyMemory.richieste = []
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_MYMEMORY": url, "ATLANTE_CONTATTO": ""}):
+            tr = m.Traduttore()
+            righe = ["riga numero %02d del testo, abbastanza lunga da contare" % k for k in range(40)]
+            out, _, motivo = tr.traduci(righe, "it", "en", False, "anna")
+            fatte = sum(1 for x in out if x)
+            caratteri = sum(len(q["q"]) for q in FintoMyMemory.richieste)
+            self.assertTrue(0 < fatte < 40, fatte)
+            self.assertLessEqual(caratteri, m.TRAD_QUOTA * m.TRAD_OSPITE)
+            self.assertIn("oggi", motivo)
+            # gli invitati insieme non vanno oltre la loro parte; per Samuele ne resta
+            for k in range(10):
+                try:
+                    tr.traduci(["%s %d" % (x, k) for x in righe], "it", "en", False, "ospite%d" % k)
+                except m.ErroreTesti as e:   # la parte degli invitati è finita: niente da tradurre
+                    self.assertIn("oggi", str(e))
+            ospiti = sum(len(q["q"]) for q in FintoMyMemory.richieste)
+            self.assertLessEqual(ospiti, m.TRAD_QUOTA * (1 - m.TRAD_RISERVA))
+            n = len(FintoMyMemory.richieste)
+            out, _, _ = tr.traduci(["Buongiorno a tutti"], "it", "en", True, "samuele")
+            self.assertEqual(out, ["EN: Buongiorno a tutti"])
+            self.assertEqual(len(FintoMyMemory.richieste), n + 1)
+            # un testo lunghissimo: al più TRAD_RIGHE_MAX righe per brano
+            FintoMyMemory.richieste = []
+            tr2 = m.Traduttore()
+            tr2.traduci(["r%d" % k for k in range(m.TRAD_RIGHE_MAX + 50)], "it", "en", True, "samuele")
+            self.assertEqual(len(FintoMyMemory.richieste), m.TRAD_RIGHE_MAX)
+
+    # 5. niente rimandi verso altri siti; un tempo massimo per tutta la risposta
+
+    def test_10_lrclib_senza_rimandi(self):
+        m = self.m
+        url = self.finto(FintoLrclibCattivo, "rimando")
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": url, "ATLANTE_LRCLIB_INTERVALLO": "0"}):
+            with self.assertRaises(m.ErroreExtra) as e:
+                m._lrclib_chiedi("/api/get", {"track_name": "x"})
+            self.assertEqual(e.exception.codice, 503)
+        self.assertNotIn("/altrove", [p for p, _ in FintoLrclibCattivo.richieste])
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_MYMEMORY": url}):
+            tr = m.Traduttore()
+            with self.assertRaises(m.ErroreTesti):
+                tr.traduci(["ciao"], "it", "en", True, "samuele")
+        self.assertNotIn("/altrove", [p for p, _ in FintoLrclibCattivo.richieste])
+
+    def test_11_tempo_massimo(self):
+        m = self.m
+        url = self.finto(FintoLrclibCattivo, "gocce")
+        m.TESTI_TEMPO_MAX = 1.5
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": url, "ATLANTE_LRCLIB_INTERVALLO": "0"}):
+            prima = time.time()
+            with self.assertRaises(m.ErroreExtra):
+                m._lrclib_chiedi("/api/get", {"track_name": "x"}, riprova=False)
+            self.assertLess(time.time() - prima, 3.0)
+        m.TRAD_TEMPO_MAX = 1.5
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_MYMEMORY": url}):
+            prima = time.time()
+            with self.assertRaises(m.ErroreTesti):
+                m.Traduttore().traduci(["ciao"], "it", "en", True, "samuele")
+            self.assertLess(time.time() - prima, 3.0)
+
+    def test_12_hugging_face(self):
+        m = self.m
+        for u in ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-x.bin", "https://hf.co/x",
+                  "https://cdn-lfs.hf.co/repos/x", "https://cas-bridge.xethub.hf.co/x", "https://cdn-lfs-us-1.huggingface.co/x"):
+            self.assertTrue(m._hf_permesso(u), u)
+        for u in ("http://huggingface.co/x", "https://huggingface.co.esempio.com/x", "https://falsohuggingface.co/x",
+                  "https://127.0.0.1/x", "https://example.com/x", "ftp://huggingface.co/x", "https://hf.co.evil/x"):
+            self.assertFalse(m._hf_permesso(u), u)
+        for modo in ("rimando", "fuori"):   # un rimando fuori da Hugging Face (o in http) non si segue
+            url = self.finto(FintoModelloStrano, modo)
+            w = m.Whisper(os.path.join(self.d, "modelli-" + modo))
+            with unittest.mock.patch.dict(os.environ, {"ATLANTE_WHISPER_URL_MODELLO": url + "/ggml.bin",
+                                                       "ATLANTE_WHISPER_SPAZIO_MIN_GB": "0"}):
+                with self.assertRaises(m.ErroreTesti):
+                    w._scarica_modello()
+            self.assertEqual(FintoModelloStrano.chiesti, ["/ggml.bin"], modo)
+            self.assertFalse(os.path.exists(w.file_modello))
+            self.web.shutdown()
+            self.web.server_close()
+            self.web = None
+
+    # 6. il modello di Whisper: lunghezza dichiarata, al più il doppio del previsto, impronta SHA-256
+
+    def test_13_modello_controllato(self):
+        m = self.m
+        url = self.finto(FintoModelloStrano, "senza lunghezza")
+        amb = {"ATLANTE_WHISPER_URL_MODELLO": url + "/ggml.bin", "ATLANTE_WHISPER_SPAZIO_MIN_GB": "0"}
+        w = m.Whisper(os.path.join(self.d, "modelli"))
+        with unittest.mock.patch.dict(os.environ, amb):
+            with self.assertRaises(m.ErroreTesti) as e:
+                w._scarica_modello()
+            self.assertIn("quanto pesa", str(e.exception))
+            self.assertFalse(os.path.exists(w.file_modello))
+        self.web.shutdown()
+        self.web.server_close()
+        url = self.finto(FintoModello)
+        FintoModello.chiesti = 0
+        amb["ATLANTE_WHISPER_URL_MODELLO"] = url + "/ggml.bin"
+        with unittest.mock.patch.dict(os.environ, amb):
+            m.WHISPER_MB = 0.25   # il doppio: mezzo MB, meno del modello finto
+            with self.assertRaises(m.ErroreTesti) as e:
+                w._scarica_modello()
+            self.assertIn("troppo grande", str(e.exception))
+            self.assertFalse(os.path.exists(w.file_modello))
+            m.WHISPER_MB = 600
+            w._scarica_modello()
+        with open(w.file_modello + ".sha256", encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), _hashlib.sha256(FintoModello.DATI).hexdigest())
+        # il modello cambia sul disco dopo lo scaricamento: Whisper non lo usa
+        cli = os.path.join(self.d, "whisper-cli")
+        _scrivi_programma(cli, FINTO_WHISPER)
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_WHISPER": cli, "FINTO_DIR": self.d}):
+            self.assertTrue(w.prepara())
+            with open(w.file_modello, "r+b") as f:
+                f.seek(100)
+                f.write(b"diverso")
+            w.prova = 0.0
+            self.assertFalse(w.prepara())
+            self.assertIn("cambiato", w.stato)
+            self.assertFalse(os.path.exists(w.file_modello))   # si riscarica, la prossima volta
+
+    # 7. il server che si ferma non accende programmi nuovi
+
+    def test_14_spegnimento(self):
+        m = self.m
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop("ATLANTE_WHISPER", None)
+            t = m.Testi(os.path.join(self.d, "testi"))
+            t.acceso = t.con_whisper = True
+            self.assertFalse(t.fermo_voce())
+            m._ferma_figli()   # quello che fa SIGTERM per primo
+            self.assertTrue(t.fermo_voce())
+        segno = os.path.join(self.d, "partito")
+        with self.assertRaises(m.Pausa):
+            m._esegui_piano(["/usr/bin/touch", segno], 5)
+        self.assertFalse(os.path.exists(segno))
+
+    # 8. testi con caratteri impossibili: la risposta non cade
+
+    def test_15_caratteri_impossibili(self):
+        m = self.m
+        self.assertEqual(m.leggi_lyricsfile('lines:\n- text: "\\U00110000 ok"\n  start_ms: 0\n'),
+                         [{"t": 0.0, "testo": "� ok"}])
+        self.assertEqual(m._yaml_valore('"\\ud83d\\ude00 \\ud800"'), "\U0001F600 �")
+        rotto = m.leggi_lyricsfile
+
+        def esplode(x):
+            raise RecursionError("Lyricsfile che fa cadere la lettura")
+        m.leggi_lyricsfile = esplode
+        r = m._testi_da_lrclib({"stato": "ok", "lyricsfile": "lines: x", "lrc": "[00:01.00]Dal testo a tempo"})
+        self.assertEqual((r["sincronizzato"], r["righe"]), (True, [{"t": 1.0, "testo": "Dal testo a tempo"}]))
+        m.leggi_lyricsfile = rotto
+        url = self.finto(FintoLrclibCattivo, "surrogati")
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": url, "ATLANTE_LRCLIB_INTERVALLO": "0"}):
+            t = m.Testi(os.path.join(self.d, "testi"))
+            o = t.per_dati("Surrogati", "Anna", "", 200)
+            self.assertEqual([x["testo"] for x in o["righe"]], ["Ciao � mondo", "seconda �"])
+            self.assertTrue([n for n in os.listdir(os.path.join(self.d, "testi")) if n.endswith(".json")])
+            n = len(FintoLrclibCattivo.richieste)
+            self.assertEqual(t.per_dati("Surrogati", "Anna", "", 200), o)   # dalla cache
+            self.assertEqual(len(FintoLrclibCattivo.richieste), n)
+
+    # 9. piccole difese: il .lrc accanto, i gruppi di processi, ffmpeg, i brani lunghissimi, il registro di Homebrew
+
+    def test_16_lrc_accanto(self):
+        m = self.m
+        brano = os.path.join(self.d, "Brano.mp3")
+        scrivi_mp3(brano, "Brano", "Anna")
+        altrove = os.path.join(self.d, "segreto.txt")
+        with open(altrove, "w") as f:
+            f.write("[00:01.00]Non sono un testo")
+        os.symlink(altrove, os.path.join(self.d, "Brano.lrc"))
+        self.assertEqual(m._testo_lrc_accanto(brano), "")   # un collegamento: non si segue
+        os.unlink(os.path.join(self.d, "Brano.lrc"))
+        os.mkfifo(os.path.join(self.d, "Brano.lrc"))   # non un file: non si resta fermi ad aspettarlo
+        esito = []
+        th = threading.Thread(target=lambda: esito.append(m._testo_lrc_accanto(brano)), daemon=True)
+        th.start()
+        th.join(3)
+        self.assertEqual(esito, [""])
+        os.unlink(os.path.join(self.d, "Brano.lrc"))
+        with open(os.path.join(self.d, "Brano.lrc"), "w", encoding="utf-8") as f:
+            f.write("[00:02.00]Questo sì")
+        self.assertEqual(m._testo_lrc_accanto(brano), "[00:02.00]Questo sì")
+
+    def test_17_gruppo_di_processi(self):
+        m = self.m
+        p = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & exit 0"], start_new_session=True)
+        p.wait()   # il primo è finito; nel suo gruppo resta «sleep»
+        try:
+            self.assertTrue(m._vivo_processo(p.pid))
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        self.assertTrue(aspetta(lambda: not m._vivo_processo(p.pid), 5))
+
+    def test_18_ffmpeg_e_brani_lunghi(self):
+        m = self.m
+        chiamate = []
+
+        def piano(args, tempo, fermo=None, log=None, ambiente=None):
+            chiamate.append(args)
+            with open(args[-1], "wb") as f:
+                f.write(bytes(2000))
+            return 0, b"", b""
+        m._esegui_piano = piano
+        m._programma = lambda nome: "/usr/bin/ffmpeg-finto"
+        m._wav16k(os.path.join(self.d, "a.mp3"), os.path.join(self.d, "a.wav"))
+        a = chiamate[0]
+        self.assertEqual(a[a.index("-protocol_whitelist") + 1], "file")
+        self.assertLess(a.index("-protocol_whitelist"), a.index("-i"))
+        self.assertLessEqual(float(a[a.index("-t") + 1]), m.WHISPER_DURATA_MAX + 60)
+        # oltre 20 minuti Whisper non ascolta il brano
+        t = m.Testi(os.path.join(self.d, "testi"))
+        r = m._testi_risposta(m.leggi_lrc("[00:01.00]Una riga\n[00:05.00]Altra riga"), "lrclib", True)
+        t._segna("lungo", {"_f": "F1", "duration": 1500}, "Lungo", "A", r)
+        t._segna("breve", {"_f": "F2", "duration": 200}, "Breve", "A", r)
+        self.assertEqual((t.schede["lungo"]["al"], t.schede["breve"]["al"]), ("non riuscito", "attesa"))
+        self.assertIn("20 minuti", t.schede["lungo"]["ale"])
+
+    def test_19_registro_di_homebrew(self):
+        m = self.m
+        bin_ = os.path.join(self.d, "bin")
+        os.makedirs(bin_)
+        brew, dest = os.path.join(bin_, "brew"), os.path.join(self.d, "installato", "whisper-cli")
+        _scrivi_programma(brew, FINTO_BREW_TESTI)
+        _scrivi_programma(os.path.join(self.d, "whisper-finto"), FINTO_WHISPER)
+        w = m.Whisper(os.path.join(self.d, "modelli"))
+        os.makedirs(w.dir)
+        with open(os.path.join(w.dir, "installa.log"), "wb") as f:
+            f.write(b"vecchio\n" * 400000)   # 3 MB di installazioni di prima
+        with unittest.mock.patch.dict(os.environ, {
+                "ATLANTE_BREW": brew, "ATLANTE_WHISPER": dest, "ATLANTE_WHISPER_INSTALLA": "1", "FINTO_DIR": self.d,
+                "FINTO_WHISPER_DEST": dest, "FINTO_WHISPER_SORGENTE": os.path.join(self.d, "whisper-finto"),
+                "FINTO_BREW_BLOCCATO": ""}):
+            self.assertEqual(w._installa(), dest)
+        self.assertLessEqual(os.path.getsize(os.path.join(w.dir, "installa.log")), m.WHISPER_LOG_MAX)
+
+
+class TestTestiOspiti(AiutiAccesso, unittest.TestCase):
+    """Sul server vero, con un invitato vero: chi chiede tanti testi di brani che il Mac non ha (api/extra/testi?titolo=…)
+    non tiene fermi i posti del server. Una ricerca nuova alla volta a testa (le altre: 429 subito), al più
+    ATLANTE_TESTI_OSPITE_ORA all'ora; dopo ATLANTE_TESTI_ATTESA secondi la risposta è «in arrivo» e l'app richiede.
+    Samuele intanto viene servito."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-ospiti-")
+        cls.c = prepara_cartelle(cls.base)
+        _brano_con_voce(cls.c["musica"], "A.mp3", "Canzone", "Artista A", [])
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibCattivo)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        FintoLrclibCattivo.modo, FintoLrclibCattivo.pausa, FintoLrclibCattivo.richieste = "lento", 1.5, []
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://mac.esempio.ts.net:10000"], ambiente={
+            "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.web.server_address[1], "ATLANTE_RICHIESTE_MAX": "6",
+            "ATLANTE_TESTI_ATTESA": "1", "ATLANTE_TESTI_OSPITE_ORA": "4", "no_proxy": "127.0.0.1,localhost"}).avvia()
+        cls.m = carica_modulo("musica_libreria_testi_ospiti")
+        cls.pers = cls.m.Persone(os.path.join(cls.c["cache"], "persone.json"))
+        cls.ospite = None
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def gigi(self, percorso):
+        if TestTestiOspiti.ospite is None:
+            TestTestiOspiti.ospite = self.invitato("Gigi", ip="203.0.113.210")[1]
+        st, _, b = self.da_fuori("GET", percorso, ip="203.0.113.210", biscotto=TestTestiOspiti.ospite)
+        return st, (json.loads(b.decode("utf-8")) if b.startswith(b"{") else b)
+
+    def test_1_tante_richieste_insieme(self):
+        self.gigi("/api/extra/io")
+        esiti = {}
+
+        def chiedi(k):
+            prima = time.time()
+            st, j = self.gigi("/api/extra/testi?titolo=flood%d&artista=x&durata=200" % k)
+            esiti[k] = (st, j.get("stato") if isinstance(j, dict) else None, time.time() - prima)
+        fili = [threading.Thread(target=chiedi, args=(k,), daemon=True) for k in range(10)]
+        for f in fili:
+            f.start()
+        time.sleep(0.3)
+        prima = time.time()
+        st, _, _ = richiesta(self.s.porta, "GET", "/api/musica/catalogo")
+        self.assertEqual(st, 200)
+        self.assertLess(time.time() - prima, 1.0)   # Samuele intanto entra subito
+        for f in fili:
+            f.join(20)
+        stati = sorted(x[0] for x in esiti.values())
+        self.assertEqual(stati, [200] + [429] * 9, esiti)
+        self.assertLess(max(x[2] for x in esiti.values()), 3.0, esiti)   # nessuno resta appeso a LRCLIB
+        self.assertIn(next(x[1] for x in esiti.values() if x[0] == 200), ("in arrivo", "nessuno"))
+        # l'app richiede: alla fine la risposta c'è (qui LRCLIB non ha il brano)
+        k = next(k for k, x in esiti.items() if x[0] == 200)
+        j = aspetta(lambda: (lambda r: r[1] if r[0] == 200 and r[1].get("stato") != "in arrivo" else None)(
+            self.gigi("/api/extra/testi?titolo=flood%d&artista=x&durata=200" % k)), 15, 0.5)
+        self.assertEqual(j, {"stato": "nessuno"})
+
+    def test_2_durata_tra_uno_e_un_ora(self):
+        FintoLrclibCattivo.pausa = 0.0
+        for durata, attesa in (("99999", "3600"), ("0.3", "1")):
+            j = self.s.json("GET", "/api/extra/testi?titolo=Durata%s&artista=Sam&durata=%s" % (durata, durata))
+            self.assertIn(j["stato"], ("nessuno", "in arrivo"))
+            q = aspetta(lambda: [x[1] for x in FintoLrclibCattivo.richieste if x[1].get("track_name") == "Durata" + durata], 5)
+            self.assertEqual(q[0].get("duration"), attesa)
+
+    def test_3_al_piu_tot_all_ora(self):
+        FintoLrclibCattivo.pausa = 0.0
+        visti = []
+        for k in range(6):
+            st, j = self.gigi("/api/extra/testi?titolo=ora%d&artista=x" % k)
+            visti.append(st)
+            if st == 200:
+                aspetta(lambda: self.gigi("/api/extra/testi?titolo=ora%d&artista=x" % k)[1].get("stato") != "in arrivo", 5)
+        self.assertIn(429, visti)
+        st, j = self.gigi("/api/extra/testi?titolo=ora%d&artista=x" % (visti.index(429) + 1))
+        self.assertEqual(st, 429)
+        self.assertIn("riprova", j["errore"])
+        self.assertEqual(self.gigi("/api/extra/testi?titolo=ora0&artista=x")[0], 200)   # dalla cache: sempre
+        # Samuele no: le sue ricerche non hanno un tetto
+        for k in range(6):
+            self.assertEqual(self.s.get("/api/extra/testi?titolo=sam%d&artista=x" % k)[0], 200)
+
+
 # ----- sicurezza (28/10): rotte degli invitati, link per yt-dlp, nomi permessi, dispositivi, tentativi, risorse -----
 
 SAMUELE_TS = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com", "X-Forwarded-Proto": "https",
@@ -9376,6 +10243,12 @@ class TestSicurezza(AiutiAccesso, unittest.TestCase):
         self.assertIn("--max-filesize", self.lavori_ytdlp("grande1"))
         self.s.json("POST", "/api/extra/musica", {"url": "https://example.com/m/grande2"})
         self.assertIn("--max-filesize", self.lavori_ytdlp("grande2"))
+        # e passano dal proxy del Mac che ricontrolla ogni connessione (rimandi, nomi risolti di nuovo); YouTube no
+        for nome in ("grande1", "grande2"):
+            a = self.lavori_ytdlp(nome)
+            self.assertIn("--proxy", a, nome)
+            self.assertRegex(a[a.index("--proxy") + 1], r"^http://127\.0\.0\.1:\d+$")
+        self.assertNotIn("--proxy", self.lavori_ytdlp("watch?v=Invitato001"))
         # a un invitato l'errore di yt-dlp non arriva così com'è (con un link qualsiasi diceva cosa c'era dietro)
         st, j = self.da_ugo("POST", "/api/extra/musica", {"id": "errore00001"})
         self.assertEqual(st, 200, j)
@@ -9409,7 +10282,9 @@ class TestSicurezza(AiutiAccesso, unittest.TestCase):
         porta = self.s.porta
         # un altro sito che fa puntare il suo nome al Mac (DNS rebinding): il browser manda il nome di quel sito
         for host in ("evil.example", "evil.example:%d" % porta, "127.0.0.1.nip.io:%d" % porta, "localhost.evil.example",
-                     "mac.esempio.ts.net.evil.example", "100.64.0.10:%d" % porta, "altro-mac.tailabcd.ts.net"):
+                     "mac.esempio.ts.net.evil.example", "100.64.0.10:%d" % porta, "altro-mac.tailabcd.ts.net",
+                     # la porta solo in cifre
+                     "localhost:abc", "localhost:", "127.0.0.1:99999", "[::1]:x", "127.0.0.1:80:80"):
             for metodo, p in (("GET", "/"), ("GET", "/api/extra/io"), ("GET", "/api/musica/catalogo"), ("GET", "/accesso"),
                               ("POST", "/api/extra/idee"), ("GET", "/x/prova.html")):
                 st, h, b = richiesta(porta, metodo, p, {"testo": "x"} if metodo == "POST" else None, intest={"Host": host})
@@ -9417,6 +10292,11 @@ class TestSicurezza(AiutiAccesso, unittest.TestCase):
         # anche dietro tailscale serve, se il nome non è quello del Mac nella rete Tailscale
         self.assertEqual(richiesta(porta, "GET", "/api/extra/io", intest=dict(
             SAMUELE_TS, **{"Host": "evil.example", "X-Forwarded-Host": "mac.esempio.ts.net"}))[0], 421)
+        # e un altro nome *.ts.net: solo il nome del Mac (--pubblico, --indirizzo, ATLANTE_HOST_OK o quello che dice
+        # tailscale), non qualsiasi nome della rete Tailscale
+        for nome in ("altro-mac.tailabcd.ts.net", "altro-mac.tailabcd.ts.net:8448", "mac.esempio.ts.net.altro.ts.net"):
+            self.assertEqual(richiesta(porta, "GET", "/api/extra/io", intest=dict(
+                SAMUELE_TS, **{"Host": nome, "X-Forwarded-Host": nome}))[0], 421, nome)
         self.assertEqual(senza_host(porta, "/api/extra/io")[0], 421)
         # i nomi di Atlante: il Mac stesso, --pubblico, ATLANTE_HOST_OK, il nome del Mac nella rete Tailscale
         for intest in ({"Host": "127.0.0.1:%d" % porta}, {"Host": "LOCALHOST:1234"}, {"Host": "[::1]"},
@@ -9445,8 +10325,10 @@ class TestSicurezza(AiutiAccesso, unittest.TestCase):
         self.assertEqual((b["artista"], b["durata"], len(b["album"]) <= 300), ("", 0, True))
         self.assertIsInstance(b["titolo"], str)   # il testo resta: lo protegge l'app quando lo mostra
         self.assertNotIn("altro", b)
+        # anche un indirizzo che non si legge (parentesi quadre aperte): copertina vuota, non un errore 500
         for cop in ("data:text/html,<script>x</script>", "vbscript:x", " javascript:x", "JaVaScRiPt:x",
-                    "https://x.example/a b.jpg", 'https://x.example/"onerror=x', "api/musica/copertina/x.jpg", ["x"]):
+                    "https://x.example/a b.jpg", 'https://x.example/"onerror=x', "api/musica/copertina/x.jpg", ["x"],
+                    "http://[::1", "https://[::1/x"):
             self.s.json("POST", "/api/extra/dispositivi/%s/stato" % mac, {"nome": "Mac", "stato": {"brano": {"copertina": cop}}})
             self.assertEqual(dispositivi()[mac]["stato"]["brano"]["copertina"], "", cop)
         for cop in ("https://i.ytimg.com/vi/x/hq720.jpg", "http://esempio.it/c.jpg", "blob:https://mac.esempio.ts.net/0a1b"):
@@ -9481,9 +10363,69 @@ class TestSicurezza(AiutiAccesso, unittest.TestCase):
         self.assertEqual((st, j), (200, {"contati": 1, "scartati": 2}))
 
 
-class TestTentativi(AiutiAccesso, unittest.TestCase):
-    """Password e codici sbagliati: si ferma chi li prova (un indirizzo, o tutta la sua rete /64 in IPv6), non tutti;
-    tanti tentativi da indirizzi diversi rallentano soltanto. Gli inviti (codici lunghi e casuali) non contano."""
+class TestPostiConti(unittest.TestCase):
+    """I conti dei posti, senza server: un quarto di RICHIESTE_MAX sempre per Samuele, quelli del Mac a parte, chi non è
+    entrato al più 8 (2 per indirizzo), ogni invitato al più 16; le attese lunghe al più 6 per dispositivo e 12 per
+    invitato; e chi non è Samuele né il Mac sta nei tre quarti dei fili (anche con ATLANTE_RICHIESTE_MAX=512)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_posti_conti")
+
+    def test_richieste(self):
+        p = self.m.Posti(64, 512)
+        prendi = lambda tipo, chiave: p.prendi(tipo, chiave, 0.05)   # noqa: E731
+        self.assertEqual([prendi("anonimo", "ip:1") for _ in range(3)], [True, True, False])   # 2 per indirizzo
+        self.assertEqual([prendi("anonimo", "ip:%d" % i) for i in range(2, 9)], [True] * 6 + [False])   # 8 in tutto
+        self.assertEqual([prendi("persona", "o:anna") for _ in range(17)], [True] * 16 + [False])   # 16 per invitato
+        for i in range(24):   # gli altri arrivano a 48 posti: poi solo Samuele
+            self.assertTrue(prendi("persona", "casa:%d" % i))
+        self.assertFalse(prendi("persona", "o:bruno"))
+        self.assertEqual([prendi("samuele", "p") for _ in range(17)], [True] * 16 + [False])
+        self.assertEqual([prendi("mac", "mac") for _ in range(9)], [True] * 8 + [False])   # il Mac: i suoi
+        p.lascia("persona", "o:anna")
+        self.assertTrue(prendi("persona", "o:bruno"))    # il posto di Anna va a un altro (gli altri al più 48)
+        self.assertFalse(prendi("persona", "o:carla"))
+        p.lascia("samuele", "p")
+        self.assertFalse(prendi("persona", "o:carla"))   # quello di Samuele resta suo
+        self.assertTrue(prendi("samuele", "p"))
+        # chi aspetta un posto lo prende appena se ne libera uno
+        esito = []
+        f = threading.Thread(target=lambda: esito.append(p.prendi("persona", "o:carla", 3)))
+        f.start()
+        time.sleep(0.2)
+        self.assertEqual(esito, [])
+        p.lascia("persona", "casa:0")
+        f.join(3)
+        self.assertEqual(esito, [True])
+
+    def test_attese_lunghe(self):
+        m = self.m
+        p = m.Posti(64, 512)
+        self.assertEqual([p.prendi_attesa("persona", "o:anna", "d:1") for _ in range(7)], [True] * 6 + [False])
+        self.assertEqual([p.prendi_attesa("persona", "o:anna", "d:2") for _ in range(7)], [True] * 6 + [False])
+        self.assertFalse(p.prendi_attesa("persona", "o:anna", "d:3"))   # 12 per invitato
+        p.lascia_attesa("persona", "o:anna", "d:1")
+        self.assertTrue(p.prendi_attesa("persona", "o:anna", "d:3"))
+        # Samuele: 6 per dispositivo, ma niente tetto per persona né quello di tutti
+        for d in range(30):
+            self.assertTrue(p.prendi_attesa("samuele", "p", "d:s%d" % d))
+        with unittest.mock.patch.object(m, "ATTESE_MAX", 12):
+            self.assertFalse(p.prendi_attesa("persona", "o:bruno", "d:b"))   # le 12 di Anna sono già il tetto di tutti
+            self.assertTrue(p.prendi_attesa("samuele", "p", "d:s99"))
+        # i programmi del Mac (e l'app aperta sul Mac stesso: tutto da 127.0.0.1) non hanno tetti
+        self.assertTrue(all(p.prendi_attesa("mac", "mac", "ip:127.0.0.1") for _ in range(20)))
+
+    def test_fili_per_samuele(self):
+        m = self.m
+        for massimo in (8, 64, 512, 4096):
+            p = m.Posti(massimo, 512)
+            self.assertLessEqual(p.altri + m.CODA_ALTRI + m.ATTESE_MAX, 512 * 3 // 4, massimo)
+            self.assertGreaterEqual(p.massimo - p.altri, max(1, massimo // 4), massimo)
+
+
+class ProvaTentativi(AiutiAccesso):
+    """Un server con la password per Internet, per le prove dei tentativi sbagliati."""
 
     PW = "password delle prove"
 
@@ -9508,29 +10450,92 @@ class TestTentativi(AiutiAccesso, unittest.TestCase):
         if not pronta:
             self.assertEqual(self.imposta(self.PW)[0], 0)
 
-    def test_1_tanti_indirizzi_non_fermano_tutti(self):
-        for i in range(30):
-            self.assertEqual(self.entra("sbagliata %d" % i, "198.51.100.%d" % (i + 1))[0], 401, i)
-        t0 = time.time()
-        st, h, b = self.entra(self.PW, "203.0.113.50")   # Samuele, da un indirizzo che non ha sbagliato
-        self.assertEqual(st, 303, b[:300])
-        self.assertGreater(time.time() - t0, 0.5)   # solo più lento
-        self.assertEqual(self.entra(self.PW, "198.51.100.1")[0], 303)   # uno sbaglio solo: non è fermo
+    def entra_quando_tocca(self, pw, ip):
+        """Come entra, ma se tocca aspettare per i tentativi di tutti insieme (429 di un secondo) aspetta e riprova."""
+        for _ in range(10):
+            st, h, b = self.entra(pw, ip)
+            if st != 429 or h.get("X-Atlante-Tentativi") != "tutti":
+                return st, h, b
+            time.sleep(float(h["Retry-After"]))
+        return st, h, b
+
+
+class TestTentativi(ProvaTentativi, unittest.TestCase):
+    """Password e codici sbagliati: si ferma chi li prova (un indirizzo, la sua rete /64 in IPv6, e con più sbagli la sua
+    rete /48), non tutti. Gli inviti (codici lunghi e casuali) non contano."""
 
     def test_2_la_rete_ipv6_conta_come_un_indirizzo(self):
         for i in range(5):
-            self.assertEqual(self.entra("sbagliata", "2001:db8:1:2::%x" % (i + 1))[0], 401)
+            self.assertEqual(self.entra_quando_tocca("sbagliata", "2001:db8:1:2::%x" % (i + 1))[0], 401)
         st, h, b = self.entra(self.PW, "2001:db8:1:2:aaaa::99")   # stesso /64, un altro indirizzo
         self.assertEqual(st, 429, b[:300])
         self.assertGreater(int(h["Retry-After"]), 0)
-        self.assertEqual(self.entra(self.PW, "2001:db8:1:3::1")[0], 303)   # un'altra rete
+        self.assertEqual(self.entra_quando_tocca(self.PW, "2001:db8:1:3::1")[0], 303)   # un'altra rete
 
     def test_3_gli_inviti_non_contano(self):
         for i in range(8):
             st, h, b = self.da_fuori("POST", "/accesso/invito/" + _secrets.token_urlsafe(16), b"", ip="203.0.113.70",
                                      extra=self.ORIGINE)
             self.assertEqual(st, 410, b[:300])
-        self.assertEqual(self.entra(self.PW, "203.0.113.70")[0], 303)
+        self.assertEqual(self.entra_quando_tocca(self.PW, "203.0.113.70")[0], 303)
+
+    def test_4_la_rete_ipv6_48(self):
+        # un fornitore dà a chi vuole tante reti /64: 4 sbagli in ognuna di 5 reti /64 della stessa /48 fermano la /48
+        for rete in range(5):
+            for i in range(4):
+                self.assertEqual(self.entra_quando_tocca("sbagliata", "2001:db8:7:%x::%x" % (rete + 1, i + 1))[0], 401)
+        st, h, b = self.entra(self.PW, "2001:db8:7:99::1")   # una rete /64 nuova, nella stessa /48
+        self.assertEqual(st, 429, b[:300])
+        self.assertGreater(int(h["Retry-After"]), 60)
+        self.assertEqual(self.entra_quando_tocca(self.PW, "2001:db8:8:1::1")[0], 303)   # un'altra /48
+
+
+class TestTentativiTutti(ProvaTentativi, unittest.TestCase):
+    """Tanti tentativi sbagliati da indirizzi diversi: oltre ACCESSO_TENTATIVI_TUTTI in 15 minuti, al più un controllo al
+    secondo per tutti insieme; gli altri ricevono subito 429 con Retry-After (prima aspettavano un secondo tenendo
+    occupato un posto del server). Nessuno resta fermo: chi riprova dopo quel secondo entra."""
+
+    def test_1_tanti_indirizzi_non_fermano_tutti(self):
+        codici = []
+        for i in range(32):
+            t0 = time.time()
+            st, h, b = self.entra("sbagliata %d" % i, "198.51.100.%d" % (i + 1))
+            self.assertLess(time.time() - t0, 0.8, i)   # nessuno aspetta tenendo occupato il server
+            codici.append(st)
+            if st == 429:
+                self.assertEqual(h.get("X-Atlante-Tentativi"), "tutti")
+                self.assertGreaterEqual(int(h["Retry-After"]), 1)
+        self.assertEqual(codici[:25], [401] * 25)
+        self.assertIn(429, codici[25:])
+        self.assertEqual(set(codici), {401, 429})
+        st, h, b = self.entra_quando_tocca(self.PW, "203.0.113.50")   # Samuele, da un indirizzo che non ha sbagliato
+        self.assertEqual(st, 303, b[:300])
+        self.assertEqual(self.entra_quando_tocca(self.PW, "198.51.100.1")[0], 303)   # uno sbaglio solo: non è fermo
+
+
+class TestCodiciVia(unittest.TestCase):
+    """Dopo ACCESSO_CODICI_VIA tentativi sbagliati da tutti insieme in 15 minuti, i codici di collegamento ancora validi
+    (6 lettere: si potrebbero indovinare con tantissimi tentativi) non valgono più; se ne fa uno nuovo riaprendo il link."""
+
+    def test_codici_via(self):
+        m = carica_modulo("musica_libreria_codici_via")
+        base = tempfile.mkdtemp(prefix="atlante-codici-via-")
+        try:
+            m.ACC = m.Accesso(os.path.join(base, "accesso.json"))
+            m.PERS = m.Persone(os.path.join(base, "persone.json"))
+            pid = m.PERS.crea("Anna")["id"]
+            k1, _ = m.PERS.collegamento(pid)
+            k2, _ = m.PERS.collegamento(pid)
+            with unittest.mock.patch.object(m, "ACCESSO_CODICI_VIA", 6):
+                for i in range(5):
+                    m._sbagliata("198.51.100.%d" % i)
+                self.assertTrue(m.PERS.usa_collegamento(k1, "iphone"))   # ancora valido
+                m._sbagliata("198.51.100.99")
+                self.assertIsNone(m.PERS.usa_collegamento(k2, "iphone"))   # non vale più
+                k3, _ = m.PERS.collegamento(pid)   # uno nuovo vale
+                self.assertTrue(m.PERS.usa_collegamento(k3, "iphone"))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 def grezza(porta, testo, attesa=10):
@@ -9603,18 +10608,421 @@ class TestRisorse(unittest.TestCase):
         st, h, b = richiesta(porta, "POST", "/api/extra/audiolibro", {"titolo": "", "capitoli": [], "nota": "x" * (1500 * 1024)})
         self.assertNotEqual(st, 413, b[:200])
 
-    def test_4_richieste_insieme(self):
-        ferme = [socket.create_connection(("127.0.0.1", self.s.porta), timeout=10) for _ in range(4)]
+    def test_4_connessioni_ferme(self):
+        # connessioni aperte che non mandano niente non tengono i posti delle richieste (qui 4): una richiesta passa
+        # subito, e quelle ferme il server le chiude dopo il tempo massimo (3 s)
+        ferme = [socket.create_connection(("127.0.0.1", self.s.porta), timeout=10) for _ in range(6)]
         try:
             time.sleep(0.3)
             r, secondi, _ = grezza(self.s.porta, ("GET /api/extra/io HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
                                                   "Connection: close\r\n\r\n" % self.s.porta).encode(), 12)
             self.assertIn(b" 200 ", r[:20], r[:200])
-            # aspetta che si liberi un posto (le quattro connessioni ferme finiscono dopo il tempo massimo, 3 s)
-            self.assertGreater(secondi, 1.5)
+            self.assertLess(secondi, 1.5)
+            t0 = time.time()
+            for s in ferme:
+                try:
+                    self.assertEqual(s.recv(100), b"")   # chiusa dal server
+                except ConnectionResetError:
+                    pass
+            self.assertLess(time.time() - t0, 6)
         finally:
             for s in ferme:
                 s.close()
+
+    def test_5_lettore_in_pausa(self):
+        # un film letto da un telefono che si ferma (video in pausa) per più del tempo della richiesta (3 s): la
+        # risposta non si taglia, ogni pezzo ha un tempo suo più lungo
+        os.makedirs(self.c["film"], exist_ok=True)
+        dim = 24 * 1024 * 1024
+        with open(os.path.join(self.c["film"], "Lungo.mp4"), "wb") as f:
+            f.write(b"\0" * dim)
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+        s.settimeout(15)
+        s.connect(("127.0.0.1", self.s.porta))
+        try:
+            s.sendall(("GET /api/extra/film/file/Lungo.mp4 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % self.s.porta).encode())
+            time.sleep(5)
+            dati = b""
+            while True:
+                b = s.recv(1 << 20)
+                if not b:
+                    break
+                dati += b
+                testa, _, corpo = dati.partition(b"\r\n\r\n")
+                if len(corpo) >= dim:
+                    break
+        finally:
+            s.close()
+        self.assertIn(b" 200 ", testa[:20], testa[:200])
+        self.assertEqual(len(corpo), dim)
+
+
+def goccia(porta, testa, ogni=0.5, durata=9.0):
+    """Connessione lenta: manda `testa`, poi un byte ogni `ogni` secondi, per al più `durata` secondi.
+    (secondi, chiusa, risposta): chiusa è True se il server ha chiuso (o risposto) prima della fine."""
+    s = socket.create_connection(("127.0.0.1", porta), timeout=10)
+    t0 = time.time()
+    try:
+        s.sendall(testa)
+        while time.time() - t0 < durata:
+            s.settimeout(ogni)
+            try:
+                return time.time() - t0, True, s.recv(65536)   # una risposta, o b"" se il server ha chiuso
+            except socket.timeout:
+                pass
+            except OSError:
+                return time.time() - t0, True, b""
+            try:
+                s.sendall(b"x")
+            except OSError:
+                return time.time() - t0, True, b""
+        return time.time() - t0, False, b""
+    finally:
+        s.close()
+
+
+# il nome vero del Mac mini nella rete Tailscale: tailscale serve (8448, la rete Tailscale) e funnel (10000, Internet)
+NOME_VERO = "mac-mini-di-samuele.tail1b5bf3.ts.net"
+SERVE_VERO = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com", "X-Forwarded-Proto": "https",
+              "Host": NOME_VERO + ":8448", "X-Forwarded-Host": NOME_VERO + ":8448"}
+FUNNEL_VERO = {"Tailscale-Funnel-Request": "?1", "X-Forwarded-Proto": "https", "X-Forwarded-Host": NOME_VERO + ":10000",
+               "Host": NOME_VERO + ":10000"}
+
+
+class TestPosti(AiutiAccesso, unittest.TestCase):
+    """I posti del server si decidono dopo le intestazioni, quando si sa chi chiede (qui ATLANTE_RICHIESTE_MAX=8 e 3 s
+    di tempo): chi manda il corpo (o le intestazioni) un byte alla volta ha 3 s in tutto, non per ogni byte; chi non è
+    entrato ha pochi posti, ogni invitato al più alcuni, e il Mac e Samuele rispondono sempre subito. Le attese lunghe non
+    tengono posti: ne hanno di loro, per dispositivo e per persona, e oltre rispondono subito con «riprova»."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-posti-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c, ["--pubblico", "https://%s:10000" % NOME_VERO],
+                       ambiente={"ATLANTE_TEMPO_RICHIESTA": "3", "ATLANTE_RICHIESTE_MAX": "8"}).avvia()
+        cls.pers = carica_modulo("musica_libreria_posti").Persone(os.path.join(cls.c["cache"], "persone.json"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def ospite(self, nome, ip):
+        """Un invitato che entra dal suo link (dal nome vero, attraverso funnel): le intestazioni delle sue richieste."""
+        a = self.pers.crea(nome)
+        codice, _ = self.pers.invito(a["id"])
+        intest = dict(FUNNEL_VERO, **{"X-Forwarded-For": ip})
+        st, h, b = richiesta(self.s.porta, "POST", "/accesso/invito/" + codice, b"", intest=dict(
+            intest, **{"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://%s:10000" % NOME_VERO}))
+        self.assertEqual(st, 200, b[:300])
+        v = (self.biscotto(h) or "").split(";")[0].split("=", 1)[-1]
+        self.assertTrue(v.startswith("o."), self.biscotto(h))
+        return a["id"], dict(intest, Cookie="am_accesso=" + v)
+
+    def veloce(self, intest, percorso="/api/extra/io", entro=1.0):
+        t0 = time.time()
+        st, h, b = richiesta(self.s.porta, "GET", percorso, intest=intest, tempo=15)
+        self.assertEqual(st, 200, (intest, b[:200]))
+        self.assertLess(time.time() - t0, entro, intest)
+        return json.loads(b.decode("utf-8"))
+
+    def test_1_corpi_a_goccia_da_internet(self):
+        _, ugo = self.ospite("Ugo", "203.0.113.31")
+        testa = lambda i: ("POST /accesso HTTP/1.1\r\nHost: %s:10000\r\nTailscale-Funnel-Request: ?1\r\n"   # noqa: E731
+                           "X-Forwarded-For: 198.51.100.%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                           "Content-Length: 4096\r\n\r\n" % (NOME_VERO, i)).encode()
+        esiti = [None] * 10
+
+        def gocciola(i):
+            esiti[i] = goccia(self.s.porta, testa(i + 1))
+        fili = [threading.Thread(target=gocciola, args=(i,)) for i in range(10)]
+        for f in fili:
+            f.start()
+        try:
+            time.sleep(0.8)
+            # intanto il Mac (l'aggiornamento, gli script), Samuele dalla rete Tailscale e un invitato rispondono subito
+            self.assertEqual(self.veloce(None)["ruolo"], "proprietario")
+            self.assertEqual(self.veloce(SERVE_VERO)["ruolo"], "proprietario")
+            self.assertEqual(self.veloce(ugo)["ruolo"], "invitato")
+        finally:
+            for f in fili:
+                f.join(20)
+        for secondi, chiusa, risposta in esiti:
+            self.assertTrue(chiusa, (secondi, risposta[:100]))
+            self.assertLess(secondi, 7.5, risposta[:100])   # 3 s in tutto (più l'attesa di un posto), non per ogni byte
+
+    def test_2_intestazioni_a_goccia(self):
+        secondi, chiusa, _ = goccia(self.s.porta, ("GET /api/extra/io HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Lento: "
+                                                   % self.s.porta).encode())
+        self.assertTrue(chiusa)
+        self.assertLess(secondi, 5.5)
+
+    def attese(self, quante, intest, percorso):
+        """`quante` attese lunghe insieme: [(secondi, risposta)]."""
+        esiti = [None] * len(quante) if isinstance(quante, list) else [None] * quante
+        lista = quante if isinstance(quante, list) else [(intest, percorso)] * quante
+
+        def una(i):
+            t0 = time.time()
+            st, h, b = richiesta(self.s.porta, "GET", lista[i][1], intest=lista[i][0], tempo=20)
+            esiti[i] = (time.time() - t0, st, json.loads(b.decode("utf-8")) if st == 200 else b[:200])
+        fili = [threading.Thread(target=una, args=(i,)) for i in range(len(lista))]
+        for f in fili:
+            f.start()
+        return fili, esiti
+
+    def conta(self, esiti):
+        """(quante hanno aspettato, quante hanno risposto subito con «riprova»)."""
+        for secondi, st, j in esiti:
+            self.assertEqual(st, 200, j)
+        lunghe = [x for x in esiti if x[0] > 3]
+        subito = [x for x in esiti if x[0] < 2 and x[2].get("riprova", 0) > 0]
+        self.assertEqual(len(lunghe) + len(subito), len(esiti), esiti)
+        return len(lunghe), len(subito)
+
+    def test_3_attese_lunghe_di_samuele(self):
+        fili, esiti = self.attese(9, SERVE_VERO, "/api/extra/dispositivi/samuele-mac-01/comandi?attesa=4")
+        try:
+            time.sleep(0.8)
+            self.veloce(SERVE_VERO)   # le attese non tengono i posti delle richieste (qui 8)
+            self.veloce(None)
+        finally:
+            for f in fili:
+                f.join(20)
+        self.assertEqual(self.conta(esiti), (6, 3))   # al più 6 per dispositivo
+
+    def test_4_attese_lunghe_di_un_invitato(self):
+        pid, ugo = self.ospite("Ugo telefoni", "203.0.113.32")
+        altri = []
+        for _ in range(2):   # altri due dispositivi della stessa persona
+            did = self.pers.usa_invito(self.pers.invito(pid)[0], "iphone")
+            altri.append(dict(ugo, Cookie="am_accesso=" + self.pers.biscotto(did)))
+        p = "/api/extra/dispositivi/ugo-telefono-01/comandi?attesa=4"
+        fili, esiti = self.attese([(ugo, p)] * 8, None, None)
+        time.sleep(0.6)
+        fili2, esiti2 = self.attese([(altri[0], p)] * 5 + [(altri[1], p)] * 5, None, None)
+        try:
+            time.sleep(0.8)
+            self.veloce(ugo)   # le sue richieste normali passano lo stesso
+        finally:
+            for f in fili + fili2:
+                f.join(20)
+        self.assertEqual(self.conta(esiti), (6, 2))    # al più 6 per dispositivo...
+        self.assertEqual(self.conta(esiti2), (6, 4))   # ...e 12 per persona
+
+    def test_5_posti_per_invitato(self):
+        _, ada = self.ospite("Ada", "203.0.113.33")
+        _, bea = self.ospite("Bea", "203.0.113.34")
+        cookie = ada["Cookie"]
+        testa = ("POST /api/extra/idee HTTP/1.1\r\nHost: %s:10000\r\nTailscale-Funnel-Request: ?1\r\n"
+                 "X-Forwarded-For: 203.0.113.33\r\nCookie: %s\r\nContent-Type: application/json\r\n"
+                 "Content-Length: 1000\r\n\r\n{" % (NOME_VERO, cookie)).encode()
+        fili = [threading.Thread(target=goccia, args=(self.s.porta, testa)) for _ in range(3)]
+        for f in fili:
+            f.start()
+        try:
+            time.sleep(0.8)
+            self.veloce(bea)          # un'altra persona: subito
+            self.veloce(SERVE_VERO)   # Samuele: subito
+            t0 = time.time()          # Ada ha già i suoi 3 posti (qui): aspetta che uno si liberi (3 s)
+            st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io", intest=ada, tempo=15)
+            self.assertEqual(st, 200, b[:200])
+            self.assertGreater(time.time() - t0, 1.2)
+        finally:
+            for f in fili:
+                f.join(20)
+
+    def test_6_nomi_veri(self):
+        # il nome vero del Mac nella rete Tailscale, su 8448 (serve) e 10000 (funnel); un altro nome *.ts.net no
+        self.veloce(SERVE_VERO)
+        st, h, b = richiesta(self.s.porta, "GET", "/accesso", intest=dict(FUNNEL_VERO, **{"X-Forwarded-For": "203.0.113.9"}))
+        self.assertEqual(st, 200, b[:200])
+        for nome in ("altro-mac.tail1b5bf3.ts.net", "mac-mini-di-samuele.tailffff.ts.net"):
+            st, h, b = richiesta(self.s.porta, "GET", "/api/extra/io", intest=dict(
+                SERVE_VERO, **{"Host": nome + ":8448", "X-Forwarded-Host": nome + ":8448"}))
+            self.assertEqual(st, 421, nome)
+
+
+def proxy_chiede(porta, testo, poi=b"", attesa=5):
+    """Manda `testo` al proxy di yt-dlp (e `poi`, dopo la risposta al CONNECT) e legge fino alla chiusura."""
+    s = socket.create_connection(("127.0.0.1", porta), timeout=attesa)
+    dati = b""
+    try:
+        s.sendall(testo.encode())
+        if poi:
+            while b"\r\n\r\n" not in dati:
+                b = s.recv(65536)
+                if not b:
+                    return dati
+                dati += b
+            s.sendall(poi)
+        while True:
+            try:
+                b = s.recv(65536)
+            except socket.timeout:
+                break
+            if not b:
+                break
+            dati += b
+    finally:
+        s.close()
+    return dati
+
+
+class TestProxyYtdlp(unittest.TestCase):
+    """yt-dlp con un link di Samuele (un sito che non è YouTube) passa dal proxy del Mac su 127.0.0.1: ogni connessione
+    (anche dopo un rimando, o con il nome risolto di nuovo) ricontrollata con _ip_vietato, mai verso il Mac, la rete di
+    casa o Tailscale. Solo richieste per un proxy (CONNECT o indirizzo intero)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_proxy_ytdlp")
+
+        class Sito(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                corpo = ("ciao " + self.path).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(corpo)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(corpo)
+
+            def log_message(self, *x):
+                pass
+        cls.sito = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Sito)
+        threading.Thread(target=cls.sito.serve_forever, daemon=True).start()
+        cls.porta = urlsplit(cls.m._proxy_ytdlp()).port
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.sito.shutdown()
+        cls.sito.server_close()
+
+    def test_vietati(self):
+        sito = "127.0.0.1:%d" % self.sito.server_port
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_DNS_PROVE": "interno.example=192.168.1.20"}):
+            for dest in (sito, "localhost:%d" % self.sito.server_port, "[::1]:443", "10.0.0.1:443", "192.168.1.1:80",
+                         "100.64.0.10:443", "169.254.169.254:80", "[::ffff:127.0.0.1]:80", "interno.example:443",
+                         "nonesiste.invalid:443"):
+                r = proxy_chiede(self.porta, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" % (dest, dest))
+                self.assertRegex(r[:12], rb"^HTTP/1\.1 (403|502)", (dest, r[:200]))
+            r = proxy_chiede(self.porta, "GET http://%s/x HTTP/1.1\r\nHost: %s\r\n\r\n" % (sito, sito))
+            self.assertTrue(r.startswith(b"HTTP/1.1 403"), r[:200])
+        # una richiesta normale (una pagina che arriva qui con il suo nome, DNS rebinding) non è per un proxy
+        for testo in ("GET /x HTTP/1.1\r\nHost: %s\r\n\r\n" % sito, "POST / HTTP/1.1\r\nHost: x\r\n\r\n",
+                      "CONNECT %s\r\n\r\n" % sito, "GET ftp://x/ HTTP/1.1\r\n\r\n"):
+            r = proxy_chiede(self.porta, testo)
+            self.assertTrue(r.startswith(b"HTTP/1.1 400"), (testo, r[:200]))
+
+    def test_pubblici(self):
+        sito = "127.0.0.1:%d" % self.sito.server_port
+        with unittest.mock.patch.object(self.m, "_ip_vietato", lambda ip: ip != "127.0.0.1"):   # qui 127.0.0.1 è pubblico
+            r = proxy_chiede(self.porta, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" % (sito, sito),
+                             poi=b"GET /galleria HTTP/1.0\r\nHost: x\r\n\r\n")
+            self.assertTrue(r.startswith(b"HTTP/1.1 200"), r[:200])
+            self.assertTrue(r.endswith(b"ciao /galleria"), r[-200:])
+            r = proxy_chiede(self.porta, "GET http://%s/intero?a=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive"
+                                         "\r\n\r\n" % (sito, sito))
+            self.assertTrue(r.startswith(b"HTTP/1.0 200"), r[:200])
+            self.assertTrue(r.endswith(b"ciao /intero?a=1"), r[-200:])
+
+
+class FintoGestore:
+    """Quanto basta di un gestore HTTP per scrivere una risposta su un socket vero, con il tempo del server."""
+
+    def __init__(self, sock, intest=None):
+        self.connection, self.headers, self.command = sock, dict(intest or {}), "GET"
+        self.wfile = socketserver._SocketWriter(sock)
+        self.protocol_version, self.close_connection, self.path = "HTTP/1.0", False, "/"
+
+    def send_response(self, codice):
+        self.wfile.write(b"HTTP/1.1 %d X\r\n" % codice)
+
+    def send_header(self, k, v):
+        self.wfile.write(("%s: %s\r\n" % (k, v)).encode())
+
+    def end_headers(self):
+        self.wfile.write(b"\r\n")
+
+
+class TestScrittureLente(unittest.TestCase):
+    """Un telefono lento o un video in pausa: file, catalogo e audio dal proxy si scrivono a pezzi, ognuno con un tempo
+    lungo. Chi smette di leggere per più del tempo della richiesta (qui 1 s) non si vede tagliare la risposta."""
+
+    DIM = 6 * 1024 * 1024
+
+    def setUp(self):
+        self.m = carica_modulo("musica_libreria_scritture")
+        self.a, self.b = socket.socketpair()
+        self.a.settimeout(1.0)   # come il server con ATLANTE_TEMPO_RICHIESTA=1
+        self.letto = []
+
+    def tearDown(self):
+        self.a.close()
+        self.b.close()
+
+    def leggi_dopo(self, secondi):
+        def leggi():
+            time.sleep(secondi)
+            self.b.settimeout(10)
+            dati = b""
+            while True:
+                try:
+                    x = self.b.recv(1 << 20)
+                except OSError:
+                    break
+                if not x:
+                    break
+                dati += x
+                if len(dati.partition(b"\r\n\r\n")[2]) >= self.DIM:
+                    break
+            self.letto.append(dati)
+        f = threading.Thread(target=leggi)
+        f.start()
+        return f
+
+    def corpo(self, f):
+        f.join(30)
+        return self.letto[0].partition(b"\r\n\r\n")[2]
+
+    def test_file(self):
+        base = tempfile.mkdtemp(prefix="atlante-scritture-")
+        try:
+            p = os.path.join(base, "film.mp4")
+            with open(p, "wb") as fh:
+                fh.write(b"f" * self.DIM)
+            f = self.leggi_dopo(2.5)
+            h = FintoGestore(self.a)
+            self.m._invia_file(h, p, "video/mp4")
+            self.assertEqual(len(self.corpo(f)), self.DIM)
+            self.assertFalse(h.close_connection)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_catalogo(self):
+        dati = b"c" * self.DIM
+        with unittest.mock.patch.object(self.m, "_risposta_catalogo", lambda lib: (dati, dati, '"x"')):
+            f = self.leggi_dopo(2.5)
+            self.m._manda_catalogo(FintoGestore(self.a))
+            self.assertEqual(len(self.corpo(f)), self.DIM)
+
+    def test_audio_dal_proxy(self):
+        class Risposta:
+            def __init__(self, dati):
+                self.dati = dati
+
+            def isclosed(self):
+                return False
+
+            def read1(self, n):
+                x, self.dati = self.dati[:n], self.dati[n:]
+                return x
+        f = self.leggi_dopo(2.5)
+        self.m._proxy_media(FintoGestore(self.a), Risposta(b"a" * self.DIM), None, "https://x.example/a.mp3", self.DIM,
+                            "audio/mpeg")
+        self.assertEqual(len(self.corpo(f)), self.DIM)
 
 
 class TestCodaInvitati(unittest.TestCase):
@@ -9708,6 +11116,72 @@ class TestCodaInvitati(unittest.TestCase):
             for f in fili:
                 f.join(10)
         self.assertLessEqual(massimo[0], 3)
+
+    def test_yt_dlp_per_persona(self):
+        """Un invitato al più un yt-dlp alla volta, la rete di casa due, e uno sempre libero per Samuele."""
+        m = self.m
+        dentro, massimo, blocco = collections.Counter(), collections.Counter(), threading.Lock()
+        porte = collections.defaultdict(threading.Event)
+
+        def finto(args, coda=None, id_=None, progresso=None):
+            chi = args[-1].rsplit("=", 1)[-1][:4]   # Anna0000001 -> Anna
+            with blocco:
+                dentro[chi] += 1
+                massimo[chi] = max(massimo[chi], dentro[chi])
+            porte[chi].wait(10)
+            with blocco:
+                dentro[chi] -= 1
+            return {"file": "", "errore": "finto"}
+
+        def prova(vid, chi):
+            try:
+                m._prepara_audio(vid, attesa=8, chi=chi)
+            except (RuntimeError, m.ErroreExtra):
+                pass
+
+        def parti(prefisso, chi, n):
+            fili = [threading.Thread(target=prova, args=("%s%07d" % (prefisso, i), chi)) for i in range(n)]
+            for f in fili:
+                f.start()
+            return fili
+        with unittest.mock.patch.object(m, "_esegui_ytdlp", finto):
+            fili = parti("Casa", "casa", 3)
+            self.assertTrue(aspetta(lambda: dentro["Casa"] == 2, 3))
+            fili += parti("Anna", "o:anna", 3)
+            time.sleep(0.6)
+            # casa ne ha 2 (non 3); Anna aspetta: il terzo posto è di Samuele
+            self.assertEqual((massimo["Casa"], massimo["Anna"]), (2, 0))
+            fili += parti("Samu", "p", 1)
+            self.assertTrue(aspetta(lambda: dentro["Samu"] == 1, 2))   # Samuele entra subito
+            porte["Casa"].set()
+            self.assertTrue(aspetta(lambda: dentro["Anna"] == 1, 3))
+            time.sleep(0.4)
+            self.assertEqual(massimo["Anna"], 1)   # un invitato: uno alla volta
+            porte["Anna"].set()
+            porte["Samu"].set()
+            for f in fili:
+                f.join(15)
+        self.assertEqual((massimo["Casa"], massimo["Anna"], massimo["Samu"]), (2, 1, 1))
+
+    def test_yt_dlp_di_chi(self):
+        """Ascolto e scaricamento dicono di chi è il yt-dlp: l'invitato, la rete di casa o Samuele."""
+        m = self.m
+        visti = []
+
+        def finto(vid, coda=None, id_=None, progresso=None, attesa=None, chi="p"):
+            visti.append(chi)
+            raise m.ErroreExtra(503, "finto")
+        with unittest.mock.patch.object(m, "_prepara_audio", finto):
+            for ruolo, persona in (("invitato", "anna"), ("casa", None), ("proprietario", None)):
+                h = FintaRisposta("127.0.0.1")
+                h._chi = {"ruolo": ruolo, "persona": persona, "chiave": None}
+                self.errore(503, m._ascolta, h, "Ascolta0001")
+            coda = m._coda("musica")
+            for di, samuele in (("anna", False), (None, False), (None, True)):
+                l = dict(coda.lavori[m._nuova_musica({"id": "Lavoro%05d" % len(visti)}, di, "Anna", samuele)])
+                with self.assertRaises(Exception):
+                    m._scarica_musica(coda, l, None)
+        self.assertEqual(visti, ["o:anna", "casa", "p", "o:anna", "casa", "p"])
 
 
 class TestSicurezzaPiccole(unittest.TestCase):
@@ -9824,6 +11298,26 @@ class TestSicurezzaApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+class TestAtteseApp(unittest.TestCase):
+    """Le attese lunghe dell'app (telecomando, chiamate, chat, posizione, Navigatore): quando il Mac risponde subito con
+    «riprova» (troppe attese insieme da quel dispositivo), l'app aspetta quei secondi prima di richiedere, invece di
+    richiedere subito all'infinito."""
+
+    def test_riprova(self):
+        app = os.path.abspath(os.path.join(QUI, ".."))
+        visti = 0
+        for nome in ["index.html"] + ["x/" + x for x in sorted(os.listdir(os.path.join(app, "x")))]:
+            if not nome.endswith((".html", ".js")):
+                continue
+            with open(os.path.join(app, nome), encoding="utf-8") as f:
+                testo = f.read()
+            for m in re.finditer(r"attesa=25", testo):
+                visti += 1
+                # nella stessa funzione (le 1500 lettere dopo la richiesta) l'app guarda «riprova»
+                self.assertIn(".riprova", testo[m.end():m.end() + 1500], "%s: attesa lunga senza riprova" % nome)
+        self.assertGreaterEqual(visti, 7)
+
+
 class TestNotificheSW(unittest.TestCase):
     """Le notifiche nel service worker (musica/sw.js): messaggi e chiamate («Chiamata da…», «Videochiamata da…»,
     «Chiamata persa da…», tolta quando è «chiusa»), mai un «Nuovo messaggio» vuoto, e il tocco. Gira in JavaScriptCore
@@ -9835,6 +11329,23 @@ class TestNotificheSW(unittest.TestCase):
             self.skipTest("osascript non c'è: non è un Mac")
         js, sw = os.path.join(QUI, "test_notifiche.js"), os.path.abspath(os.path.join(QUI, "..", "sw.js"))
         r = subprocess.run([osa, "-l", "JavaScript", js, sw], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestTitoliScorrono(unittest.TestCase):
+    """I titoli che non stanno nel loro spazio scorrono piano (sempre alla stessa velocità, tutti insieme, solo quelli
+    sullo schermo; quelli che ci stanno restano fermi; con «Riduci movimento» restano con i «…»). Gira in JavaScriptCore
+    come test_sicurezza.js: test_titoli.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_titoli(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_titoli.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
         if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
             self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])

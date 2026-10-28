@@ -24,7 +24,9 @@ salvati e playlist stanno con l'indirizzo). Con --indirizzo chi apre la vecchia 
 da un altro dispositivo viene mandato lì. In alternativa: `tailscale cert` e --cert/--chiave.
 Il server ascolta solo sul Mac stesso (127.0.0.1): per aprirlo direttamente agli altri dispositivi ATLANTE_ASCOLTO=0.0.0.0.
 Risponde solo ai suoi nomi (contro il DNS rebinding): 127.0.0.1, localhost, [::1], quelli di --indirizzo e --pubblico,
-il nome del Mac nella rete Tailscale attraverso tailscale serve, e quelli di ATLANTE_HOST_OK (separati da virgole).
+il nome del Mac nella rete Tailscale (quello di `tailscale status`) attraverso tailscale serve, e quelli di
+ATLANTE_HOST_OK (separati da virgole). Le richieste servite insieme si contano per chi chiede (vedi «risorse del
+server»): ATLANTE_RICHIESTE_MAX (64), ATLANTE_FILI_MAX (512 connessioni aperte), ATLANTE_TEMPO_RICHIESTA (30 s).
 Per unirlo a un server esistente basta chiamare `gestisci(handler)` dentro do_GET:
 restituisce True se la richiesta era per la musica.
 
@@ -54,6 +56,7 @@ import array
 import cmath
 import base64
 import collections
+import contextlib
 import difflib
 import getpass
 import gzip
@@ -61,6 +64,7 @@ import hashlib
 import hmac
 import html
 import http.client
+import io
 import ipaddress
 import json
 import math
@@ -71,10 +75,13 @@ import platform
 import queue
 import re
 import secrets
+import selectors
 import shutil
 import signal
 import socket
+import socketserver
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -827,7 +834,8 @@ def _invia_file(h, percorso, tipo, intestazioni=None):
                 blocco = f.read(min(256 * 1024, resto))
                 if not blocco:
                     break
-                h.wfile.write(blocco)
+                # ogni pezzo con un tempo lungo: un video in pausa (il browser smette di leggere) non si taglia
+                _scrivi_a_pezzi(h, blocco, TEMPO_SCRITTURA_FILE)
                 resto -= len(blocco)
         except OSError:   # telefono che chiude la connessione, o disco scollegato a metà
             h.close_connection = True
@@ -1024,7 +1032,7 @@ def _manda_catalogo(h):
     h.send_header("Connection", "close")
     h.end_headers()
     if h.command != "HEAD" and dati:
-        h.wfile.write(dati)
+        _scrivi_a_pezzi(h, dati, TEMPO_SCRITTURA_CATALOGO)   # un telefono lento non si vede tagliare il catalogo
 
 
 def _aggiungi_brano(lib, percorso):
@@ -1901,6 +1909,8 @@ def _scarica_video(coda, l, _dati):
             "--print", "before_dl:[atlante] titolo %(title)s", "--print", "after_move:[atlante] file %(filepath)s"]
     if ff:
         args += ["--ffmpeg-location", ff]
+    if not _id_da_link(l["url"]):   # un link di Samuele (non YouTube): ogni connessione ricontrollata (_proxy_ytdlp)
+        args += ["--proxy", _proxy_ytdlp()]
     args += _formato(l.get("tipo"), l.get("qualita"), bool(ff)) + ["--", l["url"]]
     inizio, file_, errore, titolo = time.time(), "", "", ""
     parte, ultimo, prog = 0, 0.0, 0.0
@@ -2042,6 +2052,176 @@ def _link_pubblico(url):
                                "(non dal Mac stesso né dalla rete di casa)")
 
 
+# ----- proxy per yt-dlp: ogni connessione ricontrollata -----
+# _link_pubblico controlla il link prima di far partire yt-dlp, ma poi yt-dlp segue i rimandi del sito e risolve di nuovo
+# i nomi: un sito potrebbe mandarlo (con un rimando, o facendo risolvere il suo nome in un altro modo la seconda volta)
+# verso il Mac stesso o la rete di casa. Con i link di Samuele che non sono YouTube, yt-dlp passa da questo proxy sul Mac
+# (127.0.0.1, porta scelta dal sistema, --proxy): ogni connessione (CONNECT per https, l'indirizzo intero per http)
+# risolve il nome qui, controlla ogni suo indirizzo con _ip_vietato (come _proxy) e si collega proprio a un indirizzo
+# controllato; poi passa i byte così come sono, nei due sensi (https resta cifrato da yt-dlp al sito). Una pagina aperta
+# nel browser non lo può usare: manda richieste normali (non per un proxy), e quelle ricevono 400.
+
+PROXY_YTDLP_TEMPO = 120   # secondi senza un byte in nessuno dei due sensi: la connessione si chiude
+PROXY_YTDLP_MAX = 32      # connessioni insieme (yt-dlp ne apre poche)
+_PROXY_YTDLP = []
+_PROXY_YTDLP_BLOCCO = threading.Lock()
+_DESTINO = re.compile(r"\[([0-9A-Fa-f:.]{2,45})\]:([0-9]{1,5})|([A-Za-z0-9._-]{1,253}):([0-9]{1,5})")
+_METODI_PROXY = ("GET", "HEAD", "POST")
+
+
+def _collega_pubblico(host, porta):
+    """Una connessione a `host`:`porta`, solo se tutti gli indirizzi del nome sono Internet pubblico (_ip_vietato): il
+    nome si risolve qui una volta, e ci si collega a uno degli indirizzi controllati. ErroreExtra se no."""
+    if not 0 < porta < 65536:
+        raise ErroreExtra(400, "Porta non valida")
+    ips = _risolvi(host, porta)
+    if not ips:
+        raise ErroreExtra(502, "Sito non trovato: %s" % host)
+    if any(_ip_vietato(ip) for ip in ips):
+        raise ErroreExtra(403, "Indirizzo non permesso: solo siti pubblici")
+    for ip in ips:
+        try:
+            return socket.create_connection((ip, porta), timeout=15)
+        except OSError:
+            pass
+    raise ErroreExtra(502, "Sito non raggiungibile: %s" % host)
+
+
+def _travasa(a, b, tempo=PROXY_YTDLP_TEMPO):
+    """I byte da una connessione all'altra, nei due sensi, finché tutte e due non hanno finito (o per `tempo` secondi
+    nessuna manda niente). Chi ha finito di mandare lo dice all'altra (shutdown), che può ancora rispondere."""
+    altro = {a: b, b: a}
+    sel = selectors.DefaultSelector()
+    try:
+        for s in altro:
+            s.settimeout(tempo)
+            sel.register(s, selectors.EVENT_READ)
+        while sel.get_map():
+            pronti = sel.select(tempo)
+            if not pronti:
+                return
+            for k, _ in pronti:
+                try:
+                    dati = k.fileobj.recv(65536)
+                except OSError:
+                    return
+                if not dati:
+                    sel.unregister(k.fileobj)
+                    try:
+                        altro[k.fileobj].shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    altro[k.fileobj].sendall(dati)
+                except OSError:
+                    return
+    finally:
+        sel.close()
+
+
+class _GestoreProxyYtdlp(socketserver.BaseRequestHandler):
+    """Una connessione di yt-dlp: CONNECT host:porta (https) o una richiesta con l'indirizzo intero (http)."""
+
+    def _no(self, codice, testo):
+        corpo = (testo + "\n").encode("utf-8")
+        try:
+            self.request.sendall(b"HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n"
+                                 b"Connection: close\r\n\r\n%s" % (codice, http.client.responses.get(codice, "Errore").encode(),
+                                                                   len(corpo), corpo))
+        except OSError:
+            pass
+
+    def handle(self):
+        c = self.request
+        c.settimeout(30)
+        dati = b""
+        try:
+            while b"\r\n\r\n" not in dati:
+                if len(dati) > 65536:
+                    return self._no(431, "Intestazioni troppo lunghe")
+                x = c.recv(65536)
+                if not x:
+                    return
+                dati += x
+        except OSError:
+            return
+        testa, _, resto = dati.partition(b"\r\n\r\n")
+        righe = testa.decode("latin-1").split("\r\n")
+        parti = righe[0].split(" ")
+        if len(parti) != 3 or parti[2] not in ("HTTP/1.0", "HTTP/1.1"):
+            return self._no(400, "Richiesta non valida")
+        metodo, dest, versione = parti
+        try:
+            if metodo == "CONNECT":   # https: il tunnel verso il sito, e dentro yt-dlp parla cifrato con lui
+                m = _DESTINO.fullmatch(dest)
+                if not m:
+                    return self._no(400, "Destinazione non valida")
+                host, porta = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+                s = _collega_pubblico(host, int(porta))
+                c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            else:   # http: solo con l'indirizzo intero (una richiesta normale non è per un proxy)
+                try:
+                    u = urlsplit(dest)
+                    host, porta = u.hostname, u.port or 80
+                except ValueError:
+                    u = host = None
+                if metodo not in _METODI_PROXY or u is None or u.scheme != "http" or not host or not dest.startswith("http://"):
+                    return self._no(400, "Solo richieste per un proxy")
+                s = _collega_pubblico(host, porta)
+                # al sito la richiesta normale, e una sola: alla fine il sito chiude, e così anche la connessione con
+                # yt-dlp (una richiesta dopo, magari per un altro sito, ripassa da qui e si ricontrolla)
+                percorso = (u.path or "/") + ("?" + u.query if u.query else "")
+                via = ("proxy-connection", "proxy-authorization", "connection", "keep-alive")
+                nuove = ["%s %s %s" % (metodo, percorso, versione)] + \
+                    [r for r in righe[1:] if r.split(":", 1)[0].strip().lower() not in via] + ["Connection: close"]
+                resto = "\r\n".join(nuove).encode("latin-1") + b"\r\n\r\n" + resto
+        except ErroreExtra as e:
+            return self._no(e.codice, e.testo)
+        try:
+            if resto:
+                s.sendall(resto)
+            _travasa(c, s)
+        except OSError:
+            pass
+        finally:
+            s.close()
+
+
+class _ServerProxyYtdlp(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+
+    def __init__(self, *a, **k):
+        self.posti = threading.BoundedSemaphore(PROXY_YTDLP_MAX)
+        super().__init__(*a, **k)
+
+    def process_request(self, request, client_address):
+        if not self.posti.acquire(blocking=False):   # troppe insieme: questa si chiude subito
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.posti.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.posti.release()
+
+
+def _proxy_ytdlp():
+    """L'indirizzo del proxy per yt-dlp (http://127.0.0.1:porta), avviato la prima volta che serve."""
+    with _PROXY_YTDLP_BLOCCO:
+        if not _PROXY_YTDLP:
+            srv = _ServerProxyYtdlp(("127.0.0.1", 0), _GestoreProxyYtdlp)
+            threading.Thread(target=srv.serve_forever, daemon=True, name="proxy-ytdlp").start()
+            _PROXY_YTDLP.append("http://127.0.0.1:%d" % srv.server_address[1])
+        return _PROXY_YTDLP[0]
+
+
 # ----- musica da internet: ricerca, ascolto e scaricamento nella libreria -----
 #
 # La ricerca fa la stessa richiesta delle pagine web di YouTube Music e YouTube (youtubei/v1/search): risponde in un
@@ -2055,11 +2235,13 @@ YOUTUBEI = {"ytm": ("https://music.youtube.com", {"clientName": "WEB_REMIX", "cl
                     "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"),   # filtro «Brani»
             "yt": ("https://www.youtube.com", {"clientName": "WEB", "clientVersion": "2.20251020.01.00"}, None)}
 ID_YT = re.compile(r"^[A-Za-z0-9_-]{11}$")
-# solo tra parentesi o dopo un trattino («(Clean)», «- Radio Edit»): «Clean» di Taylor Swift o i Clean Bandit no
-CENSURATA = re.compile(r"[(\[\-–—][^()\[\]]*?\b(clean|censored|censurat[ao]|edited|radio edit)\b", re.I)
-# pezzi dei titoli dei video che non fanno parte del nome del brano
-RUMORE = re.compile(r"\s*[(\[][^()\[\]]*\b(official|video|audio|lyrics?|testo|visuali[sz]er|videoclip|ufficiale|hd|4k|mv)\b"
-                    r"[^()\[\]]*[)\]]", re.I)
+# solo tra parentesi o dopo un trattino («(Clean)», «- Radio Edit»): «Clean» di Taylor Swift o i Clean Bandit no.
+# Al più 100 caratteri tra l'inizio e la parola: con tanti trattini di seguito la ricerca non diventa lentissima
+CENSURATA = re.compile(r"[(\[\-–—][^()\[\]]{0,100}?\b(clean|censored|censurat[ao]|edited|radio edit)\b", re.I)
+# pezzi dei titoli dei video che non fanno parte del nome del brano. (?<!\s): gli spazi prima si prendono partendo dal
+# primo, non da ognuno (con tanti spazi di seguito la ricerca costerebbe il loro quadrato e terrebbe fermo il server)
+RUMORE = re.compile(r"(?<!\s)\s*[(\[][^()\[\]]*\b(official|video|audio|lyrics?|testo|visuali[sz]er|videoclip|ufficiale|hd|"
+                    r"4k|mv)\b[^()\[\]]*[)\]]", re.I)
 HOST_COPERTINE = ("googleusercontent.com", "ggpht.com", "ytimg.com", "sndcdn.com", "bcbits.com")
 MAX_COPERTINA = 5 * 1024 * 1024
 ASCOLTI_MAX = 40       # brani pronti per l'ascolto tenuti nella cache (i più vecchi si cancellano)
@@ -2141,7 +2323,7 @@ def _da_titolo_video(titolo, canale):
     if " - " in t:
         a, t = t.split(" - ", 1)
         return a.strip(), t.strip()
-    canale = re.sub(r"\s*(?:- Topic|VEVO)$", "", canale or "").strip()
+    canale = re.sub(r"(?<!\s)\s*(?:- Topic|VEVO)$", "", canale or "").strip()
     return canale, t
 
 
@@ -2289,24 +2471,76 @@ _blocco_preparazioni = threading.Lock()
 
 
 PREPARA_MAX = 3           # yt-dlp insieme per ascoltare prima e scaricare da YouTube (gli altri aspettano il turno)
+PREPARA_PERSONA = 1       # di uno stesso invitato (uno sempre libero per Samuele: vedi PostiPrepara)
+PREPARA_CASA = 2          # della rete di casa
 ATTESA_PREPARA = 20       # secondi che un ascolto aspetta il suo turno, poi 503 (lo scaricamento in coda aspetta e basta)
-_PREPARA_POSTI = threading.BoundedSemaphore(PREPARA_MAX)
 
 
-def _turno(coda, id_, attesa):
-    """Un posto tra i PREPARA_MAX yt-dlp che preparano un audio. Un lavoro in coda aspetta finché serve (e si può
-    annullare intanto); un ascolto al più `attesa` secondi, poi 503."""
+class PostiPrepara:
+    """I posti dei yt-dlp che preparano un audio: al più PREPARA_MAX insieme; uno è sempre libero per Samuele, ogni
+    invitato ne usa al più PREPARA_PERSONA e la rete di casa PREPARA_CASA. Così un invitato con tanti ascolti insieme non
+    tiene fermi gli altri (e mai Samuele). `chi`: "p" per Samuele, "casa", o "o:<persona>" per un invitato."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.uso = collections.Counter()
+
+    @staticmethod
+    def _massimo(chi):
+        return PREPARA_MAX if chi == "p" else PREPARA_CASA if chi == "casa" else PREPARA_PERSONA
+
+    def _libero(self, chi):
+        tutti = sum(self.uso.values())
+        if tutti >= PREPARA_MAX or self.uso[chi] >= self._massimo(chi):
+            return False
+        return chi == "p" or tutti - self.uso["p"] < PREPARA_MAX - 1
+
+    def prendi(self, chi, attesa):
+        """True con un posto (da lasciare con lascia); False se non se n'è liberato uno entro `attesa` secondi."""
+        fine = time.monotonic() + attesa
+        with self.cond:
+            while not self._libero(chi):
+                resto = fine - time.monotonic()
+                if resto <= 0:
+                    return False
+                self.cond.wait(resto)
+            self.uso[chi] += 1
+            return True
+
+    def lascia(self, chi):
+        with self.cond:
+            self.uso[chi] -= 1
+            if self.uso[chi] <= 0:
+                del self.uso[chi]
+            self.cond.notify_all()
+
+
+_PREPARA_POSTI = PostiPrepara()
+
+
+def _turno(coda, id_, attesa, chi="p"):
+    """Un posto tra quelli dei yt-dlp che preparano un audio (PostiPrepara). Un lavoro in coda aspetta finché serve (e si
+    può annullare intanto); un ascolto al più `attesa` secondi, poi 503."""
     if coda is None:
-        if not _PREPARA_POSTI.acquire(timeout=ATTESA_PREPARA if attesa is None else attesa):
+        if not _PREPARA_POSTI.prendi(chi, ATTESA_PREPARA if attesa is None else attesa):
             raise ErroreExtra(503, "Il Mac sta già preparando altri brani: riprova fra poco")
         return
-    while not _PREPARA_POSTI.acquire(timeout=1):
+    while not _PREPARA_POSTI.prendi(chi, 1):
         coda.controlla(id_)
 
 
-def _prepara_audio(vid, coda=None, id_=None, progresso=None, attesa=None):
+def _di_prepara(h):
+    """Di chi è un ascolto, per i posti dei yt-dlp: "p" per Samuele, "casa" per la rete di casa, "o:<persona>"."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "invitato":
+        return "o:%s" % chi["persona"]
+    return "p" if chi["ruolo"] == "proprietario" else "casa"
+
+
+def _prepara_audio(vid, coda=None, id_=None, progresso=None, attesa=None, chi="p"):
     """L'audio originale del brano (m4a se c'è) nella cache degli ascolti, scaricato una volta sola: lo usano ▶︎ e ⬇︎.
-    Due richieste insieme per lo stesso brano (l'iPhone ne fa più d'una, a pezzi) aspettano lo stesso scaricamento."""
+    Due richieste insieme per lo stesso brano (l'iPhone ne fa più d'una, a pezzi) aspettano lo stesso scaricamento.
+    `chi` (vedi PostiPrepara) dice di chi è il yt-dlp."""
     with _blocco_preparazioni:
         b = _PREPARAZIONI.setdefault(vid, threading.Lock())
     with b:
@@ -2319,7 +2553,7 @@ def _prepara_audio(vid, coda=None, id_=None, progresso=None, attesa=None):
             raise ErroreExtra(503, "yt-dlp non è installato sul Mac: brew install yt-dlp ffmpeg")
         tmp = tempfile.mkdtemp(prefix="ascolto-", dir=_cartella_tmp())
         try:
-            _turno(coda, id_, attesa)
+            _turno(coda, id_, attesa, chi)
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
@@ -2346,14 +2580,14 @@ def _prepara_audio(vid, coda=None, id_=None, progresso=None, attesa=None):
             return dest
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-            _PREPARA_POSTI.release()
+            _PREPARA_POSTI.lascia(chi)
 
 
 def _ascolta(h, vid):
     if not ID_YT.match(vid or ""):
         raise ErroreExtra(400, "Brano non valido")
     try:
-        p = _prepara_audio(vid)
+        p = _prepara_audio(vid, chi=_di_prepara(h))
     except RuntimeError as e:
         if _chi_e(h)["ruolo"] != "proprietario":   # agli altri l'errore di yt-dlp così com'è non arriva
             print("Atlante: ascolto di %s non riuscito: %s" % (vid, e), flush=True)
@@ -2499,12 +2733,15 @@ def _scarica_brano(coda, l):
     avanza = lambda pct: coda.aggiorna(l["id"], progresso=round(min(pct, 100) * 0.8, 1))   # noqa: E731
     try:
         if l.get("yt"):
-            sorgente = _prepara_audio(l["yt"], coda, l["id"], avanza)
+            chi = "o:%s" % l["di"] if l.get("di") else l.get("_posto") or "p"   # vedi PostiPrepara
+            sorgente = _prepara_audio(l["yt"], coda, l["id"], avanza, chi=chi)
             info = _info_ascolto(l["yt"])
         else:   # link di un altro sito (SoundCloud, Bandcamp…): titolo, artista e copertina dalla sua pagina
+            # ogni connessione di yt-dlp (rimandi, nomi risolti di nuovo) ricontrollata dal proxy del Mac
             info = _esegui_ytdlp([_programma("yt-dlp"), "--newline", "--progress", "--no-playlist", "--no-mtime",
                                   "-f", "ba/b", "--max-filesize", str(BRANO_MAX), "-P", "home:" + tmp, "-P", "temp:" + tmp,
-                                  "-o", "%(id).80B.%(ext)s"] + _STAMPE_INFO + ["--", l["url"]], coda, l["id"], avanza)
+                                  "--proxy", _proxy_ytdlp(), "-o", "%(id).80B.%(ext)s"] + _STAMPE_INFO + ["--", l["url"]],
+                                 coda, l["id"], avanza)
             if not info["file"]:
                 raise RuntimeError(info["errore"] or "yt-dlp non è riuscito a scaricare l'audio")
             sorgente = info["file"]
@@ -2592,7 +2829,8 @@ def _nuova_musica(corpo, di=None, chi_nome="", samuele=False):
                               "titolo": testo("titolo", 300) or ("" if vid else url), "artista": testo("artista", 300),
                               "album": testo("album", 300), "copertina": testo("copertina", 1000),
                               "explicit": bool(corpo.get("explicit")), "nome": "", "dimensione": 0, "brano": "",
-                              **({"di": di, "chi_nome": chi_nome, "controllo": True, "caricamento": ""} if di else {})})
+                              **({"di": di, "chi_nome": chi_nome, "controllo": True, "caricamento": ""} if di else
+                                 {} if samuele else {"_posto": "casa"})})   # la rete di casa: i suoi posti di yt-dlp
 
 
 def _annulla_musica(id_, di=None):
@@ -2674,8 +2912,11 @@ class Dispositivi:
             x["sid"] = b["sid"] if isinstance(b["sid"], str) and re.fullmatch(r"[A-Za-z0-9_-]{0,64}", b["sid"]) else ""
         if "copertina" in b:
             c = b["copertina"]
-            ok = isinstance(c, str) and len(c) <= 2000 and not re.search(r"[\x00-\x20\x7f\"'<>\\`]", c) and \
-                urlsplit(c).scheme.lower() in ("http", "https", "blob")
+            ok = isinstance(c, str) and len(c) <= 2000 and not re.search(r"[\x00-\x20\x7f\"'<>\\`]", c)
+            try:
+                ok = ok and urlsplit(c).scheme.lower() in ("http", "https", "blob")
+            except ValueError:   # un indirizzo che non si legge (es. «http://[::1»): vuota, non un errore 500
+                ok = False
             x["copertina"] = c if ok else ""
         if "durata" in b:
             d = b["durata"]
@@ -3300,7 +3541,9 @@ def _posizione(h, metodo, cosa, resto, corpo):
                 v, attesa = int((q.get("v") or ["0"])[0]), float((q.get("attesa") or ["0"])[0])
             except ValueError:
                 raise ErroreExtra(400, "Parametri non validi")
-            return _json(h, pz.elenco(persona, accesso, (q.get("disp") or [""])[0], v, attesa))
+            with _attesa_lunga(h, attesa) as a:
+                r = pz.elenco(persona, accesso, (q.get("disp") or [""])[0], v, a["secondi"])
+            return _json(h, _con_riprova(r, a))
         if cosa == "posizione" and not resto and metodo == "POST":
             return _json(h, pz.crea(persona, accesso, corpo))
         if cosa == "posizione" and len(resto) == 1 and metodo in ("POST", "DELETE"):
@@ -4100,13 +4343,78 @@ TESTI_SCARTO = 3.0                # secondi di differenza ammessi tra la durata 
 TESTI_PAUSA = 1.5                 # LRCLIB «occupato» (429, 5xx: capita, la volta dopo risponde): si riprova dopo 1,5 s
 TESTI_MAX = 2 * 1024 * 1024
 TESTI_MAX_LRC = 512 * 1024        # un file .lrc più grande non è un testo
-_TESTI_BLOCCO = threading.Lock()  # una richiesta a LRCLIB alla volta (il lucchetto si tiene per una richiesta, non per tutta
-#                                   la ricerca: così l'app non aspetta dietro il lavoro su tutta la libreria)
-_TESTI_ERRORI = {}                # chiave del brano → quando LRCLIB non ha risposto
+# Su LRCLIB chiunque può pubblicare un testo: quello che arriva da lì non deve fermare il server né riempire il disco.
+TESTI_TEMPO_MAX = 20              # secondi al più per tutta una richiesta a LRCLIB (collegamento, intestazioni, corpo)
+TESTI_MAX_TESTO = 256 * 1024      # un testo (Lyricsfile, LRC, testo semplice) più lungo non è un testo: da LRCLIB non si
+#                                   tiene, da un file si legge solo fin lì
+TESTI_MAX_RIGA = 2000             # una riga più lunga si tronca prima di leggerla
+TESTI_MAX_NOME = 300              # titolo e artista di LRCLIB: si confrontano i primi 300 caratteri
+TESTI_RIGHE_MAX = 5000            # righe al più in un testo (una canzone ne ha qualche centinaio)
+TESTI_PAROLE_MAX = 20000          # parole a tempo al più in un testo
+TESTI_RECORD_MAX = 256 * 1024     # una risposta di LRCLIB più grande non si tiene nella cache del Mac
+TESTI_CACHE_MAX = 200 * 1024 ** 2  # la cache delle risposte di LRCLIB (<cache>/testi/*.json): oltre, via le più vecchie
+TESTI_CACHE_TOCCA = 86400         # una risposta letta dalla cache torna «nuova» (al più una volta al giorno)
+TESTI_SPAZIO_MIN = 5.0            # GB liberi sotto i quali la cache non si scrive (ATLANTE_TESTI_SPAZIO_MIN_GB)
+TESTI_ERRORI_MAX = 1000           # brani ricordati come «LRCLIB non risponde» (per un minuto)
+# api/extra/testi dall'app: una ricerca nuova (non nella cache) si fa in un filo a parte; la richiesta la aspetta al più
+# TESTI_ATTESA secondi, poi risponde «in arrivo» e l'app richiede (come per Whisper): i posti del server non restano
+# occupati. Gli invitati: una ricerca nuova alla volta e al più TESTI_OSPITE_ORA all'ora; oltre, 429 subito
+TESTI_ATTESA = 4.0                # ATLANTE_TESTI_ATTESA
+TESTI_OSPITE_ORA = 20             # ATLANTE_TESTI_OSPITE_ORA
+TESTI_IN_CORSO = {True: 3, False: 1}   # ricerche nuove insieme a testa: Samuele (True), gli altri (False)
+TESTI_RICERCHE_MAX = 16           # ricerche nuove insieme in tutto, di chi non è Samuele
+TESTI_TENUTA = 120                # secondi in cui una ricerca finita si ricorda (anche se la cache non l'ha scritta)
+_TESTI_ERRORI = collections.OrderedDict()   # chiave del brano → quando LRCLIB non ha risposto
 _TESTI_ULTIMA = [0.0]             # quando è partita l'ultima richiesta a LRCLIB
 _TESTI_APP = [0]                  # ricerche chieste dall'app in corso: il lavoro su tutta la libreria aspetta che finiscano
 _TESTI_APP_BLOCCO = threading.Lock()
-_TESTI_CHIAVI = {}                # chiave del brano → lucchetto: la stessa ricerca una volta sola, anche da due dispositivi
+_TESTI_CHIAVI = {}                # chiave del brano → [lucchetto, quanti lo usano]: la stessa ricerca una volta sola, anche
+#                                   da due dispositivi (il lucchetto si toglie quando nessuno lo usa più)
+_TESTI_RICERCHE = {}              # chiave del brano → la ricerca dell'app in corso (o finita da poco)
+_TESTI_GETTONI = {}               # chi → [gettoni, quando]: le ricerche nuove che un invitato può ancora fare quest'ora
+_TESTI_CACHE = {"tot": None}      # quanto pesa la cache delle risposte di LRCLIB (si misura alla prima scrittura)
+_TESTI_LETTI = collections.OrderedDict()   # impronta di una risposta di LRCLIB → le sue righe già lette
+_TESTI_LETTI_MAX = 200            # risposte lette ricordate al più…
+_TESTI_LETTI_PESO = 200000        # …e righe più parole in tutto (un testo enorme non riempie la memoria)
+_TESTI_LETTI_TOT = [0]
+
+
+class _Turno:
+    """Il turno per LRCLIB: una richiesta alla volta (al più una al secondo). Passa prima Samuele (0), poi gli altri (1),
+    poi il lavoro su tutta la libreria (2), che aspetta anche finché una ricerca dell'app è a metà: così l'app non
+    aspetta dietro tutta la ricerca del lavoro in sottofondo, e un invitato non passa davanti a Samuele."""
+
+    def __init__(self):
+        self.c = threading.Condition()
+        self.occupato = False
+        self.attese = [0, 0, 0]
+
+    @contextlib.contextmanager
+    def turno(self, priorita):
+        p = max(0, min(2, int(priorita)))
+        with self.c:
+            self.attese[p] += 1
+            try:
+                while self.occupato or any(self.attese[:p]) or (p == 2 and _TESTI_APP[0] > 0):
+                    self.c.wait(0.1)
+            finally:
+                self.attese[p] -= 1
+            self.occupato = True
+        try:
+            yield
+        finally:
+            with self.c:
+                self.occupato = False
+                self.c.notify_all()
+
+
+_TESTI_TURNO = _Turno()
+_TESTI_PRIORITA = threading.local()   # il turno di chi cerca in questo filo: 0 Samuele, 1 gli altri (senza: 1)
+
+
+class TestiInArrivo(Exception):
+    """La ricerca del testo su LRCLIB è partita ma non è ancora finita: l'app riceve «in arrivo» e richiede."""
+
 
 _LRC_TEMPO = re.compile(r"\[(\d{1,3}):(\d{1,2}(?:[.:,]\d{1,3})?)\]")
 _LRC_PAROLA = re.compile(r"<(\d{1,3}):(\d{1,2}(?:[.:,]\d{1,3})?)>")
@@ -4140,19 +4448,33 @@ def _pezzi_riga(pezzi):
     return [(a, x) for a, x in v]
 
 
+def _righe_limitate(testo, splitlines=False):
+    """Le righe di un testo da leggere: al più TESTI_MAX_TESTO caratteri in tutto e TESTI_MAX_RIGA per riga (un testo
+    di LRCLIB lo può scrivere chiunque: senza limiti la lettura terrebbe fermo il server)."""
+    x = str(testo or "")[:TESTI_MAX_TESTO]
+    righe = x.splitlines() if splitlines else x.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return [r[:TESTI_MAX_RIGA] for r in righe]
+
+
 def leggi_lrc(testo):
     """Righe di un testo LRC, in ordine di tempo: più tempi sulla stessa riga (il ritornello), [offset:±ms], i tempi delle
-    parole <mm:ss.xx> (LRC «enhanced»). Le righe senza tempo non contano; [] se il testo non ha tempi."""
-    spost, righe = 0.0, []
-    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    parole <mm:ss.xx> (LRC «enhanced»). Le righe senza tempo non contano; [] se il testo non ha tempi. Al più
+    TESTI_RIGHE_MAX righe e TESTI_PAROLE_MAX parole a tempo (oltre, le righe restano senza le parole)."""
+    spost, righe, n_parole = 0.0, [], 0
+    for r in _righe_limitate(testo):
+        if len(righe) >= TESTI_RIGHE_MAX:
+            break
         r = r.strip().lstrip("﻿")
-        tempi = []
-        while True:
-            m = _LRC_TEMPO.match(r)
+        tempi, pos = [], 0
+        while True:   # i tempi in testa alla riga, letti di seguito (senza ricopiare la riga a ogni tempo)
+            m = _LRC_TEMPO.match(r, pos)
             if not m:
                 break
             tempi.append(_lrc_secondi(*m.groups()))
-            r = r[m.end():].lstrip()
+            pos = m.end()
+            while pos < len(r) and r[pos].isspace():
+                pos += 1
+        r = r[pos:]
         if not tempi:
             m = _LRC_META.match(r)
             if m and m.group(1).lower() == "offset":
@@ -4177,6 +4499,11 @@ def leggi_lrc(testo):
         else:
             testo_riga = _spazi(r).strip()
         for t in tempi:
+            if len(righe) >= TESTI_RIGHE_MAX:
+                break
+            if n_parole + len(parole) > TESTI_PAROLE_MAX:
+                parole = []   # troppe parole a tempo: le righe restano, senza
+            n_parole += len(parole)
             d = t - tempi[0] - spost   # il ritornello ripetuto: le sue parole spostate con lui
             righe.append(_riga(t - spost, testo_riga, [(a + d, x) for a, x in parole],
                                None if fine is None else fine + d))
@@ -4187,7 +4514,9 @@ def leggi_lrc(testo):
 def testi_semplici(testo):
     """Le righe di un testo senza tempi: spazi in ordine, al più una riga vuota tra le strofe."""
     righe = []
-    for r in str(testo or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    for r in _righe_limitate(testo):
+        if len(righe) >= TESTI_RIGHE_MAX:
+            break
         r = _spazi(r).strip()
         if r or (righe and righe[-1]["testo"]):
             righe.append({"t": None, "testo": r})
@@ -4209,8 +4538,26 @@ _YAML_ESC = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "
              "N": "\x85", "_": "\xa0", "L": " ", "P": " "}
 
 
+def _senza_surrogati(x):
+    """Il testo (anche dentro liste e dizionari, come arriva da un JSON) senza «surrogati» soli: \\ud800 da solo non è
+    un carattere, e scrivendolo in UTF-8 (la cache, la risposta) tutto cadrebbe. Le coppie giuste diventano il loro
+    carattere, quelli soli «�»."""
+    if isinstance(x, str):
+        try:
+            x.encode("utf-8")
+            return x
+        except UnicodeEncodeError:
+            return x.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    if isinstance(x, list):
+        return [_senza_surrogati(v) for v in x]
+    if isinstance(x, dict):
+        return {_senza_surrogati(k): _senza_surrogati(v) for k, v in x.items()}
+    return x
+
+
 def _yaml_valore(v):
-    """Un valore semplice di YAML: 'tra apici', "tra virgolette" (con \\u…), senza niente; None se manca."""
+    """Un valore semplice di YAML: 'tra apici', "tra virgolette" (con \\u…), senza niente; None se manca. Un carattere
+    che non esiste (\\U00110000, un surrogato solo) diventa «�»: la lettura non cade."""
     v = v.strip()
     m = re.match(r"'((?:[^']|'')*)'", v)
     if m:
@@ -4219,9 +4566,16 @@ def _yaml_valore(v):
     if m:
         def esc(x):
             c = x.group(1)
-            return chr(int(c[1:], 16)) if c[0] in "xuU" else _YAML_ESC.get(c, c)
-        return re.sub(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)", esc, m.group(1))
-    v = re.sub(r"\s+#.*$", "", v)
+            if c[0] not in "xuU":
+                return _YAML_ESC.get(c, c)
+            n = int(c[1:], 16)
+            return chr(n) if n <= 0x10FFFF else "\ufffd"
+        return _senza_surrogati(re.sub(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)", esc, m.group(1)))
+    # il commento (« # …») via, in un passaggio solo: con re.sub(r"\s+#.*$") una riga di tanti spazi costava il quadrato
+    # degli spazi, e Python tiene fermi tutti gli altri fili del server mentre un'espressione regolare lavora
+    c = re.search(r"\s#", v)
+    if c:
+        v = v[:c.start()].rstrip()
     return None if v in ("", "~", "null") or v[:1] in "|>" else v
 
 
@@ -4234,9 +4588,10 @@ def _yaml_ms(v):
 
 def leggi_lyricsfile(testo):
     """Le righe del Lyricsfile di LRCLIB (lines: text, start_ms, end_ms, words: …), con le parole quando hanno tutte il
-    loro tempo. Si legge solo questa forma, riga per riga (niente YAML completo: la libreria standard non ce l'ha)."""
-    voci, riga, parola, liv, dentro = [], None, None, None, False
-    for raw in str(testo or "").splitlines():
+    loro tempo. Si legge solo questa forma, riga per riga (niente YAML completo: la libreria standard non ce l'ha). Al
+    più TESTI_RIGHE_MAX righe e TESTI_PAROLE_MAX parole."""
+    voci, riga, parola, liv, dentro, n_parole = [], None, None, None, False, 0
+    for raw in _righe_limitate(testo, splitlines=True):
         s = raw.rstrip()
         if not s.strip() or s.lstrip().startswith("#"):
             continue
@@ -4258,6 +4613,8 @@ def leggi_lyricsfile(testo):
             continue
         if ind <= liv:   # i campi della riga
             if nuovo:
+                if len(voci) >= TESTI_RIGHE_MAX:
+                    break
                 riga, parola = {"parole": []}, None
                 voci.append(riga)
             if riga is None:
@@ -4268,8 +4625,12 @@ def leggi_lyricsfile(testo):
                 riga[k] = _yaml_ms(v)
         elif riga is not None:   # una parola (dentro words:)
             if nuovo:
-                parola = {}
-                riga["parole"].append(parola)
+                n_parole += 1
+                parola = {} if n_parole <= TESTI_PAROLE_MAX else None
+                if parola is not None:
+                    riga["parole"].append(parola)
+                else:
+                    riga["troppe"] = True   # troppe parole: la riga resta, con il suo testo e senza le parole
             if parola is not None and k == "text":
                 parola["testo"] = _yaml_valore(v) or ""
             elif parola is not None and k == "start_ms":
@@ -4278,7 +4639,7 @@ def leggi_lyricsfile(testo):
     for r in voci:
         if r.get("start_ms") is None:
             continue
-        p = r["parole"]
+        p = [] if r.get("troppe") else r["parole"]
         pezzi = _pezzi_riga([(x["t"], x.get("testo", "")) for x in p]) if p and all(x.get("t") is not None for x in p) else []
         testo_riga = "".join(x for _, x in pezzi) if pezzi else _spazi("".join(x.get("testo", "") for x in p) if p else r.get("testo")).strip()
         righe.append(_riga(r["start_ms"], testo_riga, pezzi, r.get("end_ms")))
@@ -4448,16 +4809,27 @@ def _testi_risposta(righe, fonte, sincronizzato):
 
 
 def _testo_lrc_accanto(percorso):
-    """Il testo del file .lrc accanto al brano (stesso nome, come lo salvano i programmi per il karaoke), o ''."""
+    """Il testo del file .lrc accanto al brano (stesso nome, come lo salvano i programmi per il karaoke), o ''. Solo un
+    file vero: un collegamento non si segue (porterebbe fuori dalla musica) e una «pipe» o un dispositivo non si
+    aspettano (O_NONBLOCK: l'apertura non resta ferma)."""
     base = os.path.splitext(percorso)[0]
     for est in (".lrc", ".LRC", ".Lrc"):
         try:
-            if os.path.getsize(base + est) > TESTI_MAX_LRC:
-                continue
-            with open(base + est, "rb") as f:
-                b = f.read()
+            fd = os.open(base + est, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         except OSError:
             continue
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > TESTI_MAX_LRC:
+                continue
+            with os.fdopen(fd, "rb") as f:
+                fd = None
+                b = f.read(TESTI_MAX_LRC + 1)
+        except OSError:
+            continue
+        finally:
+            if fd is not None:
+                os.close(fd)
         try:
             return b.decode("utf-8-sig")
         except UnicodeDecodeError:
@@ -4499,31 +4871,125 @@ def testi_dal_file(percorso):
 
 # ----- LRCLIB -----
 
+class _SenzaRimandi(urllib.request.HTTPRedirectHandler):
+    """LRCLIB e MyMemory: un rimando (30x) non si segue, è un errore (HTTPError): il sito giusto risponde da sé."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class _Scadenza:
+    """Un tempo massimo per tutta una richiesta in rete: collegamento, intestazioni e corpo. Il timeout di urllib vale per
+    ogni singola lettura: un sito che manda un byte ogni tanto lo allungherebbe all'infinito (e intanto terrebbe il
+    turno di LRCLIB). Alla scadenza le connessioni della richiesta si chiudono e la lettura si interrompe."""
+
+    def __init__(self, secondi):
+        self.secondi, self.scaduta, self.socket = max(0.1, float(secondi)), False, []
+        self.blocco = threading.Lock()
+        self.timer = threading.Timer(self.secondi, self._scade)
+        self.timer.daemon = True
+
+    @staticmethod
+    def _chiudi(sock):
+        try:
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)   # anche sotto TLS: la lettura ferma in un altro filo si sveglia
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def registra(self, sock):
+        with self.blocco:
+            self.socket.append(sock)
+            scaduta = self.scaduta
+        if scaduta:
+            self._chiudi(sock)
+
+    def _scade(self):
+        with self.blocco:
+            self.scaduta = True
+            tutti = list(self.socket)
+        for s in tutti:
+            self._chiudi(s)
+
+    def conn(self, base):
+        """La classe di connessione di http.client che fa conoscere il suo socket alla scadenza."""
+        scadenza = self
+
+        class Conn(base):
+            def connect(self):
+                super().connect()
+                scadenza.registra(self.sock)
+        return Conn
+
+
+class _HTTPEntro(urllib.request.HTTPHandler):
+    def __init__(self, scadenza):
+        super().__init__()
+        self.scadenza = scadenza
+
+    def http_open(self, req):
+        return self.do_open(self.scadenza.conn(http.client.HTTPConnection), req)
+
+
+class _HTTPSEntro(urllib.request.HTTPSHandler):
+    def __init__(self, scadenza):
+        super().__init__(context=_ssl())
+        self.scadenza = scadenza
+
+    def https_open(self, req):
+        return self.do_open(self.scadenza.conn(http.client.HTTPSConnection), req, context=self._context)
+
+
+def _leggi_url(req, secondi, massimo):
+    """Il corpo della risposta a `req`, al più `massimo` byte, senza seguire i rimandi (un 30x è un HTTPError, come un
+    404) ed entro `secondi` in tutto: oltre, socket.timeout (un OSError)."""
+    sc = _Scadenza(secondi)
+    apri = urllib.request.build_opener(_SenzaRimandi, _HTTPEntro(sc), _HTTPSEntro(sc)).open
+    sc.timer.start()
+    try:
+        with apri(req, timeout=min(sc.secondi, 30)) as r:
+            pezzi, n = [], 0
+            while n < massimo:
+                b = r.read(min(65536, massimo - n))
+                if not b:
+                    break
+                pezzi.append(b)
+                n += len(b)
+        if sc.scaduta:
+            raise socket.timeout("nessuna risposta completa in %d secondi" % sc.secondi)
+        return b"".join(pezzi)
+    except (OSError, ValueError, http.client.HTTPException):
+        if sc.scaduta:
+            raise socket.timeout("nessuna risposta completa in %d secondi" % sc.secondi) from None
+        raise
+    finally:
+        sc.timer.cancel()
+
+
 def _lrclib_chiedi(percorso, parametri, riprova=True, sfondo=False):
     """Il JSON di LRCLIB; None se non ha il brano (404). ErroreExtra 503 se non risponde. Una risposta «occupato» (429,
-    5xx) si riprova una volta; un sito che non risponde no (il telefono aspetterebbe troppo). Con sfondo (il lavoro su
-    tutta la libreria) prima passano le ricerche chieste dall'app."""
+    5xx) si riprova una volta; un sito che non risponde no (il telefono aspetterebbe troppo). Una richiesta alla volta,
+    nel turno: prima Samuele, poi gli altri (_TESTI_PRIORITA), poi (sfondo) il lavoro su tutta la libreria, che lascia
+    passare prima le ricerche chieste dall'app. Niente rimandi, al più TESTI_TEMPO_MAX secondi in tutto, e il testo
+    senza surrogati soli (non si potrebbe salvare né mandare)."""
     base = (os.environ.get("ATLANTE_LRCLIB") or TESTI_LRCLIB).rstrip("/")   # le prove usano un LRCLIB finto
     url = base + percorso + "?" + urlencode(parametri)
     req = urllib.request.Request(url, headers={"User-Agent": _agente_testi(), "Accept": "application/json"})
-    while sfondo and _TESTI_APP[0] > 0:
-        time.sleep(0.05)
-    with _TESTI_BLOCCO:
+    with _TESTI_TURNO.turno(2 if sfondo else getattr(_TESTI_PRIORITA, "p", 1)):
         attesa = _TESTI_ULTIMA[0] + max(0.0, _numero_ambiente("ATLANTE_LRCLIB_INTERVALLO", TESTI_INTERVALLO)) - time.time()
         if attesa > 0:   # al più una al secondo (le prove: ATLANTE_LRCLIB_INTERVALLO=0)
             time.sleep(min(attesa, TESTI_INTERVALLO * 5))
         _TESTI_ULTIMA[0] = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=TESTI_TEMPO, context=_ssl() if url.startswith("https:") else None) as r:
-                return json.loads(r.read(TESTI_MAX).decode("utf-8"))
+            return _senza_surrogati(json.loads(_leggi_url(req, TESTI_TEMPO_MAX, TESTI_MAX).decode("utf-8")))
         except urllib.error.HTTPError as e:
+            e.close()
             if e.code == 404:
                 return None
             if not (riprova and (e.code == 429 or e.code >= 500)):
                 raise ErroreExtra(503, "Il sito dei testi (LRCLIB) ha risposto con un errore (%d): riprova più tardi" % e.code)
         except (OSError, ValueError, http.client.HTTPException):
             raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova più tardi")
-    time.sleep(TESTI_PAUSA)   # «occupato»: si riprova una volta, senza tenere il lucchetto
+    time.sleep(TESTI_PAUSA)   # «occupato»: si riprova una volta, senza tenere il turno
     return _lrclib_chiedi(percorso, parametri, False, sfondo)
 
 
@@ -4534,25 +5000,33 @@ def _lrclib_scarto(v, durata):
         return 1e9
 
 
+def _testo_lrclib(v, campo):
+    """Un testo di una voce di LRCLIB: "" se manca, se non è un testo o se è oltre TESTI_MAX_TESTO (non si legge)."""
+    x = v.get(campo)
+    return x if isinstance(x, str) and len(x) <= TESTI_MAX_TESTO else ""
+
+
 def _lrclib_voce(v, durata):
     """Quello che si tiene nella cache di una voce di LRCLIB: il testo a tempo solo se la durata coincide."""
     if v.get("instrumental"):
         return {"stato": "strumentale"}
-    lrc, rec = v.get("syncedLyrics") or "", {"stato": "ok", "id": v.get("id"), "durata": v.get("duration")}
+    lrc, rec = _testo_lrclib(v, "syncedLyrics"), {"stato": "ok", "id": v.get("id"), "durata": v.get("duration")}
     if lrc.strip() and _lrclib_scarto(v, durata) <= TESTI_SCARTO:
         rec["lrc"] = lrc
-        if v.get("hasWordSync") and v.get("lyricsfile"):
+        if v.get("hasWordSync") and _testo_lrclib(v, "lyricsfile"):
             rec["lyricsfile"] = v["lyricsfile"]
-    rec["semplice"] = v.get("plainLyrics") or "\n".join(r["testo"] for r in leggi_lrc(lrc))
+    rec["semplice"] = _testo_lrclib(v, "plainLyrics") or "\n".join(r["testo"] for r in leggi_lrc(lrc))
     return rec if rec.get("lrc") or rec["semplice"].strip() else {"stato": "nessuno"}
 
 
 def _lrclib_stesso(v, titolo, artista):
-    """Una voce della ricerca è proprio questo brano (stesso titolo, «(Live)» e ospiti a parte, e stesso artista)?"""
-    if _cl_titolo(v.get("trackName")) != _cl_titolo(titolo):
+    """Una voce della ricerca è proprio questo brano (stesso titolo, «(Live)» e ospiti a parte, e stesso artista)? Di
+    titolo e artista di LRCLIB (li scrive chiunque) contano i primi TESTI_MAX_NOME caratteri."""
+    nome = lambda x: str(x or "")[:TESTI_MAX_NOME]   # noqa: E731
+    if _cl_titolo(nome(v.get("trackName"))) != _cl_titolo(titolo):
         return False
     a = _cl_principale(artista)
-    return not a or a in _cl_semplice(v.get("artistName"))
+    return not a or a in _cl_semplice(nome(v.get("artistName")))
 
 
 def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
@@ -4563,49 +5037,266 @@ def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
         p["duration"] = str(int(round(durata)))
     v = _lrclib_chiedi("/api/get", p, sfondo=sfondo) if artista else None
     v = v if isinstance(v, dict) else None
-    if v and (v.get("syncedLyrics") or v.get("instrumental")):
+    if v and (_testo_lrclib(v, "syncedLyrics") or v.get("instrumental")):
         return _lrclib_voce(v, durata)
     q = {"track_name": _titolo_pulito(titolo) or titolo}
     if artista:
         q["artist_name"] = _primo_artista(artista) or artista
     trovati = _lrclib_chiedi("/api/search", q, sfondo=sfondo)
-    voci = [x for x in ([v] if v else []) + (trovati if isinstance(trovati, list) else [])
+    voci = [x for x in ([v] if v else []) + (trovati[:100] if isinstance(trovati, list) else [])
             if isinstance(x, dict) and (x is v or _lrclib_stesso(x, titolo, artista))]
     vicino = lambda x: _lrclib_scarto(x, durata)   # noqa: E731
-    for buona in ([x for x in voci if (x.get("syncedLyrics") or "").strip() and vicino(x) <= TESTI_SCARTO],
+    for buona in ([x for x in voci if _testo_lrclib(x, "syncedLyrics").strip() and vicino(x) <= TESTI_SCARTO],
                   [x for x in voci if x.get("instrumental") and vicino(x) <= TESTI_SCARTO],
-                  [x for x in voci if (x.get("plainLyrics") or x.get("syncedLyrics") or "").strip()]):
+                  [x for x in voci if (_testo_lrclib(x, "plainLyrics") or _testo_lrclib(x, "syncedLyrics")).strip()]):
         if buona:
             return _lrclib_voce(min(buona, key=vicino), durata)
     return {"stato": "nessuno"}
 
 
-def _testi_lrclib(titolo, artista, album, durata, sfondo=False):
-    """La voce di LRCLIB per il brano, dalla cache del Mac se c'è. Con sfondo: per il lavoro su tutta la libreria, che
-    lascia passare prima le ricerche dell'app."""
+# la cache delle risposte di LRCLIB: <cache>/testi/<chiave>.json
+
+_TESTI_CACHE_NOME = re.compile(r"[0-9a-f]{24}\.json")
+_TESTI_CACHE_BLOCCO = threading.Lock()
+_TESTI_LETTI_BLOCCO = threading.Lock()
+
+
+def _testi_chiave(titolo, artista, album, durata):
+    """(chiave, file) della risposta di LRCLIB per il brano, nella cache del Mac."""
     chiave = hashlib.sha1(json.dumps([_cl_semplice(artista), _cl_semplice(titolo), _cl_semplice(album),
                                       int(round(durata or 0))]).encode("utf-8")).hexdigest()[:24]
-    file = os.path.join(_cart("cache"), "testi", chiave + ".json")
+    return chiave, os.path.join(_cart("cache"), "testi", chiave + ".json")
 
-    def dalla_cache():
-        rec = _leggi_json(file, None)
-        if isinstance(rec, dict) and rec.get("stato") in ("ok", "strumentale"):
-            return rec
-        if isinstance(rec, dict) and rec.get("stato") == "nessuno" and time.time() - (rec.get("quando") or 0) < TESTI_NESSUNO:
-            return rec
+
+def _testi_dalla_cache(file):
+    """La risposta di LRCLIB tenuta sul Mac, se vale ancora (un «nessun testo» vale una settimana: LRCLIB cresce), o
+    None. Letta, torna tra le più nuove: quando la cache è piena si buttano prima quelle lette meno di recente."""
+    rec = _leggi_json(file, None)
+    if not isinstance(rec, dict):
         return None
-    rec = dalla_cache()
+    if rec.get("stato") not in ("ok", "strumentale") and not (
+            rec.get("stato") == "nessuno" and time.time() - (rec.get("quando") or 0) < TESTI_NESSUNO):
+        return None
+    try:
+        if time.time() - os.path.getmtime(file) > TESTI_CACHE_TOCCA:
+            os.utime(file)
+    except OSError:
+        pass
+    return rec
+
+
+def _testi_in_cache(file, rec):
+    """La risposta di LRCLIB nella cache del Mac, se si può: al più TESTI_RECORD_MAX (senza il Lyricsfile, se così ci
+    sta), e solo con almeno TESTI_SPAZIO_MIN GB liberi (il disco interno del Mac mini si riempie in fretta). True se
+    l'ha scritta."""
+    dati = json.dumps(rec, ensure_ascii=False)
+    if len(dati.encode("utf-8", "replace")) > TESTI_RECORD_MAX and rec.get("lyricsfile"):
+        rec = {k: v for k, v in rec.items() if k != "lyricsfile"}   # le parole a tempo no, il resto sì
+        dati = json.dumps(rec, ensure_ascii=False)
+    peso = len(dati.encode("utf-8", "replace"))
+    if peso > TESTI_RECORD_MAX:
+        return False
+    cart = os.path.dirname(file)
+    minimo = max(0.0, _numero_ambiente("ATLANTE_TESTI_SPAZIO_MIN_GB", TESTI_SPAZIO_MIN)) * 1024 ** 3
+    try:
+        os.makedirs(cart, exist_ok=True)
+        if minimo and shutil.disk_usage(cart).free < minimo:
+            return False
+        try:
+            prima = os.path.getsize(file)
+        except OSError:
+            prima = 0
+        _scrivi_json(file, rec)
+    except OSError as e:   # disco pieno: il testo si dà lo stesso, la prossima volta si richiede
+        print("Atlante: testo non salvato: %s" % e, flush=True)
+        return False
+    _testi_cache_peso(cart, peso - prima)
+    return True
+
+
+def _testi_cache_peso(cart, piu):
+    """Quanto pesa la cache delle risposte di LRCLIB: misurata alla prima scrittura, poi aggiornata a ogni scrittura.
+    Oltre TESTI_CACHE_MAX si buttano le risposte usate meno di recente, fino a 9/10 del massimo."""
+    with _TESTI_CACHE_BLOCCO:
+        if _TESTI_CACHE.get("cart") != cart or _TESTI_CACHE["tot"] is None:
+            voci = _testi_cache_voci(cart)
+            _TESTI_CACHE.update(cart=cart, tot=sum(x[2] for x in voci))
+        else:
+            _TESTI_CACHE["tot"] += piu
+        if _TESTI_CACHE["tot"] <= TESTI_CACHE_MAX:
+            return
+        voci = sorted(_testi_cache_voci(cart))
+        tot = sum(x[2] for x in voci)
+        for _quando, nome, peso in voci:
+            if tot <= TESTI_CACHE_MAX * 0.9:
+                break
+            _cancella(os.path.join(cart, nome))
+            tot -= peso
+        _TESTI_CACHE["tot"] = tot
+
+
+def _testi_cache_voci(cart):
+    """[(ultimo uso, nome, peso)] delle risposte di LRCLIB nella cache (non le schede, le traduzioni o il modello)."""
+    voci = []
+    try:
+        with os.scandir(cart) as it:
+            for e in it:
+                if _TESTI_CACHE_NOME.fullmatch(e.name) and e.is_file(follow_symlinks=False):
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    voci.append((st.st_mtime, e.name, st.st_size))
+    except OSError:
+        pass
+    return voci
+
+
+@contextlib.contextmanager
+def _chiave_bloccata(chiave):
+    """Il lucchetto di un brano: la stessa ricerca una volta sola (l'app da due dispositivi, il lavoro in sottofondo).
+    Quando nessuno lo usa più si toglie: il dizionario non cresce con ogni brano cercato."""
+    with _TESTI_APP_BLOCCO:
+        x = _TESTI_CHIAVI.get(chiave)
+        if x is None:
+            x = _TESTI_CHIAVI[chiave] = [threading.Lock(), 0]
+        x[1] += 1
+    try:
+        with x[0]:
+            yield
+    finally:
+        with _TESTI_APP_BLOCCO:
+            x[1] -= 1
+            if x[1] <= 0 and _TESTI_CHIAVI.get(chiave) is x:
+                del _TESTI_CHIAVI[chiave]
+
+
+def _testi_errore(chiave, quando=False):
+    """Senza `quando`: True se LRCLIB per questo brano non ha risposto nell'ultimo minuto. Con `quando` (un'ora, o None
+    per dimenticarlo) lo segna; si ricordano al più TESTI_ERRORI_MAX brani (dopo un minuto non contano più)."""
+    with _TESTI_APP_BLOCCO:
+        if quando is False:
+            return time.time() - _TESTI_ERRORI.get(chiave, 0) < TESTI_ERRORE
+        _TESTI_ERRORI.pop(chiave, None)
+        if quando is not None:
+            _TESTI_ERRORI[chiave] = quando
+            while len(_TESTI_ERRORI) > TESTI_ERRORI_MAX:
+                _TESTI_ERRORI.popitem(last=False)
+        return False
+
+
+def _durata_testi(testo):
+    """La durata del brano chiesta dall'app, in secondi: 0 se non c'è (o non è un numero finito e positivo), se no tra
+    1 s e un'ora. Non un numero: ErroreExtra 400."""
+    try:
+        d = float(testo or 0)
+    except ValueError:
+        raise ErroreExtra(400, "La durata deve essere un numero di secondi")
+    if not math.isfinite(d) or d <= 0:
+        return 0
+    return min(3600.0, max(1.0, d))
+
+
+def _testi_permesso(chi, in_corso, tutte=0):
+    """Una ricerca nuova su LRCLIB per chi la chiede ({chi, ia}; in_corso: le sue già partite e non finite; tutte: quelle
+    di chi non è Samuele). Samuele: al più TESTI_IN_CORSO[True] insieme. Gli altri: una alla volta, al più
+    TESTI_RICERCHE_MAX insieme in tutto e TESTI_OSPITE_ORA all'ora (un «secchio» di gettoni che si riempie piano). Se no
+    ErroreExtra 429, subito: l'app dice «riprova tra poco». Chi chiama tiene _TESTI_APP_BLOCCO."""
+    samuele = isinstance(chi, dict) and chi.get("ia") is True
+    if in_corso >= TESTI_IN_CORSO[samuele]:
+        raise ErroreExtra(429, "Il Mac sta già cercando un altro tuo testo: riprova tra poco")
+    if samuele:
+        return
+    if tutte >= TESTI_RICERCHE_MAX:
+        raise ErroreExtra(429, "Il Mac sta già cercando molti testi: riprova tra poco")
+    ora, quanti = time.time(), max(1.0, _numero_ambiente("ATLANTE_TESTI_OSPITE_ORA", TESTI_OSPITE_ORA))
+    nome = str(chi.get("chi") if isinstance(chi, dict) else "")
+    gettoni, quando = _TESTI_GETTONI.get(nome, (quanti, ora))
+    gettoni = min(quanti, gettoni + (ora - quando) * quanti / 3600.0)
+    if gettoni < 1:
+        raise ErroreExtra(429, "Hai cercato molti testi nuovi nell'ultima ora: riprova tra poco")
+    _TESTI_GETTONI[nome] = (gettoni - 1, ora)
+    if len(_TESTI_GETTONI) > 2000:   # chi ha di nuovo il secchio pieno non serve ricordarlo
+        for k, (g, q) in list(_TESTI_GETTONI.items()):
+            if g + (ora - q) * quanti / 3600.0 >= quanti:
+                del _TESTI_GETTONI[k]
+
+
+class _Ricerca:
+    """Una ricerca di un testo su LRCLIB chiesta dall'app, fatta in un filo suo (vedi _testi_ricerca_app)."""
+
+    def __init__(self, chi):
+        self.chi, self.samuele = str(chi.get("chi") or ""), chi.get("ia") is True
+        self.fatta = threading.Event()
+        self.rec, self.errore, self.fine = None, None, 0.0
+
+
+def _testi_ricerca_app(chiave, file, titolo, artista, album, durata, chi):
+    """Il testo che non è nella cache, chiesto dall'app: la ricerca su LRCLIB parte in un filo suo (una sola per brano,
+    anche se lo chiedono in tanti) e la richiesta la aspetta al più TESTI_ATTESA secondi; se non è finita,
+    TestiInArrivo (l'app riceve «in arrivo» e richiede): un posto del server non resta occupato dietro LRCLIB. I limiti
+    per persona li dà _testi_permesso. Una ricerca finita si ricorda TESTI_TENUTA secondi (anche se la cache non l'ha
+    scritta: poco spazio, risposta troppo grande)."""
+    attesa = max(0.0, _numero_ambiente("ATLANTE_TESTI_ATTESA", TESTI_ATTESA))
+    with _TESTI_APP_BLOCCO:
+        ora = time.time()
+        for k, x in list(_TESTI_RICERCHE.items()):
+            if x.fatta.is_set() and (ora - x.fine > TESTI_TENUTA or len(_TESTI_RICERCHE) > 1000):
+                del _TESTI_RICERCHE[k]
+        r = _TESTI_RICERCHE.get(chiave)
+        if r is None:
+            if ora - _TESTI_ERRORI.get(chiave, 0) < TESTI_ERRORE:
+                raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova tra un minuto")
+            r = _Ricerca(chi)
+            aperte = [x for x in _TESTI_RICERCHE.values() if not x.fatta.is_set()]
+            _testi_permesso(chi, sum(1 for x in aperte if x.chi == r.chi), sum(1 for x in aperte if not x.samuele))
+            _TESTI_RICERCHE[chiave] = r
+            _TESTI_APP[0] += 1   # il lavoro su tutta la libreria aspetta che finisca
+            threading.Thread(target=_testi_cerca_a_parte, args=(r, chiave, file, titolo, artista, album, durata),
+                             daemon=True, name="testi-app").start()
+    r.fatta.wait(attesa)
+    if not r.fatta.is_set():
+        raise TestiInArrivo()
+    if r.errore is not None:
+        raise ErroreExtra(r.errore.codice, r.errore.testo)
+    return r.rec
+
+
+def _testi_cerca_a_parte(r, chiave, file, titolo, artista, album, durata):
+    _TESTI_PRIORITA.p = 0 if r.samuele else 1   # nel turno di LRCLIB Samuele passa prima
+    try:
+        with _chiave_bloccata(chiave):
+            r.rec = _testi_dalla_cache(file) or _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, False)
+    except ErroreExtra as e:
+        r.errore = e
+    except Exception as e:   # noqa: BLE001 — un baco: la richiesta riceve un errore, il server va avanti
+        print("Testi: ricerca di «%s» non riuscita:\n%s" % (str(titolo)[:80], traceback.format_exc()), flush=True)
+        r.errore = ErroreExtra(500, "Errore sul Mac nella ricerca del testo: %s" % str(e)[:200])
+    finally:
+        with _TESTI_APP_BLOCCO:
+            _TESTI_APP[0] -= 1
+            r.fine = time.time()
+            r.fatta.set()
+
+
+def _testi_lrclib(titolo, artista, album, durata, sfondo=False, chi=None):
+    """La voce di LRCLIB per il brano, dalla cache del Mac se c'è. Con sfondo: per il lavoro su tutta la libreria, che
+    lascia passare prima le ricerche dell'app. Con chi ({chi, ia}: una richiesta dell'app) la ricerca nuova si fa a
+    parte (_testi_ricerca_app: può dare TestiInArrivo o 429); senza, si aspetta qui."""
+    chiave, file = _testi_chiave(titolo, artista, album, durata)
+    rec = _testi_dalla_cache(file)
     if rec:
         return rec
-    if time.time() - _TESTI_ERRORI.get(chiave, 0) < TESTI_ERRORE:
+    if chi is not None and not sfondo:
+        return _testi_ricerca_app(chiave, file, titolo, artista, album, durata, chi)
+    if _testi_errore(chiave):
         raise ErroreExtra(503, "Il sito dei testi (LRCLIB) non risponde: riprova tra un minuto")
-    with _TESTI_APP_BLOCCO:
-        blocco = _TESTI_CHIAVI.setdefault(chiave, threading.Lock())
-        if not sfondo:
+    if not sfondo:
+        with _TESTI_APP_BLOCCO:
             _TESTI_APP[0] += 1
     try:
-        with blocco:
-            rec = dalla_cache()   # un altro dispositivo (o il lavoro in sottofondo) l'ha appena chiesto
+        with _chiave_bloccata(chiave):
+            rec = _testi_dalla_cache(file)   # un altro dispositivo (o il lavoro in sottofondo) l'ha appena chiesto
             if rec:
                 return rec
             return _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo)
@@ -4620,37 +5311,76 @@ def _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo):
     try:
         rec = _lrclib_cerca(titolo, artista, album, durata, sfondo)
     except ErroreExtra:
-        _TESTI_ERRORI[chiave] = time.time()
+        _testi_errore(chiave, time.time())
         raise
-    _TESTI_ERRORI.pop(chiave, None)
+    _testi_errore(chiave, None)
     rec.update(quando=int(time.time()), brano={"titolo": titolo, "artista": artista, "album": album, "durata": durata})
-    try:
-        _scrivi_json(file, rec)
-    except OSError as e:   # disco pieno: il testo si dà lo stesso, la prossima volta si richiede
-        print("Atlante: testo non salvato: %s" % e, flush=True)
+    _testi_in_cache(file, rec)
     return rec
 
 
-def _testi_da_lrclib(rec):
-    if rec.get("stato") != "ok":
-        return {"stato": rec.get("stato") or "nessuno"}
-    righe = leggi_lyricsfile(rec["lyricsfile"]) if rec.get("lyricsfile") else []
+def _leggi_testo(leggi, x, nome):
+    """Le righe lette da `leggi`; [] se il testo (di LRCLIB: lo scrive chiunque) fa cadere la lettura."""
+    try:
+        return leggi(x)
+    except Exception:   # noqa: BLE001 — un testo che non si legge non deve far cadere la risposta
+        print("Testi: %s di LRCLIB che non si legge:\n%s" % (nome, traceback.format_exc(limit=3)), flush=True)
+        return []
+
+
+def _testi_leggi_lrclib(lyricsfile, lrc, semplice):
+    righe = _leggi_testo(leggi_lyricsfile, lyricsfile, "Lyricsfile") if lyricsfile else []
     if not any("parole" in r for r in righe):
-        righe = leggi_lrc(rec.get("lrc"))
+        righe = _leggi_testo(leggi_lrc, lrc, "testo a tempo")
     if any(r["testo"] for r in righe):
         return _testi_risposta(righe, "lrclib", True)
-    righe = testi_semplici(rec.get("semplice"))
+    righe = _leggi_testo(testi_semplici, semplice, "testo")
     return _testi_risposta(righe, "lrclib", False) if righe else {"stato": "nessuno"}
 
 
-def testi_brano(titolo, artista, album, durata, percorso=None, sfondo=False):
+def _copia_risposta(o):
+    """Una copia della risposta (le righe e le loro parole): chi la riceve può cambiarla, quella ricordata no."""
+    o = dict(o)
+    if "righe" in o:
+        o["righe"] = [dict(x, parole=[dict(w) for w in x["parole"]]) if x.get("parole") else dict(x) for x in o["righe"]]
+    return o
+
+
+def _testi_da_lrclib(rec):
+    """La risposta dalla voce di LRCLIB: le parole dal Lyricsfile se ci sono, se no le righe a tempo, se no il testo
+    semplice; un Lyricsfile che non si legge non conta (si usa il resto). Una voce già letta non si rilegge: le righe
+    delle ultime TESTI_LETTI_MAX si ricordano (ogni richiesta rileggerebbe dalla cache la stessa voce)."""
+    if rec.get("stato") != "ok":
+        return {"stato": rec.get("stato") or "nessuno"}
+    campi = [rec.get(k) if isinstance(rec.get(k), str) else "" for k in ("lyricsfile", "lrc", "semplice")]
+    impronta = hashlib.sha1("\0".join(campi).encode("utf-8", "surrogatepass")).hexdigest()
+    with _TESTI_LETTI_BLOCCO:
+        o = _TESTI_LETTI.get(impronta)
+        if o is not None:
+            _TESTI_LETTI.move_to_end(impronta)
+    if o is None:
+        o = _testi_leggi_lrclib(*campi)
+        with _TESTI_LETTI_BLOCCO:
+            if impronta not in _TESTI_LETTI:
+                _TESTI_LETTI[impronta] = o
+                _TESTI_LETTI_TOT[0] += _peso_risposta(o)
+            while _TESTI_LETTI and (len(_TESTI_LETTI) > _TESTI_LETTI_MAX or _TESTI_LETTI_TOT[0] > _TESTI_LETTI_PESO):
+                _TESTI_LETTI_TOT[0] -= _peso_risposta(_TESTI_LETTI.popitem(last=False)[1])
+    return _copia_risposta(o)
+
+
+def _peso_risposta(o):
+    return sum(1 + len(x.get("parole") or []) for x in o.get("righe") or [])
+
+
+def testi_brano(titolo, artista, album, durata, percorso=None, sfondo=False, chi=None):
     """Il testo del brano: a tempo dal file, a tempo da LRCLIB, senza tempi dal file, senza tempi da LRCLIB. Con sfondo:
-    per il lavoro su tutta la libreria (l'app passa prima)."""
+    per il lavoro su tutta la libreria (l'app passa prima). Con chi: una richiesta dell'app (vedi _testi_lrclib)."""
     nel_file = _con_limite(lambda: testi_dal_file(percorso), 5) if percorso else None   # disco USB bloccato: si va oltre
     if nel_file and nel_file["sincronizzato"]:
         return nel_file
     try:
-        da_rete = _testi_da_lrclib(_testi_lrclib(titolo, artista, album, durata, sfondo))
+        da_rete = _testi_da_lrclib(_testi_lrclib(titolo, artista, album, durata, sfondo, chi))
     except ErroreExtra:
         if nel_file:
             return nel_file
@@ -4857,6 +5587,14 @@ def _inizio_riga(r):
 def completa_tempi(righe, durata=None):
     """Tempi di ogni pezzo delle righe che hanno un tempo (o pezzi a tempo); le righe senza pezzi li prendono dal testo.
     Ogni riga ha poi «t» = inizio del primo pezzo e «f» = fine dell'ultimo."""
+    # quando comincia la prima riga dopo ognuna (che ha un tempo): calcolato una volta, dal fondo (cercarlo riga per riga
+    # in tutte quelle dopo costava il quadrato delle righe)
+    dopo_di, prossimo = [None] * len(righe), None
+    for k in range(len(righe) - 1, -1, -1):
+        dopo_di[k] = prossimo
+        t = _inizio_riga(righe[k])
+        if t is not None:
+            prossimo = t
     for k, r in enumerate(righe):
         if not r.get("x"):
             r["p"] = []
@@ -4865,7 +5603,7 @@ def completa_tempi(righe, durata=None):
             r["p"] = [[None, None, w] for w in _pezzi(r["x"])]
         if r.get("t") is None and all(p[0] is None for p in r["p"]):
             continue
-        dopo = next((t for t in (_inizio_riga(x) for x in righe[k + 1:]) if t is not None), None)
+        dopo = dopo_di[k]
         limite = dopo if dopo is not None else (durata or None)
         if r.get("f") is not None and (limite is None or r["f"] < limite) and r["p"][-1][1] is None \
                 and r["f"] > (r.get("t") or 0):
@@ -4899,11 +5637,15 @@ def allinea_parole(righe, sentite, a_tempo):
     sentite vicino alla sua riga: così i ritornelli uguali vanno al posto giusto. Solo i tempi abbinati vanno nei
     pezzi (in ordine crescente dentro la riga); il resto lo fa completa_tempi. Restituisce la quota di parole del
     testo abbinate (0..1)."""
-    L = []
+    L, dopo_di, prossimo = [], [None] * len(righe), None
+    for k in range(len(righe) - 1, -1, -1):   # il tempo della riga dopo ognuna, una volta sola (dal fondo)
+        dopo_di[k] = prossimo
+        if righe[k].get("t") is not None:
+            prossimo = righe[k]["t"]
     for k, r in enumerate(righe):
         lo = hi = None
         if a_tempo and r.get("t") is not None:
-            dopo = next((x["t"] for x in righe[k + 1:] if x.get("t") is not None), None)
+            dopo = dopo_di[k]
             lo, hi = r["t"] - 1.5, (dopo if dopo is not None else r["t"] + 30) + 1.0
         for j, p in enumerate(r.get("p") or []):
             c = _chiave_parola(p[2])
@@ -5008,7 +5750,13 @@ WHISPER_ERRORI = 3               # un brano che fa fallire Whisper tre volte si 
 WHISPER_DI_FILA = 3              # tre brani di fila che non riescono: è il Mac, non i brani (non contano e Whisper aspetta)
 WHISPER_RIPROVA_BREVE = 300      # Homebrew occupato da un'altra installazione: si riprova dopo 5 minuti
 WHISPER_SPAZIO_MIN = 2.0         # GB che devono restare liberi dopo lo scaricamento del modello (ATLANTE_WHISPER_SPAZIO_MIN_GB)
-WHISPER_MB = 600                 # quanto pesa il modello, prima che il sito lo dica (574 MB)
+WHISPER_MB = 600                 # quanto pesa il modello, prima che il sito lo dica (574 MB); più del doppio: non è lui
+WHISPER_SCARICA_TEMPO = 3600     # lo scaricamento del modello al più un'ora (poi riprende da lì, la volta dopo)
+# il modello di Whisper si scarica da Hugging Face: i rimandi si seguono solo in https e verso i suoi siti (e le sue
+# copie: cdn-lfs.hf.co, cas-bridge.xethub.hf.co…), su indirizzi pubblici
+WHISPER_SITI = ("huggingface.co", "hf.co")
+WHISPER_DURATA_MAX = 1200        # brani oltre 20 minuti: Whisper non li ascolta (un set di ore terrebbe il Mac al lavoro)
+WHISPER_LOG_MAX = 1024 * 1024    # installa.log (Homebrew) oltre 1 MB si ricomincia
 TESTI_PAUSA_VOCE = 600           # un errore di tutto il Mac (disco scollegato, ffmpeg rotto, rete giù): Whisper aspetta 10 min
 # I tempi DTW di whisper.cpp arrivano in ritardo di circa 0,19 s sull'attacco vero della parola (misurato il 27/10 con
 # large-v3-turbo-q5_0 su una canzone di prova con i tempi noti: ritardo mediano 0,19 s, scarto 0,06 s): si anticipano
@@ -5018,6 +5766,14 @@ MYMEMORY_BASE = "https://api.mymemory.translated.net"
 TRAD_RIPROVA = 600               # traduzione non riuscita: l'app la può richiedere dopo 10 minuti
 TRAD_CODA_MAX = 50               # traduzioni in coda al più (chi apre tanti testi non riempie il Mac di lavoro)
 TRAD_PER_PERSONA = 3             # e al più 3 brani a testa
+# MyMemory regala 5000 caratteri al giorno (50 000 con ATLANTE_CONTATTO = un indirizzo email): un invitato ne usa al
+# più il 30%, gli invitati insieme al più il 60% (il resto è per Samuele); di un brano si traducono al più 100 righe
+TRAD_QUOTA, TRAD_QUOTA_EMAIL = 5000, 50000
+TRAD_OSPITE = 0.3
+TRAD_RISERVA = 0.4
+TRAD_RIGHE_MAX = 100
+TRAD_INTERVALLO = 0.3            # secondi tra una richiesta a MyMemory e l'altra
+TRAD_TEMPO_MAX = 30              # secondi al più per tutta una richiesta a MyMemory
 
 # lingue della traduzione: codice → (nome nella lingua stessa, nome in inglese per l'IA)
 LINGUE_TRAD = {
@@ -5060,6 +5816,10 @@ def _agente_testi():
 # dopo un arresto brusco (SIGKILL, il Mac spento) li ferma il server nuovo all'avvio: niente orfani, niente due Whisper
 # sullo stesso brano.
 _FIGLI = {"dir": None, "vivi": {}, "fine": False}   # fine: il server sta uscendo (un figlio fermato non è un errore)
+# il lucchetto di _FIGLI: «fine» si controlla, il programma parte e si segna tra i vivi tutto insieme, così _ferma_figli
+# (che lo prende anche lui) non può lasciarne partire uno nuovo dopo averli fermati (RLock: SIGTERM arriva nel filo
+# principale, che può essere ovunque)
+_FIGLI_BLOCCO = threading.RLock()
 
 
 def _avvio_processo(pid):
@@ -5073,8 +5833,10 @@ def _avvio_processo(pid):
 
 
 def _vivo_processo(pid):
+    """Il gruppo di processi di `pid` (ogni programma pesante ne ha uno suo) ha ancora qualcuno vivo? Anche quando il
+    primo è finito e restano i processi che ha fatto partire lui (Homebrew, nice)."""
     try:
-        os.kill(pid, 0)
+        os.killpg(pid, 0)
         return True
     except ProcessLookupError:
         return False
@@ -5125,9 +5887,10 @@ def _ferma_orfani(cartella):
 
 
 def _ferma_figli():
-    """Ferma tutti i programmi pesanti dei testi ancora accesi (il server sta per uscire)."""
-    _FIGLI["fine"] = True
-    vivi = list(_FIGLI["vivi"])
+    """Ferma tutti i programmi pesanti dei testi ancora accesi (il server sta per uscire); dopo non ne parte più nessuno."""
+    with _FIGLI_BLOCCO:
+        _FIGLI["fine"] = True
+        vivi = list(_FIGLI["vivi"])
     if vivi:
         _ferma_gruppi(vivi, 2.0)
     for pid in vivi:
@@ -5149,12 +5912,16 @@ def _esegui_piano(args, tempo, fermo=None, log=None, ambiente=None):
     env = _ambiente()
     env.update(ambiente or {})
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        try:
-            p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log or out,
-                                 stderr=subprocess.STDOUT if log else err, env=env, start_new_session=os.name == "posix")
-        except OSError as e:
-            raise ErroreMac("%s non parte: %s" % (nome, e))
-        _FIGLI["vivi"][p.pid] = p
+        with _FIGLI_BLOCCO:   # il server sta uscendo: non parte niente (il brano resta da fare)
+            if _FIGLI["fine"]:
+                raise Pausa()
+            try:
+                p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log or out,
+                                     stderr=subprocess.STDOUT if log else err, env=env,
+                                     start_new_session=os.name == "posix")
+            except OSError as e:
+                raise ErroreMac("%s non parte: %s" % (nome, e))
+            _FIGLI["vivi"][p.pid] = p
         segno = os.path.join(_FIGLI["dir"], "%d.json" % p.pid) if _FIGLI["dir"] and os.path.isdir(_FIGLI["dir"]) else None
         if segno:
             try:
@@ -5266,14 +6033,61 @@ def righe_da_voce(j, anticipo=0.0):
 
 
 def _wav16k(percorso, dest, fermo=None):
-    """Il brano in WAV mono 16 kHz (quello che vuole Whisper), decodificato da ffmpeg."""
+    """Il brano in WAV mono 16 kHz (quello che vuole Whisper), decodificato da ffmpeg: solo file del disco (un brano
+    fatto apposta non può fargli aprire indirizzi in rete) e al più WHISPER_DURATA_MAX secondi (più un minuto)."""
     ff = _programma("ffmpeg")
     if not ff:
         raise ErroreMac("ffmpeg non è installato sul Mac: brew install ffmpeg")
-    codice, _, err = _esegui_piano([ff, "-nostdin", "-v", "error", "-y", "-i", percorso, "-map", "0:a:0", "-ac", "1",
-                                    "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", dest], 600, fermo)
+    codice, _, err = _esegui_piano([ff, "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-i", percorso,
+                                    "-map", "0:a:0", "-t", str(WHISPER_DURATA_MAX + 60), "-ac", "1", "-ar", "16000",
+                                    "-c:a", "pcm_s16le", "-f", "wav", dest], 600, fermo)
     if codice != 0 or not os.path.isfile(dest) or os.path.getsize(dest) < 1000:
         raise ErroreTesti("ffmpeg: " + (err.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
+
+
+def _hf_permesso(url):
+    """Un indirizzo da cui si può scaricare il modello di Whisper: in https, su un sito di Hugging Face (huggingface.co,
+    hf.co o un loro sottodominio, come le copie cdn-lfs.hf.co e cas-bridge.xethub.hf.co)."""
+    try:
+        u = urlsplit(url)
+        host = (u.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return u.scheme.lower() == "https" and any(host == s or host.endswith("." + s) for s in WHISPER_SITI)
+
+
+def _apri_modello(url, intest, scadenza):
+    """(risposta, connessione) di http.client per il modello di Whisper. Ogni indirizzo dev'essere di Hugging Face, in
+    https, su un indirizzo pubblico (_apri_pubblico lo controlla e si collega proprio a quello: niente nome che cambia
+    indirizzo a metà); i rimandi (Hugging Face manda alle sue copie) si seguono così, al più 5. Solo il primo indirizzo,
+    se viene da ATLANTE_WHISPER_URL_MODELLO (le prove: un Hugging Face finto sul Mac stesso), non si controlla."""
+    prova = os.environ.get("ATLANTE_WHISPER_URL_MODELLO")
+    for salto in range(6):
+        if salto == 0 and prova:
+            u = urlsplit(url)
+            if u.scheme == "https":
+                conn = scadenza.conn(http.client.HTTPSConnection)(u.hostname, u.port, timeout=60, context=_ssl())
+            else:
+                conn = scadenza.conn(http.client.HTTPConnection)(u.hostname, u.port, timeout=60)
+            conn.request("GET", (u.path or "/") + ("?" + u.query if u.query else ""), headers=intest)
+            r = conn.getresponse()
+        else:
+            if not _hf_permesso(url):
+                raise ErroreTesti("il modello di Whisper si scarica solo da Hugging Face, in https (non da %s)" % url[:120])
+            try:
+                r, conn, _sock = _apri_pubblico(url, time.time() + 60, intest=intest, entro=scadenza)
+            except ErroreExtra as e:
+                raise ErroreTesti("Hugging Face: %s" % e.testo)
+        if r.status in (301, 302, 303, 307, 308):
+            dove = r.getheader("Location")
+            r.close()
+            conn.close()
+            if not dove:
+                raise ErroreTesti("Hugging Face rimanda altrove senza dire dove")
+            url = urljoin(url, dove.strip())
+            continue
+        return r, conn
+    raise ErroreTesti("Hugging Face rimanda ad altri indirizzi troppe volte")
 
 
 class Whisper:
@@ -5295,6 +6109,7 @@ class Whisper:
         self.stato, self.errore, self.prova = "", "", 0.0
         self.anticipo = _numero_ambiente("ATLANTE_WHISPER_ANTICIPO", WHISPER_ANTICIPO)   # prove: 0
         self.tmp = None   # la cartella dei file temporanei (i WAV): anche lì deve restare spazio
+        self._firma = None   # il file del modello com'era quando se n'è controllata l'impronta (dimensione, date, inode)
 
     @staticmethod
     def spento():
@@ -5321,13 +6136,21 @@ class Whisper:
             return False
         with self.blocco:
             if self.pronto():
-                return True
+                try:
+                    self._controlla_modello()   # veloce: si rifà l'impronta solo se il file è cambiato
+                    return True
+                except ErroreTesti as e:
+                    self.cli, self.prova, self.errore = None, time.time(), str(e)[:300]
+                    self.stato = "non pronto: " + self.errore
+                    print("Testi: Whisper non pronto:", e, flush=True)
+                    return False
             if self.prova and time.time() - self.prova < WHISPER_RIPROVA:
                 return False
             try:
                 cli = self.programma() or self._installa()
                 if not os.path.isfile(self.file_modello):
                     self._scarica_modello()
+                self._controlla_modello()
                 codice, uscita, err = _esegui_piano([cli, "-h"], 30)
                 self.aiuto = (uscita + err).decode("utf-8", "replace")   # whisper-cli scrive l'aiuto negli errori
                 if "-ojf" not in self.aiuto:
@@ -5360,6 +6183,9 @@ class Whisper:
         os.makedirs(self.dir, exist_ok=True)
         log = os.path.join(self.dir, "installa.log")
         prima = os.path.getsize(log) if os.path.isfile(log) else 0
+        if prima > WHISPER_LOG_MAX:   # le installazioni di prima non servono più: si ricomincia (il disco interno)
+            open(log, "wb").close()
+            prima = 0
         # niente aggiornamenti di Homebrew né degli altri programmi (ffmpeg, yt-dlp): la musica intanto si scarica
         with open(log, "ab") as f:   # a metà non si ferma (Homebrew resterebbe a metà): la pausa vale dopo
             codice, _, _ = _esegui_piano([brew, "install", "whisper-cpp"], 1800, None, f, {
@@ -5395,15 +6221,18 @@ class Whisper:
                                   (libero / 1024 ** 3, (servono + minimo) / 1024 ** 3))
 
     def _scarica_modello(self):
-        """Il modello da Hugging Face, in un file .part che resta se lo scaricamento si ferma (pausa, rete): la volta
-        dopo riprende da lì (Range)."""
+        """Il modello da Hugging Face, in un file .part che resta se lo scaricamento si ferma (pausa, rete, oltre
+        WHISPER_SCARICA_TEMPO): la volta dopo riprende da lì (Range). Il sito deve dire quanto pesa (Content-Length), al
+        più il doppio di WHISPER_MB; i rimandi solo verso Hugging Face (_apri_modello). Finito, la sua impronta SHA-256
+        va in <modello>.sha256: se il file cambia dopo, Whisper non lo usa (_controlla_modello)."""
         url = os.environ.get("ATLANTE_WHISPER_URL_MODELLO") or WHISPER_URL % self.modello
         os.makedirs(os.path.dirname(self.file_modello) or ".", exist_ok=True)
         tmp = self.file_modello + ".part"
+        massimo = int(WHISPER_MB * 2 * 1024 * 1024)
         try:
             n = os.path.getsize(tmp)
             with open(tmp, "rb") as f:
-                if f.read(4) != b"lmgg":
+                if f.read(4) != b"lmgg" or n > massimo:
                     n = 0   # non è l'inizio di un modello: da capo
         except OSError:
             n = 0
@@ -5413,38 +6242,116 @@ class Whisper:
         intest = {"User-Agent": _agente_testi()}
         if n:
             intest["Range"] = "bytes=%d-" % n
-        buttare = False
+        buttare, r, conn = False, None, None
+        sc = _Scadenza(WHISPER_SCARICA_TEMPO)
+        sc.timer.start()
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=intest), timeout=60) as r:
-                if n and r.status != 206:
-                    n = 0   # il sito non riprende: da capo
-                m = re.match(r"bytes \d+-\d+/(\d+)", r.headers.get("Content-Range") or "")
-                tot = int(m.group(1)) if m else n + int(r.headers.get("Content-Length") or 0)
-                self._spazio(tot - n)
-                with open(tmp, "ab" if n else "wb") as f:
-                    while True:
-                        if self.fermo is not None and self.fermo():
-                            raise Pausa()
-                        b = r.read(1 << 20)
-                        if not b:
-                            break
-                        if n == 0 and b[:4] != b"lmgg":
-                            buttare = True
-                            raise ErroreTesti("il file scaricato non è un modello di whisper.cpp")
-                        f.write(b)
-                        n += len(b)
-                        if tot:
-                            self.stato = "scarico il modello %s: %d%%" % (self.modello, n * 100 // tot)
-            if (tot and n != tot) or n < 1024 * 1024:
-                buttare = bool(tot and n > tot)
+            r, conn = _apri_modello(url, intest, sc)
+            if r.status == 416:
+                buttare = True   # il pezzo già scaricato non va più bene: da capo la prossima volta
+                raise ErroreTesti("Hugging Face non riprende lo scaricamento (416): ricomincio da capo")
+            if r.status not in (200, 206):
+                raise ErroreTesti("Hugging Face ha risposto %d" % r.status)
+            if n and r.status != 206:
+                n = 0   # il sito non riprende: da capo
+            try:
+                lun = int(r.getheader("Content-Length") or -1)
+            except ValueError:
+                lun = -1
+            m = re.match(r"bytes (\d+)-\d+/(\d+)$", (r.getheader("Content-Range") or "").strip())
+            if r.status == 206 and not (m and int(m.group(1)) == n):
+                buttare = True
+                raise ErroreTesti("Hugging Face ha ripreso da un altro punto: ricomincio da capo")
+            tot = int(m.group(2)) if r.status == 206 else lun
+            if lun < 0 or tot <= 0:
+                raise ErroreTesti("il sito non dice quanto pesa il modello (Content-Length): non lo scarico")
+            if tot > massimo:
+                buttare = True
+                raise ErroreTesti("il modello è troppo grande (%d MB, ne pesa circa %d): non lo scarico" % (
+                    tot // (1024 * 1024), WHISPER_MB))
+            self._spazio(tot - n)
+            impronta = hashlib.sha256()
+            if n:   # il pezzo già scaricato entra nell'impronta
+                with open(tmp, "rb") as f:
+                    for b in iter(lambda: f.read(1 << 20), b""):
+                        impronta.update(b)
+            with open(tmp, "ab" if n else "wb") as f:
+                while n < tot:
+                    if self.fermo is not None and self.fermo():
+                        raise Pausa()
+                    b = r.read(min(1 << 20, tot - n))
+                    if not b:
+                        break
+                    if n == 0 and b[:4] != b"lmgg":
+                        buttare = True
+                        raise ErroreTesti("il file scaricato non è un modello di whisper.cpp")
+                    f.write(b)
+                    impronta.update(b)
+                    n += len(b)
+                    self.stato = "scarico il modello %s: %d%%" % (self.modello, n * 100 // tot)
+            if sc.scaduta:
+                raise socket.timeout()
+            if n != tot or n < 1024 * 1024:
                 raise ErroreTesti("modello scaricato a metà (%d byte su %d)" % (n, tot))
             os.replace(tmp, self.file_modello)
-        except urllib.error.HTTPError as e:
-            buttare = e.code == 416   # il pezzo già scaricato non va più bene: da capo la prossima volta
+            self._scrivi_impronta(impronta.hexdigest())
+        except (OSError, http.client.HTTPException) as e:
+            if sc.scaduta:
+                raise ErroreTesti("scaricamento del modello oltre %d minuti: riprendo più tardi da qui" % (
+                    WHISPER_SCARICA_TEMPO // 60))
+            if isinstance(e, http.client.HTTPException):
+                raise ErroreTesti("Hugging Face ha interrotto lo scaricamento: %s" % e)
             raise
         finally:
+            sc.timer.cancel()
+            for x in (r, conn):
+                if x is not None:
+                    x.close()
             if buttare:
                 _cancella(tmp)
+
+    def _scrivi_impronta(self, impronta):
+        """L'impronta SHA-256 del modello in <modello>.sha256, e il file com'è adesso (non si rifà l'impronta)."""
+        try:
+            with open(self.file_modello + ".sha256", "w", encoding="utf-8") as f:
+                f.write(impronta + "\n")
+            st = os.stat(self.file_modello)
+            self._firma = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        except OSError as e:
+            self._firma = None
+            print("Testi: impronta del modello di Whisper non salvata:", e, flush=True)
+
+    def _controlla_modello(self):
+        """Il modello è quello scaricato? La sua impronta SHA-256 sta in <modello>.sha256 (scritta allo scaricamento; un
+        modello scaricato prima di questo controllo, o dato da ATLANTE_WHISPER_FILE_MODELLO, la prende la prima volta
+        che si usa). Se il file è cambiato dopo: ErroreTesti, Whisper non lo usa (quello nella cartella dei modelli si
+        butta: la prossima volta si riscarica). L'impronta (mezzo secondo per 574 MB) si rifà solo se il file non è più
+        quello controllato l'ultima volta (dimensione, date, inode)."""
+        st = os.stat(self.file_modello)
+        firma = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        if firma == self._firma:
+            return
+        h = hashlib.sha256()
+        with open(self.file_modello, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                h.update(b)
+        try:
+            with open(self.file_modello + ".sha256", encoding="utf-8") as f:
+                atteso = f.read().strip().lower()
+        except OSError:
+            atteso = ""
+        if not atteso:
+            self._scrivi_impronta(h.hexdigest())
+            return
+        if atteso != h.hexdigest():
+            self._firma = None
+            nostro = os.path.dirname(os.path.abspath(self.file_modello)) == os.path.abspath(self.dir)
+            if nostro:
+                _cancella(self.file_modello)
+                _cancella(self.file_modello + ".sha256")
+            raise ErroreTesti("il modello di Whisper è cambiato dopo lo scaricamento (impronta SHA-256 diversa): non lo "
+                              "uso" + ("; lo riscarico più tardi" if nostro else ""))
+        self._firma = firma
 
     def trascrivi(self, wav, lingua="", prompt=""):
         """Il JSON di whisper-cli -ojf per un WAV a 16 kHz: frasi, pezzi di parola e tempi (DTW se c'è)."""
@@ -5480,13 +6387,35 @@ class Whisper:
 class Traduttore:
     """Traduzioni delle righe di un testo: l'IA del Mac (Ollama) se c'è, se no MyMemory (in rete, gratis: 5000 caratteri
     al giorno, 50 000 con ATLANTE_CONTATTO = un indirizzo email). Le righe uguali (il ritornello) si traducono una
-    volta sola."""
+    volta sola. Di MyMemory un invitato usa al più TRAD_OSPITE della quota del giorno e gli invitati insieme non
+    toccano TRAD_RISERVA (è per Samuele); di un brano al più TRAD_RIGHE_MAX righe (le altre, la volta dopo)."""
 
     def __init__(self):
         self.blocco = threading.Lock()
         self.ultima = 0.0
         self.pausa, self.motivo = 0.0, ""
         self.mancate = ""   # perché l'ultima traduzione ha lasciato righe senza (quota finita, errore di MyMemory)
+        self.giorno, self.usati = "", {}   # caratteri mandati oggi a MyMemory: «p:chi» a testa, «+» degli invitati
+
+    @staticmethod
+    def _quota():
+        email = os.environ.get("ATLANTE_CONTATTO", "").strip()
+        return TRAD_QUOTA_EMAIL if re.fullmatch(r"[^@\s]+@[^@\s]+\.\w+", email) else TRAD_QUOTA
+
+    def _spendi(self, chi, samuele, n):
+        """True se a MyMemory si possono mandare altri n caratteri per chi chiede (e li conta). Samuele senza tetto (lo
+        mette MyMemory); un invitato al più TRAD_OSPITE della quota del giorno, e tutti gli invitati insieme al più
+        1 - TRAD_RISERVA. Si ricomincia ogni giorno. Chi chiama tiene self.blocco."""
+        oggi = time.strftime("%Y-%m-%d")
+        if oggi != self.giorno:
+            self.giorno, self.usati = oggi, {}
+        if samuele:
+            return True
+        quota, mio, ospiti = self._quota(), self.usati.get("p:" + chi, 0), self.usati.get("+", 0)
+        if mio + n > quota * TRAD_OSPITE or ospiti + n > quota * (1 - TRAD_RISERVA):
+            return False
+        self.usati["p:" + chi], self.usati["+"] = mio + n, ospiti + n
+        return True
 
     @staticmethod
     def ia():
@@ -5501,9 +6430,10 @@ class Traduttore:
             return ""
         return "MyMemory" + (" (in pausa: %s)" % self.motivo if time.time() < self.pausa else "")
 
-    def traduci(self, righe, da, a, con_ia=False):
+    def traduci(self, righe, da, a, con_ia=False, chi=""):
         """(traduzioni, motore, motivo): una traduzione per riga, nello stesso ordine ("" per le righe vuote e per quelle
-        non riuscite: motivo dice perché). L'IA del Mac solo con con_ia (le richieste di Samuele)."""
+        non riuscite: motivo dice perché). L'IA del Mac solo con con_ia (le richieste di Samuele); chi: chi la chiede
+        (per i tetti di MyMemory, che con con_ia non valgono)."""
         uniche = list(dict.fromkeys(x.strip() for x in righe if x and x.strip()))
         fatte, motori, self.mancate = {}, [], ""
         modello = self.ia() if con_ia else ""
@@ -5515,8 +6445,10 @@ class Traduttore:
                 print("Testi: traduzione con l'IA non riuscita:", e, flush=True)
         mancano = [x for x in uniche if x not in fatte]
         if mancano and os.environ.get("ATLANTE_TRADUZIONE_ONLINE", "").strip() != "0":
-            fatte.update(self._con_mymemory(mancano, da, a))
+            fatte.update(self._con_mymemory(mancano[:TRAD_RIGHE_MAX], da, a, str(chi or ""), con_ia))
             motori.append("MyMemory")
+            if len(mancano) > TRAD_RIGHE_MAX and not self.mancate:
+                self.mancate = "testo lungo: tradotte le prime %d righe, le altre la prossima volta" % TRAD_RIGHE_MAX
         if uniche and not fatte:
             raise ErroreTesti(self.mancate or "nessun traduttore disponibile")
         motivo = (self.mancate or "alcune righe non tradotte") if any(x not in fatte for x in uniche) else ""
@@ -5545,7 +6477,7 @@ class Traduttore:
                     out[x] = y
         return out
 
-    def _con_mymemory(self, righe, da, a):
+    def _con_mymemory(self, righe, da, a, chi="", samuele=False):
         if not da:
             raise ErroreTesti("lingua del testo non riconosciuta")
         if time.time() < self.pausa:
@@ -5558,21 +6490,27 @@ class Traduttore:
             if re.fullmatch(r"[^@\s]+@[^@\s]+\.\w+", email):
                 par["de"] = email
             with self.blocco:
-                attesa = self.ultima + 0.3 - time.time()
+                if not self._spendi(chi, samuele, len(par["q"])):
+                    self.mancate = "finite per oggi le traduzioni gratuite degli invitati: si riprende domani"
+                    break
+                attesa = self.ultima + TRAD_INTERVALLO - time.time()
                 if attesa > 0:
                     time.sleep(attesa)
-                try:
+                try:   # niente rimandi verso altri siti, al più TRAD_TEMPO_MAX secondi in tutto
                     req = urllib.request.Request(base + "/get?" + urlencode(par), headers={"User-Agent": _agente_testi()})
-                    with urllib.request.urlopen(req, timeout=20) as r:
-                        j = json.loads(r.read(1024 * 1024).decode("utf-8"))
+                    j = _senza_surrogati(json.loads(_leggi_url(req, TRAD_TEMPO_MAX, 1024 * 1024).decode("utf-8")))
                 except urllib.error.HTTPError as e:
+                    e.close()
                     j = {"responseStatus": e.code}
                 except (OSError, ValueError, http.client.HTTPException) as e:
                     raise ErroreTesti("MyMemory non raggiungibile: %s" % e)
                 finally:
                     self.ultima = time.time()
-            st = str((j or {}).get("responseStatus") or "")
-            y = ((j or {}).get("responseData") or {}).get("translatedText") or ""
+            j = j if isinstance(j, dict) else {}
+            d = j.get("responseData") if isinstance(j.get("responseData"), dict) else {}
+            st = str(j.get("responseStatus") or "")
+            y = d.get("translatedText") if isinstance(d.get("translatedText"), str) else ""
+            y = y[:2000]
             if st in ("403", "429") or "MYMEMORY WARNING" in y.upper():
                 domani = time.localtime(time.time() + 86400)
                 self.pausa = time.mktime((domani.tm_year, domani.tm_mon, domani.tm_mday, 0, 5, 0, 0, 0, -1))
@@ -5701,8 +6639,9 @@ class Testi:
     # acceso, in pausa
 
     def fermo_voce(self):
-        """Whisper non deve lavorare adesso: lavoro in pausa, Whisper escluso da Gestione o spento (ATLANTE_WHISPER=0)."""
-        return not (self.acceso and self.con_whisper) or Whisper.spento()
+        """Whisper non deve lavorare adesso: lavoro in pausa, Whisper escluso da Gestione o spento (ATLANTE_WHISPER=0), o
+        il server sta uscendo (SIGTERM: dopo _ferma_figli non parte più niente)."""
+        return not (self.acceso and self.con_whisper) or Whisper.spento() or _FIGLI["fine"]
 
     def imposta(self, acceso=None, whisper=None):
         """Da Gestione: lavoro su tutta la libreria acceso o in pausa, con o senza Whisper. Resta così dopo un riavvio."""
@@ -5860,6 +6799,7 @@ class Testi:
         testi = _testi_della_risposta(r)
         it = self._impronta_di(r)
         voce = self._voce(i, b, r)
+        lungo = self._troppo_lungo(b)
         if voce:
             al, vo = "fatto", voce[0]
         else:
@@ -5867,14 +6807,28 @@ class Testi:
             if al and vecchia.get("v") == TESTI_V and vecchia.get("f") == b.get("_f") and vecchia.get("it") == it and \
                     vecchia.get("al") in ("errore", "non riuscito"):
                 al = vecchia["al"]   # stesso brano, stesso testo: Whisper non ci riesce, non si ricomincia da capo
+            if al and lungo:
+                al = "non riuscito"
         nuova = dict(v=TESTI_V, f=b.get("_f"), t=t, a=a, s=st, q=ora, n=0, fo=r.get("fonte") or "",
                      sy=bool(r.get("sincronizzato")), pw=bool(r.get("parole")), ri=len(testi), it=it,
                      li=lingua_testo(" ".join(testi)), al=al, vo=vo)
         if al == "attesa":
             nuova.update(aln=0, alq=0)
+        elif al == "non riuscito" and lungo:
+            nuova.update(alq=ora, ale=lungo)
         self._scheda(i, **nuova)
         if al == "attesa":
             self.sveglia_a.set()
+
+    @staticmethod
+    def _troppo_lungo(b):
+        """Il motivo per cui Whisper non ascolta un brano troppo lungo (oltre WHISPER_DURATA_MAX), o ""."""
+        try:
+            d = float(b.get("duration") or 0)
+        except (TypeError, ValueError):
+            d = 0
+        return "brano più lungo di %d minuti: Whisper non lo ascolta" % (WHISPER_DURATA_MAX // 60) \
+            if d > WHISPER_DURATA_MAX else ""
 
     def _prossimo(self, subito, serve):
         voci = self._voci()
@@ -6010,6 +6964,9 @@ class Testi:
             if voce or not self._serve_voce(r):
                 self._scheda(i, al="fatto" if voce else "", vo=voce[0] if voce else "")
                 return False
+            if self._troppo_lungo(b):
+                self._scheda(i, al="non riuscito", alq=ora, ale=self._troppo_lungo(b))
+                return False
             it0, f0 = self._impronta_di(r), b.get("_f")
             os.makedirs(self.tmp, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="voce-", dir=self.tmp) as tmp:
@@ -6129,7 +7086,7 @@ class Testi:
         testi, a = lavoro["righe"], lavoro["a"]
         self.ora_t = "%s → %s" % (testi[0][:40], LINGUE_TRAD[a][0])
         try:
-            tradotte, motore, motivo = self.trad.traduci(testi, lavoro["da"], a, lavoro["ia"])
+            tradotte, motore, motivo = self.trad.traduci(testi, lavoro["da"], a, lavoro["ia"], lavoro["chi"])
             c = _leggi_json(file, None)
             righe = dict(c["righe"]) if isinstance(c, dict) and isinstance(c.get("righe"), dict) else {}
             righe.update((x, y) for x, y in zip(testi, tradotte) if y and y.strip())
@@ -6143,6 +7100,11 @@ class Testi:
             self.errori_t[file] = (time.time(), str(e)[:200])
         finally:
             self.ora_t = ""
+            if len(self.errori_t) > 500:   # gli errori di più di 10 minuti fa non contano più
+                ora = time.time()
+                for k, (quando, _m) in list(self.errori_t.items()):
+                    if ora - quando >= TRAD_RIPROVA:
+                        self.errori_t.pop(k, None)
 
     # per l'app
 
@@ -6189,7 +7151,10 @@ class Testi:
     def per_brano(self, i, lingua="", chi=None):
         """GET testi/<id>: il testo di un brano della libreria."""
         b, p, (t, a, al, dur) = self.brano(i)
-        r = testi_brano(t, a, al, dur, p)
+        try:
+            r = testi_brano(t, a, al, dur, p, chi=chi)
+        except TestiInArrivo:   # LRCLIB non ha ancora risposto: l'app richiede tra poco
+            return {"stato": "in arrivo"}
         voce = self._voce(i, b, r)
         if self.acceso:   # il brano che si ascolta passa davanti agli altri
             self._vivi()
@@ -6210,7 +7175,11 @@ class Testi:
     def per_dati(self, titolo, artista, album, durata, lingua="", chi=None):
         """GET testi?titolo=…: il testo di un brano che non è nella libreria (sul telefono): niente Whisper, l'audio
         non è sul Mac."""
-        o = self._risposta(testi_brano(titolo, artista, album, durata), durata)
+        try:
+            r = testi_brano(titolo, artista, album, durata, chi=chi)
+        except TestiInArrivo:   # LRCLIB non ha ancora risposto: l'app richiede tra poco
+            return {"stato": "in arrivo"}
+        o = self._risposta(r, durata)
         if lingua:
             o["traduzione"] = self.traduzione(o, lingua, chi)
         return o
@@ -6297,14 +7266,10 @@ def _testi(h, resto):
     chi = {"chi": str(c.get("persona") or c.get("chiave") or _ip_cliente(h)), "ia": c.get("ruolo") == "proprietario"}
     if resto:
         return _tst().per_brano(resto[0], lingua, chi)
-    try:
-        durata = max(0.0, float(campo("durata") or 0))
-    except ValueError:
-        raise ErroreExtra(400, "La durata deve essere un numero di secondi")
+    durata = _durata_testi(campo("durata"))   # tra 1 s e un'ora (0: non si sa)
     if not campo("titolo"):
         raise ErroreExtra(400, "Serve il titolo del brano")
-    return _tst().per_dati(campo("titolo"), campo("artista"), campo("album"), durata if math.isfinite(durata) else 0,
-                           lingua, chi)
+    return _tst().per_dati(campo("titolo"), campo("artista"), campo("album"), durata, lingua, chi)
 
 
 def _gestione_testi(h, metodo, resto, corpo):
@@ -6401,7 +7366,9 @@ CL_HOST_LIBERI = ("jamendo.com", "archive.org")   # i soli siti da cui si scaric
 # formati MP3 di Internet Archive, dal migliore: di ogni brano si prende una versione sola
 CL_IA_FORMATI = ("VBR MP3", "320Kbps MP3", "256Kbps MP3", "224Kbps MP3", "192Kbps MP3", "160Kbps MP3", "128Kbps MP3",
                  "112Kbps MP3", "96Kbps MP3", "64Kbps MP3", "MP3")
-CL_SEPARATORI = re.compile(r"\s*(?:,|;|&|\+|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b|\bwith\b|\bw/|\bx\b|\be\b|\band\b|"
+# (senza «\s*» davanti: le parti si puliscono dagli spazi dopo, e con tanti spazi di seguito «\s*» davanti costava il
+# loro quadrato)
+CL_SEPARATORI = re.compile(r"(?:,|;|&|\+|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b|\bwith\b|\bw/|\bx\b|\be\b|\band\b|"
                            r"\bvs\b\.?)\s*", re.I)
 BLOCCO = None         # BloccoYouTube, preparato da avvia_classifiche
 CL = None             # Classifiche, se attive
@@ -6537,8 +7504,9 @@ def _cl_principale(artista):
 
 def _cl_titolo(t):
     """Il titolo senza parentesi, aggiunte dopo un trattino e ospiti, tutto attaccato: «FE!N (feat. Playboi Carti)» →
-    «fen». Così si riconosce lo stesso brano scritto in un altro modo."""
-    t = str(t or "")
+    «fen». Così si riconosce lo stesso brano scritto in un altro modo. Gli spazi di seguito diventano uno: con tanti
+    spazi le espressioni qui sotto costerebbero il loro quadrato (e i titoli di LRCLIB li scrive chiunque)."""
+    t = re.sub(r"\s+", " ", str(t or ""))
     x = re.sub(r"\s*[(\[{][^()\[\]{}]*[)\]}]", " ", t)
     x = re.sub(r"\s+[-–—]\s+.*$", "", x)
     x = re.sub(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", "", x, flags=re.I)
@@ -8168,7 +9136,12 @@ def _scrivi_json(file, d):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False)
+            try:
+                json.dump(d, f, ensure_ascii=False)
+            except UnicodeEncodeError:   # un «surrogato» solo (\ud800, da un JSON di fuori) non va in UTF-8: diventa «�»
+                f.seek(0)
+                f.truncate()
+                json.dump(_senza_surrogati(d), f, ensure_ascii=False)
         os.replace(tmp, file)
     except BaseException:
         _cancella(tmp)
@@ -9759,7 +10732,9 @@ def _chiamate(h, metodo, resto, corpo):
         dopo = (q.get("dopo") or [""])[0]
         if dopo and not re.fullmatch(r"[0-9]{1,18}", dopo):
             raise ErroreExtra(400, "Attesa non valida")
-        return _json(h, CENTRALINO.attendi(chi, (q.get("disp") or [""])[0], int(dopo) if dopo else None, _attesa(h)))
+        with _attesa_lunga(h, _attesa(h)) as a:
+            r = CENTRALINO.attendi(chi, (q.get("disp") or [""])[0], int(dopo) if dopo else None, a["secondi"])
+        return _json(h, _con_riprova(r, a))
     if not resto:
         solo("POST")
         return _json(h, {"chiamata": CENTRALINO.chiama(chi, corpo.get("disp"), corpo.get("a"), corpo.get("video"))})
@@ -10455,8 +11430,9 @@ class MusicBrainz:
 
 
 def _titolo_pulito(t):
-    """Il nome del brano senza «(Official Video)», «[HD]», «(feat. X)», «- Remastered 2011»."""
-    t = RUMORE.sub("", str(t or ""))
+    """Il nome del brano senza «(Official Video)», «[HD]», «(feat. X)», «- Remastered 2011». Gli spazi di seguito
+    diventano uno prima (vedi _cl_titolo)."""
+    t = RUMORE.sub("", re.sub(r"\s+", " ", str(t or "")))
     t = re.sub(r"\s*[(\[](?:feat|ft|featuring|con|with)\b[^()\[\]]*[)\]]", "", t, flags=re.I)
     t = re.sub(r"\s+(?:feat|ft|featuring)\.?\s.*$", "", t, flags=re.I)
     t = re.sub(r"\s+-\s+(?:\d{4}\s+)?(?:remaster(?:ed)?|remix|live|radio edit|versione|version)\b.*$", "", t, flags=re.I)
@@ -10464,6 +11440,7 @@ def _titolo_pulito(t):
 
 
 def _primo_artista(a):
+    a = re.sub(r"\s+", " ", str(a or ""))   # gli spazi di seguito diventano uno: vedi _cl_titolo
     a = re.split(r"\s+(?:feat\.?|ft\.?|featuring|con|with|x|&|e|and|vs\.?)\s+|\s*[,;/]\s*", str(a or ""), flags=re.I)[0]
     return " ".join(a.split())
 
@@ -11679,8 +12656,10 @@ def _ssl():
     return _SSL[0]
 
 
-def _apri_pubblico(url, scadenza):
-    """(risposta, connessione, socket) per una GET a un indirizzo pubblico. Niente rimandi: li segue _proxy."""
+def _apri_pubblico(url, scadenza, extra=None, intest=None, entro=None):
+    """(risposta, connessione, socket) per una GET a un indirizzo pubblico. Niente rimandi: li segue _proxy (o
+    _apri_modello). `extra`: intestazioni in più (Range); `intest`: le intestazioni da mandare al posto di quelle di un
+    browser; `entro`: una _Scadenza che chiude la connessione alla sua ora."""
     u = urlsplit(url)
     sicuro = u.scheme.lower() == "https"
     if u.scheme.lower() not in ("http", "https") or not u.hostname:
@@ -11704,9 +12683,11 @@ def _apri_pubblico(url, scadenza):
     percorso = quote(u.path or "/", safe="/%:@!$&'()*+,;=-._~")
     if u.query:
         percorso += "?" + quote(u.query, safe="/?%:@!$&'()*+,;=-._~")
-    intest = {"User-Agent": BROWSER, "Accept-Language": "it-IT,it;q=0.9,en;q=0.8", "Accept-Encoding": "identity",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml,*/*;q=0.8",
-              "Connection": "close"}
+    if intest is None:
+        intest = {"User-Agent": BROWSER, "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml,*/*;q=0.8"}
+    intest = dict(intest, **{"Accept-Encoding": "identity", "Connection": "close"})
+    intest.update(extra or {})
     ultimo = ""
     for ip in ips:
         resto = scadenza - time.time()
@@ -11714,6 +12695,9 @@ def _apri_pubblico(url, scadenza):
             break
         conn = _ConnS(host, porta, ip, resto, _ssl()) if sicuro else _Conn(host, porta, ip, resto)
         try:
+            if entro is not None:
+                conn.connect()
+                entro.registra(conn.sock)
             conn.request("GET", percorso, headers=intest)
             sock = conn.sock
             return conn.getresponse(), conn, sock
@@ -11731,13 +12715,21 @@ def _apri_pubblico(url, scadenza):
     raise ErroreExtra(502, "Sito non raggiungibile" + (": " + ultimo if ultimo else ""))
 
 
+_RANGE = re.compile(r"bytes=[0-9]{1,15}-[0-9]{0,15}")   # un pezzo solo, dall'inizio: quello che chiedono i lettori
+_CONTENT_RANGE = re.compile(r"bytes [0-9]{1,15}-[0-9]{1,15}/(?:[0-9]{1,15}|\*)")
+
+
 def _proxy(h):
     url = (parse_qs(urlsplit(h.path).query).get("url") or [""])[0].strip()
     if not url:
         raise ErroreExtra(400, "Manca l'indirizzo da leggere (url)")
+    # il lettore audio chiede un pezzo (per andare avanti o riprendere senza scaricare tutto): passa al sito così com'è,
+    # se è un pezzo semplice
+    rng = (h.headers.get("Range") or "").strip()
+    extra = {"Range": rng} if _RANGE.fullmatch(rng) else None
     scadenza = time.time() + TEMPO_PROXY
     for _ in range(10):   # al più 9 rimandi, ognuno ricontrollato
-        r, conn, sock = _apri_pubblico(url, scadenza)
+        r, conn, sock = _apri_pubblico(url, scadenza, extra)
         loc = r.getheader("Location")
         if r.status in (301, 302, 303, 307, 308) and loc:
             r.close()
@@ -11756,6 +12748,8 @@ def _proxy(h):
         except ValueError:
             lun = 0
         tipo, media = _tipo_sito(r)
+        if r.status == 206 and not _pezzo_del_sito(r)[0]:
+            raise ErroreExtra(502, "Il sito ha risposto con un pezzo che non si legge")
         if media or tipo == "application/octet-stream" and lun > MAX_PROXY:
             _proxy_media(h, r, sock, url, lun, media or tipo)
             return
@@ -11786,8 +12780,11 @@ def _proxy(h):
         r.close()
         conn.close()
     corpo = b"".join(pezzi)
+    pezzo, _ = _pezzo_del_sito(r)
     h._musica_risposto = True
-    h.send_response(200)
+    h.send_response(206 if pezzo else 200)
+    if pezzo:
+        h.send_header("Content-Range", pezzo)
     h.send_header("Content-Type", tipo and r.getheader("Content-Type") or "application/octet-stream")
     ce = r.getheader("Content-Encoding")
     if ce and ce.strip().lower() != "identity":
@@ -11806,6 +12803,17 @@ _TIPO_SITO = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.
 _TIPO_MEDIA = re.compile(r"(?:audio|video)/[a-z0-9][a-z0-9.+-]{0,63}")
 
 
+def _pezzo_del_sito(r):
+    """(Content-Range, pezzi): il Content-Range scritto bene di una risposta 206 del sito ("" se non è un 206), e se il
+    sito dà i pezzi (Accept-Ranges: bytes, o un 206)."""
+    if not hasattr(r, "getheader"):
+        return "", False
+    if getattr(r, "status", 200) != 206:
+        return "", (r.getheader("Accept-Ranges") or "").strip().lower() == "bytes"
+    m = _CONTENT_RANGE.fullmatch((r.getheader("Content-Range") or "").strip())
+    return (m.group(0) if m else ""), True
+
+
 def _tipo_sito(r):
     """(tipo, media) dalla risposta del sito: `tipo` è il tipo (minuscolo, senza parametri) se c'è una sola intestazione
     Content-Type, senza virgole e scritta bene, "" se no; `media` è lo stesso tipo se è proprio un audio/… o un video/…
@@ -11820,13 +12828,20 @@ def _tipo_sito(r):
 
 
 def _proxy_media(h, r, sock, url, lun, tipo):
-    """Audio o video letto per l'app (episodio di podcast, capitolo LibriVox): passa a pezzi, fino a 1 GB. Il tipo è
-    quello controllato da _tipo_sito, scritto pulito; aperto come pagina non può fare niente (sandbox, nosniff)."""
+    """Audio o video letto per l'app (episodio di podcast, capitolo LibriVox): passa a pezzi, fino a 1 GB, ognuno con un
+    tempo lungo (un lettore in pausa smette di leggere). Il tipo è quello controllato da _tipo_sito, scritto pulito;
+    aperto come pagina non può fare niente (sandbox, nosniff). Se il lettore ha chiesto un pezzo (Range) e il sito l'ha
+    dato (206), passa il 206 con il suo Content-Range."""
     if lun > MAX_MEDIA:
         raise ErroreExtra(413, "File troppo grande (oltre 1 GB)")
+    pezzo, pezzi = _pezzo_del_sito(r)
     h._musica_risposto = True
-    h.send_response(200)
+    h.send_response(206 if pezzo else 200)
     h.send_header("Content-Type", tipo)
+    if pezzo:
+        h.send_header("Content-Range", pezzo)
+    if pezzi:
+        h.send_header("Accept-Ranges", "bytes")   # il lettore può chiedere un pezzo (andare avanti senza scaricare tutto)
     if lun:
         h.send_header("Content-Length", str(lun))
     else:
@@ -11856,7 +12871,7 @@ def _proxy_media(h, r, sock, url, lun, tipo):
         if tot > MAX_MEDIA:
             h.close_connection = True
             return
-        h.wfile.write(b)
+        _scrivi_a_pezzi(h, b, TEMPO_SCRITTURA_FILE)
 
 
 # ----- interfaccia: strato di modifiche sopra l'app (base di Samuele, personale di ciascuno) -----
@@ -13228,7 +14243,10 @@ def _chat(h, metodo, resto, corpo):
         if cosa == "messaggi" and n == 1 and metodo == "POST":
             return _json(h, ch.invia(persona, accesso, corpo))
         if cosa == "messaggi" and n == 1 and metodo == "GET":
-            return _json(h, ch.ricevi(persona, accesso, arg("disp"), numero("dopo"), numero("v"), numero("attesa", float)))
+            disp, dopo, v = arg("disp"), numero("dopo"), numero("v")
+            with _attesa_lunga(h, numero("attesa", float)) as a:
+                r = ch.ricevi(persona, accesso, disp, dopo, v, a["secondi"])
+            return _json(h, _con_riprova(r, a))
         if cosa == "allegati" and n == 1 and metodo == "POST":
             return _json(h, ch.nuovo_allegato(persona, corpo))
         if cosa == "allegati" and n == 3 and metodo == "POST":
@@ -13256,7 +14274,8 @@ def _chat(h, metodo, resto, corpo):
 
 def _leggi_corpo(h, massimo=MAX_JSON):
     """Il corpo della richiesta, al più `massimo` byte (1 MB per il JSON, 20 MB per i pezzi dei file). Un corpo che non
-    arriva tutto entro il tempo della richiesta (TEMPO_RICHIESTA) è un errore, e la connessione si chiude."""
+    arriva tutto in tempo (_scadenza_corpo: il tempo in tutto, non quello di ogni lettura) è un errore, e la connessione
+    si chiude."""
     if "chunked" in (h.headers.get("Transfer-Encoding") or "").lower():
         h.close_connection = True
         raise ErroreExtra(411, "Serve Content-Length")
@@ -13267,6 +14286,7 @@ def _leggi_corpo(h, massimo=MAX_JSON):
     if n < 0:
         h.close_connection = True
         raise ErroreExtra(400, "Content-Length non valido")
+    _scadenza_corpo(h, n)
     if n > massimo:
         h.close_connection = True   # il corpo non si tiene: la connessione non si riusa
         if n <= MAX_CORPO:   # letto e buttato a pezzi, così l'app riceve il 413 invece di una connessione chiusa a metà
@@ -13324,7 +14344,10 @@ def _stessa_origine(h):
     ammessi = {(h.headers.get("Host") or "").lower()}
     if INDIRIZZO:
         ammessi.add(urlsplit(INDIRIZZO).netloc.lower())
-    return urlsplit(o.strip()).netloc.lower() in ammessi
+    try:
+        return urlsplit(o.strip()).netloc.lower() in ammessi
+    except ValueError:   # un Origin che non si legge (es. «http://[::1»)
+        return False
 
 
 def _instrada(h, metodo, parti, corpo):
@@ -13433,7 +14456,9 @@ def _instrada(h, metodo, parti, corpo):
         _json(h, {"comandi": DISP.stato(resto[0], corpo, _di_disp(h))})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comandi":
         solo("GET")
-        _json(h, {"comandi": DISP.attendi(resto[0], _attesa(h), _di_disp(h))})
+        with _attesa_lunga(h, _attesa(h)) as a:
+            comandi = DISP.attendi(resto[0], a["secondi"], _di_disp(h))
+        _json(h, _con_riprova({"comandi": comandi}, a))
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "comando":
         solo("POST")
         DISP.comando(resto[0], corpo, _di_disp(h))
@@ -13888,8 +14913,12 @@ ACCESSO_RINNOVO = 30 * 86400      # un biscotto con più di 30 giorni si rinnova
 ACCESSO_ITER = 240000             # PBKDF2: ogni tentativo costa al Mac circa un decimo di secondo
 ACCESSO_TENTATIVI = 5             # password sbagliate da uno stesso indirizzo (o rete /64 IPv6) in ACCESSO_FINESTRA,
                                   # poi quell'indirizzo aspetta
-ACCESSO_TENTATIVI_TUTTI = 25      # da tutti gli indirizzi insieme: oltre, ogni tentativo è solo più lento (nessuno si
-ACCESSO_RALLENTA = 1.0            # ferma: chiunque su Internet potrebbe bloccare Samuele), di tanti secondi
+ACCESSO_TENTATIVI_RETE = 20       # e da una stessa rete /48 IPv6 (un fornitore ne dà tante /64 a chi vuole)
+ACCESSO_TENTATIVI_TUTTI = 25      # da tutti gli indirizzi insieme: oltre, al più un controllo ogni ACCESSO_RALLENTA
+ACCESSO_RALLENTA = 1.0            # secondi; gli altri ricevono subito 429 (nessuno si ferma per sempre: chiunque su
+                                  # Internet potrebbe bloccare Samuele; e nessuno aspetta tenendo occupato il server)
+ACCESSO_CODICI_VIA = 200          # sbagliati da tutti insieme in ACCESSO_FINESTRA: i codici di collegamento ancora validi
+                                  # (6 lettere: con tantissimi tentativi si potrebbero indovinare) non valgono più
 ACCESSO_FINESTRA = 15 * 60
 # senza biscotto passano solo la pagina della password e quello che serve per installare l'app (manifest, icone),
 # e solo nella cartella principale dell'app: nessun altro indirizzo che finisca allo stesso modo (api/…/icon-1.png)
@@ -13918,8 +14947,10 @@ class Accesso:
         self.file = file
         self.blocco = threading.Lock()
         self.dati, self.mtime = {}, None
-        self.errori = {}    # indirizzo -> istanti delle password sbagliate
+        self.errori = {}    # indirizzo (o rete IPv6) -> istanti delle password sbagliate
         self.tutti = []     # istanti di tutte le password sbagliate
+        self.via = []       # istanti di quelle dopo l'ultima volta che i codici di collegamento sono stati tolti
+        self.ultimo = None  # quando (time.monotonic) si è controllato l'ultimo tentativo con troppi sbagliati da tutti
 
     def _aggiorna(self):
         # la password si imposta da un altro processo (--imposta-password) mentre il server gira
@@ -14010,40 +15041,66 @@ class Accesso:
             return str(ip)[:64]
         return str(ipaddress.ip_network("%s/64" % a, strict=False)) if a.version == 6 else str(a)
 
+    @classmethod
+    def _chi_provano(cls, ip):
+        """[(chiave, tentativi permessi)]: l'indirizzo (o la rete /64) e, per un IPv6, anche la sua rete /48 (un
+        fornitore dà a chi vuole tante reti /64: tutte insieme contano lì, con più tentativi)."""
+        k, a = cls._chi_prova(ip), _ip(ip)
+        if a is None or a.version != 6:
+            return [(k, ACCESSO_TENTATIVI)]
+        return [(k, ACCESSO_TENTATIVI), (str(ipaddress.ip_network("%s/48" % a, strict=False)), ACCESSO_TENTATIVI_RETE)]
+
     def attesa(self, ip):
         """Secondi da aspettare prima di riprovare la password da questo indirizzo (0: si può subito). Solo chi ha
-        sbagliato aspetta: i tentativi di tutti insieme rallentano (rallenta), non fermano."""
-        ora, k = time.time(), self._chi_prova(ip)
+        sbagliato aspetta (con la sua rete IPv6): i tentativi di tutti insieme vanno solo più piano (turno), non fermano."""
+        ora, w = time.time(), 0
         with self.blocco:
             self.tutti = [t for t in self.tutti if ora - t < ACCESSO_FINESTRA]
-            mie = [t for t in self.errori.get(k, []) if ora - t < ACCESSO_FINESTRA]
-            if mie:
-                self.errori[k] = mie
-            else:
-                self.errori.pop(k, None)
-            w = mie[-ACCESSO_TENTATIVI] + ACCESSO_FINESTRA - ora if len(mie) >= ACCESSO_TENTATIVI else 0
+            for k, n in self._chi_provano(ip):
+                mie = [t for t in self.errori.get(k, []) if ora - t < ACCESSO_FINESTRA]
+                if mie:
+                    self.errori[k] = mie
+                else:
+                    self.errori.pop(k, None)
+                if len(mie) >= n:
+                    w = max(w, mie[-n] + ACCESSO_FINESTRA - ora)
             return int(w) + 1 if w > 0 else 0
 
-    def rallenta(self):
-        """Pausa prima di controllare una password o un codice quando da tutti gli indirizzi insieme ne sono arrivati
-        troppi di sbagliati (tanti indirizzi diversi: provano solo più lentamente)."""
+    def turno(self):
+        """0 se si può controllare adesso una password o un codice; se no i secondi da aspettare (per il Retry-After del
+        429). Quando da tutti gli indirizzi insieme ne sono arrivati troppi di sbagliati, al più un controllo ogni
+        ACCESSO_RALLENTA secondi: tanti indirizzi diversi provano solo piano, e nessuno aspetta tenendo occupato un posto
+        del server (prima si dormiva un secondo)."""
         ora = time.time()
         with self.blocco:
             self.tutti = [t for t in self.tutti if ora - t < ACCESSO_FINESTRA]
-            troppi = len(self.tutti) >= ACCESSO_TENTATIVI_TUTTI
-        if troppi:
-            time.sleep(ACCESSO_RALLENTA)
+            if len(self.tutti) < ACCESSO_TENTATIVI_TUTTI:
+                return 0
+            adesso = time.monotonic()
+            if self.ultimo is not None and adesso - self.ultimo < ACCESSO_RALLENTA:
+                return max(1, math.ceil(self.ultimo + ACCESSO_RALLENTA - adesso))
+            self.ultimo = adesso
+            return 0
 
     def sbagliata(self, ip):
-        ora, k = time.time(), self._chi_prova(ip)
+        """Un tentativo sbagliato. True quando, da tutti insieme, ne sono arrivati ACCESSO_CODICI_VIA in ACCESSO_FINESTRA
+        dall'ultima volta: allora i codici di collegamento ancora validi vanno tolti (_sbagliata)."""
+        ora = time.time()
         with self.blocco:
             if len(self.errori) > 5000:   # moltissimi indirizzi diversi: escono quelli che non sbagliano da più tempo
                 for x in sorted(self.errori, key=lambda x: self.errori[x][-1] if self.errori[x] else 0)[:1000]:
                     del self.errori[x]
-            self.errori.setdefault(k, []).append(ora)
+            for k, _ in self._chi_provano(ip):
+                self.errori.setdefault(k, []).append(ora)
             self.tutti.append(ora)
+            self.via = [t for t in self.via if ora - t < ACCESSO_FINESTRA] + [ora]
+            if len(self.via) >= ACCESSO_CODICI_VIA:
+                self.via = []
+                return True
+            return False
 
     def riuscita(self, ip):
+        """Entrato: i suoi sbagli si dimenticano (quelli della sua rete /48 no: sono anche degli altri)."""
         with self.blocco:
             self.errori.pop(self._chi_prova(ip), None)
 
@@ -14241,6 +15298,17 @@ class Persone:
             d["collegamenti"][_impronta(codice)] = {"persona": pid, "scade": scade}
             self._scrivi(d)
             return codice, scade
+
+    def togli_collegamenti(self):
+        """Nessun codice di collegamento vale più (troppi tentativi sbagliati da Internet): chi ne aspettava uno ne
+        riceve uno nuovo riaprendo il suo link d'invito. Restituisce quanti ne ha tolti."""
+        with self.blocco:
+            d = self._aggiorna()
+            n = len(d["collegamenti"])
+            if n:
+                d["collegamenti"] = {}
+                self._scrivi(d)
+            return n
 
     def usa_collegamento(self, codice, tipo):
         h = _impronta(re.sub(r"[^A-Z0-9]", "", str(codice or "").upper()))
@@ -14535,25 +15603,53 @@ def _proprietario_rete(h):
 # 127.0.0.1 e parlare con il server come se fosse sua: il browser però manda sempre il nome di quel sito nell'Host, e
 # quello non si può cambiare. Si risponde solo ai nomi di Atlante: 127.0.0.1, localhost e [::1] (con qualsiasi porta),
 # il nome di --indirizzo e di --pubblico, quelli di ATLANTE_HOST_OK (separati da virgole) e il nome del Mac nella rete
-# Tailscale. tailscale serve (e funnel) lascia nell'Host il nome chiesto dal browser (lo ripete in X-Forwarded-Host)
-# e aggiunge X-Forwarded-For: una richiesta così, dal Mac stesso, con un nome *.ts.net è il Mac nella rete Tailscale
-# (un nome *.ts.net non si può far puntare al Mac da un altro sito; X-Forwarded-Host da solo invece si può scrivere,
-# quindi conta l'Host). Gli altri nomi: 421.
+# Tailscale (quello che dice `tailscale status`, non un nome *.ts.net qualsiasi). tailscale serve (e funnel) lascia
+# nell'Host il nome chiesto dal browser (lo ripete in X-Forwarded-Host) e aggiunge X-Forwarded-For: una richiesta così,
+# dal Mac stesso, con il nome del Mac nella rete Tailscale arriva da lì (X-Forwarded-Host da solo invece si può
+# scrivere, quindi conta l'Host). La porta, se c'è, solo in cifre. Gli altri nomi: 421.
 HOST_LOCALI = ("127.0.0.1", "localhost", "::1")
 HOST_OK = set()   # da ATLANTE_HOST_OK, preparato da main()
+_HOST_PORTA = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[^\[\]:]+)(?::([0-9]{1,5}))?")
 
 
 def _nome_host(valore):
     """Il nome di un'intestazione Host (o di un indirizzo «nome:porta»): minuscolo, senza porta, parentesi quadre e punto
-    finale; "" se manca o non si legge."""
+    finale; "" se manca o non si legge (anche con una porta che non è un numero, o più grande di 65535)."""
     v = (valore or "").strip()
     if not v or len(v) > 300 or any(c in v for c in " \t/\\@?#,"):
+        return ""
+    m = _HOST_PORTA.fullmatch(v)
+    if not m or (m.group(1) and int(m.group(1)) > 65535):
         return ""
     try:
         n = urlsplit("//" + v).hostname or ""
     except ValueError:
         return ""
     return n[:-1] if n.endswith(".") else n
+
+
+_NOME_TS = {"letto": None, "nome": ""}
+_NOME_TS_BLOCCO = threading.Lock()
+
+
+def _nome_tailscale():
+    """Il nome del Mac nella rete Tailscale (Self.DNSName di `tailscale status --json`), letto al più ogni 5 minuti (ogni
+    minuto finché non si sa); "" se Tailscale non c'è o non risponde (allora valgono solo i nomi scritti nelle
+    impostazioni: --pubblico, --indirizzo, ATLANTE_HOST_OK)."""
+    with _NOME_TS_BLOCCO:
+        letto = _NOME_TS["letto"]
+        if letto is not None and time.monotonic() - letto < (300 if _NOME_TS["nome"] else 60):
+            return _NOME_TS["nome"]
+        nome = ""
+        if _tailscale_programma():
+            try:
+                st, _ = _tailscale_json(["status", "--json"])
+            except ErroreExtra:
+                st = None
+            io_ = st.get("Self") if isinstance(st, dict) else None
+            nome = _nome_host(str(io_.get("DNSName") or "")) if isinstance(io_, dict) else ""
+        _NOME_TS.update(letto=time.monotonic(), nome=nome or _NOME_TS["nome"])
+        return _NOME_TS["nome"]
 
 
 def _host_permesso(h):
@@ -14565,7 +15661,7 @@ def _host_permesso(h):
     # il nome del Mac nella rete Tailscale, attraverso tailscale serve (dal Mac stesso, con X-Forwarded-For)
     vicino, xfh = _ip(h.client_address[0]), h.headers.get("X-Forwarded-Host")
     return (vicino is not None and vicino.is_loopback and h.headers.get("X-Forwarded-For") is not None
-            and n.endswith(".ts.net") and (xfh is None or _nome_host(xfh) == n))
+            and n.endswith(".ts.net") and (xfh is None or _nome_host(xfh) == n) and n == _nome_tailscale())
 
 
 def controlla_host(h):
@@ -14712,9 +15808,26 @@ def _troppi_tentativi(h, w, **k):
                                   True, intestazioni=[("Retry-After", str(w))], **k)
 
 
+def _troppi_da_tutti(h, w, **k):
+    """429 quando da tutta Internet arrivano troppi tentativi sbagliati (Accesso.turno): basta riprovare fra poco."""
+    return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati da Internet in questi minuti: riprova fra qualche "
+                                  "secondo.", True, intestazioni=[("Retry-After", str(w)), ("X-Atlante-Tentativi", "tutti")], **k)
+
+
+def _sbagliata(ip):
+    """Un tentativo sbagliato (password o codice) da `ip`. Ogni ACCESSO_CODICI_VIA sbagliati da tutti insieme i codici di
+    collegamento ancora validi non valgono più: sono corti, e chi ne aspettava uno ne riceve uno nuovo riaprendo il link."""
+    if ACC.sbagliata(ip) and PERS is not None:
+        try:
+            n = PERS.togli_collegamenti()
+        except ErroreExtra:   # archivio delle persone illeggibile: non si scrive
+            n = 0
+        print("Atlante: troppi tentativi sbagliati da Internet: tolti %d codici di collegamento" % n, flush=True)
+
+
 def _leggi_modulo(h):
-    """Corpo di un modulo POST (al più 4 KB): (byte, campi) o None se è troppo grande o non arriva tutto (entro il
-    tempo della richiesta: un corpo annunciato e mai mandato non tiene fermo il server)."""
+    """Corpo di un modulo POST (al più 4 KB): (byte, campi) o None se è troppo grande o non arriva tutto in tempo
+    (_scadenza_corpo: un corpo annunciato e mandato un byte ogni tanto, o mai, non tiene fermo il server)."""
     try:
         n = int(h.headers.get("Content-Length") or 0)
     except ValueError:
@@ -14722,6 +15835,7 @@ def _leggi_modulo(h):
     if not 0 <= n <= 4096 or h.headers.get("Transfer-Encoding"):
         h.close_connection = True
         return None
+    _scadenza_corpo(h, n)
     try:
         dati = h.rfile.read(n) if n else b""
     except OSError:   # tempo scaduto o connessione chiusa
@@ -14744,10 +15858,12 @@ def _usa_collegamento(h, codice):
     w = ACC.attesa(ip)
     if w:
         return _troppi_tentativi(h, w, modulo=modulo)
-    ACC.rallenta()
+    w = ACC.turno()
+    if w:
+        return _troppi_da_tutti(h, w, modulo=modulo)
     did = PERS.usa_collegamento(codice, tipo_da_agente(h.headers.get("User-Agent"))) if PERS else None
     if not did:
-        ACC.sbagliata(ip)
+        _sbagliata(ip)
         print("Atlante: codice di collegamento sbagliato da %s" % ip, flush=True)
         return _scrivi_pagina_accesso(h, 401, "Codice sbagliato o scaduto.", True, modulo=modulo)
     ACC.riuscita(ip)
@@ -14823,9 +15939,11 @@ def _nuova_password(h, dati):
         if w:
             return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % (
                 (w + 59) // 60, "o" if w <= 60 else "i"), True, modulo=modulo, intestazioni=[("Retry-After", str(w))])
-        ACC.rallenta()
+        w = ACC.turno()
+        if w:
+            return _troppi_da_tutti(h, w, modulo=modulo)
         if not ACC.giusta(q.get("password", [""])[0]):
-            ACC.sbagliata(ip)
+            _sbagliata(ip)
             return _scrivi_pagina_accesso(h, 401, "La password di adesso è sbagliata.", True, modulo=modulo)
         ACC.riuscita(ip)
     if len(nuova) < 8:
@@ -14872,12 +15990,14 @@ def _pagina_accesso(h, entrato, samuele):
         return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
                                       True, intestazioni=[("Retry-After", str(w))])
     pw = campi.get("password", [""])[0]
-    ACC.rallenta()
+    w = ACC.turno()
+    if w:
+        return _troppi_da_tutti(h, w)
     if pw and ACC.giusta(pw):
         ACC.riuscita(ip)
         h._biscotto = _set_cookie(h, ACC.biscotto())
         return _rimanda(h, _verso(h, "./"))
-    ACC.sbagliata(ip)
+    _sbagliata(ip)
     print("Atlante: password sbagliata da %s" % ip, flush=True)
     return _scrivi_pagina_accesso(h, 401, "Password sbagliata.", True)
 
@@ -15050,33 +16170,350 @@ def _rotta_invitato(metodo, p):
 
 # ----- risorse del server: tempo e richieste insieme -----
 # Ogni connessione ha un filo suo (ThreadingHTTPServer). Senza limiti, chi apre tante connessioni e non manda niente (o
-# annuncia un corpo e non lo manda) tiene fermi fili e memoria del Mac per sempre: ogni lettura o scrittura ha al più
-# TEMPO_RICHIESTA secondi (l'attesa lunga dei telefoni è di 25 s, ma lì il server non legge: aspetta i comandi), e al
-# più RICHIESTE_MAX connessioni sono servite insieme; le altre aspettano il loro turno (non si rifiutano).
-TEMPO_RICHIESTA = 30   # ATLANTE_TEMPO_RICHIESTA per cambiarlo (le prove lo accorciano)
-RICHIESTE_MAX = 64     # ATLANTE_RICHIESTE_MAX
+# annuncia un corpo e lo manda un byte alla volta) tiene fermi fili, memoria e posti del Mac. Le regole:
+# - tempo: riga e intestazioni della richiesta arrivano tutte entro TEMPO_RICHIESTA secondi, e il corpo entro
+#   TEMPO_RICHIESTA secondi dall'arrivo della richiesta più un secondo ogni CORPO_VELOCITA_MIN byte. Conta il tempo in
+#   tutto, non quello di ogni lettura: chi manda un byte ogni 29 secondi non tiene aperta la richiesta per ore (_Lettura).
+# - posti: al più FILI_MAX connessioni aperte insieme (un limite alto, che non deve fermare nessuno: chi aspetta lì non
+#   si sa chi sia). Le richieste servite insieme si contano dopo le intestazioni, quando si sa chi chiede (Posti): i
+#   programmi del Mac (127.0.0.1 senza tailscale serve davanti: l'aggiornamento automatico, gli script) hanno posti loro,
+#   un quarto di RICHIESTE_MAX è sempre libero per Samuele, chi non è entrato (da Internet senza biscotto: la pagina della
+#   password e gli inviti) ne ha pochi, e ogni invitato (con tutti i suoi dispositivi) o dispositivo della rete di casa
+#   al più alcuni. Chi non trova posto aspetta un poco, poi riceve 503 (l'app riprova).
+# - attese lunghe (telecomando, chiamate, chat, posizione: 25 s ciascuna, da 2 a 5 per ogni app aperta): non tengono un
+#   posto (aspettano, non lavorano) e ne hanno di loro, per dispositivo, per persona e in tutto. Oltre, rispondono subito
+#   con quello che c'è e «riprova» (secondi): l'app richiede dopo quei secondi (_attesa_lunga).
+# - scritture: ognuna ha TEMPO_RICHIESTA secondi; file (musica, film, audio dal proxy) e catalogo si scrivono a pezzi,
+#   ognuno con un tempo più lungo (_scrivi_a_pezzi): un video in pausa o un telefono lento non si vede tagliare la
+#   risposta. Servono solo a chi è entrato, che ha i suoi posti contati: chi non è entrato non li tiene.
+TEMPO_RICHIESTA = 30          # ATLANTE_TEMPO_RICHIESTA per cambiarlo (le prove lo accorciano)
+CORPO_VELOCITA_MIN = 16 * 1024   # byte al secondo: un pezzo da 8 MB di un caricamento ha 30 s più 8 minuti e mezzo
+FILI_MAX = 512                # ATLANTE_FILI_MAX: connessioni aperte insieme
+RICHIESTE_MAX = 64            # ATLANTE_RICHIESTE_MAX: richieste servite insieme (un quarto sempre libero per Samuele)
+RICHIESTE_MAC = 8             # in più, per i programmi del Mac stesso
+RICHIESTE_ANONIMI = 8         # chi non è entrato, tutti insieme (al più metà dei posti degli altri)
+RICHIESTE_ANONIMO = 2         # chi non è entrato, per indirizzo (o rete /64 IPv6)
+RICHIESTE_PERSONA = 16        # per invitato (tutti i suoi dispositivi) e per dispositivo della rete di casa
+ATTESA_POSTO = 20             # secondi che una richiesta aspetta un posto, poi 503
+ATTESA_POSTO_ANONIMI = 5      # per chi non è entrato
+CODA_PERSONA = 64             # richieste che aspettano un posto, per invitato o dispositivo di casa (oltre: subito 503)
+CODA_ANONIMO = 4              # per indirizzo di chi non è entrato
+CODA_ANONIMI = 32             # chi non è entrato, tutti insieme
+CODA_ALTRI = 128              # di tutti quelli che non sono Samuele né il Mac
+ATTESE_DISPOSITIVO = 6        # attese lunghe insieme per dispositivo (un'app aperta ne tiene da 2 a 5)
+ATTESE_PERSONA = 12           # per invitato (tutti i suoi dispositivi) e per dispositivo della rete di casa
+ATTESE_MAX = 128              # di tutti quelli che non sono Samuele né il Mac
+# chi non è Samuele né il Mac (richieste servite, in attesa di un posto, attese lunghe) tiene al più tre quarti dei
+# FILI_MAX: un quarto dei fili resta sempre per Samuele e i programmi del Mac
+RIPROVA_ATTESA = 10           # secondi dopo cui l'app richiede un'attesa lunga che non ha trovato posto
+SCRITTURA_PEZZO = 64 * 1024   # byte di un pezzo delle risposte grandi
+TEMPO_SCRITTURA_FILE = 120    # secondi per ogni pezzo di un file (un video in pausa: il browser smette di leggere)
+TEMPO_SCRITTURA_CATALOGO = 60   # per ogni pezzo del catalogo (un telefono lento)
+
+
+class _Lettura(io.RawIOBase):
+    """Lettura dalla connessione con una scadenza in tutto (`scadenza`, in time.monotonic()): prima di ogni lettura il
+    tempo massimo della connessione diventa quello che resta (al più `passo`, il tempo di una lettura), poi torna `passo`
+    (per le scritture)."""
+
+    def __init__(self, sock, passo):
+        super().__init__()
+        self.sock, self.passo, self.scadenza = sock, passo, None
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        tempo = self.passo
+        if self.scadenza is not None:
+            resto = self.scadenza - time.monotonic()
+            if resto <= 0:
+                raise socket.timeout("tempo della richiesta finito")
+            tempo = resto if tempo is None else min(tempo, resto)
+        if tempo == self.passo:
+            return self.sock.recv_into(b)
+        self.sock.settimeout(tempo)
+        try:
+            return self.sock.recv_into(b)
+        finally:
+            self.sock.settimeout(self.passo)
+
+
+def _scadenza_corpo(h, n):
+    """Il corpo di `n` byte arriva entro TEMPO_RICHIESTA secondi dall'arrivo della richiesta, più un secondo ogni
+    CORPO_VELOCITA_MIN byte. Da chiamare prima di leggerlo (_leggi_corpo, _leggi_modulo)."""
+    lettura = getattr(h, "_lettura", None)
+    if lettura is not None:
+        inizio = getattr(h, "_inizio", None) or time.monotonic()
+        lettura.scadenza = inizio + (lettura.passo or TEMPO_RICHIESTA) + max(0, n) / CORPO_VELOCITA_MIN
+
+
+def _scrivi_a_pezzi(h, dati, tempo):
+    """Una risposta grande (file, catalogo, audio dal proxy) a pezzi da SCRITTURA_PEZZO byte, ognuno con al più `tempo`
+    secondi (invece di TEMPO_RICHIESTA per tutto): un telefono lento o un video in pausa non si vede tagliare la
+    risposta. Poi la connessione torna al tempo di prima."""
+    sock = getattr(h, "connection", None)
+    if not isinstance(sock, socket.socket):
+        h.wfile.write(dati)
+        return
+    prima = sock.gettimeout()
+    v = memoryview(dati)
+    try:
+        sock.settimeout(tempo)
+        for i in range(0, len(v), SCRITTURA_PEZZO):
+            h.wfile.write(v[i:i + SCRITTURA_PEZZO])
+    finally:
+        try:
+            sock.settimeout(prima)
+        except OSError:
+            pass
+
+
+class Posti:
+    """Le richieste servite insieme, contate dopo le intestazioni quando si sa chi chiede (vedi sopra). `tipo`: «mac» (un
+    programma del Mac stesso), «samuele», «persona» (un invitato con tutti i suoi dispositivi, o un dispositivo della rete
+    di casa) o «anonimo» (chi non è entrato); `chiave`: di chi (la persona, l'indirizzo)."""
+
+    def __init__(self, massimo=RICHIESTE_MAX, fili=FILI_MAX):
+        self.cond = threading.Condition()
+        self.massimo = max(2, int(massimo))
+        # un quarto sempre libero per Samuele; e chi non è Samuele né il Mac sta nei tre quarti dei fili (vedi sopra)
+        self.altri = max(1, min(self.massimo - max(1, self.massimo // 4), int(fili) * 3 // 4 - CODA_ALTRI - ATTESE_MAX))
+        meta = max(1, self.altri // 2)
+        self.max_anonimi, self.max_anonimo = min(RICHIESTE_ANONIMI, meta), min(RICHIESTE_ANONIMO, meta)
+        self.max_persona = min(RICHIESTE_PERSONA, meta)
+        # posti usati: da tutti (tranne il Mac), da chi non è Samuele né il Mac, dal Mac, da chi non è entrato
+        self.tutti = self.uso_altri = self.mac = self.anonimi = 0
+        self.per = collections.Counter()           # chiave -> posti usati
+        self.coda = collections.Counter()          # chiave -> richieste che aspettano un posto
+        self.coda_altri = self.coda_anonimi = 0
+        self.attese_disp = collections.Counter()   # dispositivo -> attese lunghe
+        self.attese_per = collections.Counter()    # chiave -> attese lunghe
+        self.attese_altri = 0
+
+    def _libero(self, tipo, chiave):
+        if tipo == "mac":
+            return self.mac < RICHIESTE_MAC
+        if tipo == "samuele":
+            return self.tutti < self.massimo
+        if self.tutti >= self.massimo or self.uso_altri >= self.altri:   # gli altri insieme: al più `altri`
+            return False
+        if tipo == "anonimo":
+            return self.anonimi < self.max_anonimi and self.per[chiave] < self.max_anonimo
+        return self.per[chiave] < self.max_persona
+
+    def _conta(self, tipo, chiave, n):
+        if tipo == "mac":
+            self.mac += n
+            return
+        self.tutti += n
+        if tipo == "anonimo":
+            self.anonimi += n
+        if tipo in ("anonimo", "persona"):
+            self.uso_altri += n
+            self.per[chiave] += n
+            if self.per[chiave] <= 0:
+                del self.per[chiave]
+
+    def prendi(self, tipo, chiave, attesa):
+        """True con un posto (da lasciare con lascia). False se non se n'è liberato uno entro `attesa` secondi, o se
+        aspettano già troppe richieste della stessa persona o indirizzo (o di tutti quelli che non sono Samuele né il
+        Mac): ognuna aspetta tenendo un filo."""
+        fine = time.monotonic() + attesa
+        altro, anonimo = tipo in ("anonimo", "persona"), tipo == "anonimo"
+        with self.cond:
+            if not self._libero(tipo, chiave):
+                if altro and (self.coda_altri >= CODA_ALTRI or (anonimo and self.coda_anonimi >= CODA_ANONIMI) or
+                              self.coda[chiave] >= (CODA_ANONIMO if anonimo else CODA_PERSONA)):
+                    return False
+                self.coda[chiave] += 1
+                self.coda_altri += altro
+                self.coda_anonimi += anonimo
+                try:
+                    while not self._libero(tipo, chiave):
+                        resto = fine - time.monotonic()
+                        if resto <= 0:
+                            return False
+                        self.cond.wait(resto)
+                finally:
+                    self.coda[chiave] -= 1
+                    if self.coda[chiave] <= 0:
+                        del self.coda[chiave]
+                    self.coda_altri -= altro
+                    self.coda_anonimi -= anonimo
+            self._conta(tipo, chiave, 1)
+            return True
+
+    def lascia(self, tipo, chiave):
+        with self.cond:
+            self._conta(tipo, chiave, -1)
+            self.cond.notify_all()
+
+    def prendi_attesa(self, tipo, chiave, disp):
+        """Un posto per un'attesa lunga, subito o mai: al più ATTESE_DISPOSITIVO per dispositivo e, per chi non è Samuele
+        né il Mac, ATTESE_PERSONA per persona e ATTESE_MAX in tutto. I programmi del Mac (e l'app aperta sul Mac stesso,
+        dove tutto arriva da 127.0.0.1) non hanno tetti."""
+        if tipo == "mac":
+            return True
+        altro = tipo != "samuele"
+        with self.cond:
+            if self.attese_disp[disp] >= ATTESE_DISPOSITIVO:
+                return False
+            if altro and (self.attese_altri >= ATTESE_MAX or self.attese_per[chiave] >= ATTESE_PERSONA):
+                return False
+            self.attese_disp[disp] += 1
+            if altro:
+                self.attese_per[chiave] += 1
+                self.attese_altri += 1
+            return True
+
+    def lascia_attesa(self, tipo, chiave, disp):
+        if tipo == "mac":
+            return
+        with self.cond:
+            self.attese_disp[disp] -= 1
+            if self.attese_disp[disp] <= 0:
+                del self.attese_disp[disp]
+            if tipo not in ("samuele", "mac"):
+                self.attese_per[chiave] -= 1
+                if self.attese_per[chiave] <= 0:
+                    del self.attese_per[chiave]
+                self.attese_altri -= 1
+
+
+def _cliente(h):
+    """(tipo, chiave) di chi chiede, per i posti (vedi Posti): come lo decide controlla_accesso, senza scrivere niente."""
+    if _dal_mac_diretto(h):
+        return "mac", "mac"
+    if ACC is None:
+        return "samuele", "p"
+    b = _biscotto_valido(h)
+    if _proprietario_rete(h) or (b is not None and b[0] == "p"):
+        return "samuele", "p"
+    if b is not None and b[0] == "o":
+        return "persona", "o:%s" % b[3]
+    ip = _ip_cliente(h)
+    if _fidato(h):
+        return "persona", "casa:" + ip
+    return "anonimo", "ip:" + Accesso._chi_prova(ip)
+
+
+def _occupato(h):
+    """503 a chi non trova posto (Retry-After): l'app riprova, la pagina della password si ricarica."""
+    corpo = json.dumps({"errore": "Il Mac mini ha tante richieste insieme: riprova fra poco"},
+                       ensure_ascii=False).encode("utf-8")
+    h.close_connection = True   # un corpo eventuale non si legge
+    h.send_response(503)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.send_header("Retry-After", "5")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+
+
+def _lascia_posto(h):
+    """Lascia il posto della richiesta: alla fine, o prima di un'attesa lunga (che ha i suoi)."""
+    posti, h._posto = getattr(h, "_posto", None), None
+    if posti is not None:
+        posti.lascia(*h._cliente)
+
+
+def servi(h, fai):
+    """Una richiesta, dopo le intestazioni: il nome (controlla_host), un posto (Posti), l'accesso e i permessi
+    (controlla_accesso, _permesso), poi `fai()`. Da chiamare in do_GET, do_HEAD, do_POST, do_PUT e do_DELETE."""
+    h._posto = None
+    if controlla_host(h):
+        return
+    posti = getattr(getattr(h, "server", None), "posti", None)
+    h._cliente = _cliente(h)
+    if posti is not None:
+        tipo = h._cliente[0]
+        if not posti.prendi(tipo, h._cliente[1], ATTESA_POSTO_ANONIMI if tipo == "anonimo" else ATTESA_POSTO):
+            return _occupato(h)
+        h._posto = posti
+    try:
+        if controlla_accesso(h) or not _permesso(h):
+            return
+        fai()
+    finally:
+        _lascia_posto(h)
+
+
+@contextlib.contextmanager
+def _attesa_lunga(h, secondi):
+    """Un'attesa lunga (telecomando, chiamate, chat, posizione): mentre aspetta non tiene il posto della richiesta, ma
+    uno di quelli delle attese (Posti.prendi_attesa; il dispositivo è quello del biscotto, o l'indirizzo). Se non ce
+    n'è, risponde subito con quello che c'è e l'app riprova dopo RIPROVA_ATTESA secondi.
+    Dà {"secondi": quanto aspettare, "riprova": 0, o i secondi per l'app (vedi _con_riprova)}."""
+    a = {"secondi": max(0.0, secondi), "riprova": 0}
+    posti = getattr(getattr(h, "server", None), "posti", None)
+    if not a["secondi"] > 0 or posti is None:
+        a["secondi"] = 0.0
+        yield a
+        return
+    tipo, chiave = getattr(h, "_cliente", None) or ("samuele", "p")
+    c = (getattr(h, "_chi", None) or {}).get("chiave")
+    disp = "d:%s" % c if c else "ip:" + _ip_cliente(h)
+    if not posti.prendi_attesa(tipo, chiave, disp):
+        a.update(secondi=0.0, riprova=RIPROVA_ATTESA)
+        yield a
+        return
+    _lascia_posto(h)
+    try:
+        yield a
+    finally:
+        posti.lascia_attesa(tipo, chiave, disp)
+
+
+def _con_riprova(dati, a):
+    """La risposta di un'attesa lunga, con «riprova» se non ha trovato posto (l'app aspetta quei secondi)."""
+    return dict(dati, riprova=a["riprova"]) if a["riprova"] else dati
 
 
 class ServerLimitato(ThreadingHTTPServer):
     request_queue_size = 128   # con 5, dietro Tailscale le copertine davano 502
 
-    def __init__(self, indirizzo, gestore, massimo):
-        self.posti = threading.BoundedSemaphore(max(1, massimo))
+    def __init__(self, indirizzo, gestore, massimo, fili=FILI_MAX):
+        self.fili = threading.BoundedSemaphore(max(1, int(fili)))
+        self.posti = Posti(massimo, fili)
         super().__init__(indirizzo, gestore)
 
     def process_request(self, request, client_address):
-        self.posti.acquire()   # aspetta che una connessione finisca
+        self.fili.acquire()   # oltre FILI_MAX connessioni aperte, aspetta che una finisca
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self.posti.release()
+            self.fili.release()
             raise
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.posti.release()
+            self.fili.release()
+
+
+class GestoreLimitato(SimpleHTTPRequestHandler):
+    """Le richieste con il tempo in tutto (vedi sopra): riga e intestazioni entro `timeout` secondi dall'inizio
+    dell'attesa, il corpo entro _scadenza_corpo."""
+    timeout = TEMPO_RICHIESTA   # secondi al più per ogni lettura e scrittura (e per arrivare con la richiesta)
+
+    def setup(self):
+        super().setup()
+        self.rfile.close()   # al suo posto la lettura con la scadenza
+        self._lettura = _Lettura(self.connection, self.timeout)
+        self.rfile = io.BufferedReader(self._lettura)
+
+    def handle_one_request(self):
+        self._inizio = None
+        self._lettura.scadenza = time.monotonic() + self.timeout
+        super().handle_one_request()
+
+    def parse_request(self):
+        self._inizio = time.monotonic()   # la riga della richiesta è arrivata: ora le intestazioni
+        return super().parse_request()
 
 
 def _numero_ambiente(nome, predefinito):
@@ -15236,8 +16673,8 @@ def main():
     https = bool(a.cert)
     host_sicuro = urlsplit(indirizzo).netloc.lower()
 
-    class H(SimpleHTTPRequestHandler):
-        # secondi al più per leggere (la richiesta, il corpo) o scrivere un pezzo della risposta
+    class H(GestoreLimitato):
+        # secondi al più per arrivare con la richiesta (riga e intestazioni), per ogni lettura e per ogni scrittura
         timeout = max(1.0, _numero_ambiente("ATLANTE_TEMPO_RICHIESTA", TEMPO_RICHIESTA))
 
         def __init__(self, *x, **k):
@@ -15255,38 +16692,28 @@ def main():
             self.end_headers()
             return True
 
+        # ogni richiesta passa da servi: il nome (Host), un posto, l'accesso e i permessi; poi la risposta
         def do_GET(self):
-            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
-                return
-            if not gestisci_extra(self, "GET") and not gestisci(self) and not self._vai_al_sicuro():
-                super().do_GET()
+            servi(self, lambda: gestisci_extra(self, "GET") or gestisci(self) or self._vai_al_sicuro()
+                  or SimpleHTTPRequestHandler.do_GET(self))
 
         def do_HEAD(self):
-            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
-                return
-            if not gestisci_extra(self, "HEAD") and not gestisci(self) and not self._vai_al_sicuro():
-                super().do_HEAD()
+            servi(self, lambda: gestisci_extra(self, "HEAD") or gestisci(self) or self._vai_al_sicuro()
+                  or SimpleHTTPRequestHandler.do_HEAD(self))
+
+        def _senza_metodo(self, metodo):
+            if not gestisci_extra(self, metodo):
+                self.close_connection = True   # corpo non letto
+                self.send_error(501, "Unsupported method ('%s')" % metodo)
 
         def do_POST(self):
-            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
-                return
-            if not gestisci_extra(self, "POST"):
-                self.close_connection = True   # corpo non letto
-                self.send_error(501, "Unsupported method ('POST')")
+            servi(self, lambda: self._senza_metodo("POST"))
 
         def do_DELETE(self):
-            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
-                return
-            if not gestisci_extra(self, "DELETE"):
-                self.close_connection = True
-                self.send_error(501, "Unsupported method ('DELETE')")
+            servi(self, lambda: self._senza_metodo("DELETE"))
 
         def do_PUT(self):   # i pezzi dei caricamenti (brani, film) e le copertine nuove: il corpo sono i byte
-            if controlla_host(self) or controlla_accesso(self) or not _permesso(self):
-                return
-            if not gestisci_extra(self, "PUT"):
-                self.close_connection = True
-                self.send_error(501, "Unsupported method ('PUT')")
+            servi(self, lambda: self._senza_metodo("PUT"))
 
         def end_headers(self):
             # pagina, service worker e manifest (e le pagine dei moduli in x/ con kit.js e kit.css): il browser chiede
@@ -15314,7 +16741,8 @@ def main():
     # rete di casa nessuno deve arrivarci. ATLANTE_ASCOLTO=0.0.0.0 per aprirlo alla rete di casa (con ATLANTE_HOST_OK
     # per il nome usato lì). La password la chiede solo a chi arriva da Internet: vedi controlla_accesso
     ascolto = os.environ.get("ATLANTE_ASCOLTO", "127.0.0.1")
-    srv = ServerLimitato((ascolto, a.porta), H, int(_numero_ambiente("ATLANTE_RICHIESTE_MAX", RICHIESTE_MAX)))
+    srv = ServerLimitato((ascolto, a.porta), H, int(_numero_ambiente("ATLANTE_RICHIESTE_MAX", RICHIESTE_MAX)),
+                         int(_numero_ambiente("ATLANTE_FILI_MAX", FILI_MAX)))
     if https:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(a.cert, a.chiave)

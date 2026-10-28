@@ -296,7 +296,6 @@ details.card[open] summary::after{transform:rotate(-90deg)}
     mac = Object.assign({controllo: false}, s);
     $('macRetry').disabled = false;
     notaMac(); aggiornaTasti(); aggiorna();
-    avvioAutomatico();
   }
   $('macRetry').onclick = () => controllaMac(true);
   addEventListener('online', () => { if (!mac.ok) controllaMac(true); });
@@ -589,26 +588,17 @@ details.card[open] summary::after{transform:rotate(-90deg)}
   $('copyBase').onclick = () => copia(BASE + '?url=', 'Indirizzo copiato');
   $('copyBm').onclick = () => copia(BM, 'Codice copiato: incollalo come indirizzo del segnalibro');
 
-  /* ---------- link passato nell'indirizzo (?url=…, da Comandi Rapidi o segnalibro) ---------- */
-  // ?subito=1 fa partire lo scaricamento senza tocchi solo dentro l'app (questa pagina nel riquadro dei moduli, #xf, e
-  // l'app non passa «subito» dal suo indirizzo: vedi moduloDaIndirizzo in index.html). Da sola, aperta da un link di
-  // chiunque, il link resta scritto e lo scaricamento parte con un tocco su «Scarica»
-  function partenzaAutomatica(q, w) {
-    if (q.get('subito') !== '1') return false;
-    try { const f = w.frameElement; return !!(f && f.id === 'xf' && w.parent && w.parent.AM); } catch (e) { return false; }
-  }
-  let auto = false;
-  const daIndirizzo = estraiUrl(qs.get('url') || qs.get('u') || qs.get('text') || '');
-  if (daIndirizzo) {
-    $('url').value = daIndirizzo; $('addr').value = daIndirizzo;
-    auto = partenzaAutomatica(qs, window);
+  /* ---------- link passato nell'indirizzo (?url=…, da Comandi Rapidi, segnalibro o Condividi nell'app) ----------
+     Il link resta scritto e lo scaricamento parte con un tocco su «Scarica»: un link, da chiunque arrivi, non scarica
+     mai da solo (né dentro l'app né aperto da solo) */
+  function linkDaIndirizzo(q) {
+    const u = estraiUrl(q.get('url') || q.get('u') || q.get('text') || '');
+    if (!u) return '';
+    $('url').value = u; $('addr').value = u;
     try { history.replaceState(null, '', location.pathname); } catch (e) {}   // un ricaricamento non lo rimanda
+    return u;
   }
-  function avvioAutomatico() {
-    if (!auto || !puoScaricare()) return;
-    auto = false;
-    $('btnScarica').click();
-  }
+  const daIndirizzo = linkDaIndirizzo(qs);
 
   /* ---------- avvio ---------- */
   mostraScheda(daIndirizzo ? 'scarica' : AX.store.get('video-tab', 'scarica'));

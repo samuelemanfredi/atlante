@@ -102,6 +102,7 @@
         if (n !== giroN) return;
         pausa = 0;
         await elenco(j);
+        if (j.riprova) await dormi(j.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
       } catch (e) {
         if (n !== giroN) return;
         if (e.dati && e.dati.registra) { await G.Cifra.registra(true).catch(() => {}); await dormi(1000); continue; }

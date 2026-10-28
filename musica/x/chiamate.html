@@ -95,8 +95,9 @@
    - schermata della chiamata, che l'app apre in una cornice sua sopra tutto (?chiama=<persona>[,<persona>]&video=1 o
      ?entrante=<id della chiamata>, con &cornice=1). Aperta da sola (senza l'app) fa tutto lei, squilli compresi.
    Da un altro modulo (la chat): AX.host.chiama('<persona>', video) oppure aprire x/chiamate.html?chiama=<persona>.
-   Chiama subito solo nella cornice dell'app (l'iframe in #xc che crea apriChiamata in index.html): un link con ?chiama=
-   aperto da solo o passato all'app (anche con &cornice=1) propone la chiamata e aspetta un tocco. */
+   Chiama subito solo nella cornice dell'app (l'iframe in #xc che crea apriChiamata in index.html), e solo se il gettone
+   usa e getta dell'indirizzo (&gettone=…) è quello che l'app ha appena dato: un link con ?chiama= aperto da solo o
+   passato all'app (anche con &cornice=1) propone la chiamata e aspetta un tocco. */
 const {$, esc, api} = AX;
 const host = AX.host;
 const Q = new URLSearchParams(location.search);
@@ -105,7 +106,12 @@ const Q = new URLSearchParams(location.search);
 function nellaCornice(w) {
   try { const f = w.frameElement; return !!(f && f.parentElement && f.parentElement.id === 'xc' && w.parent && w.parent.AM); } catch (e) { return false; }
 }
-const CORNICE = Q.get('cornice') === '1' && !!host && nellaCornice(window);
+// il gettone si restituisce all'app (una volta sola): vale solo quello che lei ha messo nell'indirizzo della cornice
+function gettoneValido(g) {
+  try { return !!g && typeof host.gettoneChiamata === 'function' && host.gettoneChiamata(g) === true; } catch (e) { return false; }
+}
+const IN_CORNICE = Q.get('cornice') === '1' && !!host && nellaCornice(window);
+const CORNICE = IN_CORNICE && gettoneValido(Q.get('gettone'));
 const enc = encodeURIComponent;
 const pausa = ms => new Promise(r => setTimeout(r, ms));
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -411,6 +417,7 @@ async function ciclo() {
       mia.seq = j.seq; mia.errori = 0;
       for (const e of j.eventi || []) if (e.tipo === 'segnale' && e.chiamata === mia.id) await ricevi(e);
       aggiorna((j.chiamate || []).find(x => x.id === mia.id));
+      if (j.riprova) await pausa(j.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
     } catch (e) {
       if (!mia.attivo || mia !== C) return;
       if (++mia.errori >= 3) scritta('Il Mac mini non risponde…');
@@ -727,6 +734,7 @@ async function ascoltaEntrate() {
       if (C.attivo || C.preparando) break;
       const c = (j.chiamate || []).find(x => x.stato !== 'finita' && (io(x) || {}).stato === 'squilla');
       if (c) { ascolto = false; entrata(c.id); return; }
+      if (j.riprova) await pausa(j.riprova * 1000);   // troppe attese insieme da qui: il Mac dice quando riprovare
     } catch (e) { await pausa(5000); }
   }
   ascolto = false;
@@ -741,6 +749,7 @@ async function ascoltaEntrate() {
     else host.chiamataFinita();
     return;
   }
+  if (IN_CORNICE) { host.chiamataFinita(); return; }   // nella cornice senza il gettone giusto (ricaricata): si chiude
   AX.header('Chiamate');
   disegnaRecenti();
   const ok = await caricaPersone();

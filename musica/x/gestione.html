@@ -190,39 +190,40 @@ async function disegna() {
   const attesa = rq.richieste.filter(r => r.stato === 'attesa');
   $('richieste').hidden = !attesa.length;
   $('rlist').innerHTML = attesa.map(r => '<div class="row"><span class="tx"><b>' + esc(r.nome) + '</b><span>Lo chiede ' + esc(r.da_nome || 'una persona revocata') + ' · ' + quando(r.creato) + '</span></span>' +
-    '<button class="btn sm pri" data-ok="' + r.id + '">Consenti</button><button class="btn sm" data-no="' + r.id + '">Rifiuta</button></div>').join('');
+    '<button class="btn sm pri" data-ok="' + esc(r.id) + '">Consenti</button><button class="btn sm" data-no="' + esc(r.id) + '">Rifiuta</button></div>').join('');
   $('rlist').querySelectorAll('[data-ok]').forEach(b => b.onclick = async () => {
-    try { const r = await api('gestione/richieste/' + b.dataset.ok + '/consenti', {method:'POST'}); toast('Fatto: il link per ' + r.persona.nome + ' è arrivato a chi l\'ha chiesto'); }
+    try { const r = await api('gestione/richieste/' + encodeURIComponent(b.dataset.ok) + '/consenti', {method:'POST'}); toast('Fatto: il link per ' + r.persona.nome + ' è arrivato a chi l\'ha chiesto'); }
     catch (e) { toast(e.message); }
     disegna();
   });
   $('rlist').querySelectorAll('[data-no]').forEach(b => b.onclick = async () => {
-    try { await api('gestione/richieste/' + b.dataset.no + '/rifiuta', {method:'POST'}); } catch (e) { toast(e.message); }
+    try { await api('gestione/richieste/' + encodeURIComponent(b.dataset.no) + '/rifiuta', {method:'POST'}); } catch (e) { toast(e.message); }
     disegna();
   });
   $('pvuote').hidden = el.persone.length > 0;
   $('plist').hidden = !el.persone.length;
+  // id e numeri arrivano dal Mac: nel codice HTML gli id protetti (esc), i numeri come numeri (|0)
   $('plist').innerHTML = el.persone.map(p => {
-    const ult = Math.max(0, ...p.dispositivi.map(d => d.visto));
+    const ult = Math.max(0, ...p.dispositivi.map(d => d.visto)), nd = p.dispositivi.length | 0;
     const det = p.id !== aperta ? '' : '<div class="det">' +
-      (p.dispositivi.length ? p.dispositivi.map(d => '<div class="dev"><span class="tx"><b>' + esc(descrivi(d)) + '</b><span class="small">' + esc(dettagli(d)) + '</span></span><button class="btn sm" data-rd="' + d.id + '">Revoca</button></div>').join('') :
+      (p.dispositivi.length ? p.dispositivi.map(d => '<div class="dev"><span class="tx"><b>' + esc(descrivi(d)) + '</b><span class="small">' + esc(dettagli(d)) + '</span></span><button class="btn sm" data-rd="' + esc(d.id) + '">Revoca</button></div>').join('') :
         '<p class="small">Nessun dispositivo collegato, per ora.</p>') +
-      '<div class="btns"><button class="btn sm" data-nl="' + p.id + '">Nuovo link</button><button class="btn sm danger" data-rp="' + p.id + '">Revoca ' + esc(p.nome) + '</button></div><div data-box></div></div>';
-    return '<button class="row" data-p="' + p.id + '"><span class="av">' + esc(p.nome.slice(0, 1)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b><span>' +
-      p.dispositivi.length + (p.dispositivi.length === 1 ? ' dispositivo' : ' dispositivi') + ' · ultimo accesso ' + quando(ult) +
+      '<div class="btns"><button class="btn sm" data-nl="' + esc(p.id) + '">Nuovo link</button><button class="btn sm danger" data-rp="' + esc(p.id) + '">Revoca ' + esc(p.nome) + '</button></div><div data-box></div></div>';
+    return '<button class="row" data-p="' + esc(p.id) + '"><span class="av">' + esc(p.nome.slice(0, 1)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b><span>' +
+      nd + (nd === 1 ? ' dispositivo' : ' dispositivi') + ' · ultimo accesso ' + quando(ult) +
       (p.da_nome ? ' · invito di ' + esc(p.da_nome) : '') + '</span></span><span class="chev">' + (p.id === aperta ? '⌄' : '›') + '</span></button>' + det;
   }).join('');
   $('plist').querySelectorAll('[data-p]').forEach(b => b.onclick = () => { aperta = aperta === b.dataset.p ? '' : b.dataset.p; disegna(); });
   $('plist').querySelectorAll('[data-rd]').forEach(b => b.onclick = () => revocaDisp(b.dataset.rd));
   $('plist').querySelectorAll('[data-nl]').forEach(b => b.onclick = async () => {
     const p = el.persone.find(x => x.id === b.dataset.nl), box = b.closest('.det').querySelector('[data-box]');
-    try { const r = await api('gestione/persone/' + p.id + '/invito', {method:'POST'}); box.innerHTML = cartaLink(p.nome, r.invito.link, r.invito.scade); attivaLink(box, p.nome, r.invito.link); }
+    try { const r = await api('gestione/persone/' + encodeURIComponent(p.id) + '/invito', {method:'POST'}); box.innerHTML = cartaLink(p.nome, r.invito.link, r.invito.scade); attivaLink(box, p.nome, r.invito.link); }
     catch (e) { toast(e.message); }
   });
   $('plist').querySelectorAll('[data-rp]').forEach(b => b.onclick = async () => {
     const p = el.persone.find(x => x.id === b.dataset.rp);
     if (!confirm(p.nome + ' non potrà più aprire Atlante Musica. I brani già salvati sul suo telefono restano lì.')) return;
-    try { await api('gestione/persone/' + p.id, {method:'DELETE'}); toast('Accesso di ' + p.nome + ' revocato'); aperta = ''; } catch (e) { toast(e.message); }
+    try { await api('gestione/persone/' + encodeURIComponent(p.id), {method:'DELETE'}); toast('Accesso di ' + p.nome + ' revocato'); aperta = ''; } catch (e) { toast(e.message); }
     disegna();
   });
   $('tlist').innerHTML = el.tuoi.length ? el.tuoi.map(d => '<div class="row"><span class="tx"><b>' + esc(descrivi(d)) + (d.attuale ? ' <span class="pill ok">questo</span>' : '') + '</b><span>' + esc(dettagli(d)) + '</span></span>' +
@@ -257,9 +258,9 @@ async function ascolti() {
   try { j = await api('ascoltati'); }
   catch (e) { $('alist').innerHTML = '<div class="row"><span class="tx"><b>Non riesco a leggere le classifiche</b><span>' + esc(e.message) + '</span></span></div>'; return; }
   const riga = (x, i) => '<div class="row"><span class="av" style="background:var(--fill);color:var(--fg2)">' + (i + 1) + '</span><span class="tx"><b>' + esc(x.titolo || 'Brano') + '</b><span>' +
-    esc(x.artista || '') + (x.ascolti ? ' · ' + x.ascolti + (x.ascolti === 1 ? ' ascolto' : ' ascolti') : '') + '</span></span></div>';
+    esc(x.artista || '') + ((x.ascolti | 0) ? ' · ' + (x.ascolti | 0) + ((x.ascolti | 0) === 1 ? ' ascolto' : ' ascolti') : '') + '</span></span></div>';
   const titolo = (t, sotto) => '<div class="row"><span class="tx"><b>' + t + '</b>' + (sotto ? '<span>' + sotto + '</span>' : '') + '</span></div>';
-  const vuota = 'Nessun brano ascoltato da almeno ' + j.soglia + ' persone, per ora';
+  const vuota = 'Nessun brano ascoltato da almeno ' + (j.soglia | 0) + ' persone, per ora';
   $('alist').innerHTML = titolo('Questa settimana', j.settimana.length ? '' : vuota) + j.settimana.slice(0, 10).map(riga).join('') +
     titolo('Questo mese', j.mese.length ? '' : vuota) + j.mese.slice(0, 10).map(riga).join('') +
     titolo('Chi condivide i suoi ascolti', (j.condivisi.length ? j.condivisi.map(c => esc(c.nome)).join(', ') : 'Nessuno, per ora') + (j.io.condivido ? ' · anche tu' : '')) +
@@ -327,7 +328,7 @@ ascolti();
   const pill = f => f.esito === 'ok' ? '<span class="pill ok">letta</span>' : f.esito === 'errore' ? '<span class="pill bad">non letta</span>' : '<span class="pill">da leggere</span>';
   function riga(f) {
     const sotto = f.esito === 'errore' ? esc(f.errore) + ' · ' + quando(f.letta) + ': riprovo domani' :
-      f.esito === 'ok' ? (f.brani === 1 ? '1 brano' : f.brani + ' brani') + ' · ' + quando(f.letta) : 'non ancora letta';
+      f.esito === 'ok' ? ((f.brani | 0) === 1 ? '1 brano' : (f.brani | 0) + ' brani') + ' · ' + quando(f.letta) : 'non ancora letta';
     return '<div class="row"><span class="tx"><b>' + esc(f.nome) + '</b><span>' + sotto + '</span></span>' + pill(f) + '</div>';
   }
   // licenza e pagina d'origine di un brano aggiunto: solo indirizzi https
@@ -356,13 +357,14 @@ ascolti();
       $('cl').innerHTML = '<div class="card"><p class="small">Spento su questo Mac. Si accende sul Mac mini con <b>ATLANTE_CLASSIFICHE=1</b> nel servizio del server.</p></div>';
     } else {
       const p = j.pausa, f = j.fonte;
-      let h = '<div class="card"><div class="numeri"><div><b>' + j.oggi + '</b><span>aggiunti oggi</span></div><div><b>' + j.totale + '</b><span>in tutto</span></div></div>';
+      // i numeri dal Mac entrano nel codice HTML come numeri (|0), i testi protetti (esc)
+      let h = '<div class="card"><div class="numeri"><div><b>' + (j.oggi | 0) + '</b><span>aggiunti oggi</span></div><div><b>' + (j.totale | 0) + '</b><span>in tutto</span></div></div>';
       if (p) h += '<p class="small">In pausa: ' + esc(p.motivo) + ' Riprendo ' + alle(p.fino) + '.</p>';
       else if (j.ora) h += '<p class="small">Adesso: ' + esc(j.ora) + '</p>';
       if (b) h += '<p class="small" style="color:var(--bad)">La classifica di YouTube Music aspetta: prossima prova ' + alle(b.prossima) + '.</p>';
-      if (f && f.in_coda) h += '<p class="small">Fonte in corso: <b>' + esc(f.nome) + '</b> · ' + f.in_coda + (f.in_coda === 1 ? ' brano' : ' brani') + ' da scaricare</p>';
-      h += '<p class="small">' + j.provati + (j.provati === 1 ? ' brano provato' : ' brani provati') +
-        (j.spazio_libero_gb != null ? ' · ' + Math.round(j.spazio_libero_gb) + ' GB liberi' + (j.spazio_min_gb ? ' (mi fermo sotto i ' + j.spazio_min_gb + ')' : '') : '') + '</p>';
+      if (f && (f.in_coda | 0)) h += '<p class="small">Fonte in corso: <b>' + esc(f.nome) + '</b> · ' + (f.in_coda | 0) + ((f.in_coda | 0) === 1 ? ' brano' : ' brani') + ' da scaricare</p>';
+      h += '<p class="small">' + (j.provati | 0) + ((j.provati | 0) === 1 ? ' brano provato' : ' brani provati') +
+        (j.spazio_libero_gb != null ? ' · ' + Math.round(j.spazio_libero_gb) + ' GB liberi' + ((j.spazio_min_gb | 0) ? ' (mi fermo sotto i ' + (j.spazio_min_gb | 0) + ')' : '') : '') + '</p>';
       if (!j.jamendo) h += '<p class="small">Jamendo è spento: serve il suo client_id gratuito (devportal.jamendo.com) in <b>ATLANTE_JAMENDO_CLIENT_ID</b> nel servizio del server.</p>';
       if (b || p) h += '<div class="btns"><button class="btn sm pri" data-riprova>Riprova adesso</button></div>';
       h += '</div>';
