@@ -4,9 +4,10 @@
 //
 // Le funzioni si prendono dall'app così come sono (come in test_tutto.js) e si provano con un ambiente finto:
 // - il riquadro lo vede solo Samuele (non chi è in casa, non gli invitati), nel gruppo Gestione;
-// - apre Atlante Accessi (lo schermo dei Mac) sulla porta 8449 dello stesso nome Tailscale del Mac mini, in una finestra
-//   a parte: niente riquadro dei moduli, niente «am-x» (all'avvio non si riapre da solo);
-// - da Internet (Funnel, porta 10000), dal Mac stesso (127.0.0.1) o da un altro nome non apre niente e lo spiega;
+// - apre Atlante Accessi (lo schermo dei Mac) dalla sua porta pubblica (Funnel, 8443) dello stesso nome del Mac mini, in
+//   una finestra a parte: niente riquadro dei moduli, niente «am-x» (all'avvio non si riapre da solo). La sicurezza è
+//   la password di Accessi e poi quella del Mac, non Tailscale: lo stesso link con Tailscale acceso o spento;
+// - dal Mac stesso (127.0.0.1) o da un altro nome non sa l'indirizzo: non apre niente e lo spiega;
 // - gli altri moduli si aprono come prima.
 // Scrive «OK …» o «PROVA FALLITA: …» (test_extra.py lo controlla).
 ObjC.import('Foundation');
@@ -79,11 +80,11 @@ function prove(src, fatte) {
   const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
   const chiavi = F => F.xmodsVisibili().flatMap(g => g.m).map(m => m.k);
 
-  /* ---------- l'indirizzo di Atlante Accessi: lo stesso nome Tailscale, porta 8449, solo dentro la rete ---------- */
+  /* ---------- l'indirizzo di Atlante Accessi: lo stesso nome, la porta pubblica 8443, da ovunque ---------- */
   const F0 = carica(src, ambiente('proprietario'));
-  eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET, port: '8448'}), 'https://' + TAILNET + ':8449/', 'dalla rete Tailscale');
-  eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET.toUpperCase(), port: '8448'}), 'https://' + TAILNET.toUpperCase() + ':8449/', 'il nome con le maiuscole');
-  eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET, port: '10000'}), '', 'da Internet (Funnel) Accessi non si raggiunge');
+  eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET, port: '8448'}), 'https://' + TAILNET + ':8443/', 'con Tailscale acceso');
+  eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET, port: '10000'}), 'https://' + TAILNET + ':8443/', 'da Internet (Funnel), con Tailscale spento');
+  eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET.toUpperCase(), port: '8448'}), 'https://' + TAILNET.toUpperCase() + ':8443/', 'il nome con le maiuscole');
   eq(F0.remotoUrl({protocol: 'http:', hostname: '127.0.0.1', port: '8790'}), '', 'dal Mac stesso');
   eq(F0.remotoUrl({protocol: 'https:', hostname: 'atlante.example.com', port: ''}), '', 'un altro nome');
   eq(F0.remotoUrl({protocol: 'https:', hostname: TAILNET + '.example.com', port: ''}), '', 'un nome che contiene ts.net ma non finisce così');
@@ -101,18 +102,25 @@ function prove(src, fatte) {
   /* ---------- il tocco: Accessi in una finestra a parte, il riquadro dei moduli resta chiuso ---------- */
   let env = ambiente('proprietario'), F = carica(src, env);
   F.openX('remoto');
-  eq(env.aperti, [['https://' + TAILNET + ':8449/', '_blank', 'noopener']], 'si apre Atlante Accessi');
+  eq(env.aperti, [['https://' + TAILNET + ':8443/', '_blank', 'noopener']], 'si apre Atlante Accessi');
   eq([env.xf.src, env.xp.hidden, 'am-x' in env.salvati], [null, true, false], 'senza il riquadro dei moduli e senza ricordarlo per il prossimo avvio');
   eq(env.avvisi, [], 'senza avvisi');
   fatte.push('tocco');
 
-  /* ---------- da Internet: niente finestra, un avviso che spiega ---------- */
+  /* ---------- da Internet (Atlante aperto da Funnel, Tailscale spento): lo stesso link ---------- */
   env = ambiente('proprietario', {port: '10000'}); F = carica(src, env);
   F.openX('remoto');
-  eq(env.aperti, [], 'da Internet non si apre');
-  eq(env.avvisi.length, 1, 'un avviso');
-  eq(/Tailscale/.test(env.avvisi[0]), true, "l'avviso dice di accendere Tailscale: " + env.avvisi[0]);
+  eq(env.aperti, [['https://' + TAILNET + ':8443/', '_blank', 'noopener']], 'da Internet si apre lo stesso link');
+  eq(env.avvisi, [], 'senza avvisi');
   fatte.push('da Internet');
+
+  /* ---------- dal Mac stesso (127.0.0.1): l'indirizzo non si sa, un avviso che spiega ---------- */
+  env = ambiente('proprietario', {protocol: 'http:', hostname: '127.0.0.1', port: '8790'}); F = carica(src, env);
+  F.openX('remoto');
+  eq(env.aperti, [], 'dal Mac stesso non si apre');
+  eq(env.avvisi.length, 1, 'un avviso');
+  eq(/8443/.test(env.avvisi[0]), true, "l'avviso dice dove aprirlo: " + env.avvisi[0]);
+  fatte.push('dal Mac stesso');
 
   /* ---------- un invitato con il link ?x=remoto: niente ---------- */
   env = ambiente('invitato'); F = carica(src, env);
