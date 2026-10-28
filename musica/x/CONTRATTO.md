@@ -96,6 +96,7 @@ Per Samuele (`"p"`) e per gli invitati; dalla rete di casa senza biscotto 403. I
 | `strumenti.html` | ricerca del prezzo migliore, negozi per categoria, risolutore di test (crocette e domande aperte), carte fedeltà e di pagamento, gestore dispositivo |
 | `idee.html` | «Idee»: l'invito a proporre miglioramenti dell'app, il modulo per mandarne una e «Le tue idee» con lo stato (aperto anche agli invitati); le idee di tutti sono in Gestione → Idee |
 | `studio.html` | Atlante UCI (accesso con le proprie credenziali), notizie di ciclismo, allenamenti creati dall'IA su qualsiasi argomento, Assistente Idee |
+| *(nessun file)* | «Controllo remoto» (gruppo Gestione, solo Samuele): non è una pagina in `x/`. Apre in una finestra a parte Atlante Accessi, lo schermo dei Mac, su `https://<nome Tailscale del Mac mini>:8449/` (`remotoUrl` nell'app). Accessi non si lascia aprire dentro un riquadro (`frame-ancestors 'none'`) e si raggiunge solo dalla rete Tailscale: da Internet (Funnel) o da `127.0.0.1` l'app lo spiega con un avviso |
 
 ## Playlist del Mac e disco di backup (nell'app, non nei moduli)
 In Libreria › Playlist, sotto «Dal Mac», l'app mostra le playlist del Mac, di sola lettura: le cartelle di
