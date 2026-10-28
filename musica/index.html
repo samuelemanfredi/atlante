@@ -3229,10 +3229,11 @@ const XMODS = [
 // chi è questo dispositivo per il Mac: Samuele (con la Gestione), casa (la rete di casa: come Samuele, senza Gestione) o
 // una persona invitata (ascolta e basta: dei moduli solo «Invita un amico» e «Idee»). Il Mac controlla comunque ogni richiesta.
 let IO = ls.get('am-io', {ruolo:'', persona:null});
-// «Controllo remoto»: lo schermo dei Mac con Atlante Accessi, che Tailscale pubblica sulla porta 8449 dello stesso Mac
-// mini, solo dentro la rete Tailscale. Solo per Samuele (le altre persone e i loro Mac li sceglie Accessi, in «Persone»).
+// «Controllo remoto»: lo schermo dei Mac con Atlante Accessi, dalla sua porta pubblica (Funnel 8443) dello stesso nome del
+// Mac mini: si apre da qualsiasi dispositivo, con Tailscale acceso o spento. La sicurezza è di Accessi: utente, password e
+// codice, poi la password del Mac. Solo per Samuele (le altre persone e i loro Mac li sceglie Accessi, in «Persone»).
 // Non è una pagina in x/: si apre in una finestra a parte, grande, e la musica continua qui.
-const ACCESSI_PORTA = '8449', FUNNEL_PORTA = '10000';
+const ACCESSI_PORTA = '8443';
 const XREMOTO = {k:'remoto', t:'Controllo remoto', d:'Lo schermo dei tuoi Mac, da qui', i:'🖥️', c:'#5e5ce6'};
 const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, Da controllare, contenuti, idee e rete', i:'🛡️', c:'#636366'}, XREMOTO]};
 const XINVITATI = [{g:'Per te', m:[{k:'cerca', t:'Cerca e scarica musica', d:'Il brano arriva sul tuo telefono e a Samuele', i:'🔎', c:'#fa2d48'},
@@ -3318,15 +3319,15 @@ function openX(k, q) {
   if (f.getAttribute('src') !== src) f.setAttribute('src', src);
   $('xp').hidden = false; ls.set('am-x', k); document.body.classList.toggle('xnav', k === 'naviga');
 }
-// l'indirizzo di Atlante Accessi se l'app è aperta dalla rete Tailscale (…ts.net, in https): lo stesso nome, la sua porta.
-// Da Internet (Funnel) Accessi non si raggiunge, e dal Mac stesso (127.0.0.1) non si sa il nome: allora ''
+// l'indirizzo pubblico di Atlante Accessi: lo stesso nome del Mac mini (…ts.net, in https, dalla rete Tailscale o da
+// Internet), la sua porta. Dal Mac stesso (127.0.0.1) il nome non si sa: allora ''
 function remotoUrl(loc) {
-  if (loc.protocol !== 'https:' || !/\.ts\.net$/i.test(loc.hostname) || loc.port === FUNNEL_PORTA) return '';
+  if (loc.protocol !== 'https:' || !/\.ts\.net$/i.test(loc.hostname)) return '';
   return 'https://' + loc.hostname + ':' + ACCESSI_PORTA + '/';
 }
 function apriRemoto() {
   const u = remotoUrl(location);
-  if (!u) { toast('Il controllo remoto si apre con Tailscale acceso su questo dispositivo: vedi «Rete e VPN»'); return; }
+  if (!u) { toast('Da qui non so l\'indirizzo: apri Atlante dal suo link (…ts.net), il controllo remoto è sulla porta 8443'); return; }
   window.open(u, '_blank', 'noopener');
 }
 function closeX() { const era = xCur; document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); if (era === 'gestione') ioCarica(); }   // i numeri del riquadro Gestione dopo averla usata

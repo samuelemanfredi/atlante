@@ -11353,9 +11353,9 @@ class TestTitoliScorrono(unittest.TestCase):
 
 
 class TestControlloRemoto(unittest.TestCase):
-    """Il riquadro «Controllo remoto» (scheda Altro, solo per Samuele) apre Atlante Accessi sulla porta 8449 dello stesso
-    nome Tailscale, in una finestra a parte; da Internet o dal Mac stesso lo spiega. Gira in JavaScriptCore come
-    test_titoli.js: test_remoto.js. Senza osascript (non è un Mac) si salta."""
+    """Il riquadro «Controllo remoto» (scheda Altro, solo per Samuele) apre Atlante Accessi dalla porta pubblica 8443
+    dello stesso nome del Mac mini, in una finestra a parte, con Tailscale acceso o spento; dal Mac stesso lo spiega.
+    Gira in JavaScriptCore come test_titoli.js: test_remoto.js. Senza osascript (non è un Mac) si salta."""
 
     def test_remoto(self):
         osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
