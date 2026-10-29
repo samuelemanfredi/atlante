@@ -1863,6 +1863,68 @@ class TestAccesso(AiutiAccesso, unittest.TestCase):
             self.assertEqual(h["X-Frame-Options"], "SAMEORIGIN", p)
             self.assertIn("frame-ancestors 'self'", h["Content-Security-Policy"], p)
 
+    def test_9l_playlist_dell_account(self):
+        """Le playlist di ogni account sul Mac: uguali su tutti i suoi dispositivi, senza doppioni; ognuno le sue."""
+        ts = {"X-Forwarded-For": "100.64.0.20", "Tailscale-User-Login": "samuele@example.com", "X-Forwarded-Proto": "https",
+              "Host": "mac.esempio.ts.net:8448", "Origin": "https://mac.esempio.ts.net:8448"}
+        def manda(liste, intest=ts, dopo=0):
+            st, h, b = richiesta(self.s.porta, "POST", "/api/extra/liste", {"playlist": liste, "dopo": dopo}, intest=intest)
+            self.assertEqual(st, 200, b[:300])
+            j = json.loads(b.decode("utf-8"))
+            self.seq = j["seq"]
+            return {l["id"]: l for l in j["playlist"]}, j["alias"]
+        t = int(time.time() * 1000)
+        d, al = manda([{"id": "iphone1", "name": "Viaggio", "ids": ["r1", "r2"], "created": t, "updated": t},
+                       {"id": "_preferiti", "ids": ["r9"], "updated": t}])
+        self.assertEqual((d["iphone1"]["ids"], d["_preferiti"]["ids"], al), (["r1", "r2"], ["r9"], {}))
+        # dal Mac (un altro dispositivo di Samuele) la stessa playlist con un altro id: una sola, con i brani di entrambe
+        d, al = manda([{"id": "mac1", "name": " viaggio ", "ids": ["r2", "r3"], "updated": t + 5}], intest={})
+        self.assertEqual(al, {"mac1": "iphone1"})
+        self.assertNotIn("mac1", d)
+        self.assertEqual(d["iphone1"]["ids"], ["r1", "r2", "r3"])
+        # vince la modifica più recente; una vecchia non torna indietro
+        d, al = manda([{"id": "iphone1", "name": "Viaggio", "ids": ["r1"], "updated": t + 1}], dopo=self.seq)
+        self.assertEqual(d["iphone1"]["ids"], ["r1", "r2", "r3"])   # anche se non è cambiata: l'app riceve quella buona
+        d, al = manda([{"id": "iphone1", "name": "Viaggio estate", "ids": ["r3", "r1"], "updated": t + 10}])
+        self.assertEqual((d["iphone1"]["name"], d["iphone1"]["ids"]), ("Viaggio estate", ["r3", "r1"]))
+        # un orologio avanti di un anno non vince per sempre
+        d, al = manda([{"id": "iphone1", "name": "Viaggio", "ids": ["r1"], "updated": t + 365 * 86400000}])
+        self.assertLessEqual(d["iphone1"]["updated"], int(time.time() * 1000))
+        time.sleep(0.01)
+        # cancellata: resta come «cancellata», così gli altri dispositivi la tolgono e non la rifanno
+        d, al = manda([{"id": "iphone1", "deleted": True, "updated": int(time.time() * 1000) + 1000}])
+        self.assertIs(d["iphone1"]["deleted"], True)
+        d, al = manda([{"id": "iphone1", "name": "Viaggio", "ids": ["r1"], "updated": t + 5}])   # più vecchia della cancellazione
+        self.assertIs(d["iphone1"].get("deleted"), True)
+        # solo quelle cambiate dopo l'ultima vista; niente di nuovo, niente da ricevere
+        n = self.seq
+        d, al = manda([], dopo=n)
+        self.assertEqual(d, {})
+        d, al = manda([{"id": "nuova2", "name": "Corsa", "ids": ["r7"], "updated": int(time.time() * 1000)}], dopo=n)
+        self.assertEqual(set(d), {"nuova2"})
+        st, h, b = richiesta(self.s.porta, "GET", "/api/extra/liste?dopo=%d" % n, intest=ts)
+        self.assertEqual({l["id"] for l in json.loads(b.decode("utf-8"))["playlist"]}, {"nuova2"})
+        # i Preferiti di un dispositivo nuovo si aggiungono a quelli dell'account
+        d, al = manda([{"id": "_preferiti", "ids": ["r8", "r9"], "updated": 1, "unisci": True}], intest={})
+        self.assertEqual(d["_preferiti"]["ids"], ["r9", "r8"])
+        # quelle rovinate si saltano; senza elenco è un errore
+        d, al = manda([{"id": "../x", "name": "a", "ids": [], "updated": t}, {"id": "ok2", "name": "", "ids": [], "updated": t},
+                       {"id": "ok3", "name": "b", "ids": ["r1", 5], "updated": t}, {"id": "ok4", "name": "c", "ids": [], "updated": "x"}])
+        self.assertFalse({"../x", "ok2", "ok3", "ok4"} & set(d))
+        self.assertEqual(richiesta(self.s.porta, "POST", "/api/extra/liste", {"x": 1}, intest=ts)[0], 400)
+        self.assertEqual(richiesta(self.s.porta, "POST", "/api/extra/liste", {"playlist": []},
+                                   intest=dict(ts, Origin="https://altro.example"))[0], 403)
+        # da Internet senza accesso no; un'invitata ha le sue, separate da quelle di Samuele
+        self.assertEqual(self.da_fuori("GET", "/api/extra/liste")[0], 401)
+        pid, o, _ = self.invitato("Franca", ip="203.0.113.70")
+        fuori = dict(FUNNEL, **{"X-Forwarded-For": "203.0.113.70", "Cookie": "am_accesso=" + o, "Origin": "https://mac.esempio.ts.net:10000"})
+        st, h, b = richiesta(self.s.porta, "GET", "/api/extra/liste", intest=fuori)
+        self.assertEqual((st, json.loads(b.decode("utf-8"))["playlist"]), (200, []))
+        d, al = manda([{"id": "suo1", "name": "Viaggio", "ids": ["r5"], "updated": t}], intest=fuori)
+        self.assertEqual((set(d), al), ({"suo1"}, {}))
+        st, h, b = richiesta(self.s.porta, "GET", "/api/extra/liste", intest=ts)
+        self.assertNotIn("suo1", {l["id"] for l in json.loads(b.decode("utf-8"))["playlist"]})
+
     def test_9k_classifiche_anche_per_gli_invitati(self):
         pid, v, t = self.invitato("Olga", ip="203.0.113.160")
         st, h, b = self.da_fuori("GET", "/api/extra/classifiche", biscotto=v)

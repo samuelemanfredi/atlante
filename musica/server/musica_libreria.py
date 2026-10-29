@@ -14360,6 +14360,154 @@ def _stessa_origine(h):
         return False
 
 
+# ---------- le playlist di ognuno, uguali su tutti i suoi dispositivi ----------
+#
+# Ogni account ha le sue playlist sul Mac mini: Samuele (tutti i dispositivi entrati come lui: Tailscale, Mac, password)
+# e ogni persona invitata (i suoi dispositivi). L'app manda quelle cambiate e riceve tutte quelle dell'account: vince la
+# modifica più recente (mai più avanti dell'orologio del Mac); una playlist cancellata si ricorda 6 mesi, così un
+# dispositivo spento a lungo non la rifà. Ogni modifica ha il suo numero («seq»): l'app chiede solo quelle dopo l'ultimo
+# che ha visto.
+# La stessa playlist creata su due dispositivi (stesso nome, es. le playlist di Apple Music importate sull'iPhone e sul
+# Mac) diventa una sola, con i brani di entrambe: niente doppioni; l'app ne riceve il nuovo id in «alias».
+# «_preferiti» porta i Preferiti dell'account.
+
+LISTE = None                      # Liste, preparato da main()
+LISTE_MAX = 1000                  # playlist di un account (comprese quelle cancellate da poco)
+LISTA_BRANI_MAX = 20000
+LISTA_NOME_MAX = 200
+LISTE_INVIO_MAX = 500             # playlist in una richiesta
+LISTA_TOLTA_DURATA = 180 * 86400
+ID_LISTA = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+ID_BRANO_LISTA = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+
+
+def _nome_lista(s):
+    return " ".join(str(s or "").casefold().split())
+
+
+def _lista_valida(x, ora_ms):
+    """La playlist arrivata dall'app, ripulita (solo i campi che conosciamo); None se non è una playlist."""
+    if not isinstance(x, dict) or not isinstance(x.get("id"), str) or not ID_LISTA.match(x["id"]):
+        return None
+    agg = x.get("updated")
+    if isinstance(agg, bool) or not isinstance(agg, (int, float)) or agg <= 0:
+        return None
+    # un dispositivo con l'orologio avanti non deve vincere sulle modifiche fatte dopo: mai più avanti di adesso
+    l = {"id": x["id"], "updated": int(min(agg, ora_ms))}
+    if x.get("deleted") is True:
+        l["deleted"] = True
+        return l
+    ids = x.get("ids")
+    if not isinstance(ids, list) or len(ids) > LISTA_BRANI_MAX or not all(isinstance(i, str) and ID_BRANO_LISTA.match(i) for i in ids):
+        return None
+    nome = x.get("name", "")
+    if x["id"] != "_preferiti" and (not isinstance(nome, str) or not nome.strip()):
+        return None
+    l.update(ids=list(ids), name=str(nome).strip()[:LISTA_NOME_MAX])
+    cr = x.get("created")
+    l["created"] = int(cr) if isinstance(cr, (int, float)) and not isinstance(cr, bool) and cr > 0 else l["updated"]
+    if x.get("apple") is True:
+        l["apple"] = True
+    if isinstance(x.get("atl"), str) and ID_LISTA.match(x["atl"]):
+        l["atl"] = x["atl"]
+    return l
+
+
+class Liste:
+    """<cartella>/<account>.json: {"seq": numero dell'ultima modifica, "liste": {id: playlist con il suo «seq»}}."""
+
+    def __init__(self, cartella):
+        self.dir = cartella
+        self.blocco = threading.Lock()
+
+    def _file(self, conto):
+        return os.path.join(self.dir, conto + ".json")
+
+    def _leggi(self, conto):
+        try:
+            with open(self._file(conto), encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            d = {}
+        if not isinstance(d, dict):
+            d = {}
+        liste = d.get("liste") if isinstance(d.get("liste"), dict) else {}
+        seq = d.get("seq") if isinstance(d.get("seq"), int) else 0
+        return seq, {k: v for k, v in liste.items() if isinstance(v, dict)}
+
+    @staticmethod
+    def _risposta(seq, liste, dopo, alias, arrivate=()):
+        """Le cambiate dopo «dopo», più quelle appena mandate (anche se non hanno vinto: l'app tiene la versione buona)."""
+        anche = set(arrivate) | set(alias.values())
+        return {"playlist": [v for k, v in liste.items() if v.get("seq", 0) > dopo or k in anche], "alias": alias, "seq": seq}
+
+    def tutte(self, conto, dopo=0):
+        with self.blocco:
+            seq, liste = self._leggi(conto)
+            return self._risposta(seq, liste, dopo, {})
+
+    def sincronizza(self, conto, arrivate, dopo=0):
+        """Unisce le playlist arrivate a quelle dell'account e risponde con quelle cambiate dopo «dopo» (il «seq» che
+        l'app ha già visto), il «seq» di adesso e «alias» ({id dell'app: id che resta} per le playlist unite)."""
+        ora = time.time()
+        ora_ms = int(ora * 1000)
+        alias = {}
+        with self.blocco:
+            seq, d = self._leggi(conto)
+            seq0 = seq
+
+            def segna(l):
+                nonlocal seq
+                seq += 1
+                l["seq"] = seq
+                d[l["id"]] = l
+            for x in arrivate[:LISTE_INVIO_MAX]:
+                l = _lista_valida(x, ora_ms)
+                if l is None:
+                    continue
+                cur = d.get(l["id"])
+                if cur is not None and l["id"] == "_preferiti" and x.get("unisci") is True and not l.get("deleted"):
+                    # i Preferiti di un dispositivo che si collega per la prima volta: si aggiungono, non sostituiscono
+                    visti = set(cur["ids"])
+                    nuovi = [i for i in l["ids"] if i not in visti]
+                    if nuovi:
+                        segna(dict(cur, ids=(cur["ids"] + nuovi)[:LISTA_BRANI_MAX], updated=ora_ms))
+                    continue
+                if cur is None and not l.get("deleted") and l["id"] != "_preferiti":
+                    n = _nome_lista(l["name"])
+                    gem = next((y for y in d.values() if not y.get("deleted") and y["id"] != "_preferiti"
+                                and _nome_lista(y.get("name")) == n), None)
+                    if gem is not None:   # la stessa playlist da un altro dispositivo: una sola, con i brani di entrambe
+                        visti = set(gem["ids"])
+                        nuovi = [i for i in l["ids"] if i not in visti]
+                        if nuovi:
+                            segna(dict(gem, ids=(gem["ids"] + nuovi)[:LISTA_BRANI_MAX], updated=max(gem["updated"], l["updated"])))
+                        alias[l["id"]] = gem["id"]
+                        continue
+                if cur is None or l["updated"] > cur.get("updated", 0):
+                    segna(l)
+            # le cancellate da più di 6 mesi si dimenticano; oltre il massimo escono le cancellate più vecchie
+            via = [k for k, v in d.items() if v.get("deleted") and v.get("updated", 0) < (ora - LISTA_TOLTA_DURATA) * 1000]
+            if len(d) - len(via) > LISTE_MAX:
+                via += sorted((k for k, v in d.items() if v.get("deleted") and k not in via),
+                              key=lambda k: d[k]["updated"])[:len(d) - len(via) - LISTE_MAX]
+            for k in via:
+                del d[k]
+            if seq != seq0 or via:
+                _scrivi_json(self._file(conto), {"seq": seq, "liste": d})
+            return self._risposta(seq, d, dopo, alias, [x.get("id") for x in arrivate[:LISTE_INVIO_MAX] if isinstance(x, dict)])
+
+
+def _conto_liste(h):
+    """L'account delle playlist: «p» per Samuele, l'id della persona per un invitato. La rete di casa non ha account."""
+    chi = _chi_e(h)
+    if chi["ruolo"] == "proprietario":
+        return "p"
+    if chi["ruolo"] == "invitato" and isinstance(chi.get("persona"), str) and ID_LISTA.match(chi["persona"]):
+        return "o-" + chi["persona"]
+    raise ErroreExtra(403, "Le playlist si tengono nell'account: entra come Samuele o con il tuo invito")
+
+
 def _instrada(h, metodo, parti, corpo):
     cosa, resto = (parti[0] if parti else ""), parti[1:]
 
@@ -14442,6 +14590,25 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "idee" and not resto:
         solo("GET", "POST")
         _idee(h, metodo, corpo)
+    elif cosa == "liste" and not resto:   # le playlist dell'account, uguali su tutti i suoi dispositivi
+        solo("GET", "POST")
+        conto = _conto_liste(h)
+        if LISTE is None:
+            raise ErroreExtra(503, "Playlist dell'account non disponibili")
+        if metodo == "GET":
+            q = parse_qs(urlsplit(h.path).query)
+            try:
+                dopo = max(0, int((q.get("dopo") or ["0"])[0]))
+            except ValueError:
+                raise ErroreExtra(400, "«dopo» non valido")
+            _json(h, LISTE.tutte(conto, dopo))
+        else:
+            arr, dopo = corpo.get("playlist"), corpo.get("dopo", 0)
+            if not isinstance(arr, list):
+                raise ErroreExtra(400, "Servono le playlist")
+            if isinstance(dopo, bool) or not isinstance(dopo, int) or dopo < 0:
+                raise ErroreExtra(400, "«dopo» non valido")
+            _json(h, LISTE.sincronizza(conto, arr, dopo))
     elif cosa == "password" and not resto:   # gestore «Password»: stato della password per Internet (solo Samuele)
         solo("GET")
         if _chi_e(h)["ruolo"] != "proprietario":
@@ -16131,6 +16298,8 @@ PERMESSE_INVITATI = re.compile(
     r"|extra/tematiche(?:/[^/]+){0,2})$")   # playlist di Atlante: anche gli invitati le ascoltano, creano e condividono
 # la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
+# le loro playlist, uguali su tutti i loro dispositivi
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extra/liste$")
 # la chat (fase 5a): la pagina, la cifratura, il QR del codice di sicurezza e le sue rotte
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/(?:chat\.html|chat-cifra\.js|qrcode\.js)$"
                                r"|^(?:/.*)?/api/extra/chat(?:/[^/]+){1,4}$")
@@ -16180,7 +16349,7 @@ PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extr
 _ROTTE_INVITATI = """
 GET io classifiche clip clip/* clip/file/* dispositivi dispositivi/*/comandi
 POST dispositivi/*/stato dispositivi/*/comando
-GET POST inviti idee musica caricamenti chiavi posizione
+GET POST inviti idee musica caricamenti chiavi posizione liste
 GET musica/cerca musica/ascolta/* caricamenti/* caricamenti/*/file
 POST musica/*/annulla
 PUT DELETE caricamenti/*
@@ -16597,7 +16766,7 @@ def _imposta_password(file):
 
 def main():
     global ACC, CLIP, PERS, PROPRIETARI, PUBBLICO
-    global IDEE, CL_SPAZIO_MIN
+    global IDEE, CL_SPAZIO_MIN, LISTE
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -16678,6 +16847,7 @@ def main():
     ACC = Accesso(file_accesso)
     PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
     IDEE = Idee(os.path.join(os.path.expanduser(a.cache), "idee.json"))
+    LISTE = Liste(os.path.join(os.path.expanduser(a.cache), "liste"))   # playlist di ogni account
     avvia_ascoltati(a.cache)   # brani ascoltati: classifiche e consigli tra le persone
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}
