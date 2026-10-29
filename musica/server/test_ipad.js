@@ -52,7 +52,7 @@ function riga(src, inizio) {
 }
 function carica(src, env) {
   const nomi = ['xmodsVisibili', 'sideRender', 'sideMark', 'sideVai'];
-  const codice = ['const XREMOTO', 'const XGESTIONE', 'const nuoveGestione', 'const SIDE_LIB', 'let sideChiave'].map(r => riga(src, r))
+  const codice = ['const XREMOTO', 'const XGESTIONE', 'const XCONDIVIDI', 'const nuoveGestione', 'const SIDE_LIB', 'let sideChiave'].map(r => riga(src, r))
     .concat(nomi.map(n => estrai(src, n))).join('\n');
   const f = new Function('env', 'with (env) { return (function () {\n' + codice + '\nreturn {' + nomi.join(',') + '};\n})(); }');
   return f(env);
@@ -106,8 +106,9 @@ function prove(src, fatte) {
   /* ---------- le voci: schede, Libreria e tutti i moduli di chi usa l'app ---------- */
   let env = ambiente('proprietario', {inviti: 2, idee: 1}), F = carica(src, env);
   F.sideRender();
-  eq(chiavi(env), ['home', 'lib', 'search', 'altro', 'playlists', 'artists', 'albums', 'songs', 'favs', 'gestione', 'remoto', 'chat', 'cerca', 'podcast', 'strumenti'],
-    'Samuele: schede, Libreria, Gestione e tutti i moduli');
+  eq(chiavi(env), ['home', 'lib', 'search', 'altro', 'playlists', 'artists', 'albums', 'songs', 'favs', 'inviti', 'gestione', 'remoto', 'chat', 'cerca', 'podcast', 'strumenti'],
+    'Samuele: schede, Libreria, «Condividi l\'app», Gestione e tutti i moduli');
+  eq(/Condividi l'app/.test(env.side.voci.find(v => v.dataset.k === 'inviti').testo), true, '«Condividi l\'app» nella barra');
   eq(env.side.voci.find(v => v.dataset.k === 'gestione').testo.indexOf('3') >= 0, true, 'il numero delle cose nuove sulla Gestione');
   eq(env.side.voci.filter(v => v.dataset.k).every(v => v.dataset.a === 'xopen'), true, 'i moduli si aprono come i riquadri di Altro (xopen)');
   eq(env.side.voci.filter(v => v.dataset.v).every(v => v.dataset.a === 'sgo'), true, 'le voci della Libreria: sgo');
