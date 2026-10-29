@@ -14442,6 +14442,12 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "idee" and not resto:
         solo("GET", "POST")
         _idee(h, metodo, corpo)
+    elif cosa == "password" and not resto:   # gestore «Password»: stato della password per Internet (solo Samuele)
+        solo("GET")
+        if _chi_e(h)["ruolo"] != "proprietario":
+            raise ErroreExtra(403, "Solo per Samuele")
+        _json(h, {"impostata": bool(ACC and ACC.ha_password()), "quando": ACC.quando() if ACC else 0,
+                  "da_rete": _proprietario_rete(h), "via": _via(h), "utente": "Atlante Musica", "pubblico": PUBBLICO})
     elif cosa == "io" and not resto:   # chi è questo dispositivo: l'app mostra la Gestione o le funzioni degli invitati
         solo("GET")
         chi = _chi_e(h)
@@ -15003,10 +15009,24 @@ class Accesso:
         h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), sale, ACCESSO_ITER)
         with self.blocco:
             self._aggiorna()
-            d = dict(self.dati, sale=sale.hex(), hash=h.hex(), iter=ACCESSO_ITER)
+            d = dict(self.dati, sale=sale.hex(), hash=h.hex(), iter=ACCESSO_ITER, quando=int(time.time()))
             if self.dati.get("hash") or not self.dati.get("segreto"):
                 d["segreto"] = secrets.token_hex(32)   # password cambiata: i biscotti di prima non valgono più
             self._scrivi(d)
+
+    def quando(self):
+        """Quando è stata scelta la password (secondi), 0 se non si sa (impostata prima che si annotasse)."""
+        with self.blocco:
+            self._aggiorna()
+            q = self.dati.get("quando")
+            return q if isinstance(q, int) else 0
+
+    def ruota(self):
+        """Esci da tutti i dispositivi entrati come Samuele: i loro biscotti non valgono più (la password resta).
+        Quelli della rete Tailscale rientrano da soli; le persone invitate hanno i loro biscotti e non cambiano."""
+        with self.blocco:
+            self._aggiorna()
+            self._scrivi(dict(self.dati, segreto=secrets.token_hex(32)))
 
     def giusta(self, password):
         with self.blocco:
@@ -15767,7 +15787,9 @@ _MODULO_ACCESSO = _MODULO_CODICE + """
 <input class="nome" type="text" name="nome" autocomplete="username" value="Atlante Musica" tabindex="-1" aria-hidden="true">
 <input type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required>
 <button type="submit">Entra</button>
-</form>"""
+</form>
+<p class="o">Password dimenticata? Con Tailscale acceso apri Atlante › Altro › <b>Password</b>: ne crei una nuova senza quella
+vecchia, e l'iPhone la salva nell'app Password (poi la scrive lui, con Face ID).</p>"""
 _MODULO_INVITO = """<p>@M</p>
 <form method="post" action="" onsubmit="this.querySelector('button').disabled=true">
 <button type="submit">Entra</button>
@@ -15928,43 +15950,62 @@ def _pagina_invito(h, codice, samuele, chi=None):
                                   modulo=_INVITO_FATTO.replace("@K", k))
 
 
-def _nuova_password(h, dati):
-    """Dalla rete Tailscale o dal Mac: scelta (o cambio) della password per Internet."""
+def _nuova_password(h, dati, da_rete):
+    """Samuele sceglie (o cambia) la password per Internet. Dalla rete Tailscale o dal Mac (da_rete) quella di adesso non
+    serve: Tailscale ha già detto che è lui, e così una password dimenticata si rifà. Da Internet (entrato con la password)
+    per cambiarla serve quella di adesso. Dal gestore «Password» (campo torna=password) si torna lì con l'esito."""
     cambio = ACC.ha_password()
-    modulo = _MODULO_NUOVA.replace("@A", _CAMPO_ATTUALE if cambio else "")
+    serve_attuale = cambio and not da_rete
+    modulo = _MODULO_NUOVA.replace("@A", _CAMPO_ATTUALE if serve_attuale else "")
     if h.command != "POST":
         return _scrivi_pagina_accesso(h, 200, ("Cambia la password per aprire l'app da Internet." if cambio else
                                                "Scegli la password per aprire l'app da Internet, senza Tailscale. "
                                                "Qui non serve: la chiede solo da fuori, una volta per dispositivo."), modulo=modulo)
-    if not _stessa_origine(h):
-        return _scrivi_pagina_accesso(h, 403, "Richiesta da un altro sito: rifiutata.", True, modulo=modulo)
     try:
         q = parse_qs(dati.decode("utf-8"), max_num_fields=10)
     except (UnicodeDecodeError, ValueError):
         q = {}
+    gestore = q.get("torna", [""])[0] == "password"
+
+    def esito(codice, messaggio, chiave, **k):
+        if gestore:   # il gestore «Password» si riapre con l'esito (un vero invio del modulo: l'iPhone propone di salvarla)
+            return _rimanda(h, _verso(h, "x/password.html?" + chiave))
+        return _scrivi_pagina_accesso(h, codice, messaggio, codice >= 400, modulo=modulo, **k)
+    if not _stessa_origine(h):
+        return esito(403, "Richiesta da un altro sito: rifiutata.", "errore=origine")
     nuova, ripeti = q.get("nuova", [""])[0], q.get("ripeti", [""])[0]
-    if cambio:
+    if serve_attuale:
         ip = _ip_cliente(h)
-        w = ACC.attesa(ip)
+        w = ACC.attesa(ip) or ACC.turno()
         if w:
-            return _scrivi_pagina_accesso(h, 429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % (
-                (w + 59) // 60, "o" if w <= 60 else "i"), True, modulo=modulo, intestazioni=[("Retry-After", str(w))])
-        w = ACC.turno()
-        if w:
-            return _troppi_da_tutti(h, w, modulo=modulo)
+            return esito(429, "Troppi tentativi sbagliati: riprova fra %d minut%s." % ((w + 59) // 60, "o" if w <= 60 else "i"),
+                         "errore=attesa&minuti=%d" % ((w + 59) // 60), intestazioni=[("Retry-After", str(w))])
         if not ACC.giusta(q.get("password", [""])[0]):
             _sbagliata(ip)
-            return _scrivi_pagina_accesso(h, 401, "La password di adesso è sbagliata.", True, modulo=modulo)
+            return esito(401, "La password di adesso è sbagliata.", "errore=attuale")
         ACC.riuscita(ip)
     if len(nuova) < 8:
-        return _scrivi_pagina_accesso(h, 400, "Servono almeno 8 caratteri.", True, modulo=modulo)
+        return esito(400, "Servono almeno 8 caratteri.", "errore=corta")
     if nuova != ripeti:
-        return _scrivi_pagina_accesso(h, 400, "Le due password non sono uguali.", True, modulo=modulo)
+        return esito(400, "Le due password non sono uguali.", "errore=diverse")
     ACC.imposta(nuova)
     h._biscotto = _set_cookie(h, ACC.biscotto())   # firmato col segreto nuovo: questo dispositivo resta dentro
     print("Atlante: password per Internet %s" % ("cambiata" if cambio else "impostata"), flush=True)
+    if gestore:
+        return _rimanda(h, _verso(h, "x/password.html?fatto=1"))
     return _scrivi_pagina_accesso(h, 200, "Password salvata. Da Internet l'app la chiederà una volta per dispositivo; "
                                   "dalla rete Tailscale nessuna differenza.<br><br><a href=\"@R./\">Apri Atlante Musica</a>", modulo=False)
+
+
+def _esci_ovunque(h, campi):
+    """Gestore «Password», «Esci da tutti gli altri dispositivi»: un nuovo segreto per i biscotti di Samuele. Questo
+    dispositivo resta dentro (biscotto nuovo); gli altri entrati con la password la richiedono."""
+    if not _stessa_origine(h):
+        return _rimanda(h, _verso(h, "x/password.html?errore=origine"))
+    ACC.ruota()
+    h._biscotto = _set_cookie(h, ACC.biscotto())
+    print("Atlante: Samuele è uscito da tutti gli altri dispositivi", flush=True)
+    return _rimanda(h, _verso(h, "x/password.html?uscito=1"))
 
 
 def _pagina_accesso(h, entrato, samuele):
@@ -15979,9 +16020,11 @@ def _pagina_accesso(h, entrato, samuele):
     elif h.command not in ("GET", "HEAD"):
         h.close_connection = True
         return _scrivi_pagina_accesso(h, 405, "Richiesta non valida.", True)
+    if samuele and h.command == "POST" and "esci" in campi:
+        return _esci_ovunque(h, campi)
     if samuele and (not ACC.ha_password() or "cambia" in parse_qs(urlsplit(h.path).query, keep_blank_values=True)
                    or b"nuova=" in dati):
-        return _nuova_password(h, dati)
+        return _nuova_password(h, dati, _proprietario_rete(h))
     if entrato:
         return _rimanda(h, _verso(h, "./"))
     if h.command == "POST" and "codice" in campi:

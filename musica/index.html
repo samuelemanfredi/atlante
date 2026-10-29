@@ -3306,7 +3306,8 @@ let IO = ls.get('am-io', {ruolo:'', persona:null});
 // Non è una pagina in x/: si apre in una finestra a parte, grande, e la musica continua qui.
 const ACCESSI_PORTA = '8443';
 const XREMOTO = {k:'remoto', t:'Controllo remoto', d:'Lo schermo dei tuoi Mac, da qui', i:'🖥️', c:'#5e5ce6'};
-const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, Da controllare, contenuti, idee e rete', i:'🛡️', c:'#636366'}, XREMOTO]};
+const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, Da controllare, contenuti, idee e rete', i:'🛡️', c:'#636366'}, XREMOTO,
+  {k:'password', t:'Password', d:'Accesso da Internet, app Password e Face ID', i:'🔑', c:'#ff9f0a'}]};
 const XINVITATI = [{g:'Per te', m:[{k:'cerca', t:'Cerca e scarica musica', d:'Il brano arriva sul tuo telefono e a Samuele', i:'🔎', c:'#fa2d48'},
   {k:'carica', t:'Carica nella libreria', d:'Brani e film per Samuele', i:'⬆️', c:'#34c759'},
   {k:'inviti', t:'Condividi l\'app', d:'Invita un amico: il link te lo dà Samuele', i:'📲', c:'#007aff'}, XIDEE]}];

@@ -1474,16 +1474,73 @@ class TestAccesso(AiutiAccesso, unittest.TestCase):
         self.assertIn("Secure", self.biscotto(h))
         self.assertEqual(os.stat(self.file).st_mode & 0o777, 0o600)
         self.assertEqual(self.entra("scelta su iphone", "203.0.113.30")[0], 303)
-        # con la password già scelta: la pagina rimanda all'app; per cambiarla serve quella di adesso
+        # con la password già scelta: la pagina rimanda all'app; per cambiarla dalla rete Tailscale quella di adesso non
+        # serve (Tailscale ha già detto che è Samuele: una password dimenticata si rifà)
         self.assertEqual(self.dal_tailscale("GET", "/accesso")[0], 303)
         st, h, b = self.dal_tailscale("GET", "/accesso?cambia")
-        self.assertIn('name="password"', b.decode("utf-8"))
-        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"nuova=un+altra+ancora&ripeti=un+altra+ancora")[0], 401)
-        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"password=sbagliata&nuova=un+altra+ancora&ripeti=un+altra+ancora")[0], 401)
-        st, h, b = self.dal_tailscale("POST", "/accesso", b"password=scelta+su+iphone&nuova=un+altra+ancora&ripeti=un+altra+ancora")
+        self.assertNotIn('name="password"', b.decode("utf-8"))
+        st, h, b = self.dal_tailscale("POST", "/accesso", b"nuova=un+altra+ancora&ripeti=un+altra+ancora")
         self.assertEqual(st, 200)
         self.assertEqual(self.entra("scelta su iphone", "203.0.113.31")[0], 401)
         self.assertEqual(self.entra("un altra ancora", "203.0.113.31")[0], 303)
+
+    def test_3c_gestore_password(self):
+        """Il modulo «Password»: stato, cambio (da Internet con quella di adesso, da Tailscale senza), ritorno al modulo
+        con l'esito, «Esci da tutti gli altri dispositivi». Solo Samuele."""
+        modulo = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://mac.esempio.ts.net:10000"}
+        if not self.ha_password():
+            self.assertEqual(self.dal_tailscale("POST", "/accesso", b"nuova=gestore+prima&ripeti=gestore+prima")[0], 200)
+        self.assertEqual(self.dal_tailscale("POST", "/accesso", b"nuova=gestore+uno+1&ripeti=gestore+uno+1&torna=password")[1]["Location"],
+                         "x/password.html?fatto=1")
+        # stato: da Tailscale non serve quella di adesso, da Internet sì
+        j = json.loads(self.dal_tailscale("GET", "/api/extra/password")[2].decode("utf-8"))
+        self.assertEqual((j["impostata"], j["da_rete"], j["via"], j["utente"]), (True, True, "tailscale", "Atlante Musica"))
+        self.assertAlmostEqual(j["quando"], time.time(), delta=60)
+        st, h, b = self.entra("gestore uno 1", "203.0.113.40")
+        self.assertEqual(st, 303)
+        a = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        st, h, b = self.entra("gestore uno 1", "203.0.113.41")
+        altro = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        j = json.loads(self.da_fuori("GET", "/api/extra/password", biscotto=a)[2].decode("utf-8"))
+        self.assertEqual((j["da_rete"], j["via"]), (False, "internet"))
+        self.assertEqual(self.da_fuori("GET", "/api/extra/password")[0], 401)
+        # da Internet: senza quella di adesso, o sbagliata, si torna al modulo con l'errore
+        for corpo, err in ((b"nuova=gestore+due+2&ripeti=gestore+due+2&torna=password", "errore=attuale"),
+                           (b"password=no&nuova=gestore+due+2&ripeti=gestore+due+2&torna=password", "errore=attuale"),
+                           (b"password=gestore+uno+1&nuova=corta&ripeti=corta&torna=password", "errore=corta"),
+                           (b"password=gestore+uno+1&nuova=gestore+due+2&ripeti=altra+cosa&torna=password", "errore=diverse")):
+            st, h, b = self.da_fuori("POST", "/accesso?cambia", corpo, ip="203.0.113.42", biscotto=a, extra=modulo)
+            self.assertEqual((st, h["Location"]), (303, "x/password.html?" + err), corpo)
+        self.assertEqual(self.entra("gestore uno 1", "203.0.113.43")[0], 303)   # non è cambiata
+        st, h, b = self.da_fuori("POST", "/accesso?cambia", b"password=gestore+uno+1&nuova=gestore+due+2&ripeti=gestore+due+2&torna=password",
+                                 ip="203.0.113.42", biscotto=a, extra=modulo)
+        self.assertEqual((st, h["Location"]), (303, "x/password.html?fatto=1"))
+        a = self.biscotto(h).split(";")[0].split("=", 1)[1]   # questo dispositivo resta dentro
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=a)[0], 200)
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=altro)[0], 401)   # gli altri rimettono la password
+        self.assertEqual(self.entra("gestore uno 1", "203.0.113.44")[0], 401)
+        st, h, b = self.entra("gestore due 2", "203.0.113.44")
+        altro = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        # un invitato non vede il modulo né lo stato, e non fa uscire nessuno
+        pid, o, t = self.invitato("Elsa", ip="203.0.113.45")
+        self.assertEqual(self.da_fuori("GET", "/x/password.html", biscotto=o)[0], 403)
+        self.assertEqual(self.da_fuori("GET", "/api/extra/password", biscotto=o)[0], 403)
+        self.da_fuori("POST", "/accesso", b"esci=1&torna=password", ip="203.0.113.45", biscotto=o, extra=modulo)
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=altro)[0], 200)
+        # «Esci da tutti gli altri dispositivi»: da un altro sito no; da Samuele sì, e lui resta dentro
+        st, h, b = self.da_fuori("POST", "/accesso", b"esci=1&torna=password", ip="203.0.113.42", biscotto=a,
+                                 extra=dict(modulo, Origin="https://altro.example"))
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=altro)[0], 200)
+        st, h, b = self.da_fuori("POST", "/accesso", b"esci=1&torna=password", ip="203.0.113.42", biscotto=a, extra=modulo)
+        self.assertEqual((st, h["Location"]), (303, "x/password.html?uscito=1"))
+        a2 = self.biscotto(h).split(";")[0].split("=", 1)[1]
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=a2)[0], 200)
+        for v in (a, altro):
+            self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=v)[0], 401)
+        self.assertEqual(self.da_fuori("GET", "/api/musica/catalogo", biscotto=o)[0], 200)   # l'invitata resta
+        self.assertEqual(self.entra("gestore due 2", "203.0.113.46")[0], 303)   # la password resta quella
+        # la pagina della password dice come rifarla se dimenticata
+        self.assertIn("Password dimenticata?", self.da_fuori("GET", "/accesso", ip="203.0.113.47")[2].decode("utf-8"))
 
     def test_4_password(self):
         self.assertEqual(self.imposta("corta")[0], 1)

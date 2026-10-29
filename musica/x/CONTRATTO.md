@@ -124,6 +124,7 @@ Un'app web non può accendere il VPN del telefono: si comanda Tailscale sul Mac 
 
 | File | Contenuto |
 |---|---|
+| `password.html` | solo Samuele (Gestione): password per aprire Atlante da Internet. Dalla rete Tailscale o dal Mac si rifà senza quella vecchia, da Internet serve quella di adesso; la crea («Creane una per me») e la fa salvare nell'app Password dell'iPhone (Face ID); «Esci da tutti gli altri dispositivi». Il modulo è un vero invio a `../accesso` (campo `torna=password`): il Mac rimanda qui con `?fatto`, `?uscito` o `?errore=` |
 | `rete.html` | per tutti: se questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet; come accendere Tailscale (App Store, Google Play); agli invitati spiega che non serve. Resta nella copia offline |
 
 ## Caricamenti, «Da controllare», film e contenuti (Gestione, parte 2)
