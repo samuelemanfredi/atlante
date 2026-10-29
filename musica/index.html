@@ -856,7 +856,7 @@ async function loadServer() {
     if (r.ok && (r.headers.get('content-type') || '').indexOf('json') >= 0) {
       et = r.headers.get('etag') || '';
       // lo stesso catalogo già messo in libreria da quando l'app è aperta: niente da rifare (grande libreria)
-      if (et && et === CATET) { try { r.body && r.body.cancel().catch(() => {}); } catch (e) {} SRV = true; clearTimeout(scanTimer); scanTimer = SRVSCAN ? setTimeout(() => reconnect(true), 5000) : 0; scaricaTutto(); return true; }
+      if (et && et === CATET) { try { r.body && r.body.cancel().catch(() => {}); } catch (e) {} SRV = true; clearTimeout(scanTimer); scanTimer = SRVSCAN ? setTimeout(() => reconnect(true), 5000) : 0; scaricaTutto(); syncListe(); return true; }
       j = await r.json();
     }
   } catch (e) {}
@@ -917,6 +917,7 @@ async function loadServer() {
   CATET = et;
   clCarica();
   mplCarica();   // playlist del Mac (dal disco e dalla vecchia radio)
+  syncListe();   // le playlist e i Preferiti dell'account
   return true;
 }
 // playlist e coda della versione precedente: i brani del Mac mai ascoltati né preferiti avevano l'id senza «r».
@@ -1156,6 +1157,118 @@ function dlMark() {   // aggiorna solo i segni ✓ / … e la riga di avanzament
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !srvWait) reconnect(); });
 addEventListener('online', () => { if (!srvWait) reconnect(true); });
+
+/* ---------- playlist dell'account: uguali su tutti i dispositivi ---------- */
+// Le playlist e i Preferiti stanno anche sul Mac mini, nell'account di chi usa l'app (Samuele, o la persona invitata): così
+// sono le stesse su iPhone, iPad e Mac. Ogni modifica parte dopo 2 s; a ogni collegamento al Mac e al ritorno in primo piano
+// arriva quello che è cambiato sugli altri dispositivi (il Mac numera le modifiche: «seq»). Vince la modifica più recente;
+// la stessa playlist creata su due dispositivi (stesso nome, es. quelle di Apple Music importate due volte) diventa una sola.
+const SYNC = {visti:ls.get('am-pl-visti', {}), tolte:ls.get('am-pl-tolte', {}), seq:ls.get('am-pl-seq', 0), fav:ls.get('am-fav-agg', 0),
+  favAltri:ls.get('am-fav-altri', []), toccate:new Set(), favToccati:false, t:0, corre:false, ancora:false, no:false};
+function syncPresto() { clearTimeout(SYNC.t); SYNC.t = setTimeout(syncListe, 2000); }
+function favCambiati() { SYNC.fav = Date.now(); ls.set('am-fav-agg', SYNC.fav); if (SYNC.corre) SYNC.favToccati = true; syncPresto(); }
+function plTolta(id) { SYNC.tolte[id] = Date.now(); ls.set('am-pl-tolte', SYNC.tolte); syncPresto(); }
+const plInvio = p => { const x = {id:p.id, name:p.name, ids:p.ids, created:p.created || 1, updated:p.updated || p.created || 1};
+  if (p.apple) x.apple = true; if (p.atl) x.atl = p.atl; return x; };
+function favInvio() {   // i Preferiti di questo dispositivo, più quelli dell'account con brani che qui ancora non ci sono
+  const ids = [], c = new Set();
+  for (const t of T.values()) if (t.fav && t.remote) { ids.push(t.id); c.add(t.id); }
+  for (const t of GONE.values()) if (t.fav && !c.has(t.id)) { ids.push(t.id); c.add(t.id); }
+  for (const id of SYNC.favAltri) if (!c.has(id) && !T.has(id) && !GONE.has(id)) ids.push(id);
+  return ids;
+}
+async function syncListe() {
+  clearTimeout(SYNC.t);
+  if (!SRV || !DB || SYNC.no) return;   // senza Mac si riprova al prossimo collegamento
+  if (SYNC.corre) { SYNC.ancora = true; return; }
+  SYNC.corre = true; SYNC.toccate.clear(); SYNC.favToccati = false;
+  try {
+    const manda = P.filter(p => (p.updated || p.created || 1) !== SYNC.visti[p.id]).map(plInvio);
+    const tolte = Object.keys(SYNC.tolte);
+    tolte.forEach(id => manda.push({id, deleted:true, updated:SYNC.tolte[id]}));
+    const primo = SYNC.visti._preferiti === undefined;
+    if (primo || SYNC.fav !== SYNC.visti._preferiti) {
+      const ids = favInvio();
+      if (!primo || ids.length) manda.push(Object.assign({id:'_preferiti', ids, updated:SYNC.fav || 1}, primo ? {unisci:true} : {}));
+    }
+    // a gruppi sotto i 700 KB: il Mac accetta 1 MB per richiesta
+    const gruppi = [[]]; let n = 0;
+    for (const x of manda) { const k = JSON.stringify(x).length; if (n + k > 700000 && gruppi[gruppi.length - 1].length) { gruppi.push([]); n = 0; } gruppi[gruppi.length - 1].push(x); n += k; }
+    const arr = [], alias = {}; let seq = SYNC.seq, rifai = false;
+    for (const g of gruppi) {
+      const r = await fetchT('api/extra/liste', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({playlist:g, dopo:SYNC.seq})}, 20000);
+      if (r.status === 403) { SYNC.no = true; return; }   // rete di casa, senza account: le playlist restano solo qui
+      if (!r.ok) return;
+      const j = await r.json();
+      if ((j.seq || 0) < SYNC.seq) rifai = true;   // l'account sul Mac è ripartito da capo: si rimanda tutto
+      arr.push(...(j.playlist || [])); Object.assign(alias, j.alias || {}); seq = Math.max(seq, j.seq || 0);
+    }
+    tolte.forEach(id => delete SYNC.tolte[id]); ls.set('am-pl-tolte', SYNC.tolte);
+    if (rifai) { SYNC.seq = 0; SYNC.visti = {}; ls.set('am-pl-seq', 0); ls.set('am-pl-visti', {}); SYNC.ancora = true; return; }
+    applicaListe(arr, alias);
+    SYNC.seq = seq; ls.set('am-pl-seq', seq);
+  } catch (e) {}
+  finally { SYNC.corre = false; if (SYNC.ancora) { SYNC.ancora = false; syncPresto(); } }
+}
+function applicaListe(arr, alias) {
+  let cambi = false;
+  for (const [vecchio, nuovo] of Object.entries(alias)) {   // la stessa playlist c'era già nell'account: resta quella
+    const k = P.findIndex(p => p.id === vecchio); if (k < 0) continue;
+    P.splice(k, 1); dbDel('playlists', vecchio).catch(() => {}); delete SYNC.visti[vecchio]; cambi = true;
+    Object.values(tabs).forEach(st => st.forEach(r => { if (r.v === 'playlist' && r.k === vecchio) r.k = nuovo; }));
+  }
+  for (const l of arr) {
+    if (l.id === '_preferiti') { applicaPreferiti(l); continue; }
+    if (SYNC.toccate.has(l.id)) continue;   // cambiata qui mentre si sincronizzava: parte la prossima volta
+    SYNC.visti[l.id] = l.updated;
+    const k = P.findIndex(p => p.id === l.id), loc = k >= 0 ? P[k] : null;
+    if (l.deleted) { if (loc) { P.splice(k, 1); dbDel('playlists', l.id).catch(() => {}); cambi = true; } continue; }
+    if (loc && loc.updated === l.updated && loc.name === l.name && loc.ids.length === l.ids.length && loc.ids.every((x, i) => x === l.ids[i])) continue;
+    const n = loc || {id:l.id};
+    Object.assign(n, {name:l.name, ids:l.ids.slice(), created:l.created, updated:l.updated});
+    if (l.apple) n.apple = true; else delete n.apple;
+    if (l.atl) n.atl = l.atl; else delete n.atl;
+    if (!loc) P.push(n);
+    dbPut('playlists', n).catch(() => {}); cambi = true;
+  }
+  ls.set('am-pl-visti', SYNC.visti);
+  if (cambi) { P.sort((a, b) => (a.created || 0) - (b.created || 0)); render(true); }
+}
+function applicaPreferiti(l) {
+  if (SYNC.favToccati) return;   // cambiati qui mentre si sincronizzava: partono la prossima volta
+  SYNC.visti._preferiti = l.updated; SYNC.fav = l.updated; ls.set('am-fav-agg', SYNC.fav);
+  const s = new Set(l.ids), ch = [];
+  for (const t of T.values()) if (t.remote && !!t.fav !== s.has(t.id)) { t.fav = s.has(t.id); ch.push(t); }
+  SYNC.favAltri = l.ids.filter(id => !T.has(id)); ls.set('am-fav-altri', SYNC.favAltri);
+  ls.set('am-pl-visti', SYNC.visti);
+  if (ch.length) { dbBatch('meta', ch, []).catch(() => {}); render(true); }
+}
+
+/* ---------- aggiornamento da solo ---------- */
+// Sull'iPhone l'app torna dal sottofondo senza ricaricarsi e può restare per giorni alla versione vecchia. Al ritorno in
+// primo piano (e ogni 30 minuti) chiede al Mac la data di index.html: se è cambiata si ricarica appena non suona niente e
+// non c'è un modulo aperto (una chiamata, la chat, il navigatore). Coda, posizione e download riprendono da soli.
+let verApp = '', verNuova = false;
+async function verOra() {
+  if (!/^https?:$/.test(location.protocol) || /claude\.ai$/.test(location.hostname)) return '';
+  try { const r = await fetch('index.html', {method:'HEAD', cache:'no-store'}); return r.ok ? (r.headers.get('last-modified') || '') + '|' + (r.headers.get('content-length') || '') : ''; }
+  catch (e) { return ''; }
+}
+async function controllaVersione() {
+  const v = await verOra(); if (!v) return;
+  if (!verApp) { verApp = v; return; }
+  if (v !== verApp) { verNuova = true; aggiornaApp(); }
+}
+function aggiornaApp() {
+  if (!verNuova || ALLAU.some(a => !a.paused) || xCur || document.visibilityState !== 'visible') return;   // si riprova dopo
+  verNuova = false; ls.set('am-aggiornata', 1);
+  const vai = () => location.reload();
+  try { navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {}).then(vai); } catch (e) { vai(); }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { controllaVersione(); if (!srvWait) syncListe(); } });
+setInterval(controllaVersione, 30 * 60000);
+
+auOn('pause', () => { if (verNuova) setTimeout(aggiornaApp, 5000); });   // messo in pausa e lasciato lì: si aggiorna
 
 /* ---------- playlist di Apple Music ---------- */
 // Musica sul Mac: File ▸ Libreria ▸ Esporta playlist… (formato Testo, M3U o XML), oppure Esporta libreria (XML con tutte le playlist).
@@ -3131,7 +3244,8 @@ function unsave(id) {   // «Togli dall'iPhone»: il file salvato si cancella, i
   const k = DLQ.indexOf(id); if (k >= 0) { DLQ.splice(k, 1); ls.set('am-dlq', DLQ); }
   dbDel('files', id).catch(() => {}); saved.delete(id); render(true); toast('Tolto dall\'iPhone: resta sul Mac');
 }
-async function savePl(p) { await dbPut('playlists', p).catch(() => {}); }
+// ogni modifica di una playlist va anche nell'account sul Mac (vedi «playlist dell'account»)
+async function savePl(p) { p.updated = Date.now(); if (SYNC.corre) SYNC.toccate.add(p.id); await dbPut('playlists', p).catch(() => {}); syncPresto(); }
 async function delTrack(id) {
   const t = T.get(id); if (!t) return;
   saved.delete(id); T.delete(id); nuoviGemelli(); await dbDel('meta', id).catch(() => {}); await dbDel('files', id).catch(() => {}); memFiles.delete(id);
@@ -3184,7 +3298,7 @@ document.addEventListener('click', e => {
     case 'tutto': setTutto(!TUTTO); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': saltaA(+d.i, () => load(+d.i, true), true); break;   // col mix al salto, come «Successivo»
-    case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); updateNow(); favMark(curId); } break;
+    case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); updateNow(); favMark(curId); } break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
     case 'xopen': if (b.closest('#side') && tab !== 'altro') setTab('altro'); openX(d.k); break;   // dalla barra dell'iPad: chiuso il modulo («‹ Altro») si torna ad Altro
@@ -3197,7 +3311,7 @@ document.addEventListener('click', e => {
     case 'closesheet': closeSheet(); break;
     case 'm-next': closeSheet(); playNext(d.id); break;
     case 'm-last': closeSheet(); playLast(d.id); break;
-    case 'm-fav': { const t = T.get(d.id); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); closeSheet(); updateNow(); favMark(d.id); toast(t.fav ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti'); break; }
+    case 'm-fav': { const t = T.get(d.id); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); closeSheet(); updateNow(); favMark(d.id); toast(t.fav ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti'); break; }
     case 'm-addpl': {
       const id = d.id;
       openSheet('<div class="grp scroll"><div class="smsg"><b>Aggiungi a una playlist</b></div><button class="acc" data-a="m-newpl" data-id="' + id + '"><span class="l">Nuova playlist…</span>' + ic('plus') + '</button>' +
@@ -3230,7 +3344,7 @@ document.addEventListener('click', e => {
     }
     case 'plren': { const p = P.find(x => x.id === d.k); nameSheet('Rinomina playlist', p ? p.name : '', 'renpl', d.k); break; }
     case 'pldel': { const p = P.find(x => x.id === d.k); openSheet('<div class="grp"><div class="smsg"><b>Eliminare «' + esc(p.name) + '»?</b>I brani restano nella libreria.</div><button class="red cancel" data-a="pldel2" data-k="' + d.k + '">Elimina playlist</button></div>' + cancel); break; }
-    case 'pldel2': { P = P.filter(x => x.id !== d.k); dbDel('playlists', d.k).catch(() => {}); closeSheet(); back(); toast('Playlist eliminata'); break; }
+    case 'pldel2': { P = P.filter(x => x.id !== d.k); dbDel('playlists', d.k).catch(() => {}); plTolta(d.k); closeSheet(); back(); toast('Playlist eliminata'); break; }
     case 'pickt': { const p = P.find(x => x.id === d.k); if (!p) break; const i = p.ids.indexOf(d.id); if (i >= 0) p.ids.splice(i, 1); else p.ids.push(d.id); b.classList.toggle('on', i < 0); savePl(p); break; }
     case 'sclear': q = ''; $('sq').value = ''; b.hidden = true; render(true); $('sq').focus(); break;
     case 'install': installSheet(); break;
@@ -3306,8 +3420,7 @@ let IO = ls.get('am-io', {ruolo:'', persona:null});
 // Non è una pagina in x/: si apre in una finestra a parte, grande, e la musica continua qui.
 const ACCESSI_PORTA = '8443';
 const XREMOTO = {k:'remoto', t:'Controllo remoto', d:'Lo schermo dei tuoi Mac, da qui', i:'🖥️', c:'#5e5ce6'};
-const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, Da controllare, contenuti, idee e rete', i:'🛡️', c:'#636366'}, XREMOTO,
-  {k:'password', t:'Password', d:'Accesso da Internet, app Password e Face ID', i:'🔑', c:'#ff9f0a'}]};
+const XGESTIONE = {g:'Gestione', m:[{k:'gestione', t:'Gestione', d:'Persone, Da controllare, contenuti, idee e rete', i:'🛡️', c:'#636366'}, XREMOTO, {k:'password', t:'Password', d:'Accesso da Internet, app Password e Face ID', i:'🔑', c:'#ff9f0a'}]};   // su una riga sola: le prove (test_ipad.js, test_remoto.js) la leggono così
 const XINVITATI = [{g:'Per te', m:[{k:'cerca', t:'Cerca e scarica musica', d:'Il brano arriva sul tuo telefono e a Samuele', i:'🔎', c:'#fa2d48'},
   {k:'carica', t:'Carica nella libreria', d:'Brani e film per Samuele', i:'⬆️', c:'#34c759'},
   {k:'inviti', t:'Condividi l\'app', d:'Invita un amico: il link te lo dà Samuele', i:'📲', c:'#007aff'}, XIDEE]}];
@@ -3406,7 +3519,7 @@ function apriRemoto() {
   if (!u) { toast('Da qui non so l\'indirizzo: apri Atlante dal suo link (…ts.net), il controllo remoto è sulla porta 8443'); return; }
   window.open(u, '_blank', 'noopener');
 }
-function closeX() { const era = xCur; document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); sideMark(); if (era === 'gestione') ioCarica(); }   // i numeri del riquadro Gestione dopo averla usata
+function closeX() { const era = xCur; document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); sideMark(); if (era === 'gestione') ioCarica(); if (verNuova) setTimeout(aggiornaApp, 1000); }   // i numeri del riquadro Gestione dopo averla usata
 const xSubs = new Set();
 function xNotify() { const n = AM.now(); xSubs.forEach(cb => { try { cb(n); } catch (e) {} }); }
 window.AM = {
@@ -4903,6 +5016,8 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   await ioCarica();   // prima del catalogo: chi è decide se scaricare tutta la musica
   await loadServer();
   srvWait = false;
+  controllaVersione();   // la versione di adesso: da qui in poi si aggiorna da sola
+  if (ls.get('am-aggiornata', 0)) { ls.set('am-aggiornata', 0); setTimeout(() => toast('Atlante aggiornato all\'ultima versione'), 1500); }
   // brano del Mac toccato durante il collegamento, ma il Mac non ha risposto: lo si dice (e si passa a uno salvato) invece del silenzio
   if (!SRV && curId && !au.paused && au.readyState < 3) {
     const t = T.get(curId);

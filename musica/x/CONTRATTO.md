@@ -80,6 +80,8 @@ Per Samuele (`"p"`) e per gli invitati; dalla rete di casa senza biscotto 403. I
 | POST / DELETE | `chat/push` `{disp, endpoint}` · `chat/push/<disp>` | notifiche (solo servizi di Apple, Google, Mozilla, Microsoft) |
 | GET | `chat/avvisi?disp=` | `{avvisi:[{conv,da,nome,gruppo,n,t}], chiamate:[{id,evento:'arriva'\|'persa'\|'chiusa',nome,video,t}]}` — per il testo della notifica, letto dal service worker (`sw.js`: «Chiamata da…», «Videochiamata da…», «Chiamata persa da…», etichetta `chiamata-<id>`; «chiusa» la toglie) |
 
+Playlist dell'account: `GET api/extra/liste?dopo=<seq>` e `POST api/extra/liste {playlist:[{id,name,ids,created,updated,deleted?}], dopo}` → `{playlist, alias, seq}`; le usa l'app (Samuele e ogni invitato hanno le loro, uguali su tutti i loro dispositivi; `_preferiti` sono i Preferiti).
+
 ## API dell'app che ospita (`AX.player`, oppure `parent.AM`)
 `playExternal(items, start, from)`, `toggle()`, `next()`, `prev()`, `seek(sec)`,
 `now()` → `{id,title,artist,album,cover,playing,ext,t,d}` oppure `null`, `onChange(cb)` → funzione per smettere, `toast(msg)`, `close()`,

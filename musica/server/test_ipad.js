@@ -106,7 +106,7 @@ function prove(src, fatte) {
   /* ---------- le voci: schede, Libreria e tutti i moduli di chi usa l'app ---------- */
   let env = ambiente('proprietario', {inviti: 2, idee: 1}), F = carica(src, env);
   F.sideRender();
-  eq(chiavi(env), ['home', 'lib', 'search', 'altro', 'playlists', 'artists', 'albums', 'songs', 'favs', 'inviti', 'gestione', 'remoto', 'chat', 'cerca', 'podcast', 'strumenti'],
+  eq(chiavi(env), ['home', 'lib', 'search', 'altro', 'playlists', 'artists', 'albums', 'songs', 'favs', 'inviti', 'gestione', 'remoto', 'password', 'chat', 'cerca', 'podcast', 'strumenti'],
     'Samuele: schede, Libreria, «Condividi l\'app», Gestione e tutti i moduli');
   eq(/Condividi l'app/.test(env.side.voci.find(v => v.dataset.k === 'inviti').testo), true, '«Condividi l\'app» nella barra');
   eq(env.side.voci.find(v => v.dataset.k === 'gestione').testo.indexOf('3') >= 0, true, 'il numero delle cose nuove sulla Gestione');
