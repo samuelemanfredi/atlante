@@ -2,6 +2,8 @@
 
 L'app Musica (`musica/index.html`) ha una scheda **Altro** che apre ogni modulo (`musica/x/<nome>.html`)
 in un riquadro a tutto schermo **dentro l'app**: la musica continua a suonare, il mini player resta.
+Su iPad e Mac (finestra da 800 × 560 px in su) il riquadro sta accanto alla barra laterale, che elenca tutti i moduli:
+largo circa 540–1100 px, e l'utente passa da un modulo all'altro senza tornare ad Altro.
 Il server sul Mac (`musica/server/musica_libreria.py`) serve sia l'app sia queste pagine e le API `api/extra/`.
 
 ## Regole per ogni modulo

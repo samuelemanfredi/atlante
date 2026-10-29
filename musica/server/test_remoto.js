@@ -71,7 +71,7 @@ function ambiente(ruolo, loc) {
     document: {body: {classList: {toggle: () => {}}}},
     $: id => ({xf: {getAttribute: () => xf.src, setAttribute: (n, v) => { xf.src = v; }}, xp}[id]),
     ls: {get: (k, d) => (k in salvati ? salvati[k] : d), set: (k, v) => { salvati[k] = v; }},
-    toast: m => { env.avvisi.push(m); }, closeNP: () => {}, uiApri: () => {},
+    toast: m => { env.avvisi.push(m); }, closeNP: () => {}, uiApri: () => {}, sideMark: () => {},   // la barra dell'iPad
   };
   return env;
 }

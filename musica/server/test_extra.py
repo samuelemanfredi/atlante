@@ -11369,5 +11369,22 @@ class TestControlloRemoto(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+class TestBarraIPad(unittest.TestCase):
+    """Sull'iPad (da 800 px) le schede in basso diventano una barra a sinistra con le schede, la Libreria e tutti i
+    moduli di Altro di chi usa l'app; una voce accesa sola; l'icona di Altro disegnata.
+    Gira in JavaScriptCore come test_remoto.js: test_ipad.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_barra(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_ipad.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
