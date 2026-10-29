@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>Invita un amico</title>
+<title>Condividi l'app</title>
 <link rel="stylesheet" href="kit.css">
 <style>
 .btn.full{width:100%}
@@ -12,28 +12,143 @@
 .inv{padding:12px 14px;border-bottom:.5px solid var(--sep)}
 .inv:last-child{border-bottom:0}
 .inv .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+/* il link appena creato: QR da inquadrare, link, tasti */
+.carta{text-align:center}
+.carta>b{display:block;font-size:19px}
+.carta canvas{display:block;width:220px;height:220px;margin:12px auto 6px;border-radius:12px;background:#fff}
+.carta .btns{justify-content:center}
+.inv canvas{display:block;width:200px;height:200px;margin:10px auto 0;border-radius:12px;background:#fff}
+.row .av{width:36px;height:36px;border-radius:50%;background:var(--fill);display:grid;place-items:center;font-weight:600;flex:none}
+.avviso{background:rgba(255,159,10,.16);border-radius:12px;padding:12px 14px;margin:10px 0;font-size:15px}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <p class="sub">Scrivi il nome del tuo amico: la richiesta arriva a Samuele. Quando la consente, qui trovi il link da mandargli.</p>
-  <div class="card">
-    <div class="field"><label for="nome">Nome del tuo amico</label><input class="in" id="nome" maxlength="40" placeholder="Nome" autocomplete="off"></div>
-    <button class="btn pri full" id="chiedi">Chiedi l'invito</button>
-  </div>
-  <h2 class="h2">I miei inviti</h2>
-  <div class="list" id="ilist"></div>
+  <div class="card" id="fermo" hidden></div>
+
+  <!-- Samuele: il link si crea subito -->
+  <section id="sezMio" hidden>
+    <p class="sub">Invita chi non ha ancora Atlante: scrivi il nome, poi fagli inquadrare il codice QR o mandagli il link. Con il link entra e può mettere l'app sulla schermata Home.</p>
+    <div class="avviso" id="mRichieste" hidden></div>
+    <div class="card">
+      <div class="field"><label for="mnome">Nome della persona</label><input class="in" id="mnome" maxlength="40" placeholder="Nome" autocomplete="off" enterkeyhint="done"></div>
+      <button class="btn pri full" id="crea">Crea il link d'invito</button>
+    </div>
+    <div id="carta" hidden></div>
+    <div id="attesa" hidden>
+      <h2 class="h2">Non ancora entrati</h2>
+      <p class="small">Il loro link non è stato usato. «Nuovo link» ne crea un altro da mandare (anche se quello di prima è scaduto).</p>
+      <div class="list" id="alist"></div>
+    </div>
+    <p class="small" id="mnota"></p>
+  </section>
+
+  <!-- invitati: chiedono a Samuele -->
+  <section id="sezChiedi" hidden>
+    <p class="sub">Scrivi il nome del tuo amico: la richiesta arriva a Samuele. Quando la consente, qui trovi il link e il codice QR da mandargli.</p>
+    <div class="card">
+      <div class="field"><label for="nome">Nome del tuo amico</label><input class="in" id="nome" maxlength="40" placeholder="Nome" autocomplete="off" enterkeyhint="send"></div>
+      <button class="btn pri full" id="chiedi">Chiedi l'invito</button>
+    </div>
+    <h2 class="h2">I miei inviti</h2>
+    <div class="list" id="ilist"></div>
+  </section>
 </div>
 <script src="kit.js"></script>
 <script>
 'use strict';
 const {$, esc, toast, api} = AX;
-AX.header('Invita un amico');
+AX.header('Condividi l\'app');
 const STATI = {attesa:['In attesa di Samuele', ''], consentita:['Consentito', 'ok'], rifiutata:['Samuele non l\'ha consentito', 'bad'], usata:['Invito usato', 'ok']};
-function messaggio(nome, link) {
-  return 'Ciao ' + nome + '! Ti invito su Atlante Musica, la libreria musicale di Samuele. Apri questo link sul telefono e sei dentro: ' +
-    'puoi ascoltare tutto e salvare i brani sul telefono. Se ti viene un\'idea per migliorarla, mandala dalla sezione «Idee»: Samuele le legge tutte.\n' + link;
+const giorno = s => new Date(s * 1000).toLocaleDateString('it-IT', {day:'numeric', month:'long'});
+// il testo da mandare: il link, cosa fare per entrare e per avere l'app sulla schermata Home
+function messaggio(nome, link, scade, daSamuele) {
+  return 'Ciao ' + nome + '! ' + (daSamuele ? 'Ti invito su Atlante Musica, la mia app: musica, chat, podcast, libri e molto altro.' :
+    'Ti invito su Atlante Musica, la libreria musicale di Samuele.') + ' Apri questo link sul telefono e tocca «Entra»:\n' + link + '\n' +
+    'Per averla come app: su iPhone e iPad, in Safari, tocca Condividi e poi «Aggiungi alla schermata Home»; su Android, in Chrome, «Installa app». ' +
+    'Il link vale per un dispositivo' + (scade ? ', fino al ' + giorno(scade) : '') + '.' +
+    (daSamuele ? '' : ' Se ti viene un\'idea per migliorarla, mandala dalla sezione «Idee»: Samuele le legge tutte.');
 }
+async function condividi(testo) {
+  if (navigator.share) {
+    try { await navigator.share({text:testo}); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }   // chiuso dall'utente: niente; altro errore: si copia
+  }
+  copia(testo);
+}
+async function copia(t) {
+  try { await navigator.clipboard.writeText(t); toast('Copiato'); }
+  catch (e) { toast('Non riesco a copiare: tieni premuto sul link e scegli Copia'); }
+}
+// codice QR del link (x/qrcode.js, come il codice di sicurezza della chat), caricato solo quando serve
+let QRLIB = null;
+async function disegnaQR(cv, testo) {
+  try {
+    if (!QRLIB) { await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = 'qrcode.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); }); QRLIB = window.qrcode; }
+    const q = QRLIB(0, 'M'); q.addData(testo); q.make();
+    const n = q.getModuleCount(), g = cv.getContext('2d'), k = Math.floor(cv.width / (n + 2)), o = Math.floor((cv.width - k * n) / 2);
+    g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.fillStyle = '#000';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) g.fillRect(o + c * k, o + r * k, k, k);
+  } catch (e) { cv.hidden = true; }
+}
+function fermo(testo) { const f = $('fermo'); f.hidden = false; f.innerHTML = '<p style="margin:0">' + esc(testo) + '</p>'; }
+
+/* ---------- Samuele: link subito, QR, Condividi; chi non è ancora entrato ---------- */
+function mostraCarta(nome, link, scade) {
+  const box = $('carta'); box.hidden = false;
+  box.innerHTML = '<div class="card carta"><b>Invito per ' + esc(nome) + '</b>' +
+    '<canvas width="440" height="440" aria-label="Codice QR del link d\'invito"></canvas>' +
+    '<p class="small">Fallo inquadrare con la fotocamera del suo telefono, oppure mandagli il link.</p>' +
+    '<div class="link">' + esc(link) + '</div>' +
+    '<div class="btns"><button class="btn pri" data-k="share">Condividi…</button><button class="btn" data-k="msg">Copia il messaggio</button><button class="btn" data-k="link">Copia il link</button></div>' +
+    '<p class="small">Vale per un dispositivo, fino al ' + esc(giorno(scade)) + '.</p></div>';
+  disegnaQR(box.querySelector('canvas'), link);
+  box.querySelector('[data-k="share"]').onclick = () => condividi(messaggio(nome, link, scade, true));
+  box.querySelector('[data-k="msg"]').onclick = () => copia(messaggio(nome, link, scade, true));
+  box.querySelector('[data-k="link"]').onclick = () => copia(link);
+  box.scrollIntoView({behavior:'smooth', block:'start'});
+}
+function erroreCarta(testo) {
+  const box = $('carta'); box.hidden = false;
+  box.innerHTML = '<div class="card"><b>Il link non è stato creato</b><p class="small" style="margin:6px 0 0">' + esc(testo) + '</p></div>';
+}
+async function disegnaMiei() {
+  let el;
+  try { el = await api('gestione/persone'); }
+  catch (e) { $('attesa').hidden = true; $('mnota').textContent = 'Non riesco a leggere le persone: ' + e.message; return; }
+  const fuori = el.persone.filter(p => !(p.dispositivi || []).length).sort((a, b) => (b.creato || 0) - (a.creato || 0));
+  const dentro = el.persone.length - fuori.length;
+  $('attesa').hidden = !fuori.length;
+  $('alist').innerHTML = fuori.map(p => '<div class="row"><span class="av">' + esc(String(p.nome || '?').slice(0, 1)) + '</span><span class="tx"><b>' + esc(p.nome) + '</b><span>Invitato il ' + esc(giorno(p.creato)) +
+    (p.da_nome ? ' · lo ha chiesto ' + esc(p.da_nome) : '') + '</span></span><button class="btn sm" data-nl="' + esc(p.id) + '">Nuovo link</button></div>').join('');
+  $('alist').querySelectorAll('[data-nl]').forEach(b => b.onclick = async () => {
+    const p = fuori.find(x => x.id === b.dataset.nl); b.disabled = true;
+    try { const r = await api('gestione/persone/' + encodeURIComponent(p.id) + '/invito', {method:'POST'}); mostraCarta(p.nome, r.invito.link, r.invito.scade); }
+    catch (e) { erroreCarta(e.message); }
+    b.disabled = false;
+  });
+  $('mnota').innerHTML = (dentro ? (dentro === 1 ? '1 persona è già dentro. ' : dentro + ' persone sono già dentro. ') : '') +
+    'Dispositivi, revoche e richieste degli invitati: <a href="gestione.html">Gestione › Persone</a>.';
+}
+async function crea() {
+  const nome = $('mnome').value.trim();
+  if (!nome) { $('mnome').focus(); return; }
+  $('crea').disabled = true;
+  try {
+    const r = await api('inviti', {method:'POST', body:{nome}});
+    $('mnome').value = ''; $('mnome').blur();
+    mostraCarta(r.persona.nome, r.invito.link, r.invito.scade);
+    disegnaMiei();
+  } catch (e) { erroreCarta(e.message); }
+  $('crea').disabled = false;
+}
+function richiesteInAttesa(io) {
+  const n = ((io && io.nuove) || {}).richieste | 0, a = $('mRichieste');
+  a.hidden = !n;
+  if (n) a.innerHTML = (n === 1 ? 'Un tuo invitato chiede un invito per un amico' : n + ' richieste d\'invito dai tuoi invitati') + ': le consenti in <a href="gestione.html">Gestione</a>.';
+}
+
+/* ---------- invitati: le richieste a Samuele ---------- */
 async function disegna() {
   let L;
   try { L = (await api('inviti')).inviti; }
@@ -41,30 +156,41 @@ async function disegna() {
   $('ilist').innerHTML = L.length ? L.map((r, i) => {
     const [testo, cl] = STATI[r.stato] || [r.stato, ''];   // uno stato che la pagina non conosce si vede com'è, protetto
     return '<div class="inv"><div class="top"><b>' + esc(r.nome) + '</b><span class="pill ' + cl + '">' + esc(testo) + '</span></div>' +
-      (r.link ? '<div class="link">' + esc(r.link) + '</div><div class="btns"><button class="btn sm pri" data-s="' + i + '">Condividi</button><button class="btn sm" data-c="' + i + '">Copia</button></div>' +
+      (r.link ? '<div class="link">' + esc(r.link) + '</div><div class="btns"><button class="btn sm pri" data-s="' + i + '">Condividi</button><button class="btn sm" data-c="' + i + '">Copia</button><button class="btn sm" data-q="' + i + '">Codice QR</button></div>' +
         '<p class="small">Vale una volta sola, fino al ' + new Date(r.scade * 1000).toLocaleDateString('it-IT') + '.</p>' : '') + '</div>';
   }).join('') : '<div class="inv"><span class="small">Nessun invito, per ora.</span></div>';
-  $('ilist').querySelectorAll('[data-s]').forEach(b => b.onclick = async () => {
-    const r = L[+b.dataset.s], text = messaggio(r.nome, r.link);
-    if (navigator.share) { try { await navigator.share({text}); } catch (e) {} return; }
-    copia(text);
-  });
+  $('ilist').querySelectorAll('[data-s]').forEach(b => b.onclick = () => { const r = L[+b.dataset.s]; condividi(messaggio(r.nome, r.link, r.scade, false)); });
   $('ilist').querySelectorAll('[data-c]').forEach(b => b.onclick = () => copia(L[+b.dataset.c].link));
+  $('ilist').querySelectorAll('[data-q]').forEach(b => b.onclick = () => {
+    const box = b.closest('.inv'), c = box.querySelector('canvas');
+    if (c) { c.remove(); return; }
+    const cv = document.createElement('canvas'); cv.width = cv.height = 400; cv.setAttribute('aria-label', 'Codice QR del link d\'invito');
+    box.appendChild(cv); disegnaQR(cv, L[+b.dataset.q].link);
+  });
 }
-async function copia(t) {
-  try { await navigator.clipboard.writeText(t); toast('Copiato'); }
-  catch (e) { toast('Non riesco a copiare: tieni premuto sul link e scegli Copia'); }
-}
-$('chiedi').onclick = async () => {
+async function chiedi() {
   const nome = $('nome').value.trim();
   if (!nome) { $('nome').focus(); return; }
   $('chiedi').disabled = true;
   try { await api('inviti', {method:'POST', body:{nome}}); $('nome').value = ''; toast('Richiesta mandata a Samuele'); disegna(); }
   catch (e) { toast(e.message); }
   $('chiedi').disabled = false;
-};
-$('nome').addEventListener('keydown', e => { if (e.key === 'Enter') $('chiedi').click(); });
-disegna();
+}
+
+/* ---------- avvio: chi è questo dispositivo per il Mac ---------- */
+$('crea').onclick = crea;
+$('mnome').addEventListener('keydown', e => { if (e.key === 'Enter') crea(); });
+$('chiedi').onclick = chiedi;
+$('nome').addEventListener('keydown', e => { if (e.key === 'Enter') chiedi(); });
+async function avvio() {
+  let io = null;
+  try { io = await api('io', {timeout:8000}); } catch (e) {}
+  if (!io) return fermo('Il Mac mini non risponde: per creare un invito serve il Mac acceso e raggiungibile. Riprova tra poco.');
+  if (io.ruolo === 'proprietario') { $('sezMio').hidden = false; richiesteInAttesa(io); disegnaMiei(); }
+  else if (io.ruolo === 'invitato') { $('sezChiedi').hidden = false; disegna(); }
+  else fermo('Da questo dispositivo non si creano inviti: li crea Samuele (con Tailscale o con la sua password) e chi è già entrato con un invito.');
+}
+avvio();
 </script>
 </body>
 </html>

@@ -52,7 +52,7 @@ function riga(src, inizio) {
 }
 function carica(src, env) {
   const nomi = ['xmodsVisibili', 'openX', 'remotoUrl', 'apriRemoto'];
-  const codice = ['const ACCESSI_PORTA', 'const XREMOTO', 'const XGESTIONE'].map(r => riga(src, r))
+  const codice = ['const ACCESSI_PORTA', 'const XREMOTO', 'const XGESTIONE', 'const XCONDIVIDI'].map(r => riga(src, r))
     .concat(nomi.map(n => estrai(src, n))).join('\n');
   const f = new Function('env', 'with (env) { return (function () {\n' + codice + '\nreturn {' + nomi.join(',') + '};\n})(); }');
   return f(env);

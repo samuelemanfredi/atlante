@@ -2992,9 +2992,15 @@ class Dispositivi:
 DISP = Dispositivi()
 
 
-def _link_invito(codice):
+def _serve_pubblico():
+    """Prima di creare una persona o un invito: senza l'indirizzo pubblico il link non si può dare, e la persona
+    resterebbe in Gestione senza link."""
     if not PUBBLICO:
         raise ErroreExtra(409, "Manca l'indirizzo pubblico dell'app (ATLANTE_PUBBLICO): senza, il link non si apre da fuori")
+
+
+def _link_invito(codice):
+    _serve_pubblico()
     return PUBBLICO + "accesso/invito/" + codice
 
 
@@ -3037,10 +3043,12 @@ def _gestione(h, metodo, resto, corpo):
                 x["attuale"] = True   # questo non si revoca da qui (409): la Gestione lo segna
         return _json(h, el)
     if resto == ["persone"] and metodo == "POST":
+        _serve_pubblico()
         persona = PERS.crea(corpo.get("nome"))
         codice, scade = PERS.invito(persona["id"])
         return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
     if len(resto) == 3 and resto[0] == "persone" and resto[2] == "invito" and metodo == "POST":
+        _serve_pubblico()
         codice, scade = PERS.invito(resto[1])
         return _json(h, {"invito": {"link": _link_invito(codice), "scade": scade}})
     if len(resto) == 2 and resto[0] == "persone" and metodo == "DELETE":
@@ -3060,6 +3068,7 @@ def _gestione(h, metodo, resto, corpo):
             if not PERS.rifiuta(resto[1]):
                 raise ErroreExtra(404, "Richiesta sconosciuta o già decisa")
             return _json(h, {"ok": True})
+        _serve_pubblico()
         persona, codice, scade = PERS.consenti(resto[1])
         return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})
     if resto and resto[0] == "classifiche":
@@ -3078,6 +3087,7 @@ def _inviti(h, metodo, corpo):
         raise ErroreExtra(403, "Gli inviti li chiedono Samuele e i suoi invitati")
     if metodo == "GET":
         return _json(h, {"inviti": []})
+    _serve_pubblico()
     persona = PERS.crea(corpo.get("nome"))
     codice, scade = PERS.invito(persona["id"])
     return _json(h, {"persona": persona, "invito": {"link": _link_invito(codice), "scade": scade}})

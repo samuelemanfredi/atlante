@@ -787,6 +787,12 @@ class TestExtra(unittest.TestCase):
     def test_gestione_senza_indirizzo_pubblico(self):
         r = self.s.json("POST", "/api/extra/gestione/persone", {"nome": "Ida"}, codice=409)
         self.assertIn("ATLANTE_PUBBLICO", r["errore"])
+        r = self.s.json("POST", "/api/extra/inviti", {"nome": "Ugo"}, codice=409)   # «Condividi l'app» di Samuele
+        self.assertIn("ATLANTE_PUBBLICO", r["errore"])
+        # senza link non resta nessuna persona creata a metà (prima Ida e Ugo restavano in Persone, senza link)
+        nomi = [p["nome"] for p in self.s.json("GET", "/api/extra/gestione/persone")["persone"]]
+        self.assertNotIn("Ida", nomi)
+        self.assertNotIn("Ugo", nomi)
 
     def test_dispositivi(self):
         iphone, mac = "iphone-prova-0001", "mac-prova-00000001"
@@ -11380,6 +11386,23 @@ class TestBarraIPad(unittest.TestCase):
             self.skipTest("osascript non c'è: non è un Mac")
         js, app = os.path.join(QUI, "test_ipad.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
         r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestCondividiApp(unittest.TestCase):
+    """«Condividi l'app»: Samuele crea subito il link d'invito (QR, Condividi, messaggio con le istruzioni per la schermata
+    Home), in cima ad Altro e con il tasto in Libreria; gli invitati lo chiedono a lui; chi è in casa no; la copia offline
+    nuova arriva anche alle app già installate. Gira in JavaScriptCore: test_condividi.js. Senza osascript si salta."""
+
+    def test_condividi(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, cartella = os.path.join(QUI, "test_condividi.js"), os.path.abspath(os.path.join(QUI, ".."))
+        r = subprocess.run([osa, "-l", "JavaScript", js, cartella], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
         if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
             self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
