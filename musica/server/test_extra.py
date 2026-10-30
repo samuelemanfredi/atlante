@@ -11608,5 +11608,150 @@ class TestKaraokeWhisperSiFerma(unittest.TestCase):
         self.assertNotEqual(self.s.json("GET", "/api/extra/testi/" + self.ids["Si ferma sempre"]).get("allineamento"), "fatto")
 
 
+
+# ----- LRCLIB sovraccarico: la ricerca esatta risponde «occupato» (503 ServerOverloaded) per i brani che non ha già
+# pronti, mentre la ricerca a parole spesso risponde; e la ricerca a parole si rompe con i due punti nel titolo -----
+
+class FintoLrclibOccupato(http.server.BaseHTTPRequestHandler):
+    """LRCLIB come la sera del 30/10: /api/get sempre 503; /api/search 503 con «:» nel titolo (sintassi di Tantivy) o
+    per «Tutto occupato», se no i brani qui sotto. Ricorda le richieste."""
+    chieste = []
+    VOCI = {"occupato esatto": {"id": 21, "trackName": "Occupato esatto", "artistName": "Anna", "duration": 120.0,
+                                "instrumental": False, "plainLyrics": "Prima\nSeconda",
+                                "syncedLyrics": "[00:02.00]Prima\n[00:04.00]Seconda"},
+            "brahms lied del mattino": {"id": 22, "trackName": "Brahms: Lied del mattino", "artistName": "Coro",
+                                        "duration": 100.0, "instrumental": False, "plainLyrics": "Guten Morgen",
+                                        "syncedLyrics": "[00:03.00]Guten Morgen"}}
+
+    def manda(self, stato, d):
+        dati = json.dumps(d).encode("utf-8")
+        self.send_response(stato)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoLrclibOccupato.chieste.append((u.path, q))
+        titolo = q.get("track_name", "")
+        occupato = {"message": "The server is busy, please retry in a moment", "name": "ServerOverloaded", "statusCode": 503}
+        if u.path == "/api/get" or ":" in titolo or titolo == "Tutto occupato":
+            return self.manda(503, occupato)
+        v = self.VOCI.get(" ".join(titolo.lower().split()))
+        return self.manda(200, [v] if v else [])
+
+    def log_message(self, *x):
+        pass
+
+
+class TestLrclibOccupato(unittest.TestCase):
+    """Con LRCLIB sovraccarico il testo arriva lo stesso dalla ricerca a parole (senza i due punti, che la rompono); se è
+    occupato anche quella, il brano non diventa «nessun testo» per una settimana: è un errore e si riprova."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-lrclib-occupato-")
+        cls.c = prepara_cartelle(cls.base)
+        for artista, titolo, ms in (("Anna", "Occupato esatto", 120000), ("Coro", "Brahms: Lied del mattino", 100000),
+                                    ("Duo", "Tutto occupato", 90000)):
+            mp3_con_testo(os.path.join(cls.c["musica"], "%s - %s.mp3" % (artista, titolo.replace(":", ""))), titolo, artista,
+                          "", ms)
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibOccupato)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        FintoLrclibOccupato.chieste = []
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.web.server_address[1],
+                                                   "ATLANTE_TESTI_ATTESA": "30", "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) == 3 else None)(cls.s.json("GET", "/api/musica/catalogo")["brani"]), 30)
+        cls.id = {x["title"]: x["id"] for x in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiedi(self, titolo):
+        """La risposta finale (non «in arrivo»): (codice, JSON)."""
+        def finale():
+            st, _, b = self.s.get("/api/extra/testi/" + self.id[titolo])
+            j = json.loads(b.decode("utf-8"))
+            return None if j.get("stato") == "in arrivo" else (st, j)
+        return aspetta(finale, 40, 0.3)
+
+    def test_occupato_dalla_ricerca(self):
+        st, r = self.chiedi("Occupato esatto")
+        self.assertEqual((st, r["stato"], r["sincronizzato"], r["fonte"]), (200, "ok", True, "lrclib"))
+        self.assertEqual([(x["t"], x["testo"]) for x in r["righe"]], [(2.0, "Prima"), (4.0, "Seconda")])
+
+    def test_due_punti_tolti_dalla_ricerca(self):
+        st, r = self.chiedi("Brahms: Lied del mattino")
+        self.assertEqual((st, r["stato"], r["sincronizzato"]), (200, "ok", True), r)
+        cercati = [q["track_name"] for p, q in FintoLrclibOccupato.chieste if p == "/api/search" and "Lied" in q["track_name"]]
+        self.assertTrue(cercati)
+        self.assertFalse([t for t in cercati if ":" in t], cercati)
+
+    def test_tutto_occupato_non_e_nessun_testo(self):
+        st, r = self.chiedi("Tutto occupato")
+        self.assertEqual(st, 503, r)   # «riprova più tardi», non «nessun testo» (che varrebbe una settimana)
+        self.assertIn("LRCLIB", r.get("errore", ""))
+
+
+
+class TestLrclibSoloQuesto(unittest.TestCase):
+    """LRCLIB che risponde ma è «occupato» solo per un brano (LrclibSoloQuesto): la ricerca su tutta la libreria e Whisper
+    lo riprovano più tardi e passano al prossimo, senza la pausa di 10 minuti per tutti (che resta quando LRCLIB non
+    risponde proprio). Prima un brano così fermava tutto, ogni 10 minuti sullo stesso brano."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_solo_questo")
+        cls.base = tempfile.mkdtemp(prefix="atlante-solo-questo-")
+        cls.p = os.path.join(cls.base, "Coro - Lied.mp3")
+        mp3_con_testo(cls.p, "Lied", "Coro", "", 100000)
+        cls.b = {"id": "a1b2c3d4e5f60718", "title": "Lied", "artist": "Coro", "album": "", "duration": 100.0, "_p": cls.p,
+                 "_f": "1:1"}
+        cls.m.LIB = FintaLibreria([cls.b])
+        cls.m.LIB.percorsi = {cls.b["id"]: cls.p}
+        cls.m.CONF["cache"] = os.path.join(cls.base, "cache")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.m.LIB = None
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def lavoro(self, errore):
+        t = self.m.Testi(tempfile.mkdtemp(dir=self.base))
+        t.schede[self.b["id"]] = {"v": self.m.TESTI_V, "f": "1:1", "t": "Lied", "a": "Coro", "s": "ok", "al": "attesa", "aln": 0}
+
+        def solleva(*a, **k):
+            raise errore
+        return t, unittest.mock.patch.object(self.m, "testi_brano", solleva)
+
+    def test_ricerca(self):
+        t, finto = self.lavoro(self.m.LrclibSoloQuesto(503, "occupato solo per questo brano"))
+        with finto:
+            t.cerca(self.b["id"], self.b, {})
+        self.assertEqual((t.pausa_rete, t.schede[self.b["id"]]["s"]), (0.0, "errore"))   # si riprova tra un'ora, gli altri subito
+        t, finto = self.lavoro(self.m.ErroreExtra(503, "LRCLIB non risponde"))
+        with finto:
+            t.cerca(self.b["id"], self.b, {})
+        self.assertGreater(t.pausa_rete, time.time())   # LRCLIB giù davvero: tutti aspettano, come prima
+
+    def test_whisper(self):
+        t, finto = self.lavoro(self.m.LrclibSoloQuesto(503, "occupato solo per questo brano"))
+        with finto:
+            self.assertFalse(t.allinea(self.b["id"], self.b))
+        s = t.schede[self.b["id"]]
+        self.assertEqual((s["al"], s.get("aln", 0), t.pausa_voce, t.pausa_rete), ("errore", 0, 0.0, 0.0))   # non conta
+        t, finto = self.lavoro(self.m.ErroreExtra(503, "LRCLIB non risponde"))
+        with finto:
+            self.assertFalse(t.allinea(self.b["id"], self.b))
+        self.assertGreater(t.pausa_voce, time.time())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

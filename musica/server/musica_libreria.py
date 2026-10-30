@@ -5039,20 +5039,42 @@ def _lrclib_stesso(v, titolo, artista):
     return not a or a in _cl_semplice(nome(v.get("artistName")))
 
 
+# la ricerca a parole di LRCLIB (Tantivy) prende «:», virgolette, parentesi e simili come comandi e risponde 503: via
+_LRCLIB_COMANDI = re.compile(r'[:"()\[\]{}^~*?!\\+]+|(?:^|(?<=\s))-+')
+
+
+def _lrclib_parole(s):
+    return " ".join(_LRCLIB_COMANDI.sub(" ", str(s or "")).split())
+
+
+class LrclibSoloQuesto(ErroreExtra):
+    """LRCLIB risponde (la ricerca a parole va) ma la ricerca esatta di questo brano è «occupata» e a parole non si trova:
+    si riprova più tardi solo questo brano, e il lavoro su tutta la libreria (e Whisper) va avanti con gli altri invece
+    di aspettare 10 minuti per tutti. Con migliaia di brani classici che LRCLIB non ha pronti, un brano così
+    altrimenti fermava tutto, ogni 10 minuti sullo stesso brano."""
+
+
 def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
     p = {"track_name": titolo, "artist_name": artista}
     if album:
         p["album_name"] = album
     if durata:
         p["duration"] = str(int(round(durata)))
-    v = _lrclib_chiedi("/api/get", p, sfondo=sfondo) if artista else None
+    occupato = None
+    try:
+        v = _lrclib_chiedi("/api/get", p, sfondo=sfondo) if artista else None
+    except ErroreExtra as e:   # LRCLIB sovraccarico risponde «occupato» alla ricerca esatta dei brani che non ha già
+        occupato, v = e, None  # pronti, ma la ricerca a parole spesso risponde lo stesso: si prova quella
     v = v if isinstance(v, dict) else None
     if v and (_testo_lrclib(v, "syncedLyrics") or v.get("instrumental")):
         return _lrclib_voce(v, durata)
-    q = {"track_name": _titolo_pulito(titolo) or titolo}
+    q = {"track_name": _lrclib_parole(_titolo_pulito(titolo) or titolo) or titolo}
     if artista:
-        q["artist_name"] = _primo_artista(artista) or artista
-    trovati = _lrclib_chiedi("/api/search", q, sfondo=sfondo)
+        q["artist_name"] = _lrclib_parole(_primo_artista(artista) or artista) or artista
+    try:
+        trovati = _lrclib_chiedi("/api/search", q, sfondo=sfondo)
+    except ErroreExtra:
+        raise occupato or sys.exc_info()[1]
     voci = [x for x in ([v] if v else []) + (trovati[:100] if isinstance(trovati, list) else [])
             if isinstance(x, dict) and (x is v or _lrclib_stesso(x, titolo, artista))]
     vicino = lambda x: _lrclib_scarto(x, durata)   # noqa: E731
@@ -5061,6 +5083,8 @@ def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
                   [x for x in voci if (_testo_lrclib(x, "plainLyrics") or _testo_lrclib(x, "syncedLyrics")).strip()]):
         if buona:
             return _lrclib_voce(min(buona, key=vicino), durata)
+    if occupato:   # la ricerca esatta non ha risposto: «nessun testo» varrebbe una settimana, è solo «riprova più tardi»
+        raise LrclibSoloQuesto(occupato.codice, occupato.testo)
     return {"stato": "nessuno"}
 
 
@@ -6967,7 +6991,8 @@ class Testi:
             r = testi_brano(t, a, al, dur, LIB.percorsi.get(i) if LIB else None, sfondo=True)
         except ErroreExtra as e:   # LRCLIB non risponde: per un po' il lavoro su tutta la libreria aspetta
             print("Testi: %s: %s" % (self.ora_c, e.testo), flush=True)
-            self.pausa_rete = time.time() + TESTI_PAUSA_RETE
+            if not isinstance(e, LrclibSoloQuesto):   # occupato solo per questo brano: gli altri subito, lui tra un'ora
+                self.pausa_rete = time.time() + TESTI_PAUSA_RETE
             n = (self.schede.get(i) or {}).get("n", 0) + 1
             self._scheda(i, v=TESTI_V, f=b.get("_f"), t=t, a=a, s="errore", q=int(time.time()), n=n)
             return
@@ -6995,6 +7020,10 @@ class Testi:
             try:
                 r = testi_brano(t, a, al, dur, p, sfondo=True)   # di solito dalla cache: il testo da allineare
             except ErroreExtra as e:   # LRCLIB non risponde: non è colpa del brano
+                if isinstance(e, LrclibSoloQuesto):   # occupato solo per questo brano: Whisper lo riprova più tardi (non
+                    print("Testi: %s: %s; lo riprendo più tardi" % (self.ora_a, e.testo), flush=True)   # conta tra
+                    self._scheda(i, al="errore", alq=ora, ale=e.testo[:200])   # i suoi errori) e intanto fa gli altri
+                    return False
                 self.pausa_rete = time.time() + TESTI_PAUSA_RETE
                 raise ErroreMac(e.testo)
             voce = self._voce(i, b, r)
