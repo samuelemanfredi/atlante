@@ -11528,5 +11528,85 @@ class TestCondividiApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+
+# ----- Whisper che si ferma su un brano (SIGABRT): si riprova senza DTW, poi conta contro il brano, non contro il Mac -----
+# whisper.cpp con --dtw su certi brani (pezzi classici quasi senza parole) si ferma con abort() in median_filter: segnale 6.
+# Il whisper-cli finto fa lo stesso: «ferma: "dtw"» nelle parole del brano = solo con --dtw, «"sempre"» = anche senza.
+FINTO_WHISPER_SI_FERMA = FINTO_WHISPER.replace('''if d.get("lento"):''', '''with open(os.path.join(os.environ["FINTO_DIR"], "whisper-ferma.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"ferma": d.get("ferma"), "dtw": "--dtw" in a}) + "\\n")
+if d.get("ferma") == "sempre" or (d.get("ferma") == "dtw" and "--dtw" in a):
+    sys.stderr.write("whisper_full_with_state: median_filter\\n")
+    sys.stderr.flush()
+    os.abort()
+if d.get("lento"):''')
+
+
+class TestKaraokeWhisperSiFerma(unittest.TestCase):
+    """Un whisper-cli che si ferma da solo (segnale 6) su un brano non è un errore di tutto il Mac: con il DTW si riprova
+    senza DTW (i tempi delle parole vengono dai pezzi), e se si ferma anche così il brano non riesce e Whisper passa al
+    prossimo. Prima un solo brano così fermava Whisper per sempre: 10 minuti di pausa, poi di nuovo lo stesso brano."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-si-ferma-")
+        cls.c = prepara_cartelle(cls.base)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        _scrivi_programma(os.path.join(cls.c["bin"], "whisper-cli"), FINTO_WHISPER_SI_FERMA)
+        _brano_con_voce(cls.c["musica"], "Si ferma col DTW.mp3", "Si ferma col DTW", "Coro",
+                        [[1.0, "canto"], [1.6, "lento"], [2.4, "piano"], [3.0, "sotto"], [3.5, "la"], [3.8, "luna"],
+                         [4.4, "che"], [4.8, "sale"]], lingua="de", ferma="dtw")
+        _brano_con_voce(cls.c["musica"], "Si ferma sempre.mp3", "Si ferma sempre", "Coro", [[1.0, "nota"]], ferma="sempre")
+        _brano_con_voce(cls.c["musica"], "Normale.mp3", "Normale", "Coro", [[1.0, "tutto"], [1.5, "bene"], [2.0, "qui"],
+                                                                         [2.4, "si"], [2.7, "canta"], [3.2, "ancora"],
+                                                                         [3.8, "una"], [4.1, "volta"]])
+        cls.modello = os.path.join(cls.base, "ggml-finto.bin")
+        with open(cls.modello, "wb") as f:
+            f.write(b"lmgg")
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
+        threading.Thread(target=cls.lrc.serve_forever, daemon=True).start()
+        with unittest.mock.patch.dict(os.environ, {
+                "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"), "ATLANTE_WHISPER_FILE_MODELLO": cls.modello}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) == 3 else None)(cls.s.json("GET", "/api/musica/catalogo").get("brani") or []), 30)
+        cls.ids = {b["title"]: b["id"] for b in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.lrc.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiamate(self):
+        try:
+            with open(os.path.join(self.c["finto"], "whisper-ferma.log"), encoding="utf-8") as f:
+                return [json.loads(x) for x in f if x.strip()]
+        except OSError:
+            return []
+
+    def test_si_riprova_senza_dtw_e_si_va_avanti(self):
+        _accendi(self.s)
+        # tutti e tre provati: due trascritti dalla voce (uno senza DTW), uno non riuscito; nessuna pausa per tutto il Mac
+        j = aspetta(lambda: (lambda x: x if x["conteggi"].get("trascritti") == 2 and not x["ora"]["allinea"]
+                             and len([c for c in self.chiamate() if c["ferma"] == "sempre"]) >= 2 else None)(
+            self.s.json("GET", "/api/extra/gestione/testi")), 40, 0.2)
+        log = self.s.leggi_log()
+        self.assertIsNotNone(j, "%r\n%s" % (self.s.json("GET", "/api/extra/gestione/testi"), log[-3000:]))
+        self.assertNotIn("Whisper aspetta", log)
+        self.assertFalse((j["whisper"].get("pausa") or ""), j["whisper"])
+        dtw = [c["dtw"] for c in self.chiamate() if c["ferma"] == "dtw"]
+        self.assertEqual(dtw, [True, False])   # con il DTW si ferma, senza riesce
+        self.assertEqual([c["dtw"] for c in self.chiamate() if c["ferma"] == "sempre"][:2], [True, False])
+        r = self.s.json("GET", "/api/extra/testi/" + self.ids["Si ferma col DTW"])
+        self.assertEqual((r["stato"], r["fonte"]), ("ok", "voce"))
+        self.assertEqual(" ".join(x["testo"] for x in r["righe"]).split(),
+                         ["canto", "lento", "piano", "sotto", "la", "luna", "che", "sale"])
+        self.assertEqual(self.s.json("GET", "/api/extra/testi/" + self.ids["Normale"])["fonte"], "voce")
+        self.assertIn("non riuscito", log)
+        self.assertIn("segnale 6", log)
+        # il brano che non riesce non è «fatto» (Whisper lo riproverà più tardi, come gli altri errori del brano)
+        self.assertNotEqual(self.s.json("GET", "/api/extra/testi/" + self.ids["Si ferma sempre"]).get("allineamento"), "fatto")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

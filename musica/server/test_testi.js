@@ -12,6 +12,7 @@ function run(argv) {
   const fatte = [];
   try {
     prove(leggi(argv[0] || '../index.html'), fatte);
+    proveTraduzione(leggi(argv[0] || '../index.html'), fatte);
     if (argv[1]) proveGestione(leggi(argv[1]), fatte);   // la pagina Gestione (x/gestione.html), se data
     return 'OK ' + fatte.length + ' prove: ' + fatte.join(', ');
   } catch (e) {
@@ -248,6 +249,24 @@ function prove(src, fatte) {
   eq(E2.testoAttesa({stato:'ok'}, {stato:'in corso'}, false), 3000, 'traduzione in corso');
   eq(E2.testoAttesa({stato:'ok'}, null, false), 0, 'pronto: niente richieste');
   fatte.push('in arrivo e 429');
+}
+
+/* ---------- doppio testo: all'inizio nella lingua del telefono, oppure quella scelta (o nessuna) ---------- */
+function proveTraduzione(src, fatte) {
+  const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
+  const L = riga(src, 'const TESTO_LINGUE');
+  let lingue = L, i = src.indexOf('\n' + L);
+  for (let k = src.indexOf('\n', i + 1); !/\]\];\s*$/.test(lingue); k = src.indexOf('\n', k + 1)) lingue = src.slice(i + 1, src.indexOf('\n', k + 1));
+  const F = new Function('return (function () {\n' + lingue + '\n' + estrai(src, 'testoTradRisolvi') + '\nreturn testoTradRisolvi; })();')();
+  eq(['it-IT', 'pt-BR', 'zh-Hant-TW', 'en-US', 'nb-NO', 'xx-YY', ''].map(l => F('auto', l)), ['it', 'pt', 'zh', 'en', 'no', 'en', 'en'],
+    'lingua del telefono');
+  eq([F('', 'it-IT'), F('de', 'it-IT'), F('ja', 'en-US')], ['', 'de', 'ja'], 'scelta a mano (o nessuna) vale più del telefono');
+  // all'inizio (mai scelto) è «auto»: il doppio testo c'è senza toccare niente
+  if (!/scelta:ls\.get\('am-trad', 'auto'\)/.test(src)) throw new Error("all'inizio la traduzione deve essere nella lingua del telefono");
+  if (!/data-v="auto"/.test(src)) throw new Error('nel menu manca «Lingua del telefono»');
+  // ogni dispositivo la sua lingua: la scelta resta sul dispositivo, e se la sua lingua cambia ad app aperta la traduzione la segue
+  if (!/addEventListener\('languagechange'/.test(src)) throw new Error('la traduzione non segue la lingua del dispositivo quando cambia');
+  fatte.push('traduzione nella lingua del telefono');
 }
 
 function proveGestione(src, fatte) {

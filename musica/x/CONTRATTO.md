@@ -199,7 +199,9 @@ Tutte rispondono 403 dalla rete di casa senza biscotto (lì non si sa chi c'è) 
 Il tasto «Testo» del lettore a tutto schermo (in `index.html`, blocco «testo sincronizzato») mostra le parole del brano a
 tempo con la musica, come in Apple Music: la luce scorre dentro le parole lettera per lettera (più lenta sulle vocali),
 un tocco su una riga o su una parola porta la musica lì, nei tre puntini di una pausa il punto toccato vale il suo secondo
-(anche durante il mix e comandando un altro dispositivo); sotto ogni riga, se scelta, la traduzione. Il testo viene da un
+(anche durante il mix e comandando un altro dispositivo); sotto ogni riga la traduzione: all'inizio nella lingua del
+telefono (`navigator.language`; se non è tra le 31, l'inglese), dal tasto in alto un'altra lingua o nessuna (`am-trad`:
+`auto`, `''` o il codice). Il testo viene da un
 file `.lrc` accanto al brano, dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC LYRICS, anche in formato LRC) o da LRCLIB
 (`lrclib.net`, gratuito, senza chiave; `ATLANTE_LRCLIB` per un indirizzo diverso), chiesto dal Mac una richiesta alla volta
 (al più una al secondo) e tenuto in `<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Le righe vengono dal
@@ -223,5 +225,7 @@ ferma anche a metà di un brano. In `<cache>/testi/`: le risposte di LRCLIB, `la
 `traduzioni/`, `tmp/` e `figli/` (i file temporanei e i programmi accesi per Whisper: con SIGTERM il server li ferma
 prima di uscire, dopo un arresto brusco li ferma all'avvio). Il modello si scarica solo se dopo restano almeno 2 GB
 liberi, e in pausa lo scaricamento riprende da dove era. Un errore di tutto il Mac (disco della musica scollegato,
-ffmpeg o Whisper che non partono, disco pieno, rete giù) non conta contro i brani: Whisper aspetta 10 minuti.
+ffmpeg o Whisper che non partono, disco pieno, rete giù) non conta contro i brani: Whisper aspetta 10 minuti. Un
+`whisper-cli` che si ferma da solo su un brano (SIGABRT: con `--dtw` capita, abort in `median_filter`) invece sì: si
+riprova senza DTW (i tempi delle parole dai pezzi) e, se si ferma anche così, quel brano non riesce e Whisper va avanti.
 `ATLANTE_WHISPER=0` spegne Whisper (oppure il percorso di un whisper-cli).

@@ -5809,6 +5809,20 @@ class ErroreMac(ErroreTesti):
     pieno, rete giù): non conta contro il brano, e Whisper aspetta un po' per tutti."""
 
 
+class ErroreSegnale(ErroreMac):
+    """Un programma fermato da un segnale: di solito è il sistema (poca memoria, il Mac che si spegne), e allora è un
+    errore del Mac. Con SIGABRT invece è il programma stesso che si ferma su qualcosa che non sa fare: whisper.cpp con
+    --dtw su certi brani (abort in median_filter, pezzi classici quasi senza parole). Vedi Whisper.trascrivi."""
+
+    def __init__(self, testo, segnale, errori=""):
+        super().__init__(testo)
+        self.segnale, self.errori = segnale, errori
+
+
+# Whisper che non carica il modello (file rotto, poca memoria): è il Mac, non il brano
+_WHISPER_MEMORIA = re.compile(r"failed to (?:load|initiali[sz]e|open)|out of memory|cannot allocate|insufficient memory", re.I)
+
+
 class ErroreBreve(ErroreTesti):
     """Si riprova tra pochi minuti, non tra ore (Homebrew occupato da un'altra installazione)."""
 
@@ -5966,7 +5980,9 @@ def _esegui_piano(args, tempo, fermo=None, log=None, ambiente=None):
             err.seek(0)
             raise ErroreMac("%s non parte: %s" % (nome, err.read().decode("utf-8", "replace").strip()[-200:]))
         if p.returncode < 0:   # fermato dal sistema (poca memoria, il Mac che si spegne): non è colpa del brano
-            raise ErroreMac("%s fermato dal sistema (segnale %d)" % (nome, -p.returncode))
+            err.seek(0)        # (SIGABRT invece può esserlo: chi chiama lo sa, vedi ErroreSegnale)
+            raise ErroreSegnale("%s fermato dal sistema (segnale %d)" % (nome, -p.returncode), -p.returncode,
+                                err.read().decode("utf-8", "replace").strip()[-300:])
         out.seek(0)
         err.seek(0)
         return p.returncode, out.read(), err.read()
@@ -6363,13 +6379,16 @@ class Whisper:
                               "uso" + ("; lo riscarico più tardi" if nostro else ""))
         self._firma = firma
 
-    def trascrivi(self, wav, lingua="", prompt=""):
-        """Il JSON di whisper-cli -ojf per un WAV a 16 kHz: frasi, pezzi di parola e tempi (DTW se c'è)."""
+    def trascrivi(self, wav, lingua="", prompt="", dtw=True):
+        """Il JSON di whisper-cli -ojf per un WAV a 16 kHz: frasi, pezzi di parola e tempi (DTW se c'è). Se whisper-cli
+        si ferma da solo (SIGABRT) con il DTW si riprova senza (i tempi vengono dai pezzi); se si ferma anche così è un
+        errore del brano (ErroreTesti), non di tutto il Mac: Whisper passa al prossimo invece di aspettare per tutti."""
         out = wav + ".whisper"
         args = [self.cli, "-m", self.file_modello, "-f", wav, "-ojf", "-of", out, "-l", lingua or "auto"]
         if "-np" in self.aiuto:
             args.append("-np")
-        if "--dtw" in self.aiuto and self.dtw():
+        dtw = bool(dtw and "--dtw" in self.aiuto and self.dtw())
+        if dtw:
             args += ["--dtw", self.dtw()]
             if "-nfa" in self.aiuto:   # con la flash attention il DTW è spento
                 args.append("-nfa")
@@ -6378,12 +6397,20 @@ class Whisper:
         if "-sns" in self.aiuto:
             args.append("-sns")       # niente «[Musica]», «(applausi)»
         args += ["-t", str(max(2, min(8, (os.cpu_count() or 4) // 2)))]
-        codice, _, err = _esegui_piano(args, WHISPER_TEMPO, self.fermo)
+        try:
+            codice, _, err = _esegui_piano(args, WHISPER_TEMPO, self.fermo)
+        except ErroreSegnale as e:
+            if e.segnale != signal.SIGABRT or _WHISPER_MEMORIA.search(e.errori):
+                raise   # il sistema l'ha fermato (poca memoria, il Mac che si spegne): è il Mac
+            _cancella(out + ".json")
+            if dtw:
+                print("Testi: whisper-cli si ferma con il DTW (segnale %d): riprovo senza" % e.segnale, flush=True)
+                return self.trascrivi(wav, lingua, prompt, dtw=False)
+            raise ErroreTesti("whisper-cli si ferma su questo brano (segnale %d)" % e.segnale)
         try:
             if codice != 0 or not os.path.isfile(out + ".json"):
                 testo = err.decode("utf-8", "replace").strip()[-300:]
-                if re.search(r"failed to (?:load|initiali[sz]e|open)|out of memory|cannot allocate|insufficient memory",
-                             testo, re.I):   # il modello non si carica (file rotto, poca memoria): non è il brano
+                if _WHISPER_MEMORIA.search(testo):   # il modello non si carica (file rotto, poca memoria): non è il brano
                     raise ErroreMac("Whisper non carica il modello: " + testo[-200:])
                 raise ErroreTesti("whisper-cli: " + (testo or "nessun risultato (codice %d)" % codice))
             with open(out + ".json", "rb") as f:

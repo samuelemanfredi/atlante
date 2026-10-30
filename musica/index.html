@@ -5229,7 +5229,7 @@ function tsCambiati(rs) {   // MutationObserver: pagine e righe nuove o tolte, t
    (api/extra/testi) e resta sul telefono (IndexedDB «am-testi») per quando il Mac non risponde; senza tempi si vede il
    testo semplice, senza testo una riga che lo dice. */
 const TESTO = {on:ls.get('am-testo', false), k:'', b:null, j:null, righe:null, riga:-2, primo:true, libero:0, raf:0, visto:0,
-  vis:false, pronto:'', chiesti:new Map(), db:null, trad:ls.get('am-trad', ''), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false};
+  vis:false, pronto:'', chiesti:new Map(), db:null, trad:'', scelta:ls.get('am-trad', 'auto'), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false};
 const TESTO_ANTICIPO = 0.25;   // la riga si accende un attimo prima della voce: l'occhio arriva in tempo
 const TESTO_PAUSA = 4;         // 4 s o più senza voce (l'introduzione, un assolo): i tre puntini
 const TESTO_VOC = /[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]/i;
@@ -5240,6 +5240,24 @@ const TESTO_LINGUE = [['it', 'Italiano'], ['en', 'English'], ['es', 'Español'],
   ['tr', 'Türkçe'], ['ru', 'Русский'], ['uk', 'Українська'], ['hr', 'Hrvatski'], ['sq', 'Shqip'], ['ar', 'العربية'],
   ['he', 'עברית'], ['hi', 'हिन्दी'], ['zh', '中文'], ['ja', '日本語'], ['ko', '한국어'], ['vi', 'Tiếng Việt'],
   ['id', 'Bahasa Indonesia'], ['th', 'ไทย']];
+// doppio testo: all'inizio (mai scelto) «auto», la lingua del telefono (se non è tra le lingue, l'inglese); '' = nessuna
+// traduzione; se no la lingua scelta. Il testo già in quella lingua resta da solo (il Mac risponde «uguale»).
+function testoTradRisolvi(scelta, lingua) {
+  if (scelta !== 'auto') return scelta || '';
+  const c = String(lingua || '').toLowerCase().split(/[-_]/)[0], x = {nb:'no', nn:'no', iw:'he', in:'id'}[c] || c;
+  return TESTO_LINGUE.some(l => l[0] === x) ? x : 'en';
+}
+const testoTradNome = c => (TESTO_LINGUE.find(x => x[0] === c) || [])[1] || c;
+TESTO.trad = testoTradRisolvi(TESTO.scelta, navigator.language);
+// ogni dispositivo la sua lingua: la scelta resta su questo dispositivo (am-trad) e, con «Lingua del telefono», se la sua
+// lingua cambia mentre l'app è aperta la traduzione la segue subito
+addEventListener('languagechange', () => {
+  const c = TESTO.scelta === 'auto' ? testoTradRisolvi('auto', navigator.language) : TESTO.trad;
+  if (c === TESTO.trad) return;
+  TESTO.trad = c; TESTO.giri = 0;
+  testoTasti();
+  if (TESTO.b) testoCarica(TESTO.b);
+});
 function testoRiga(R, t) {   // la riga del momento: l'ultima già cominciata (un attimo prima), -1 prima della prima
   let a = 0, z = R.length - 1, i = -1;
   t += TESTO_ANTICIPO;
@@ -5582,14 +5600,16 @@ function testoCambia() {
 }
 // ----- la traduzione sotto ogni riga, nella lingua scelta (la fa il Mac) -----
 function testoTradScegli() {
-  openSheet('<div class="grp"><div class="smsg"><b>Traduzione</b>Sotto ogni riga, nella lingua che scegli. La fa il Mac mini: con la sua IA se c\'è, se no con MyMemory.</div>' +
-    '<button data-a="testo-trad-l" data-v=""><span class="l">Nessuna traduzione</span>' + (TESTO.trad ? '' : ic('check')) + '</button>' +
-    TESTO_LINGUE.map(([c, n]) => '<button data-a="testo-trad-l" data-v="' + c + '"><span class="l">' + esc(n) + '</span>' + (TESTO.trad === c ? ic('check') : '') + '</button>').join('') + '</div>' + cancel);
+  const tel = testoTradRisolvi('auto', navigator.language);
+  openSheet('<div class="grp"><div class="smsg"><b>Traduzione</b>Sotto ogni riga, nella lingua di questo dispositivo o in quella che scegli (ogni dispositivo ha la sua). La fa il Mac mini: con la sua IA se c\'è, se no con MyMemory.</div>' +
+    '<button data-a="testo-trad-l" data-v="auto"><span class="l">Lingua del telefono (' + esc(testoTradNome(tel)) + ')</span>' + (TESTO.scelta === 'auto' ? ic('check') : '') + '</button>' +
+    '<button data-a="testo-trad-l" data-v=""><span class="l">Nessuna traduzione</span>' + (TESTO.scelta === '' ? ic('check') : '') + '</button>' +
+    TESTO_LINGUE.map(([c, n]) => '<button data-a="testo-trad-l" data-v="' + c + '"><span class="l">' + esc(n) + '</span>' + (TESTO.scelta === c ? ic('check') : '') + '</button>').join('') + '</div>' + cancel);
 }
 function testoTradUsa(c) {
   closeSheet();
-  TESTO.trad = c; ls.set('am-trad', c); TESTO.giri = 0;
-  toast(c ? 'Traduzione in ' + ((TESTO_LINGUE.find(x => x[0] === c) || [])[1] || c) : 'Traduzione spenta');
+  TESTO.scelta = c; TESTO.trad = testoTradRisolvi(c, navigator.language); ls.set('am-trad', c); TESTO.giri = 0;
+  toast(c === 'auto' ? 'Traduzione nella lingua del telefono (' + testoTradNome(TESTO.trad) + ')' : c ? 'Traduzione in ' + testoTradNome(c) : 'Traduzione spenta');
   testoTasti();
   if (TESTO.b) testoCarica(TESTO.b);
 }
