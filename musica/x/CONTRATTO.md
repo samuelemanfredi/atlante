@@ -207,7 +207,9 @@ file `.lrc` accanto al brano, dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC
 (al più una al secondo) e tenuto in `<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Con LRCLIB sovraccarico
 («occupato», 503, alla ricerca esatta dei brani che non ha pronti) si prova la ricerca a parole, senza i due punti e i
 simboli che la rompono; un brano «occupato» solo lui si riprova più tardi e il lavoro su tutta la libreria (anche
-Whisper) va avanti con gli altri, invece della pausa di 10 minuti per tutti (che resta quando LRCLIB non risponde). Le righe vengono dal
+Whisper) va avanti con gli altri, invece della pausa di 10 minuti per tutti (che resta quando LRCLIB non risponde). Se per
+un brano sono occupate sia la ricerca esatta sia quella a parole, una domanda di controllo (al più una al minuto) su un
+brano che LRCLIB ha di sicuro pronto (Bohemian Rhapsody) decide: risponde → è solo quel brano; non risponde → LRCLIB giù. Le righe vengono dal
 testo, i tempi delle parole dalla fonte o da Whisper sul Mac (le parole dalla voce), se no si stimano dentro la riga.
 Anche per gli invitati; la traduzione per loro (e per chi non è Samuele) solo con MyMemory: l'IA del Mac solo per
 Samuele, al più 3 brani a testa e 50 in tutto in coda. La Gestione solo Samuele.

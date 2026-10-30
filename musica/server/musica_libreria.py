@@ -5047,6 +5047,28 @@ def _lrclib_parole(s):
     return " ".join(_LRCLIB_COMANDI.sub(" ", str(s or "")).split())
 
 
+# un brano che LRCLIB ha di sicuro pronto: se risponde a questo, LRCLIB è vivo e l'«occupato» era solo per l'altro brano
+LRCLIB_CONTROLLO = {"track_name": "Bohemian Rhapsody", "artist_name": "Queen", "album_name": "A Night at the Opera",
+                    "duration": "355"}
+LRCLIB_CONTROLLO_OGNI = 60        # al più una domanda di controllo al minuto
+_LRCLIB_VIVO = [0.0, False]       # quando e con che esito l'ultima domanda di controllo
+
+
+def _lrclib_vivo(sfondo=False):
+    """LRCLIB risponde (a un brano che ha di sicuro pronto)? Vale un minuto. Si chiede solo quando per un brano sono
+    occupate sia la ricerca esatta sia quella a parole: sovraccarico, LRCLIB dice 503 alle ricerche pesanti di certi
+    brani mentre risponde subito alle altre."""
+    if time.time() - _LRCLIB_VIVO[0] < LRCLIB_CONTROLLO_OGNI:
+        return _LRCLIB_VIVO[1]
+    try:
+        _lrclib_chiedi("/api/get", dict(LRCLIB_CONTROLLO), False, sfondo)
+        vivo = True   # anche «non c'è» (None) è una risposta
+    except ErroreExtra:
+        vivo = False
+    _LRCLIB_VIVO[:] = [time.time(), vivo]
+    return vivo
+
+
 class LrclibSoloQuesto(ErroreExtra):
     """LRCLIB risponde (la ricerca a parole va) ma la ricerca esatta di questo brano è «occupata» e a parole non si trova:
     si riprova più tardi solo questo brano, e il lavoro su tutta la libreria (e Whisper) va avanti con gli altri invece
@@ -5074,7 +5096,10 @@ def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
     try:
         trovati = _lrclib_chiedi("/api/search", q, sfondo=sfondo)
     except ErroreExtra:
-        raise occupato or sys.exc_info()[1]
+        e = occupato or sys.exc_info()[1]
+        if occupato and _lrclib_vivo(sfondo):   # occupate tutte e due solo per questo brano: LRCLIB risponde ad altro
+            raise LrclibSoloQuesto(e.codice, e.testo)
+        raise e
     voci = [x for x in ([v] if v else []) + (trovati[:100] if isinstance(trovati, list) else [])
             if isinstance(x, dict) and (x is v or _lrclib_stesso(x, titolo, artista))]
     vicino = lambda x: _lrclib_scarto(x, durata)   # noqa: E731

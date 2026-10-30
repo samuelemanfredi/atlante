@@ -11752,6 +11752,32 @@ class TestLrclibSoloQuesto(unittest.TestCase):
             self.assertFalse(t.allinea(self.b["id"], self.b))
         self.assertGreater(t.pausa_voce, time.time())
 
+    def test_domanda_di_controllo(self):
+        """Ricerca esatta e ricerca a parole «occupate» per un brano: se LRCLIB risponde a un brano che ha di sicuro
+        pronto (Bohemian Rhapsody), è quel brano (LrclibSoloQuesto); se no LRCLIB è giù (pausa per tutti). Al più una
+        domanda di controllo al minuto."""
+        chieste = []
+
+        def finto(vivo):
+            def chiedi(percorso, parametri, riprova=True, sfondo=False):
+                chieste.append((percorso, parametri.get("track_name")))
+                if parametri.get("track_name") == self.m.LRCLIB_CONTROLLO["track_name"] and vivo:
+                    return {"id": 1, "trackName": "Bohemian Rhapsody", "syncedLyrics": "[00:01.00]Is this the real life"}
+                raise self.m.ErroreExtra(503, "Il sito dei testi (LRCLIB) ha risposto con un errore (503): riprova più tardi")
+            return unittest.mock.patch.object(self.m, "_lrclib_chiedi", chiedi)
+        self.m._LRCLIB_VIVO[:] = [0.0, False]
+        with finto(True):
+            with self.assertRaises(self.m.LrclibSoloQuesto):
+                self.m._lrclib_cerca("IV. Recitativo. Ach, schmelze doch", "Bach Collegium", "", 120)
+            with self.assertRaises(self.m.LrclibSoloQuesto):   # subito dopo: senza un'altra domanda di controllo
+                self.m._lrclib_cerca("V. Aria", "Bach Collegium", "", 200)
+        self.assertEqual([c for c in chieste if c[1] == "Bohemian Rhapsody"], [("/api/get", "Bohemian Rhapsody")])
+        self.m._LRCLIB_VIVO[:] = [0.0, False]
+        with finto(False):
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                self.m._lrclib_cerca("IV. Recitativo. Ach, schmelze doch", "Bach Collegium", "", 120)
+            self.assertNotIsInstance(e.exception, self.m.LrclibSoloQuesto)   # LRCLIB giù davvero: pausa per tutti
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
