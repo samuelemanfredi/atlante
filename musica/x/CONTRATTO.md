@@ -204,7 +204,10 @@ telefono (`navigator.language`; se non è tra le 31, l'inglese), dal tasto in al
 `auto`, `''` o il codice). Il testo viene da un
 file `.lrc` accanto al brano, dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC LYRICS, anche in formato LRC) o da LRCLIB
 (`lrclib.net`, gratuito, senza chiave; `ATLANTE_LRCLIB` per un indirizzo diverso), chiesto dal Mac una richiesta alla volta
-(al più una al secondo) e tenuto in `<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Le righe vengono dal
+(al più una al secondo) e tenuto in `<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Con LRCLIB sovraccarico
+(«occupato», 503, alla ricerca esatta dei brani che non ha pronti) si prova la ricerca a parole, senza i due punti e i
+simboli che la rompono; un brano «occupato» solo lui si riprova più tardi e il lavoro su tutta la libreria (anche
+Whisper) va avanti con gli altri, invece della pausa di 10 minuti per tutti (che resta quando LRCLIB non risponde). Le righe vengono dal
 testo, i tempi delle parole dalla fonte o da Whisper sul Mac (le parole dalla voce), se no si stimano dentro la riga.
 Anche per gli invitati; la traduzione per loro (e per chi non è Samuele) solo con MyMemory: l'IA del Mac solo per
 Samuele, al più 3 brani a testa e 50 in tutto in coda. La Gestione solo Samuele.
