@@ -349,6 +349,10 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .lyrmsg{padding:40px 6px;font-size:21px;font-weight:700;line-height:1.3;opacity:.8}
 .lyrmsg small{display:block;margin-top:8px;font-size:15px;font-weight:400;opacity:.8}
 .lyrfonte{padding:26px 0 0;font-size:13px;opacity:.55}
+/* sincronia del testo su questo dispositivo: «Prima» e «Dopo» mentre la musica suona, finché le lettere vanno con la voce */
+.lyrsinc{display:flex;align-items:center;gap:8px;margin:6px 0 2px;padding:6px;border-radius:12px;background:rgba(255,255,255,.12)}
+.lyrsinc button{flex:none;padding:7px 12px;border-radius:9px;background:rgba(255,255,255,.18);font-weight:600;font-size:15px}
+.lyrsinc span{flex:1;min-width:0;text-align:center;font-size:13px;line-height:1.25;opacity:.9}
 /* Whisper dal vivo: le righe nuove si scrivono da sinistra a destra, una dopo l'altra; in testa a che punto è il Mac */
 .lyr .lr.nuova{animation:lyrArriva .45s ease-out var(--d,0ms) both}
 .lyr .lr.nuova .lo{animation:lyrScrivi 1.1s steps(26,end) var(--d,0ms) both}
@@ -5360,7 +5364,7 @@ function tsCambiati(rs) {   // MutationObserver: pagine e righe nuove o tolte, t
    (api/extra/testi) e resta sul telefono (IndexedDB «am-testi») per quando il Mac non risponde; senza tempi si vede il
    testo semplice, senza testo una riga che lo dice. */
 const TESTO = {on:ls.get('am-testo', false), k:'', b:null, j:null, righe:null, riga:-2, primo:true, libero:0, raf:0, visto:0,
-  vis:false, pronto:'', chiesti:new Map(), db:null, trad:'', scelta:ls.get('am-trad', 'auto'), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false};
+  vis:false, pronto:'', chiesti:new Map(), db:null, trad:'', scelta:ls.get('am-trad', 'auto'), ritardo:ls.get('am-testo-ritardo', null), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false};
 const TESTO_ANTICIPO = 0.25;   // la riga si accende un attimo prima della voce: l'occhio arriva in tempo
 const TESTO_PAUSA = 4;         // 4 s o più senza voce (l'introduzione, un assolo): i tre puntini
 const TESTO_VOC = /[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]/i;
@@ -5491,13 +5495,41 @@ function testoBrano() {   // il brano di cui mostrare il testo (di questo dispos
 function testoUrl(b, lingua) {   // con la lingua della traduzione, se scelta
   return lingua ? b.url + (b.url.indexOf('?') < 0 ? '?' : '&') + 'lingua=' + encodeURIComponent(lingua) : b.url;
 }
+// ----- sincronia: il ritardo dell'uscita audio di questo dispositivo -----
+// Con cuffie Bluetooth, AirPlay o CarPlay il suono arriva alle orecchie qualche decimo di secondo dopo il tempo del lettore:
+// senza correzione le lettere si accendono prima della voce. Il ritardo si sceglie su ogni dispositivo («Prima»/«Dopo»
+// guardando il testo mentre suona, am-testo-ritardo); finché non lo si sceglie vale quello che dice il mixer del browser
+// (outputLatency + baseLatency, dove c'è), se no 0. Comandando un altro dispositivo vale la sua posizione, com'è.
+const TESTO_RITARDO_MAX = 1.5;   // secondi al più (più di così non è un'uscita audio: meglio non indovinare)
+function testoRitardo(scelto, ctx) {
+  if (typeof scelto === 'number' && isFinite(scelto)) return Math.max(-0.5, Math.min(TESTO_RITARDO_MAX, scelto));
+  const l = ctx ? (+ctx.outputLatency || 0) + (+ctx.baseLatency || 0) : 0;
+  return isFinite(l) && l > 0 && l < TESTO_RITARDO_MAX ? Math.round(l * 100) / 100 : 0;
+}
+function testoSincroniaNome(scelto, r) {
+  const v = Math.abs(r).toFixed(2).replace('.', ','), su = Math.abs(r) > 0.004;
+  const quanto = r > 0.004 ? v + ' s dopo' : r < -0.004 ? v + ' s prima' : 'a tempo del lettore';
+  return scelto == null ? 'Automatica: ' + (su ? 'testo ' : '') + quanto : 'Testo ' + quanto;
+}
+function testoTempo() {
+  return RC.id ? rcPos(RC.dev) : Math.max(0, (au.currentTime || 0) - testoRitardo(TESTO.ritardo, MIX.ctx));
+}
+function testoSincroniaMostra() {
+  const t = $('lyrSincT'); if (t) t.textContent = testoSincroniaNome(TESTO.ritardo, testoRitardo(TESTO.ritardo, MIX.ctx));
+}
+function testoSincroniaCambia(passo) {   // ±0,05 s dal ritardo di adesso; null = di nuovo automatico
+  const ora = testoRitardo(TESTO.ritardo, MIX.ctx);
+  TESTO.ritardo = passo == null ? null : Math.round(testoRitardo(ora + passo, null) * 100) / 100;
+  ls.set('am-testo-ritardo', TESTO.ritardo);
+  TESTO.riga = -2;   // la riga e le parole si rifanno subito con il tempo nuovo
+  testoSincroniaMostra();
+}
 // per il brano della libreria che suona adesso anche dove si è: senza testo, il Mac lo trascrive subito da lì (Whisper dal vivo)
 function testoUrlPos(b, lingua) {
   const u = testoUrl(b, lingua), qui = b.sid ? testoBrano() : null;
   if (!qui || qui.k !== b.k) return u;
   return u + (u.indexOf('?') < 0 ? '?' : '&') + 'pos=' + Math.max(0, testoTempo()).toFixed(1);
 }
-const testoTempo = () => RC.id ? rcPos(RC.dev) : au.currentTime || 0;
 // tocco su una riga: la musica va lì. Sul lettore che suona adesso («au»: nel mix è quello del brano nuovo, il brano che
 // esce si ferma); comandando un altro dispositivo, il salto è un comando del telecomando. In pausa riparte da lì.
 function testoVai(t) {
@@ -5680,8 +5712,9 @@ function testoDisegna(j, agg) {   // agg: righe nuove dal vivo (si resta dove si
   testoTasti();
 }
 function testoTasti() {   // il tasto della traduzione, quando c'è un testo da tradurre
-  const b = $('nplTrad'); if (!b) return;
+  const b = $('nplTrad'), sc = $('nplSinc'); if (!b) return;
   b.hidden = !TESTO.righe;
+  if (sc) { sc.hidden = !(TESTO.righe && TESTO.j && TESTO.j.sincronizzato); if (sc.hidden) { $('lyrSinc').hidden = true; sc.classList.remove('on'); } }
   b.classList.toggle('on', !!TESTO.trad);
   b.setAttribute('aria-label', TESTO.trad ? 'Traduzione: ' + ((TESTO_LINGUE.find(x => x[0] === TESTO.trad) || [])[1] || TESTO.trad) : 'Traduzione');
 }
@@ -5779,6 +5812,7 @@ function testoTradUsa(c) {
 }
 (function testoPrepara() {
   I.testo = '<path fill-rule="evenodd" d="M5 3.5h14A2.5 2.5 0 0 1 21.5 6v9a2.5 2.5 0 0 1-2.5 2.5h-6.9l-4.5 3.5a.8.8 0 0 1-1.3-.63V17.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5zm3.7 4.3c-1.3 0-2.2.9-2.2 2.1 0 1.1.8 1.9 1.8 1.9h.4c-.2.8-.8 1.4-1.6 1.7l.4.9c1.7-.5 2.9-1.9 2.9-3.9 0-1.6-.7-2.7-1.7-2.7zm5.4 0c-1.3 0-2.2.9-2.2 2.1 0 1.1.8 1.9 1.8 1.9h.4c-.2.8-.8 1.4-1.6 1.7l.4.9c1.7-.5 2.9-1.9 2.9-3.9 0-1.6-.7-2.7-1.7-2.7z"/>';
+  I.sinc = '<path d="M9 1.5h6v2h-2v1.6a8.5 8.5 0 1 1-2 0V3.5H9zm3 5.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm-1 2.5h2v4.1l2.9 2.9-1.4 1.4-3.5-3.5zM18.6 4.6l1.4-1.4 1.8 1.8-1.4 1.4z"/>';
   I.trad = '<path d="M4 4h9v2H9.9c-.4 2-1.2 3.7-2.3 5.1.9.8 2 1.5 3.2 2l-.8 1.9c-1.4-.6-2.7-1.4-3.7-2.4C5.2 13.6 3.9 14.4 2.4 15l-.8-1.9c1.3-.5 2.4-1.2 3.3-2.1C4 9.9 3.3 8.6 2.9 7.2l1.9-.6c.3 1 .8 2 1.5 2.9.7-1 1.2-2.2 1.5-3.5H4V4zm11.2 5h2.2l4.6 11h-2.3l-1.1-2.8h-4.6L12.9 20h-2.3l4.6-11zm1.1 2.6-1.6 4.1h3.2l-1.6-4.1z"/>';
   const q = $('bQ'), b = document.createElement('button');
   b.id = 'bTesto'; b.dataset.a = 'testo'; b.innerHTML = ic('testo');
@@ -5787,7 +5821,11 @@ function testoTradUsa(c) {
   v.className = 'npl';
   v.innerHTML = '<div class="nplhead"><span class="art" id="nplArt"></span><div class="tx"><b id="nplT"></b><span id="nplA"></span><span id="nplVivo" hidden></span></div>' +
     '<button class="cb" id="nplFav" data-a="favcur" aria-label="Preferito"></button>' +
-    '<button class="cb" id="nplTrad" data-a="testo-trad" aria-label="Traduzione" hidden>' + ic('trad') + '</button></div><div class="qlist lyr" id="lyr"></div>';
+    '<button class="cb" id="nplSinc" data-a="testo-sinc" aria-label="Sincronia del testo con la voce" hidden>' + ic('sinc') + '</button>' +
+    '<button class="cb" id="nplTrad" data-a="testo-trad" aria-label="Traduzione" hidden>' + ic('trad') + '</button></div>' +
+    '<div class="lyrsinc" id="lyrSinc" hidden><button data-a="testo-sinc-p" aria-label="Testo prima: 0,05 secondi">Prima</button>' +
+    '<span id="lyrSincT"></span><button data-a="testo-sinc-d" aria-label="Testo dopo: 0,05 secondi">Dopo</button>' +
+    '<button data-a="testo-sinc-a" aria-label="Sincronia automatica">Auto</button></div><div class="qlist lyr" id="lyr"></div>';
   favTasti();
   npq.parentNode.insertBefore(v, npq.nextSibling);
   // il dito sul testo: si legge liberamente (senza sfocatura) e dopo 4 s si torna alla riga cantata
@@ -5803,7 +5841,13 @@ function testoTradUsa(c) {
       if (t == null) return;
       testoVai(Math.max(0, t - 0.05));
       TESTO.libero = 0; L.classList.remove('libero'); TESTO.riga = -2;
-    } else if (a === 'testo-trad') testoTradScegli();
+    } else if (a === 'testo-sinc') {   // la barra della sincronia: si regola guardando il testo mentre la musica suona
+      const bar = $('lyrSinc'); bar.hidden = !bar.hidden; $('nplSinc').classList.toggle('on', !bar.hidden);
+      if (!bar.hidden) { testoSincroniaMostra(); toast('Se le parole si accendono prima della voce (cuffie, auto) tocca «Dopo»'); }
+    } else if (a === 'testo-sinc-p') testoSincroniaCambia(-0.05);
+    else if (a === 'testo-sinc-d') testoSincroniaCambia(0.05);
+    else if (a === 'testo-sinc-a') testoSincroniaCambia(null);
+    else if (a === 'testo-trad') testoTradScegli();
     else if (a === 'testo-trad-l') testoTradUsa(x.dataset.v || '');
     else if (a === 'queue' && TESTO.on && np.classList.contains('q')) { TESTO.on = false; ls.set('am-testo', false); testoSegna(); }   // la coda al posto del testo
   });
