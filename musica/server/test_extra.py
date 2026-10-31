@@ -1925,6 +1925,14 @@ class TestAccesso(AiutiAccesso, unittest.TestCase):
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/liste", intest=ts)
         self.assertNotIn("suo1", {l["id"] for l in json.loads(b.decode("utf-8"))["playlist"]})
 
+    def test_9m_canta_anche_per_gli_invitati(self):
+        """«Canta» (x/canta.js) e Whisper nell'app (x/trascrivi.js): anche gli invitati li caricano; il resto di x/ no."""
+        pid, o, _ = self.invitato("Gino", ip="203.0.113.71")
+        for p in ("/x/canta.js", "/x/trascrivi.js"):
+            self.assertNotEqual(self.da_fuori("GET", p, ip="203.0.113.71", biscotto=o)[0], 403, p)
+        self.assertEqual(self.da_fuori("GET", "/x/cantax.js", ip="203.0.113.71", biscotto=o)[0], 403)
+        self.assertEqual(self.da_fuori("GET", "/x/canta.js")[0], 401)   # da Internet senza accesso: no
+
     def test_9k_classifiche_anche_per_gli_invitati(self):
         pid, v, t = self.invitato("Olga", ip="203.0.113.160")
         st, h, b = self.da_fuori("GET", "/api/extra/classifiche", biscotto=v)

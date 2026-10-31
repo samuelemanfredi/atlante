@@ -5463,6 +5463,7 @@ function testoRiprendi(b) {   // la richiesta che aspettava: solo per il brano d
   testoCarica(b);
 }
 function testoUsa(j) {   // si ridisegna solo se è cambiato qualcosa (parole dalla voce, traduzione): niente salti a vuoto
+  if (window.telScegli) j = telScegli(j) || j;   // senza testo dal Mac: quello trascritto su questo telefono (x/canta.js)
   const firma = x => !x ? '' : [x.stato, x.v || JSON.stringify(x.righe || []),
     JSON.stringify(x.traduzione && x.traduzione.lingua === TESTO.trad ? x.traduzione : null)].join('|');
   if (!TESTO.j || firma(TESTO.j) !== firma(j)) return testoDisegna(j);
@@ -5481,11 +5482,13 @@ function testoNota(j) {   // in fondo al testo: com'è a tempo, da dove viene, l
     (j.parole_da === 'voce' ? 'A tempo con la voce, parola per parola' : j.parole_da === 'fonte' || (j.parole && !j.parole_da) ? 'A tempo, parola per parola' :
       j.parole_da === 'stima' ? (al ? 'A tempo, parole stimate: Whisper le sta per ascoltare' : 'A tempo, parole stimate dentro la riga') : 'A tempo') +
     ' · tocca una parola per andare lì';
-  const fonte = {file:'dal file del brano', lrclib:'da LRCLIB', voce:'trascritto dalla voce: può avere errori'}[j.fonte] || '';
+  const fonte = {file:'dal file del brano', lrclib:'da LRCLIB', voce:'trascritto dalla voce: può avere errori',
+    telefono:'trascritto su questo telefono: può avere errori'}[j.fonte] || '';
+  const tel = window.telNota ? telNota(j) : '';   // la trascrizione sul telefono a che punto è
   const t = j.traduzione && j.traduzione.lingua === TESTO.trad ? j.traduzione : null;
   const tr = t ? {pronta:'traduzione: ' + (t.motore || ''), 'in corso':'traduzione in arrivo…', uguale:'il testo è già in questa lingua',
     'non riuscita':'traduzione non riuscita'}[t.stato] || '' : '';
-  return [tempi, fonte, tr].filter(Boolean).join(' · ');
+  return [tempi, fonte, tel, tr].filter(Boolean).join(' · ');
 }
 function testoDisegna(j) {
   const L = $('lyr');
@@ -5493,6 +5496,7 @@ function testoDisegna(j) {
   L.classList.remove('piano', 'libero');
   const msg = (a, b) => { L.innerHTML = '<div class="lyrmsg">' + esc(a) + (b ? '<small>' + esc(b) + '</small>' : '') + '</div>'; L.scrollTop = 0; testoTasti(); };
   if (!j || j.stato === 'in arrivo') return msg('Cerco il testo…', j ? 'Il Mac lo sta chiedendo a LRCLIB' : '');
+  if (j.stato === 'trascrivo') return msg('Trascrivo il testo su questo telefono…', j.nota || '');   // x/canta.js
   if (j.stato === 'vuoto') return msg(RC.id || curId ? 'Nessun testo' : 'Niente in riproduzione', RC.id || curId ? 'Podcast, audiolibri e radio non hanno un testo a tempo' : '');
   if (j.stato === 'errore') return msg('Testo non disponibile', j.errore);
   if (j.stato === 'strumentale') return msg('Brano strumentale', j.fonte === 'voce' ? 'Whisper non ha sentito una voce: solo musica' : 'Niente parole: solo musica');
@@ -5647,5 +5651,6 @@ function testoTradUsa(c) {
   testoSegna();
 })();
 </script>
+<script src="x/canta.js" defer></script>
 </body>
 </html>
