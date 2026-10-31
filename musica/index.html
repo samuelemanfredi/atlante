@@ -5483,7 +5483,7 @@ function testoNota(j) {   // in fondo al testo: com'è a tempo, da dove viene, l
       j.parole_da === 'stima' ? (al ? 'A tempo, parole stimate: Whisper le sta per ascoltare' : 'A tempo, parole stimate dentro la riga') : 'A tempo') +
     ' · tocca una parola per andare lì';
   const fonte = {file:'dal file del brano', lrclib:'da LRCLIB', voce:'trascritto dalla voce: può avere errori',
-    telefono:'trascritto su questo telefono: può avere errori'}[j.fonte] || '';
+    telefono:'trascritto su questo telefono: può avere errori', netease:'da NetEase', lyricsovh:'da lyrics.ovh'}[j.fonte] || '';
   const tel = window.telNota ? telNota(j) : '';   // la trascrizione sul telefono a che punto è
   const t = j.traduzione && j.traduzione.lingua === TESTO.trad ? j.traduzione : null;
   const tr = t ? {pronta:'traduzione: ' + (t.motore || ''), 'in corso':'traduzione in arrivo…', uguale:'il testo è già in questa lingua',

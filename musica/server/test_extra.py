@@ -32,6 +32,8 @@ import urllib.request
 from urllib.parse import parse_qs, quote as _quote, urlsplit
 
 QUI =os.path.dirname(os.path.abspath(__file__))
+# le altre fonti dei testi (NetEase, lyrics.ovh): nelle prove mai i siti veri (TestTestiAltreFonti ne dà uno finto)
+os.environ.setdefault("ATLANTE_TESTI_ALTRE", "0")
 SERVER = os.path.join(QUI, "musica_libreria.py")
 
 FINTO_YTDLP = r'''
@@ -11707,6 +11709,132 @@ class TestLrclibOccupato(unittest.TestCase):
         self.assertEqual(st, 503, r)   # «riprova più tardi», non «nessun testo» (che varrebbe una settimana)
         self.assertIn("LRCLIB", r.get("errore", ""))
 
+
+
+class FintoAltreFonti(http.server.BaseHTTPRequestHandler):
+    """LRCLIB, NetEase e lyrics.ovh finti sullo stesso indirizzo: LRCLIB non ha niente; NetEase ha «Albachiara» a tempo
+    (con i crediti in testa) e un «Solo testo» di durata sbagliata; lyrics.ovh ha «Solo testo» senza tempi."""
+    chieste = []
+
+    def manda(self, stato, d):
+        dati = json.dumps(d).encode("utf-8")
+        self.send_response(stato)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoAltreFonti.chieste.append((u.path, q))
+        if u.path == "/api/get":
+            return self.manda(404, {"code": 404})
+        if u.path == "/api/search":
+            return self.manda(200, [])
+        if u.path == "/api/search/get":   # NetEase
+            canzoni = []
+            if "Albachiara" in q.get("s", ""):
+                canzoni = [{"id": 11, "name": "Albachiara (Live)", "artists": [{"name": "Vasco Rossi"}], "duration": 300000},
+                           {"id": 12, "name": "Albachiara", "artists": [{"name": "Vasco Rossi"}], "duration": 244500},
+                           {"id": 13, "name": "Albachiara", "artists": [{"name": "Un altro"}], "duration": 244000}]
+            if "Solo testo" in q.get("s", ""):
+                canzoni = [{"id": 21, "name": "Solo testo", "artists": [{"name": "Duo"}], "duration": 200000}]
+            return self.manda(200, {"result": {"songs": canzoni}, "code": 200})
+        if u.path == "/api/song/lyric":
+            if q.get("id") == "12":
+                return self.manda(200, {"lrc": {"lyric": "[00:00.00] 作词 : Vasco Rossi\n[00:01.00] 作曲 : Vasco Rossi\n"
+                                                         "[00:21.18]Ti addormenti di sera\n[00:22.93]Ti risvegli col sole\n"
+                                                         "[00:25.57]Sei chiara come un'alba\n[00:28.10]Sei fresca come l'aria\n"}})
+            return self.manda(200, {"nolyric": True})
+        if u.path == "/v1/Duo/Solo%20testo":   # lyrics.ovh
+            return self.manda(200, {"lyrics": "Paroles de la chanson Solo testo par Duo\n[Verse 1]\nPrima riga\nSeconda riga\n\n"
+                                              "[Ritornello]\nTerza riga\nQuarta riga"})
+        if u.path.startswith("/v1/"):
+            return self.manda(404, {"error": "No lyrics found"})
+        self.manda(404, {})
+
+    def log_message(self, *x):
+        pass
+
+
+class TestTestiAltreFonti(unittest.TestCase):
+    """Quando LRCLIB non ha il testo: NetEase (a tempo, solo con titolo, artista e durata giusti, senza i crediti) e poi
+    lyrics.ovh (senza tempi, senza intestazioni). Un «nessun testo» di prima delle altre fonti si chiede solo a loro."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-altre-fonti-")
+        cls.c = prepara_cartelle(cls.base)
+        for artista, titolo, ms in (("Vasco Rossi", "Albachiara", 244000), ("Duo", "Solo testo", 180000),
+                                    ("Nessuno", "Niente da nessuna parte", 150000)):
+            mp3_con_testo(os.path.join(cls.c["musica"], "%s - %s.mp3" % (artista, titolo)), titolo, artista, "", ms)
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoAltreFonti)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        FintoAltreFonti.chieste = []
+        cls.url = "http://127.0.0.1:%d" % cls.web.server_address[1]
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": cls.url, "ATLANTE_TESTI_ALTRE": cls.url,
+                                                   "ATLANTE_TESTI_ATTESA": "30", "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) == 3 else None)(cls.s.json("GET", "/api/musica/catalogo")["brani"]), 30)
+        cls.id = {x["title"]: x["id"] for x in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiedi(self, titolo):
+        def finale():
+            st, _, b = self.s.get("/api/extra/testi/" + self.id[titolo])
+            j = json.loads(b.decode("utf-8"))
+            return None if j.get("stato") == "in arrivo" else (st, j)
+        return aspetta(finale, 40, 0.3)
+
+    def test_netease_a_tempo(self):
+        st, r = self.chiedi("Albachiara")
+        self.assertEqual((st, r["stato"], r["sincronizzato"], r["fonte"]), (200, "ok", True, "netease"), r)
+        self.assertEqual([(x["t"], x["testo"]) for x in r["righe"] if x["testo"]][:2], [(21.18, "Ti addormenti di sera"),
+                                                                                       (22.93, "Ti risvegli col sole")])
+        self.assertFalse([x for x in r["righe"] if "作" in x["testo"]])   # i crediti no
+        chiesti = [q.get("id") for p, q in FintoAltreFonti.chieste if p == "/api/song/lyric"]
+        self.assertIn("12", chiesti)
+        self.assertNotIn("11", chiesti)   # «(Live)» con un'altra durata: no
+        self.assertNotIn("13", chiesti)   # un altro artista: no
+
+    def test_lyricsovh_senza_tempi(self):
+        st, r = self.chiedi("Solo testo")
+        self.assertEqual((st, r["stato"], r["sincronizzato"], r["fonte"]), (200, "ok", False, "lyricsovh"), r)
+        testi = [x["testo"] for x in r["righe"] if x["testo"]]
+        self.assertEqual(testi, ["Prima riga", "Seconda riga", "Terza riga", "Quarta riga"])
+        self.assertFalse([p for p, q in FintoAltreFonti.chieste if p == "/api/song/lyric" and q.get("id") == "21"])   # durata sbagliata
+
+    def test_nessuno_e_vecchi_senza_testo(self):
+        st, r = self.chiedi("Niente da nessuna parte")
+        self.assertEqual((st, r["stato"]), (200, "nessuno"), r)
+        m = modulo_server("musica_libreria_altre_fonti")
+        self.assertTrue(m._serve_altre({"stato": "nessuno", "quando": 1}))
+        self.assertTrue(m._serve_altre({"stato": "ok", "semplice": "a\nb"}))
+        self.assertFalse(m._serve_altre({"stato": "ok", "lrc": "[00:01.00]a"}))
+        self.assertFalse(m._serve_altre({"stato": "nessuno", "fv": m.TESTI_FONTI_V}))
+        # un «nessun testo» di prima: solo NetEase e lyrics.ovh, LRCLIB non si richiede
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": self.url, "ATLANTE_TESTI_ALTRE": self.url,
+                                                   "ATLANTE_LRCLIB_INTERVALLO": "0", "no_proxy": "127.0.0.1,localhost"}):
+            prima = len(FintoAltreFonti.chieste)
+            f = os.path.join(self.base, "una-voce.json")
+            rec = m._testi_lrclib_cerca(f, "c" * 24, "Albachiara", "Vasco Rossi", "", 244.0, True,
+                                        {"stato": "nessuno", "quando": 1})
+        self.assertEqual((rec["fonte"], rec["fv"]), ("netease", m.TESTI_FONTI_V))
+        nuove = [p for p, q in FintoAltreFonti.chieste[prima:]]
+        self.assertNotIn("/api/get", nuove)
+        self.assertIn("/api/search/get", nuove)
+        # le prove con un LRCLIB finto (senza ATLANTE_TESTI_ALTRE) non escono su Internet
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": self.url}):
+            os.environ.pop("ATLANTE_TESTI_ALTRE", None)
+            self.assertTrue(m._altre_spente())
+            self.assertEqual(m._testi_altre_fonti({"stato": "nessuno"}, "Albachiara", "Vasco Rossi", 244.0)["stato"], "nessuno")
 
 
 class TestLrclibSoloQuesto(unittest.TestCase):
