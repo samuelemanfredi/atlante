@@ -94,6 +94,14 @@ function prove(src, fatte) {
   eq(env.TUTTO, true, "sull'iPhone resta acceso di serie");
   fatte.push('iPhone');
 
+  /* ---------- sul telefono di un invitato (31/10): scarica tutto anche lui, senza chiedere ---------- */
+  env = ambiente(null, {ruolo:'invitato', persona:{nome:'Anna'}, stesso_mac:false});
+  F = carica(src, NOMI, env);
+  F.ioCarica();
+  eq([env.TUTTO, env.salvati['am-tutto']], [true, undefined], "dall'invitato «Scarica tutta la musica» resta acceso");
+  eq(env.coda.length, 1, 'e i brani vanno subito in coda');
+  fatte.push('invitato');
+
   /* ---------- prima che il Mac risponda: con «stesso Mac» già saputo (dall'ultima volta) non si mette in coda niente ---------- */
   env = ambiente(null, {});
   env.IO = {ruolo:'proprietario', persona:null, stessoMac:true};

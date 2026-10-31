@@ -7,6 +7,7 @@ Avvia il server su una porta libera con una cartella di musica vuota, cartelle t
 (yt-dlp, say) in testa al PATH; l'IA è cercata su una porta dove non risponde nessuno (quindi «Ollama assente»
 anche su un Mac dove Ollama c'è). Il proxy verso un sito pubblico si prova solo se la rete c'è.
 """
+import array
 import collections
 import base64
 import http.client
@@ -29,9 +30,12 @@ import unittest
 import unittest.mock
 import urllib.error
 import urllib.request
+import wave
 from urllib.parse import parse_qs, quote as _quote, urlsplit
 
 QUI =os.path.dirname(os.path.abspath(__file__))
+# le altre fonti dei testi (NetEase, lyrics.ovh): nelle prove mai i siti veri (TestTestiAltreFonti ne dà uno finto)
+os.environ.setdefault("ATLANTE_TESTI_ALTRE", "0")
 SERVER = os.path.join(QUI, "musica_libreria.py")
 
 FINTO_YTDLP = r'''
@@ -1924,6 +1928,14 @@ class TestAccesso(AiutiAccesso, unittest.TestCase):
         self.assertEqual((set(d), al), ({"suo1"}, {}))
         st, h, b = richiesta(self.s.porta, "GET", "/api/extra/liste", intest=ts)
         self.assertNotIn("suo1", {l["id"] for l in json.loads(b.decode("utf-8"))["playlist"]})
+
+    def test_9m_canta_anche_per_gli_invitati(self):
+        """«Canta» (x/canta.js) e Whisper nell'app (x/trascrivi.js): anche gli invitati li caricano; il resto di x/ no."""
+        pid, o, _ = self.invitato("Gino", ip="203.0.113.71")
+        for p in ("/x/canta.js", "/x/trascrivi.js"):
+            self.assertNotEqual(self.da_fuori("GET", p, ip="203.0.113.71", biscotto=o)[0], 403, p)
+        self.assertEqual(self.da_fuori("GET", "/x/cantax.js", ip="203.0.113.71", biscotto=o)[0], 403)
+        self.assertEqual(self.da_fuori("GET", "/x/canta.js")[0], 401)   # da Internet senza accesso: no
 
     def test_9k_classifiche_anche_per_gli_invitati(self):
         pid, v, t = self.invitato("Olga", ip="203.0.113.160")
@@ -8068,9 +8080,18 @@ if not os.path.isfile(ingresso):
     sys.stderr.write("ingresso mancante\n")
     sys.exit(1)
 n = 16000   # un secondo di silenzio a 16 kHz: a Whisper (finto) basta sapere quale brano è
+try:   # più lungo se le parole lo chiedono («secondi»: per Whisper dal vivo, a pezzi)
+    with open(ingresso + ".parole.json", encoding="utf-8") as f:
+        n = int(16000 * float(__import__("json").load(f).get("secondi") or 1))
+except (OSError, ValueError):
+    pass
+# ogni campione dice in che centesimo di secondo è: Whisper (finto) riconosce da dove viene un pezzo del brano
+campioni = __import__("array").array("h", (min(32767, k // 160) for k in range(n)))
+if sys.byteorder == "big":
+    campioni.byteswap()
 with open(uscita, "wb") as f:
     f.write(b"RIFF" + struct.pack("<I", 36 + 2 * n) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
-            + b"data" + struct.pack("<I", 2 * n) + bytes(2 * n))
+            + b"data" + struct.pack("<I", 2 * n) + campioni.tobytes())
 if os.path.isfile(ingresso + ".parole.json"):
     shutil.copy(ingresso + ".parole.json", uscita + ".parole.json")
 '''
@@ -8091,11 +8112,27 @@ with open(os.path.join(os.environ["FINTO_DIR"], "whisper.log"), "a", encoding="u
 with open(os.path.join(os.environ["FINTO_DIR"], "whisper-nice.log"), "a", encoding="utf-8") as f:
     f.write("%d\n" % os.getpriority(os.PRIO_PROCESS, 0))
 wav, out = a[a.index("-f") + 1], a[a.index("-of") + 1]
+pezzo = None
+if not os.path.isfile(wav + ".parole.json") and os.path.isfile(os.path.join(os.path.dirname(wav), "voce.wav.parole.json")):
+    # un pezzo del brano (Whisper dal vivo): il primo campione dice da che centesimo di secondo comincia
+    import wave
+    with wave.open(wav, "rb") as w:
+        n = w.getnframes()
+        primo = w.readframes(1)
+    pezzo = (int.from_bytes(primo[:2], "little", signed=True) / 100.0 if n else 0.0, n / 16000.0)
+    with open(os.path.join(os.environ["FINTO_DIR"], "whisper-pezzi.log"), "a", encoding="utf-8") as f:
+        f.write("%d %d\n" % (round(pezzo[0] * 1000), round(pezzo[1] * 1000)))
+    wav_parole = os.path.join(os.path.dirname(wav), "voce.wav")
+else:
+    wav_parole = wav
 try:
-    with open(wav + ".parole.json", encoding="utf-8") as f:
+    with open(wav_parole + ".parole.json", encoding="utf-8") as f:
         d = json.load(f)
 except OSError:
     d = {"lingua": "en", "parole": []}
+if pezzo:   # le parole che cominciano nel pezzo, con il tempo dall'inizio del pezzo (come whisper-cli)
+    d["parole"] = [[t - pezzo[0], w] for t, w in d["parole"] if pezzo[0] <= t < pezzo[0] + pezzo[1]]
+    time.sleep(d.get("pausa_pezzo", 0))
 if d.get("lento"):
     with open(os.path.join(os.environ["FINTO_DIR"], "whisper-lento.pid"), "w") as f:
         f.write(str(os.getpid()))
@@ -8805,6 +8842,240 @@ class TestKaraokePausa(unittest.TestCase):
         self.assertEqual(self.chiamate(), n + 1)
         self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False})
         self.assertTrue(aspetta(lambda: not _vivo(q), 10, 0.1))
+
+
+class TestTagliVivo(unittest.TestCase):
+    """Whisper dal vivo: dove si taglia il brano in pezzi (nel silenzio) e le parole di un pezzo solo."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_vivo")
+        cls.base = tempfile.mkdtemp(prefix="atlante-vivo-")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def wav(self, secondi, zitti=()):
+        """Un WAV a 16 kHz di rumore forte, con il silenzio negli intervalli `zitti`."""
+        import random
+        rnd, n = random.Random(7), int(secondi * 16000)
+        a = array.array("h", (rnd.randint(-3000, 3000) for _ in range(n)))
+        for da, z in zitti:
+            for k in range(int(da * 16000), int(z * 16000)):
+                a[k] = 0
+        p = os.path.join(self.base, "voce-%d.wav" % len(os.listdir(self.base)))
+        with wave.open(p, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(a.tobytes())
+        return p
+
+    def test_tagli_nel_silenzio(self):
+        t = self.m.tagli_vivo(self.wav(70, [(27.0, 27.3), (51.5, 51.8)]))
+        self.assertEqual(len(t), 4)
+        self.assertEqual((t[0], t[-1]), (0.0, 70.0))
+        self.assertTrue(27.0 <= t[1] <= 27.3, t)   # nel silenzio, non a 30 s in mezzo a una parola
+        self.assertTrue(51.5 <= t[2] <= 51.8, t)
+        self.assertTrue(all(0 < b - a <= 30 for a, b in zip(t, t[1:])), t)
+        self.assertEqual(self.m.tagli_vivo(self.wav(12)), [0.0, 12.0])   # corto: un pezzo solo
+        with self.assertRaises(self.m.ErroreTesti):   # non mono
+            p = os.path.join(self.base, "stereo.wav")
+            with wave.open(p, "wb") as w:
+                w.setnchannels(2)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(bytes(64000))
+            self.m.tagli_vivo(p)
+
+    def test_parole_di_un_pezzo(self):
+        tok = lambda t, w: {"text": " " + w, "offsets": {"from": int(t * 1000), "to": int(t * 1000) + 300},   # noqa: E731
+                            "p": 0.9, "t_dtw": int(t * 100)}
+        j = {"transcription": [{"tokens": [tok(t, w) for t, w in ((22.0, "prima"), (22.4, "del"), (22.8, "taglio"),
+                                                                 (24.1, "dopo"), (24.5, "il"), (24.9, "taglio"))]}]}
+        r = self.m.righe_da_voce(j, 0.0, (0, 24.05), 0)
+        self.assertEqual([x["x"] for x in r], ["prima del taglio"])
+        r = self.m.righe_da_voce(j, 0.0, (24.05, 1e9), 0)
+        self.assertEqual([(x["t"], x["x"]) for x in r], [(24.1, "dopo il taglio")])
+        self.assertEqual([x["x"] for x in self.m.righe_da_voce(j)], ["prima del taglio dopo il taglio"])   # tutto
+        self.assertEqual(self.m.righe_da_voce(j, minimo=7), [])   # meno parole di così: strumentale
+
+
+class TestKaraokeDalVivo(unittest.TestCase):
+    """Whisper dal vivo: il brano che si ascolta, senza testo da nessuna parte, il Mac lo trascrive subito a pezzi
+    (anche con il lavoro su tutta la libreria in pausa), cominciando da dove si è; l'app vede le righe man mano. Finito,
+    il testo resta sul Mac per le volte dopo; i brani con un testo non passano di qui."""
+
+    PAROLE = [[2.0, "prima"], [2.5, "riga"], [3.0, "del"], [3.4, "brano"], [20.0, "ancora"], [20.5, "voce"],
+              [26.0, "dopo"], [26.5, "il"], [27.0, "taglio"], [27.5, "arriva"], [50.0, "terzo"], [50.5, "pezzo"],
+              [51.0, "della"], [51.5, "canzone"], [65.0, "fine"], [65.5, "del"], [66.0, "brano"]]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-vivo-")
+        cls.c = prepara_cartelle(cls.base)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        _scrivi_programma(os.path.join(cls.c["bin"], "whisper-cli"), FINTO_WHISPER)
+        # 70 s di silenzio: i tagli cadono a 24,05 e 48,1 s (il primo decimo di secondo più silenzioso)
+        _brano_con_voce(cls.c["musica"], "V - Mai trovata.mp3", "Mai trovata", "Artista V", cls.PAROLE, secondi=70,
+                        pausa_pezzo=0.6)
+        _brano_con_voce(cls.c["musica"], "W - Silenzio.mp3", "Silenzio", "Artista W", [], secondi=40)
+        _brano_con_voce(cls.c["musica"], "X - Nessuno la sa.mp3", "Nessuno la sa", "Artista X", cls.PAROLE, secondi=70)
+        _brano_con_voce(cls.c["musica"], "Y - Lasciata a metà.mp3", "Lasciata a metà", "Artista Y", cls.PAROLE, secondi=70,
+                        pausa_pezzo=2.5)
+        _brano_con_voce(cls.c["musica"], "A - Canzone sincronizzata.mp3", "Canzone sincronizzata", "Artista A",
+                        TestKaraokeServer.BRANI["A - Canzone sincronizzata.mp3"][2])
+        cls.modello = os.path.join(cls.base, "ggml-finto.bin")
+        with open(cls.modello, "wb") as f:
+            f.write(b"lmgg")
+        cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
+        threading.Thread(target=cls.lrc.serve_forever, daemon=True).start()
+        cls.ambiente = {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                        "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"),
+                        "ATLANTE_WHISPER_FILE_MODELLO": cls.modello, "ATLANTE_WHISPER_ANTICIPO": "0"}
+        cls.s = cls.avvia()
+        cat = aspetta(lambda: (lambda j: j if len(j.get("brani") or []) == 5 else None)(
+            cls.s.json("GET", "/api/musica/catalogo")), 30)
+        cls.ids = {b["title"]: b["id"] for b in cat["brani"]}
+
+    @classmethod
+    def avvia(cls):
+        with unittest.mock.patch.dict(os.environ, cls.ambiente):
+            return Server(cls.base, cls.c).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.lrc.shutdown()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiamate(self):
+        try:
+            with open(os.path.join(self.c["finto"], "whisper.log"), encoding="utf-8") as f:
+                return [json.loads(x) for x in f]
+        except OSError:
+            return []
+
+    def leggi(self, titolo, pos=None):
+        def x():
+            j = self.s.json("GET", "/api/extra/testi/%s%s" % (self.ids[titolo], "" if pos is None else "?pos=%s" % pos))
+            return None if j.get("stato") == "in arrivo" else j
+        j = aspetta(x, 20, 0.1)
+        self.assertTrue(j)
+        return j
+
+    def fino_a(self, titolo, pos, fine, tempo=60):
+        visti = []
+
+        def giro():
+            j = self.leggi(titolo, pos)
+            visti.append(j)
+            return j if fine(j) else None
+        j = aspetta(giro, tempo, 0.15)
+        self.assertTrue(j, "%s\n%s" % (visti[-3:], self.s.leggi_log()[-3000:]))
+        return j, visti
+
+    def test_1_trascrive_a_pezzi_da_dove_si_e(self):
+        self.assertIs(self.s.json("GET", "/api/extra/gestione/testi")["acceso"], False)   # il lavoro è in pausa
+        i = self.ids["Mai trovata"]
+        j, visti = self.fino_a("Mai trovata", 30, lambda x: x.get("allineamento") == "fatto")
+        # mentre trascriveva: prima il pezzo che suonava (dalle 24,05 alle 48,1), con le parole al tempo del brano
+        parz = [x for x in visti if x.get("allineamento") == "dal vivo" and x.get("stato") == "ok"]
+        self.assertTrue(parz, visti)
+        p = parz[0]
+        self.assertEqual((p["fonte"], p["parole_da"], p["sincronizzato"]), ("voce", "voce", True))
+        self.assertEqual([r["testo"] for r in p["righe"]], ["dopo il taglio arriva"])
+        self.assertEqual([w["t"] for w in p["righe"][0]["parole"]], [26.0, 26.5, 27.0, 27.5])
+        self.assertEqual((p["dal_vivo"]["pezzi"], p["dal_vivo"]["fatti"], p["dal_vivo"]["trascritti"]),
+                         (3, 1, [[24.05, 48.1]]))
+        self.assertTrue(any(x.get("dal_vivo", {}).get("ora") for x in visti))   # e quale pezzo stava ascoltando
+        # a Whisper un pezzo alla volta: quello che suona, il successivo, poi quello già passato; prima del resto
+        with open(os.path.join(self.c["finto"], "whisper-pezzi.log"), encoding="utf-8") as f:
+            pezzi = f.read().split("\n")[:3]
+        self.assertEqual(pezzi, ["24050 24050", "48100 21900", "0 24050"])
+        with open(os.path.join(self.c["finto"], "whisper-nice.log"), encoding="utf-8") as f:
+            self.assertEqual(set(f.read().split()), {"5"})   # dal vivo: prima degli scaricamenti
+        # finito: il testo intero, come quello trascritto dal lavoro su tutta la libreria
+        self.assertEqual((j["stato"], j["fonte"], j["parole_da"], j["lingua"]), ("ok", "voce", "voce", "it"))
+        self.assertNotIn("dal_vivo", j)
+        self.assertEqual([r["testo"] for r in j["righe"]], ["prima riga del brano", "ancora voce", "dopo il taglio arriva",
+                                                            "terzo pezzo della canzone", "fine del brano"])
+        self.assertEqual(j["righe"][3]["parole"][0]["t"], 50.0)
+        dir_ = os.path.join(self.c["cache"], "testi", "brani")
+        self.assertTrue(os.path.isfile(os.path.join(dir_, i + ".json")))
+        self.assertFalse(os.path.exists(os.path.join(dir_, i + ".vivo.json")))   # i pezzi: non servono più
+        self.assertEqual(os.listdir(os.path.join(self.c["cache"], "testi", "tmp")), [])
+        # le volte dopo: dal Mac, senza Whisper
+        n = len(self.chiamate())
+        self.assertEqual(self.leggi("Mai trovata", 0)["righe"], j["righe"])
+        self.assertEqual(self.leggi("Mai trovata")["allineamento"], "fatto")
+        self.assertEqual(len(self.chiamate()), n)
+        g = self.s.json("GET", "/api/extra/gestione/testi")
+        self.assertEqual((g["conteggi"].get("trascritti"), g["ora"]["vivo"]), (1, ""))
+
+    def test_2_strumentale(self):
+        j, _ = self.fino_a("Silenzio", 0, lambda x: x.get("allineamento") == "fatto")
+        self.assertEqual(j["stato"], "strumentale")
+
+    def test_3_con_un_testo_niente_whisper(self):
+        n = len(self.chiamate())
+        j = self.leggi("Canzone sincronizzata", 12.5)
+        self.assertEqual((j["stato"], j["fonte"], j["parole_da"]), ("ok", "lrclib", "stima"))
+        self.assertNotIn("allineamento", j)
+        time.sleep(0.5)
+        self.assertEqual(len(self.chiamate()), n)
+
+    def test_4_senza_posizione_o_whisper_escluso(self):
+        n = len(self.chiamate())
+        self.assertEqual(self.leggi("Nessuno la sa"), {"stato": "nessuno"})   # chiesto senza dire dove si è: no
+        for pos in ("abc", "-3", "nan", "inf"):
+            self.assertEqual(self.leggi("Nessuno la sa", pos), {"stato": "nessuno"})
+        self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False, "whisper": False})
+        try:
+            self.assertEqual(self.leggi("Nessuno la sa", 3), {"stato": "nessuno"})   # Whisper escluso da Gestione
+            time.sleep(0.5)
+            self.assertEqual(len(self.chiamate()), n)
+        finally:
+            self.s.json("POST", "/api/extra/gestione/testi", {"acceso": False, "whisper": True})
+        j = self.leggi("Nessuno la sa", 3)
+        self.assertEqual(j["allineamento"], "dal vivo")
+        j, _ = self.fino_a("Nessuno la sa", 3, lambda x: x.get("allineamento") == "fatto")
+        self.assertEqual(len(j["righe"]), 5)
+
+    def pezzi_log(self):
+        try:
+            with open(os.path.join(self.c["finto"], "whisper-pezzi.log"), encoding="utf-8") as f:
+                return f.read().split()
+        except OSError:
+            return []
+
+    def test_5_lasciato_a_meta_riprende_da_li(self):
+        """Quello che Whisper ha già scritto resta: dopo un riavvio a metà brano si fanno solo i pezzi che mancano."""
+        i = self.ids["Lasciata a metà"]
+        p, _ = self.fino_a("Lasciata a metà", 30, lambda x: (x.get("dal_vivo") or {}).get("fatti") == 1)
+        self.assertEqual([r["testo"] for r in p["righe"]], ["dopo il taglio arriva"])
+        self.assertTrue(os.path.isfile(os.path.join(self.c["cache"], "testi", "brani", i + ".vivo.json")))
+        type(self).s.ferma()   # a metà del secondo pezzo
+        prima = len(self.pezzi_log())
+        type(self).s = self.avvia()
+        aspetta(lambda: len(self.s.json("GET", "/api/musica/catalogo").get("brani") or []) == 5, 30)
+        # subito il pezzo già fatto, senza Whisper; poi solo gli altri due
+        j = self.leggi("Lasciata a metà", 30)
+        self.assertEqual(([r["testo"] for r in j["righe"]], j["dal_vivo"]["trascritti"]),
+                         (["dopo il taglio arriva"], [[24.05, 48.1]]))
+        j, _ = self.fino_a("Lasciata a metà", 30, lambda x: x.get("allineamento") == "fatto")
+        self.assertEqual(len(j["righe"]), 5)
+        nuovi = self.pezzi_log()[prima:]
+        self.assertEqual(sorted(zip(nuovi[::2], nuovi[1::2])), [("0", "24050"), ("48100", "21900")])
+
+    def test_6_peso_nel_catalogo(self):
+        """Il catalogo dice quanto pesa ogni brano: l'app sa quanto spazio serve per scaricare tutto."""
+        cat = self.s.json("GET", "/api/musica/catalogo")["brani"]
+        nomi = {b["title"]: b for b in cat}
+        p = os.path.join(self.c["musica"], "V - Mai trovata.mp3")
+        self.assertEqual(nomi["Mai trovata"]["size"], os.path.getsize(p))
+        self.assertTrue(all(isinstance(b.get("size"), int) and b["size"] > 0 for b in cat))
 
 
 class TestKaraokeInvitati(unittest.TestCase):
@@ -10072,7 +10343,7 @@ class TestTestiSicurezza(unittest.TestCase):
         m = self.m
         chiamate = []
 
-        def piano(args, tempo, fermo=None, log=None, ambiente=None):
+        def piano(args, tempo, fermo=None, log=None, ambiente=None, priorita=None):
             chiamate.append(args)
             with open(args[-1], "wb") as f:
                 f.write(bytes(2000))
@@ -11699,6 +11970,132 @@ class TestLrclibOccupato(unittest.TestCase):
         self.assertEqual(st, 503, r)   # «riprova più tardi», non «nessun testo» (che varrebbe una settimana)
         self.assertIn("LRCLIB", r.get("errore", ""))
 
+
+
+class FintoAltreFonti(http.server.BaseHTTPRequestHandler):
+    """LRCLIB, NetEase e lyrics.ovh finti sullo stesso indirizzo: LRCLIB non ha niente; NetEase ha «Albachiara» a tempo
+    (con i crediti in testa) e un «Solo testo» di durata sbagliata; lyrics.ovh ha «Solo testo» senza tempi."""
+    chieste = []
+
+    def manda(self, stato, d):
+        dati = json.dumps(d).encode("utf-8")
+        self.send_response(stato)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(dati)))
+        self.end_headers()
+        self.wfile.write(dati)
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        FintoAltreFonti.chieste.append((u.path, q))
+        if u.path == "/api/get":
+            return self.manda(404, {"code": 404})
+        if u.path == "/api/search":
+            return self.manda(200, [])
+        if u.path == "/api/search/get":   # NetEase
+            canzoni = []
+            if "Albachiara" in q.get("s", ""):
+                canzoni = [{"id": 11, "name": "Albachiara (Live)", "artists": [{"name": "Vasco Rossi"}], "duration": 300000},
+                           {"id": 12, "name": "Albachiara", "artists": [{"name": "Vasco Rossi"}], "duration": 244500},
+                           {"id": 13, "name": "Albachiara", "artists": [{"name": "Un altro"}], "duration": 244000}]
+            if "Solo testo" in q.get("s", ""):
+                canzoni = [{"id": 21, "name": "Solo testo", "artists": [{"name": "Duo"}], "duration": 200000}]
+            return self.manda(200, {"result": {"songs": canzoni}, "code": 200})
+        if u.path == "/api/song/lyric":
+            if q.get("id") == "12":
+                return self.manda(200, {"lrc": {"lyric": "[00:00.00] 作词 : Vasco Rossi\n[00:01.00] 作曲 : Vasco Rossi\n"
+                                                         "[00:21.18]Ti addormenti di sera\n[00:22.93]Ti risvegli col sole\n"
+                                                         "[00:25.57]Sei chiara come un'alba\n[00:28.10]Sei fresca come l'aria\n"}})
+            return self.manda(200, {"nolyric": True})
+        if u.path == "/v1/Duo/Solo%20testo":   # lyrics.ovh
+            return self.manda(200, {"lyrics": "Paroles de la chanson Solo testo par Duo\n[Verse 1]\nPrima riga\nSeconda riga\n\n"
+                                              "[Ritornello]\nTerza riga\nQuarta riga"})
+        if u.path.startswith("/v1/"):
+            return self.manda(404, {"error": "No lyrics found"})
+        self.manda(404, {})
+
+    def log_message(self, *x):
+        pass
+
+
+class TestTestiAltreFonti(unittest.TestCase):
+    """Quando LRCLIB non ha il testo: NetEase (a tempo, solo con titolo, artista e durata giusti, senza i crediti) e poi
+    lyrics.ovh (senza tempi, senza intestazioni). Un «nessun testo» di prima delle altre fonti si chiede solo a loro."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-altre-fonti-")
+        cls.c = prepara_cartelle(cls.base)
+        for artista, titolo, ms in (("Vasco Rossi", "Albachiara", 244000), ("Duo", "Solo testo", 180000),
+                                    ("Nessuno", "Niente da nessuna parte", 150000)):
+            mp3_con_testo(os.path.join(cls.c["musica"], "%s - %s.mp3" % (artista, titolo)), titolo, artista, "", ms)
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoAltreFonti)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        FintoAltreFonti.chieste = []
+        cls.url = "http://127.0.0.1:%d" % cls.web.server_address[1]
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": cls.url, "ATLANTE_TESTI_ALTRE": cls.url,
+                                                   "ATLANTE_TESTI_ATTESA": "30", "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) == 3 else None)(cls.s.json("GET", "/api/musica/catalogo")["brani"]), 30)
+        cls.id = {x["title"]: x["id"] for x in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def chiedi(self, titolo):
+        def finale():
+            st, _, b = self.s.get("/api/extra/testi/" + self.id[titolo])
+            j = json.loads(b.decode("utf-8"))
+            return None if j.get("stato") == "in arrivo" else (st, j)
+        return aspetta(finale, 40, 0.3)
+
+    def test_netease_a_tempo(self):
+        st, r = self.chiedi("Albachiara")
+        self.assertEqual((st, r["stato"], r["sincronizzato"], r["fonte"]), (200, "ok", True, "netease"), r)
+        self.assertEqual([(x["t"], x["testo"]) for x in r["righe"] if x["testo"]][:2], [(21.18, "Ti addormenti di sera"),
+                                                                                       (22.93, "Ti risvegli col sole")])
+        self.assertFalse([x for x in r["righe"] if "作" in x["testo"]])   # i crediti no
+        chiesti = [q.get("id") for p, q in FintoAltreFonti.chieste if p == "/api/song/lyric"]
+        self.assertIn("12", chiesti)
+        self.assertNotIn("11", chiesti)   # «(Live)» con un'altra durata: no
+        self.assertNotIn("13", chiesti)   # un altro artista: no
+
+    def test_lyricsovh_senza_tempi(self):
+        st, r = self.chiedi("Solo testo")
+        self.assertEqual((st, r["stato"], r["sincronizzato"], r["fonte"]), (200, "ok", False, "lyricsovh"), r)
+        testi = [x["testo"] for x in r["righe"] if x["testo"]]
+        self.assertEqual(testi, ["Prima riga", "Seconda riga", "Terza riga", "Quarta riga"])
+        self.assertFalse([p for p, q in FintoAltreFonti.chieste if p == "/api/song/lyric" and q.get("id") == "21"])   # durata sbagliata
+
+    def test_nessuno_e_vecchi_senza_testo(self):
+        st, r = self.chiedi("Niente da nessuna parte")
+        self.assertEqual((st, r["stato"]), (200, "nessuno"), r)
+        m = modulo_server("musica_libreria_altre_fonti")
+        self.assertTrue(m._serve_altre({"stato": "nessuno", "quando": 1}))
+        self.assertTrue(m._serve_altre({"stato": "ok", "semplice": "a\nb"}))
+        self.assertFalse(m._serve_altre({"stato": "ok", "lrc": "[00:01.00]a"}))
+        self.assertFalse(m._serve_altre({"stato": "nessuno", "fv": m.TESTI_FONTI_V}))
+        # un «nessun testo» di prima: solo NetEase e lyrics.ovh, LRCLIB non si richiede
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": self.url, "ATLANTE_TESTI_ALTRE": self.url,
+                                                   "ATLANTE_LRCLIB_INTERVALLO": "0", "no_proxy": "127.0.0.1,localhost"}):
+            prima = len(FintoAltreFonti.chieste)
+            f = os.path.join(self.base, "una-voce.json")
+            rec = m._testi_lrclib_cerca(f, "c" * 24, "Albachiara", "Vasco Rossi", "", 244.0, True,
+                                        {"stato": "nessuno", "quando": 1})
+        self.assertEqual((rec["fonte"], rec["fv"]), ("netease", m.TESTI_FONTI_V))
+        nuove = [p for p, q in FintoAltreFonti.chieste[prima:]]
+        self.assertNotIn("/api/get", nuove)
+        self.assertIn("/api/search/get", nuove)
+        # le prove con un LRCLIB finto (senza ATLANTE_TESTI_ALTRE) non escono su Internet
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": self.url}):
+            os.environ.pop("ATLANTE_TESTI_ALTRE", None)
+            self.assertTrue(m._altre_spente())
+            self.assertEqual(m._testi_altre_fonti({"stato": "nessuno"}, "Albachiara", "Vasco Rossi", 244.0)["stato"], "nessuno")
 
 
 class TestLrclibSoloQuesto(unittest.TestCase):

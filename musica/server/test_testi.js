@@ -227,10 +227,13 @@ function prove(src, fatte) {
   fatte.push('richieste');
 
   /* ---------- revisione di sicurezza (28/10): il Mac sta cercando il testo («in arrivo»), troppe richieste (429) ---------- */
-  const IC = new Function('return (function () {\n' + riga(src, 'const testoInCorso') + '\nreturn testoInCorso;\n})();')();
-  eq([IC({stato:'in arrivo'}), IC({stato:'ok'}), IC({stato:'ok', allineamento:'in coda'}), IC(null)], [true, false, true, false],
-    'il Mac ci lavora ancora');
-  const E2 = carica(src, ['testoEsito', 'testoAttesa'], [], {});
+  const IC = new Function('return (function () {\n' + riga(src, 'const testoVivo') + '\n' + riga(src, 'const testoInCorso') + '\nreturn testoInCorso;\n})();')();
+  eq([IC({stato:'in arrivo'}), IC({stato:'ok'}), IC({stato:'ok', allineamento:'in coda'}), IC(null), IC({stato:'nessuno', allineamento:'dal vivo'})],
+    [true, false, true, false, true], 'il Mac ci lavora ancora (anche Whisper dal vivo)');
+  const E2 = carica(src, ['testoEsito', 'testoAttesa'], ['const testoVivo'], {});
+  // Whisper dal vivo (31/10): si richiede ogni 2 s per le righe nuove; a metà non si tiene sul telefono
+  eq(E2.testoAttesa({stato:'ok', allineamento:'dal vivo'}, null, false), 2000, 'dal vivo: ogni 2 s');
+  eq(E2.testoEsito(true, 200, {stato:'ok', righe:[], allineamento:'dal vivo'}, null).salva, false, 'a metà dal vivo non si salva');
   const copia = {stato:'ok', righe:[{t:1, testo:'dal telefono'}]};
   eq(E2.testoEsito(true, 200, {stato:'in arrivo'}, null), {j:{stato:'in arrivo'}}, '«in arrivo»: non si salva sul telefono');
   eq(E2.testoEsito(true, 200, {stato:'in arrivo'}, copia), {j:copia, riprova:true, presto:true}, '«in arrivo» con la copia sul telefono');
