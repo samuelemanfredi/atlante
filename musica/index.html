@@ -411,6 +411,11 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .trk.off .art,.trk.off .tx{opacity:.4}
 /* brani ascoltati in Atlante: classifiche e consigli */
 .asub{color:var(--fg2);font-size:15px;margin:-6px 0 10px}
+.qauto{display:flex;align-items:center;gap:8px;margin:14px 0 4px;font-size:15px;font-weight:600;opacity:.75}
+.rpnum{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0 4px}
+.rpnum>div{background:var(--fill);border-radius:14px;padding:12px 10px;text-align:center}
+.rpnum b{display:block;font-size:24px;font-weight:800}
+.rpnum span{font-size:13px;color:var(--fg2)}
 .aseg{display:inline-flex;background:var(--fill);border-radius:9px;padding:2px;margin:0 0 8px}
 .aseg button{padding:6px 14px;border-radius:7px;font-size:14px;font-weight:600;color:var(--fg2)}
 .aseg button.on{background:var(--sheet);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
@@ -476,6 +481,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
         <button class="tg" id="tShuf" data-a="shuffle" aria-label="Casuale"></button>
         <button class="tg" id="tRep" data-a="repeat" aria-label="Ripeti"></button>
         <button class="tg" id="tMix" data-a="mix" aria-label="Mix a tempo"></button>
+        <button class="tg" id="tAuto" data-a="autoplay" aria-label="Riproduzione automatica"></button>
       </div>
       <div class="qlist" id="qlist"></div>
     </div>
@@ -1657,7 +1663,8 @@ function topBar(right) {
   return '<div class="top">' + (prev ? '<button class="back" data-a="back">' + ic('chevL') + '<span>' + esc(routeTitle(prev)) + '</span></button>' : '<span></span>') + (right || '') + '</div>';
 }
 function routeTitle(r) {
-  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche', atl:'Playlist di Atlante', iaprev:'Anteprima', ritmo:'Per ritmo'}[r.v] || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
+  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche', atl:'Playlist di Atlante', iaprev:'Anteprima', ritmo:'Per ritmo', generi:'Generi', replay:'Replay'}[r.v] ||
+    (r.v === 'genere' ? ((generi().find(g => g.k === r.k) || {}).nome || 'Genere') : '') || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
     (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : r.v === 'atlpl' ? ((atlPl(r.k) || {}).nome || 'Playlist') : r.v === 'macpl' ? mplNome(r.k) : '');
 }
 function emptyState() {
@@ -1709,7 +1716,7 @@ const pages = {
     if (SRV && SRVSCAN) h += '<div class="banner"><span class="bt">Il Mac sta leggendo il disco di backup' + (SRVN ? ': ' + SRVN + ' brani finora…' : '…') + '</span></div>';
     else if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span>' + (IO.ruolo !== 'invitato' ? '<button class="ba" data-a="rescan">Aggiorna</button>' : '') + '</div>';
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
-    h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + (CLS.length ? row('classifiche', 'classifica', 'Classifiche') : '') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('favs', 'star', 'Preferiti') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
+    h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + (CLS.length ? row('classifiche', 'classifica', 'Classifiche') : '') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('generi', 'note', 'Generi') + row('favs', 'star', 'Preferiti') + row('replay', 'classifica', 'Replay') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
     if (rem) {
       // brani diversi: un gruppo di doppioni conta una volta
       const gm = gemelli(), visti = new Set(); let tot = 0, sul = 0;
@@ -1805,7 +1812,7 @@ const pages = {
       (IO.ruolo === 'invitato' ? '<p class="xnote">Qui arriveranno: le chiamate.</p>' : '') + ascAltro();
   },
   search() {
-    return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
+    return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani, testi" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
   }
 };
 function searchResults() {
@@ -1827,7 +1834,34 @@ function searchResults() {
   if (al.length) h += '<h2 class="h2">Album</h2><div class="shelf">' + al.map(tile).join('') + '</div>';
   if (pl.length) h += '<h2 class="h2">Playlist</h2>' + pl.map(p => '<button class="trk" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(plTracks(p)) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">Playlist</span></span></span></button>').join('');
   if (tr.length) h += '<h2 class="h2">Brani</h2>' + trackRows(tr, {label:'Risultati'});
-  return h || '<div class="empty"><h3>Nessun risultato</h3><p>Prova con un altro nome di brano, artista o album.</p></div>';
+  const nt = testiCercaSezione(n);   // anche le parole di una canzone: il Mac le cerca nei testi che conosce
+  return (h || '<div class="empty" id="svuoto"><h3>Nessun risultato</h3><p>Prova con un altro nome di brano, artista o album, o con una frase della canzone.</p></div>') + nt;
+}
+// RICERCA NEI TESTI (come in Apple Music): una frase della canzone trova il brano. La cerca il Mac nei testi che conosce
+// (api/extra/testi/cerca); i risultati arrivano un attimo dopo quelli per nome e restano per questa apertura dell'app
+const TCERCA = {ris:new Map(), t:0};
+function testiCercaHtml(B) {
+  const tr = (B || []).map(x => ({t:T.get('r' + x.id), riga:x.riga})).filter(x => x.t && !x.t.gone);
+  if (!tr.length) return '';
+  const righe = new Map(tr.map(x => [x.t.id, x.riga]));
+  return '<h2 class="h2">Nel testo</h2>' + trackRows(tr.map(x => x.t), {label:'Nel testo', extra:t => righe.get(t.id) ? ' · «' + esc(righe.get(t.id)) + '»' : ''});
+}
+function testiCercaSezione(n) {
+  if (!SRV || n.replace(/\s+/g, '').length < 4) return '';
+  if (TCERCA.ris.has(n)) return testiCercaHtml(TCERCA.ris.get(n));
+  clearTimeout(TCERCA.t);
+  TCERCA.t = setTimeout(async () => {
+    try {
+      const r = await fetchT(XAPI + 'testi/cerca?q=' + encodeURIComponent(n), {cache:'no-store'}, 8000); if (!r.ok) return;
+      const B = (await r.json()).brani || [];
+      TCERCA.ris.set(n, B); if (TCERCA.ris.size > 50) TCERCA.ris.delete(TCERCA.ris.keys().next().value);
+      const el = $('stesti'); if (!el || el.dataset.q !== n) return;   // intanto si è cercato altro
+      const h = testiCercaHtml(B);
+      if (h) { const v = $('svuoto'); if (v) v.remove(); }
+      el.outerHTML = h;
+    } catch (e) {}
+  }, 450);
+  return '<div id="stesti" data-q="' + esc(n) + '"></div>';
 }
 
 /* ---------- classifiche: ogni classifica letta dal Mac mini è una playlist (posizioni, ▲▼, nuovi, usciti) ---------- */
@@ -2076,11 +2110,11 @@ async function load(i, play, at) {
   if (t.ext) au.src = t.url;
   else if (f && !castDalMac(t)) { if (!gemelloSalvato(id)) saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
   else au.src = API + 'file/' + encodeURIComponent(t.sid);   // in streaming dal Mac: si salva sull'iPhone se suona davvero (keep)
-  curId = id; keptFor = null;
+  curId = id; keptFor = null; if (typeof volNormImposta === 'function') volNormImposta(au, t.ext ? null : id);
   seekOnLoad(at);
   countFor = play ? id : null;   // l'ascolto si conta quando il brano suona davvero (evento «playing»), non qui
   if (play) au.play().catch(() => {});
-  updateNow(); saveState();
+  updateNow(); saveState(); if (typeof autoCoda === 'function') autoCoda();
 }
 function stop() { loadTok++; xfAbort(); seekOnLoad(0); au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} curId = null; S.queue = []; S.orig = []; S.qi = -1; if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null; updateNow(); saveState(); }
 function playList(ids, start, shuf, from) {
@@ -2088,7 +2122,7 @@ function playList(ids, start, shuf, from) {
   if (RC.id) rcEsci(true);   // si sceglie un brano su questo dispositivo: si torna a suonare qui
   errRun = 0;
   if (!ids.some(canPlay)) { toast(NOMAC); return; }   // niente di ascoltabile ora: resta com'è il brano in corso
-  S.orig = ids.slice(); S.from = from || '';
+  S.orig = ids.slice(); S.from = from || ''; AUTOP.ids.clear();
   if (shuf) { const first = start == null ? null : ids[start]; let rest = shuffleArr(ids.filter((x, j) => j !== start || first == null)); if (first != null) rest = [first].concat(rest); S.queue = rest; S.shuffle = true; load(0, true); }
   else { S.queue = ids.slice(); S.shuffle = false; load(start || 0, true); }
 }
@@ -2096,6 +2130,7 @@ let pausaVoluta = 0;   // l'ultima pausa chiesta dall'utente (tasto, cuffie, sch
 function toggle() { if (!curId) { if (T.size) playList(songs().map(t => t.id), 0, true, 'Tutti i brani'); return; } if (au.paused) au.play().catch(() => {}); else { pausaVoluta = Date.now(); au.pause(); } }
 function next(auto) {
   if (!S.queue.length) return;
+  if (auto && typeof timerFineBrano === 'function' && timerFineBrano()) return;   // timer «alla fine del brano»
   if (auto && (S.repeat !== 'off' || S.qi < S.queue.length - 1)) controllaPassaggio();
   if (auto && S.repeat === 'one') { au.currentTime = 0; au.play().catch(() => {}); return; }
   if (S.qi < S.queue.length - 1) load(S.qi + 1, true);
@@ -2114,6 +2149,186 @@ function setShuffle(on) {
 function cycleRepeat() { S.repeat = S.repeat === 'off' ? 'all' : S.repeat === 'all' ? 'one' : 'off'; updateNow(); saveState(); toast(S.repeat === 'off' ? 'Ripeti disattivato' : S.repeat === 'all' ? 'Ripeti tutto' : 'Ripeti questo brano'); }
 function playNext(id) { if (!curId) return playList([id], 0, false, ''); S.queue.splice(S.qi + 1, 0, id); const oi = S.orig.indexOf(curId); S.orig.splice(oi + 1, 0, id); updateNow(); saveState(); toast('Verrà riprodotto dopo'); }
 function playLast(id) { if (!curId) return playList([id], 0, false, ''); S.queue.push(id); S.orig.push(id); updateNow(); saveState(); toast('Aggiunto alla coda'); }
+
+/* ---------- come in Apple Music: riproduzione automatica, stazioni, «suggerisci meno», timer, volume uniforme ----------
+   RIPRODUZIONE AUTOMATICA (∞ nella coda): finita la coda, la musica continua con brani simili a quelli appena ascoltati.
+   Simile: stesso artista o genere, ritmo ed energia vicini (misurati dal Mac), nelle stesse playlist, anni vicini; un po'
+   di più i preferiti e i più ascoltati, mai quelli segnati «Suggerisci meno» né quelli sentiti nelle ultime 3 ore. Al più
+   2 brani dello stesso artista ogni 15, i doppioni una volta. Si aggiungono quando suona il penultimo brano della coda
+   (così il mix li prepara in tempo) e nella coda stanno sotto «Riproduzione automatica». STAZIONE: dal menu di un brano,
+   quel brano e 30 simili, poi la riproduzione automatica. */
+const AUTOP = {on:ls.get('am-autoplay', true), ids:new Set(ls.get('am-autoplay-ids', []))};
+const AUTOP_N = 15, AUTOP_RECENTI = 3 * 3600e3;
+function genereDi(t) { return low(String((t && t.genre) || '').split(/[\/;,|]/)[0]); }
+function similiA(semi, n, via) {
+  const S0 = semi.map(id => T.get(id)).filter(Boolean); if (!S0.length) return [];
+  const art = new Set(S0.map(t => low(primary(t)))), gen = new Set(S0.map(genereDi).filter(Boolean));
+  const rr = S0.map(bpmDi).filter(Boolean), bpm0 = rr.length ? rr.reduce((s, r) => s + r.bpm, 0) / rr.length : 0;
+  const en = rr.filter(r => r.en != null), en0 = en.length ? en.reduce((s, r) => s + r.en, 0) / en.length : null;
+  const anni = S0.map(t => +t.year).filter(Boolean), sem = new Set(semi), inPl = new Map();
+  for (const p of P) if (p.ids.some(x => sem.has(x))) for (const x of p.ids) inPl.set(x, (inPl.get(x) || 0) + 1);
+  const voti = [];
+  for (const t of T.values()) {
+    if (via.has(t.id) || t.meno || t.gone || t.ext || !canPlay(t.id)) continue;
+    let s = 0;
+    if (art.has(low(primary(t)))) s += 3;
+    const g = genereDi(t); if (g && gen.has(g)) s += 2;
+    if (inPl.has(t.id)) s += Math.min(3, 1.5 * inPl.get(t.id));
+    const r = bpmDi(t);
+    if (r && bpm0) { if (Math.abs(Math.log(r.bpm / bpm0)) < 0.08) s += 1; if (en0 != null && r.en != null && Math.abs(r.en - en0) < 0.15) s += 1; }
+    if (t.year && anni.length && Math.min(...anni.map(a => Math.abs(a - t.year))) <= 5) s += 0.5;
+    if (s <= 0) continue;
+    if (t.fav) s += 1;
+    if (t.plays) s += Math.min(1, t.plays / 10);
+    voti.push([s + Math.random() * 1.5, t]);
+  }
+  voti.sort((a, b) => b[0] - a[0]);
+  // niente di simile (libreria senza generi né playlist): brani a caso tra i preferiti e i più ascoltati, poi tutti
+  if (voti.length < n) for (const t of shuffleArr([...T.values()].filter(t => !via.has(t.id) && !t.meno && !t.gone && !t.ext && canPlay(t.id))).slice(0, n * 3))
+    if (!voti.some(v => v[1] === t)) voti.push([(t.fav ? 1 : 0) + Math.min(1, (t.plays || 0) / 10) - 10, t]);
+  const per = new Map(), gm = gemelli(), presi = [], visti = new Set();
+  for (const [, t] of voti) {
+    const a = low(primary(t)); if ((per.get(a) || 0) >= 2) continue;
+    const g = gm.get(t.id); if (g && g.some(x => visti.has(x))) continue;
+    per.set(a, (per.get(a) || 0) + 1); visti.add(t.id); presi.push(t.id);
+    if (presi.length >= n) break;
+  }
+  return presi;
+}
+function autoSalva() { ls.set('am-autoplay-ids', [...AUTOP.ids].filter(id => S.queue.indexOf(id) > S.qi)); }
+function autoCoda() {   // il penultimo brano della coda suona: si aggiungono i simili
+  if (!AUTOP.on || RC.id || S.repeat !== 'off' || !curId || !S.queue.length || S.qi < S.queue.length - 2) return;
+  const via = new Set(S.queue), ora = Date.now();
+  for (const t of T.values()) if (t.last && ora - t.last < AUTOP_RECENTI) via.add(t.id);
+  const nuovi = similiA(S.queue.slice(Math.max(0, S.queue.length - 5)), AUTOP_N, via);
+  if (!nuovi.length) return;
+  S.queue.push(...nuovi); S.orig.push(...nuovi); nuovi.forEach(id => AUTOP.ids.add(id)); autoSalva();
+  saveState(); if (np.classList.contains('q')) renderQueue();
+}
+function autoCambia() {
+  AUTOP.on = !AUTOP.on; ls.set('am-autoplay', AUTOP.on);
+  if (!AUTOP.on) {   // via dalla coda i brani messi lì dalla riproduzione automatica (non ancora suonati)
+    const via = new Set([...AUTOP.ids].filter(id => S.queue.indexOf(id) > S.qi));
+    S.queue = S.queue.filter((id, k) => k <= S.qi || !via.has(id)); S.orig = S.orig.filter(id => !via.has(id) || id === curId);
+    AUTOP.ids.clear(); autoSalva(); saveState();
+  } else autoCoda();
+  toast(AUTOP.on ? 'Riproduzione automatica: finita la coda continua con brani simili' : 'Riproduzione automatica spenta');
+  updateNow();
+}
+function stazione(id) {
+  const t = T.get(id); if (!t) return;
+  const altri = similiA([id], 30, new Set([id]));
+  closeSheet();
+  playList([id].concat(altri), 0, false, 'Stazione: ' + t.title);
+  AUTOP.ids = new Set(altri); autoSalva();
+  toast('Stazione di «' + t.title + '»: brani simili, uno dopo l\'altro');
+}
+function menoCambia(id) {   // «Suggerisci meno»: fuori da riproduzione automatica e stazioni (resta in libreria)
+  const t = T.get(id); if (!t) return;
+  t.meno = !t.meno; dbPut('meta', t).catch(() => {});
+  if (t.meno && AUTOP.ids.has(id)) { const k = S.queue.indexOf(id); if (k > S.qi) { S.queue.splice(k, 1); S.orig = S.orig.filter(x => x !== id); saveState(); } }
+  closeSheet(); toast(t.meno ? 'Suggerirò meno brani così' : 'Di nuovo tra i suggerimenti');
+}
+
+/* TIMER DI SPEGNIMENTO: la musica si ferma tra 15–90 minuti o alla fine del brano (si controlla a ogni avanzamento del
+   lettore, che a schermo bloccato continua; i timer di JavaScript lì arrivano in ritardo) */
+const TIMER = {fine:0, finebrano:false};
+function timerScheda() {
+  const resta = TIMER.fine ? Math.max(1, Math.round((TIMER.fine - Date.now()) / 60000)) : 0;
+  openSheet('<div class="grp"><div class="smsg"><b>Timer di spegnimento</b>' + (resta ? 'La musica si ferma tra ' + resta + ' min.' : TIMER.finebrano ? 'La musica si ferma alla fine di questo brano.' : 'La musica si ferma da sola, anche a schermo bloccato.') + '</div>' +
+    [15, 30, 45, 60, 90].map(m => '<button data-a="timer" data-v="' + m + '"><span class="l">' + m + ' minuti</span>' + ic('timer') + '</button>').join('') +
+    '<button data-a="timer" data-v="fine"><span class="l">Alla fine del brano</span>' + ic('timer') + '</button>' +
+    (resta || TIMER.finebrano ? '<button class="red" data-a="timer" data-v="0"><span class="l">Spegni il timer</span>' + ic('close') + '</button>' : '') + '</div>' + cancel);
+}
+function timerImposta(v) {
+  closeSheet();
+  TIMER.finebrano = v === 'fine'; TIMER.fine = +v > 0 ? Date.now() + v * 60000 : 0;
+  toast(TIMER.fine ? 'La musica si ferma tra ' + v + ' minuti' : TIMER.finebrano ? 'La musica si ferma alla fine del brano' : 'Timer spento');
+}
+function timerControlla() { if (TIMER.fine && Date.now() >= TIMER.fine && !au.paused) { TIMER.fine = 0; pausaVoluta = Date.now(); au.pause(); toast('Timer: musica in pausa'); } }
+// alla fine del brano con il timer «alla fine del brano»: pausa invece del successivo (vedi next e nextIdx)
+function timerFineBrano() { if (!TIMER.finebrano) return false; TIMER.finebrano = false; pausaVoluta = Date.now(); au.pause(); toast('Timer: musica in pausa'); return true; }
+
+/* VOLUME UNIFORME: i brani forti si abbassano fino al volume di riferimento, così passando da un brano all'altro il
+   volume resta simile (il Mac misura il volume di ogni brano: dB RMS dei pezzi con cui misura il ritmo). Solo verso il
+   basso (niente distorsioni); sull'iPhone dove il volume dei lettori non si cambia lo fa il mixer, se c'è. */
+const VOLN = {on:ls.get('am-volnorm', true), rif:-14};
+function volNorm(id) {
+  if (!VOLN.on || !id) return 1;
+  const t = T.get(id), r = t && t.sid && RITMI && RITMI.ritmi ? RITMI.ritmi[t.sid] : null, db = r && r[4];
+  return typeof db === 'number' && isFinite(db) ? Math.max(0.35, Math.min(1, Math.pow(10, (VOLN.rif - db) / 20))) : 1;
+}
+function volNormImposta(el, id) {
+  el._n = volNorm(id); el._tid = id;
+  const n = MIX.norm && MIX.norm.get(el);
+  if (n) { try { n.gain.setValueAtTime(el._n, MIX.ctx.currentTime); } catch (e) { n.gain.value = el._n; } }
+  else applyVol(el);
+}
+function volNormCambia() { VOLN.on = !VOLN.on; ls.set('am-volnorm', VOLN.on); ALLAU.forEach(el => volNormImposta(el, el._tid)); toast(VOLN.on ? 'Volume uniforme: i brani forti si abbassano un po\'' : 'Volume uniforme spento'); }
+auOn('timeupdate', timerControlla);
+auOn('playing', autoCoda);
+setInterval(() => { timerControlla(); autoCoda(); }, 5000);   // anche dopo un passaggio del mix (non passa da load)
+// riproduzione automatica: una coda (righe) che continua (▶︎ e la freccia che gira); l'∞ è già del mix a tempo
+I.inf = '<path d="M3 5.5h12v2H3zm0 4.5h12v2H3zm0 4.5h7v2H3z"/><path d="M12.5 13.2v7.6l6.3-3.8z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M18.5 4.8a3.6 3.6 0 0 1 .4 6.6"/>';
+I.radio = '<circle cx="12" cy="12" r="2.4"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M8.3 8.3a5.3 5.3 0 0 0 0 7.4M15.7 8.3a5.3 5.3 0 0 1 0 7.4M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/>';
+I.timer = '<path d="M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a8.5 8.5 0 1 0 11.1 11.1z"/>';
+I.meno = '<path d="M3 13.5V4.5h3.5v9zm5-9h8.6a2 2 0 0 1 2 1.6l1.4 7a2 2 0 0 1-2 2.4h-4.8l.8 3.6a1.8 1.8 0 0 1-3.3 1.4L8 14z"/>';
+
+/* GENERI (dal tag del file) e REPLAY (gli ascolti di questo dispositivo: brani, artisti, album, minuti) */
+function generi() {
+  const m = new Map();
+  for (const t of T.values()) {
+    if (t.ext) continue;
+    const g = String(t.genre || '').split(/[\/;,|]/)[0].trim(); if (!g) continue;
+    const k = low(g); let x = m.get(k);
+    if (!x) { x = {k, nome:g.charAt(0).toUpperCase() + g.slice(1), tracks:[], cover:null}; m.set(k, x); }
+    x.tracks.push(t); if (!x.cover && t.cover) x.cover = t.cover;
+  }
+  return [...m.values()].sort((a, b) => b.tracks.length - a.tracks.length || coll.compare(a.nome, b.nome));
+}
+function replayDati() {
+  const tr = [...T.values()].filter(t => t.plays && !t.ext), art = new Map(), alb = new Map();
+  let sec = 0;
+  for (const t of tr) {
+    sec += t.plays * (t.duration || 0);
+    const a = primary(t); art.set(a, (art.get(a) || 0) + t.plays);
+    const k = albArt(t) + '\u0001' + (t.album || ''); alb.set(k, (alb.get(k) || 0) + t.plays);
+  }
+  return {brani:tr.sort((a, b) => b.plays - a.plays || (b.last || 0) - (a.last || 0)).slice(0, 25),
+    artisti:[...art.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10), album:[...alb.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12),
+    minuti:Math.round(sec / 60), ascolti:tr.reduce((s, t) => s + t.plays, 0), nArtisti:art.size};
+}
+Object.assign(pages, {
+  generi() {
+    const G = generi();
+    return topBar() + '<h1 class="lt">Generi</h1>' + (G.length ? '<div>' + G.map(g => '<button class="trk" data-a="go" data-v="genere" data-k="' + esc(g.k) + '">' + art(g.cover) +
+      '<span class="rt"><span class="tx"><span class="t1">' + esc(g.nome) + '</span><span class="t2">' + g.tracks.length + ' brani</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('') + '</div>' :
+      '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Nessun genere</h3><p>I generi vengono dal tag «genere» dei file.</p></div>');
+  },
+  genere(r) {
+    const g = generi().find(x => x.k === r.k);
+    if (!g) return topBar() + '<h1 class="lt">Genere</h1><p class="foot">Nessun brano.</p>';
+    const tr = g.tracks.slice().sort((a, b) => coll.compare(primary(a), primary(b)) || coll.compare(a.album || '', b.album || '') || trkSort(a, b));
+    const l = regList(tr.map(t => t.id), g.nome);
+    return topBar() + '<h1 class="lt">' + esc(g.nome) + '</h1>' + pbtns(l) +
+      '<button class="mixcard" data-a="m-stazione" data-id="' + tr[Math.floor(Math.random() * tr.length)].id + '"><span class="mi">' + ic('radio') + '</span><span><b>Stazione ' + esc(g.nome) + '</b><span>Brani simili, uno dopo l\'altro</span></span></button>' +
+      trackRows(tr, {label:g.nome});
+  },
+  replay() {
+    const R = replayDati();
+    let h = topBar() + '<h1 class="lt">Replay</h1><p class="asub">I tuoi ascolti su questo dispositivo</p>';
+    if (!R.ascolti) return h + '<div class="empty"><div class="big">' + ic('classifica') + '</div><h3>Ancora niente</h3><p>Ascolta un po\' di musica: qui vedrai i brani, gli artisti e gli album che ascolti di più.</p></div>';
+    h += '<div class="numeri rpnum"><div><b>' + num(R.minuti) + '</b><span>minuti</span></div><div><b>' + num(R.ascolti) + '</b><span>ascolti</span></div><div><b>' + num(R.nArtisti) + '</b><span>artisti</span></div></div>';
+    h += '<h2 class="h2">Brani più ascoltati</h2>' + trackRows(R.brani, {label:'Replay', extra:t => ' · ' + t.plays + (t.plays === 1 ? ' ascolto' : ' ascolti')});
+    const copA = new Map(artists().map(a => [a.name, a.cover]));
+    h += '<h2 class="h2">Artisti</h2>' + R.artisti.map(([n, p], k) => '<button class="trk" data-a="go" data-v="artist" data-k="' + esc(n) + '">' + art(copA.get(n), 'av') +
+      '<span class="rt"><span class="tx"><span class="t1">' + esc(n) + '</span><span class="t2">' + (k + 1) + '° · ' + p + (p === 1 ? ' ascolto' : ' ascolti') + '</span></span></span></button>').join('');
+    const per = new Map(albums().map(a => [a.key, a]));
+    const al = R.album.map(([k]) => per.get(k)).filter(Boolean);
+    if (al.length) h += '<h2 class="h2">Album</h2><div class="shelf">' + al.map(tile).join('') + '</div>';
+    return h;
+  }
+});
 
 /* ---------- aggiornamento interfaccia lettore ---------- */
 function npColor(key) {
@@ -2145,6 +2360,7 @@ function updateNow() {
   $('np').classList.toggle('paused', !playing);
   $('tShuf').innerHTML = ic('shuf'); $('tShuf').classList.toggle('on', S.shuffle);
   $('tMix').innerHTML = ic('mix'); $('tMix').classList.toggle('on', MIX.on);
+  $('tAuto').innerHTML = ic('inf'); $('tAuto').classList.toggle('on', AUTOP.on);
   $('tRep').innerHTML = ic(S.repeat === 'one' ? 'rep1' : 'rep'); $('tRep').classList.toggle('on', S.repeat !== 'off');
   $('bShufMain').innerHTML = ic('shuf'); $('bShufMain').classList.toggle('on', S.shuffle);
   $('bRepMain').innerHTML = ic(S.repeat === 'one' ? 'rep1' : 'rep'); $('bRepMain').classList.toggle('on', S.repeat !== 'off');
@@ -2173,8 +2389,9 @@ function updateNow() {
 }
 function renderQueue() {
   const up = S.queue.slice(S.qi + 1);
-  $('qlist').innerHTML = (up.length ? up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; return '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
-    '<div class="qempty">Nessun brano in coda.' + (S.repeat === 'all' ? ' Si ricomincia dall\'inizio.' : '') + '</div>') + ascLettore();
+  let auto = false;   // i brani della riproduzione automatica stanno sotto il loro titolo
+  $('qlist').innerHTML = (up.length ? up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; const h = !auto && AUTOP.ids.has(id) ? (auto = true, '<div class="qauto">' + ic('inf') + 'Riproduzione automatica</div>') : ''; return h + '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
+    '<div class="qempty">Nessun brano in coda.' + (S.repeat === 'all' ? ' Si ricomincia dall\'inizio.' : AUTOP.on ? ' Continua la riproduzione automatica.' : '') + '</div>') + ascLettore();
 }
 let dragging = false, lastSave = 0, lastPos = 0;
 function tick() {
@@ -2238,7 +2455,7 @@ auOn('error', async () => {
    che manda il pezzo già decodificato), una volta sola per brano. Se i ritmi non si riconoscono o sono troppo lontani,
    resta una dissolvenza normale. */
 // X: secondi della dissolvenza a fine brano, verso il successivo (12 dal 28/10, chiesto da Samuele: «allunga un po'»; erano 10)
-const MIX = {on:ls.get('am-mix', true), X:12, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0};
+const MIX = {on:ls.get('am-mix', true), X:12, plan:null, act:null, ctx:null, gains:new Map(), norm:new Map(), loop:0, prepT:0};
 // «un lettore solo» non c'è più (vedi la pausa del lettore, più sotto): chi l'aveva salvato lo perde, una volta sola. Se
 // era acceso (il mix fermo per sempre per un falso allarme) lo si scrive nel diario
 (function () { const era = ls.get('am-mix-unlettore', null); if (era == null) return; try { localStorage.removeItem('am-mix-unlettore'); } catch (e) {} if (era) setTimeout(() => diario('un lettore solo: tolto'), 0); })();
@@ -2246,7 +2463,7 @@ let userVol = 1;
 function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iPhone il volume dei lettori non si cambia: lo fa il mixer)
   const g = el._g == null ? 1 : el._g;
   if (MIX.gains.has(el)) { el.volume = 1; return; }
-  try { el.volume = Math.max(0, Math.min(1, userVol * g)); } catch (e) {}
+  try { el.volume = Math.max(0, Math.min(1, userVol * g * (el._n == null ? 1 : el._n))); } catch (e) {}   // _n: volume uniforme
 }
 function setGain(el, g) { el._g = g; if (MIX.gains.has(el)) { const n = MIX.gains.get(el).gain; try { n.cancelScheduledValues(MIX.ctx.currentTime); n.setValueAtTime(g, MIX.ctx.currentTime); } catch (e) { n.value = g; } } else applyVol(el); }
 // iPhone e iPad: il volume dei lettori è fisso, la dissolvenza passa da un piccolo mixer (Web Audio). Si prepara al primo
@@ -2274,7 +2491,8 @@ function mixerInit() {
     if (navigator.audioSession) navigator.audioSession.type = 'playback';
     else return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
     const ctx = new AudioContext({latencyHint:'playback'});
-    DECKS.forEach(el => { const g = ctx.createGain(); ctx.createMediaElementSource(el).connect(g); g.connect(ctx.destination); MIX.gains.set(el, g); applyVol(el); });
+    // dissolvenza (g) e volume uniforme (n, vedi volNorm) in due nodi: le curve della dissolvenza non lo toccano
+    DECKS.forEach(el => { const g = ctx.createGain(), n = ctx.createGain(); n.gain.value = el._n == null ? 1 : el._n; ctx.createMediaElementSource(el).connect(g); g.connect(n); n.connect(ctx.destination); MIX.gains.set(el, g); MIX.norm.set(el, n); applyVol(el); });
     MIX.ctx = ctx; ctx.resume().catch(() => {});
     ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && !au.paused && au !== AUX) ctx.resume().catch(() => {}); });
     ctx.addEventListener('statechange', () => diario('mixer', {stato:ctx.state, nascosta:document.hidden}));   // ogni cambio nel diario
@@ -2484,6 +2702,7 @@ function grid(id, part) {
 // prossimo brano della coda come lo sceglierebbe la fine del brano (-1: niente passaggio)
 function nextIdx() {
   if (!S.queue.length || S.repeat === 'one') return -1;
+  if (typeof TIMER !== 'undefined' && TIMER.finebrano) return -1;   // il timer ferma la musica a fine brano: niente mix
   if (S.qi < S.queue.length - 1) return S.qi + 1;
   return S.repeat === 'all' && S.queue.length > 1 ? 0 : -1;
 }
@@ -2504,7 +2723,7 @@ async function xfPrepare(P) {
   if (MIX.plan !== P || !tb) return;
   if (P.url) URL.revokeObjectURL(P.url);
   P.url = f ? URL.createObjectURL(f) : null;
-  velocita(el, 1); setGain(el, 0); P.el = el;
+  velocita(el, 1); setGain(el, 0); if (typeof volNormImposta === 'function') volNormImposta(el, P.idB); P.el = el;
   // si carica davvero (l'iPhone non scarica un brano fermo): parte muto, si ferma appena suona, torna al primo battito.
   // Se quel play() viene interrotto l'ascoltatore resta attaccato: agisce solo per questo piano, e si stacca quando finisce
   el.muted = true;
@@ -2777,7 +2996,7 @@ function saltoCarica(X) {
     if (!tb || !f && !tb.sid) { saltoSubito(X, 'brano non disponibile: cambio subito'); return; }
     const el = X.el = otherDeck();
     X.url = f ? URL.createObjectURL(f) : null;
-    velocita(el, 1); setGain(el, 0); el.muted = true;
+    velocita(el, 1); setGain(el, 0); if (typeof volNormImposta === 'function') volNormImposta(el, X.idB); el.muted = true;
     X.suona = () => { if (MIX.salto !== X) return; el.pause(); el.muted = false; X.pronto = true; diario('pronto', {ms:Date.now() - X.prepT, salto:true}); };
     el.addEventListener('playing', X.suona, {once:true});
     el.src = X.url || API + 'file/' + encodeURIComponent(tb.sid);
@@ -3232,12 +3451,16 @@ function trackMenu(id, pl) {
   const alb = albArt(t) + '\u0001' + (t.album || '');
   openSheet('<div class="grp">' + head(t) +
     '<button data-a="m-next" data-id="' + id + '"><span class="l">Riproduci dopo</span>' + ic('next') + '</button>' +
-    '<button data-a="m-last" data-id="' + id + '"><span class="l">Riproduci per ultimo</span>' + ic('last') + '</button></div>' +
+    '<button data-a="m-last" data-id="' + id + '"><span class="l">Riproduci per ultimo</span>' + ic('last') + '</button>' +
+    '<button data-a="m-stazione" data-id="' + id + '"><span class="l">Crea stazione</span>' + ic('radio') + '</button></div>' +
+    (id === curId ? '<div class="grp"><button data-a="m-timer"><span class="l">Timer di spegnimento' + (TIMER.fine ? ': ' + Math.max(1, Math.round((TIMER.fine - Date.now()) / 60000)) + ' min' : TIMER.finebrano ? ': fine del brano' : '') + '</span>' + ic('timer') + '</button>' +
+      '<button data-a="volnorm"><span class="l">Volume uniforme: ' + (VOLN.on ? 'acceso' : 'spento') + '</span>' + ic('spkHi') + '</button></div>' : '') +
     '<div class="grp"><button data-a="m-fav" data-id="' + id + '"><span class="l">' + (t.fav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti') + '</span>' + ic(t.fav ? 'star' : 'staro') + '</button>' +
     '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' +
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
     '<button data-a="m-artist" data-k="' + esc(primary(t)) + '"><span class="l">Vai all\'artista</span>' + ic('person') + '</button>' +
     '<button data-a="m-share" data-id="' + id + '"><span class="l">Condividi brano…</span>' + ic('share') + '</button>' +
+    '<button data-a="m-meno" data-id="' + id + '"><span class="l">' + (t.meno ? 'Suggerisci di nuovo brani così' : 'Suggerisci meno brani così') + '</span>' + ic('meno') + '</button>' +
     (t.remote && ASC ? '<button data-a="asc-anche" data-id="' + id + '"><span class="l">Chi ascolta questo brano ascolta anche…</span>' + ic('person') + '</button>' : '') +
     (t.remote && !saved.has(id) && SRV ? '<button data-a="m-dl" data-id="' + id + '"><span class="l">Scarica sull\'iPhone</span>' + ic('down') + '</button>' : '') +
     (t.remote && saved.has(id) ? '<button data-a="m-undl" data-id="' + id + '"><span class="l">Togli dall\'iPhone</span>' + ic('trash') + '</button>' : '') +
@@ -3344,6 +3567,12 @@ document.addEventListener('click', e => {
     case 'shuffle': setShuffle(!S.shuffle); break;
     case 'repeat': cycleRepeat(); break;
     case 'mix': setMix(!MIX.on); break;
+    case 'autoplay': autoCambia(); break;
+    case 'm-stazione': stazione(d.id); break;
+    case 'm-meno': menoCambia(d.id); break;
+    case 'm-timer': timerScheda(); break;
+    case 'timer': timerImposta(d.v); break;
+    case 'volnorm': closeSheet(); volNormCambia(); break;
     case 'tutto': setTutto(!TUTTO); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': saltaA(+d.i, () => load(+d.i, true), true); break;   // col mix al salto, come «Successivo»
@@ -3854,7 +4083,7 @@ function rcInvia(azione, extra) {
 const RC_SOLO = 'Dal telecomando: riproduci, pausa, avanti, indietro, posizione e volume';
 const RC_TASTI = {
   toggle:() => rcInvia('toggle'), next:() => rcInvia('next'), prev:() => rcInvia('prev'),
-  shuffle:() => toast(RC_SOLO), repeat:() => toast(RC_SOLO), mix:() => toast(RC_SOLO), queue:() => toast(RC_SOLO),
+  shuffle:() => toast(RC_SOLO), repeat:() => toast(RC_SOLO), mix:() => toast(RC_SOLO), queue:() => toast(RC_SOLO), autoplay:() => toast(RC_SOLO),
   favcur:() => favCorrente(), morecur:() => toast(RC_SOLO), sharecur:() => toast(RC_SOLO), qjump:() => toast(RC_SOLO)
 };
 
