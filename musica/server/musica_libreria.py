@@ -16381,6 +16381,8 @@ PERMESSE_INVITATI = re.compile(
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
 # le loro playlist, uguali su tutti i loro dispositivi
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extra/liste$")
+# «Canta» (il microfono e il bordo verde o rosso) e il testo trascritto sul telefono (Whisper nell'app): anche per loro
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/(?:canta|trascrivi)\.js$")
 # la chat (fase 5a): la pagina, la cifratura, il QR del codice di sicurezza e le sue rotte
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/(?:chat\.html|chat-cifra\.js|qrcode\.js)$"
                                r"|^(?:/.*)?/api/extra/chat(?:/[^/]+){1,4}$")

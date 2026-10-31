@@ -126,6 +126,8 @@ Un'app web non può accendere il VPN del telefono: si comanda Tailscale sul Mac 
 
 | File | Contenuto |
 |---|---|
+| `canta.js` | non un modulo: gira dentro index.html, dopo il karaoke. Il tasto 🎤 del testo accende il microfono: il bordo della parola diventa verde se la canti a tempo, rosso se fuori tempo (mappa tempo/testo dal testo a tempo; riga per riga si riallinea alla musica misurando l'entrata; il ritardo cuffie/microfono si misura da solo). Per i brani senza testo (né file, né LRCLIB, né Whisper del Mac) li trascrive sul telefono con `trascrivi.js` mentre suonano; il testo resta in IndexedDB («am-testi», chiave `tel|<brano>`) e vale finché il Mac non ne dà uno |
+| `trascrivi.js` | Web Worker (modulo): Whisper base nell'app con transformers.js 3.8.1 (jsdelivr) e il modello `onnx-community/whisper-base_timestamped` (Hugging Face, circa 80 MB, una volta sola, poi nella Cache Storage); WebGPU se c'è, se no WebAssembly; la lingua dal primo pezzo con la voce; pezzi da 25 s ogni 20 con le parole a tempo |
 | `password.html` | solo Samuele (Gestione): password per aprire Atlante da Internet. Dalla rete Tailscale o dal Mac si rifà senza quella vecchia, da Internet serve quella di adesso; la crea («Creane una per me») e la fa salvare nell'app Password dell'iPhone (Face ID); «Esci da tutti gli altri dispositivi». Il modulo è un vero invio a `../accesso` (campo `torna=password`): il Mac rimanda qui con `?fatto`, `?uscito` o `?errore=` |
 | `rete.html` | per tutti: se questo dispositivo arriva con Tailscale, dalla rete di casa o da Internet; come accendere Tailscale (App Store, Google Play); agli invitati spiega che non serve. Resta nella copia offline |
 
