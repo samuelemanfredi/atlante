@@ -201,7 +201,9 @@ tempo con la musica, come in Apple Music: la luce scorre dentro le parole letter
 un tocco su una riga o su una parola porta la musica lì, nei tre puntini di una pausa il punto toccato vale il suo secondo
 (anche durante il mix e comandando un altro dispositivo); sotto ogni riga la traduzione: all'inizio nella lingua del
 telefono (`navigator.language`; se non è tra le 31, l'inglese), dal tasto in alto un'altra lingua o nessuna (`am-trad`:
-`auto`, `''` o il codice). Il testo viene da un
+`auto`, `''` o il codice). Sincronia: il tasto col cronometro apre «Prima»/«Dopo» (0,05 s) per il ritardo
+dell'uscita audio di questo dispositivo (cuffie Bluetooth, AirPlay, CarPlay; `am-testo-ritardo`, da −0,5 a 1,5 s; senza
+scelta vale `outputLatency` + `baseLatency` del mixer, dove il browser li dà, se no 0). Il testo viene da un
 file `.lrc` accanto al brano, dal file del brano (ID3 SYLT/USLT, MP4 ©lyr, FLAC LYRICS, anche in formato LRC) o da LRCLIB
 (`lrclib.net`, gratuito, senza chiave; `ATLANTE_LRCLIB` per un indirizzo diverso), chiesto dal Mac una richiesta alla volta
 (al più una al secondo) e tenuto in `<cache>/testi/`; sul telefono resta in IndexedDB `am-testi`. Con LRCLIB sovraccarico

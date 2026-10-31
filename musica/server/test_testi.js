@@ -13,6 +13,7 @@ function run(argv) {
   try {
     prove(leggi(argv[0] || '../index.html'), fatte);
     proveTraduzione(leggi(argv[0] || '../index.html'), fatte);
+    proveSincronia(leggi(argv[0] || '../index.html'), fatte);
     if (argv[1]) proveGestione(leggi(argv[1]), fatte);   // la pagina Gestione (x/gestione.html), se data
     return 'OK ' + fatte.length + ' prove: ' + fatte.join(', ');
   } catch (e) {
@@ -284,4 +285,28 @@ function proveGestione(src, fatte) {
   if (!e || /574 MB/.test(e)) throw new Error('Whisper già scaricato: ' + e);
   if (/574 MB/.test(G.testiConferma({acceso:false, con_whisper:false, whisper:{}}, {acceso:true}))) throw new Error('senza Whisper non si scarica niente');
   fatte.push('gestione');
+}
+
+/* ---------- sincronia: il ritardo dell'uscita audio di questo dispositivo (cuffie Bluetooth, AirPlay, CarPlay) ---------- */
+function proveSincronia(src, fatte) {
+  const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
+  const R = carica(src, ['testoRitardo', 'testoSincroniaNome'], ['const TESTO_RITARDO_MAX'], {});
+  // scelto a mano vale più di quello che dice il browser; dentro i limiti (-0,5 s … 1,5 s)
+  eq([R.testoRitardo(0.2, null), R.testoRitardo(0.2, {outputLatency:0.15}), R.testoRitardo(3, null), R.testoRitardo(-2, null)],
+    [0.2, 0.2, 1.5, -0.5], 'ritardo scelto a mano');
+  // automatico: quello che dice il mixer (outputLatency + baseLatency), se no 0
+  eq([R.testoRitardo(null, {outputLatency:0.15, baseLatency:0.01}), R.testoRitardo(null, {}), R.testoRitardo(null, null),
+    R.testoRitardo(null, {outputLatency:NaN}), R.testoRitardo(null, {outputLatency:5})], [0.16, 0, 0, 0, 0], 'ritardo automatico');
+  eq([R.testoSincroniaNome(null, 0), R.testoSincroniaNome(null, 0.16), R.testoSincroniaNome(0.2, 0.2), R.testoSincroniaNome(-0.1, -0.1),
+    R.testoSincroniaNome(0, 0)], ['Automatica: a tempo del lettore', 'Automatica: testo 0,16 s dopo', 'Testo 0,20 s dopo',
+    'Testo 0,10 s prima', 'Testo a tempo del lettore'], 'come si dice');
+  // il tempo del testo: quello del lettore meno il ritardo (mai sotto zero); comandando un altro dispositivo, il suo
+  const E = {RC:{id:null, dev:null}, au:{currentTime:10}, TESTO:{ritardo:0.25}, MIX:{ctx:null}, rcPos:() => 42,
+    testoRitardo:R.testoRitardo};
+  const T = carica(src, ['testoTempo'], [], E);
+  eq(T.testoTempo(), 9.75, 'testo 0,25 s dopo il lettore');
+  E.au.currentTime = 0.1; eq(T.testoTempo(), 0, 'mai sotto zero');
+  E.RC = {id:'x', dev:{}}; eq(T.testoTempo(), 42, 'altro dispositivo: la sua posizione');
+  if (!/data-a="testo-sinc"/.test(src) || !/am-testo-ritardo/.test(src)) throw new Error('manca la regolazione della sincronia (per dispositivo)');
+  fatte.push('sincronia');
 }
