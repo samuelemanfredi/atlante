@@ -4802,8 +4802,10 @@ class TestRegoleAtlante(unittest.TestCase):
     def test_ritmi_e_buonumore(self):
         # per «Per ritmo» (anche senza rete, nell'app) e «Mettimi di buonumore»: i dati dell'audio di ogni brano misurato
         self.t.schede["a"]["modo"] = 1
+        self.t.schede["a"]["db"] = -9.04   # il volume misurato: per il volume uniforme nell'app
         r = self.t.ritmi()
-        self.assertEqual(r["ritmi"]["a"], [150.2, 0.9, 0.85, 1])
+        self.assertEqual(r["ritmi"]["a"], [150.2, 0.9, 0.85, 1, -9.0])
+        self.assertIsNone(r["ritmi"]["b"][4])   # misurato prima che si tenesse il volume
         self.assertEqual(set(r["ritmi"]), {"a", "b", "e"})   # c e d non hanno ancora l'audio misurato
         self.assertEqual(dict((i, p) for i, p in r["buonumore"]), {"a": 2})   # Energia e Buonumore; modo maggiore pesa di più
         self.t.schede["e"]["modo"] = -1
@@ -8675,6 +8677,19 @@ class TestKaraokeServer(unittest.TestCase):
         self.assertEqual(len(FintoLrclibKaraoke.richieste), n)   # niente ricerche né allineamenti rifatti
         self.assertEqual(os.path.getsize(os.path.join(self.c["finto"], "whisper.log")), w)
 
+    def test_8_ricerca_nei_testi(self):
+        """Cerca una frase: i brani che l'hanno nel testo (dalla fonte o trascritto da Whisper), con la riga."""
+        self.finito()
+        cerca = lambda q: self.s.json("GET", "/api/extra/testi/cerca?q=" + quote(q))   # noqa: E731
+        j = cerca("SORGE piàno")   # maiuscole e accenti non contano
+        self.assertEqual([x["id"] for x in j["brani"]], [self.ids["Canzone sincronizzata"]])
+        self.assertEqual(j["brani"][0]["riga"], "Il sole sorge piano sul mare")
+        self.assertEqual([x["id"] for x in cerca("non la conosce")["brani"]], [self.ids["Mai sentita"]])   # da Whisper
+        self.assertEqual([x["id"] for x in cerca("riga del testo")["brani"]], [self.ids["Solo testo"]])
+        self.assertEqual(cerca("ole")["brani"], [])        # troppo corta
+        self.assertEqual(cerca("rge piano")["brani"], [])  # dall'inizio di una parola
+        self.assertGreaterEqual(cerca("qualcosa che non c'è")["indicizzati"], 5)
+
     def test_7_gestione_riprova(self):
         self.assertEqual(self.s.json("POST", "/api/extra/gestione/testi/riprova", {}), {"ok": True})
         self.s.json("GET", "/api/extra/gestione/testi/altro", codice=404)
@@ -12174,6 +12189,22 @@ class TestLrclibSoloQuesto(unittest.TestCase):
             with self.assertRaises(self.m.ErroreExtra) as e:
                 self.m._lrclib_cerca("IV. Recitativo. Ach, schmelze doch", "Bach Collegium", "", 120)
             self.assertNotIsInstance(e.exception, self.m.LrclibSoloQuesto)   # LRCLIB giù davvero: pausa per tutti
+
+
+class TestAscoltoApp(unittest.TestCase):
+    """Le funzioni «come in Apple Music» dell'app (riproduzione automatica e stazioni, generi, Replay, volume uniforme):
+    test_ascolto.js in JavaScriptCore. Senza osascript (non è un Mac) si salta."""
+
+    def test_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_ascolto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
 if __name__ == "__main__":
