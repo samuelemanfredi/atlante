@@ -418,7 +418,7 @@ function testiConferma(j, corpo) {
     const c = j.conteggi || {}, w = j.whisper || {}, tr = j.traduzioni || {}, o = j.ora || {};
     const cercati = n(c, 'cercati'), tot = j.totale || 0;
     let h = '<div class="card"><div class="orow"><div class="tx"><b>Lavoro su tutta la libreria</b><span>' +
-      (j.acceso ? 'Acceso: un brano alla volta, dopo tutto il resto. Spegnilo per metterlo in pausa.' : 'In pausa: il testo arriva solo quando ascolti un brano.') + '</span></div>' +
+      (j.acceso ? 'Acceso: un brano alla volta, dopo tutto il resto. Spegnilo per metterlo in pausa.' : 'In pausa: il testo arriva solo quando ascolti un brano (senza testo, Whisper lo scrive mentre lo ascolti).') + '</span></div>' +
       '<input type="checkbox" class="sw" id="tsAcceso" aria-label="Lavoro su tutta la libreria"' + (j.acceso ? ' checked' : '') + (occupato ? ' disabled' : '') + '></div>';
     h += '<div class="orow" style="margin-top:12px"><div class="tx"><b>Parole dalla voce (Whisper)</b><span>Ogni parola al tempo in cui viene cantata. Pesante: usa il processore e circa 1 GB di memoria mentre lavora.</span></div>' +
       '<input type="checkbox" class="sw" id="tsWhisper" aria-label="Parole dalla voce con Whisper"' + (j.con_whisper ? ' checked' : '') + (occupato ? ' disabled' : '') + '></div>';
@@ -437,7 +437,7 @@ function testiConferma(j, corpo) {
       .filter(([k]) => n(c, 'fonte_' + k)).map(([k, t]) => t + ' ' + n(c, 'fonte_' + k));
     if (fonti.length) h += '<p class="small">Testi: ' + esc(fonti.join(' · ')) + '</p>';
     h += '<p class="small">LRCLIB: ' + esc(j.lrclib || '') + ' · Traduzioni: ' + esc(tr.motore || 'nessun traduttore') + ' (' + (tr.fatte || 0) + ' fatte' + (tr.in_coda ? ', ' + tr.in_coda + ' in coda' : '') + ')</p>';
-    const adesso = [o.cerca && 'cerco «' + o.cerca + '»', o.allinea && 'ascolto «' + o.allinea + '»', o.traduce && 'traduco «' + o.traduce + '»'].filter(Boolean);
+    const adesso = [o.vivo && 'scrivo dal vivo «' + o.vivo + '»', o.cerca && 'cerco «' + o.cerca + '»', o.allinea && 'ascolto «' + o.allinea + '»', o.traduce && 'traduco «' + o.traduce + '»'].filter(Boolean);
     if (adesso.length) h += '<p class="small">Adesso: ' + esc(adesso.join(' · ')) + '</p>';
     h += '<div class="btns"><button class="btn sm" data-tsriprova>Riprova adesso</button></div></div>';
     $('ts').innerHTML = h;

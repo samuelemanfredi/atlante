@@ -295,6 +295,7 @@ window.telScegli = function (j) {
   const b = TESTO.b; if (!b || RC.id) return j;
   const id = curId, t = id && T.get(id);
   if (!t || (j && j.fonte === 'telefono')) return j;   // il testo del telefono stesso (testoUsa lo ridisegna)
+  if (j && j.allineamento === 'dal vivo') { telFerma(b.k); return j; }   // lo scrive il Mac mini, adesso: il telefono non serve
   if (j && j.stato === 'ok' && !senzaTesto(j)) { telFerma(b.k); return j; }   // c'è il testo (dal file, da LRCLIB o da Whisper sul Mac)
   if (!senzaTesto(j) && !(j && j.stato === 'errore')) return j;   // in arrivo, strumentale, vuoto: si aspetta il Mac
   const mio = TEL.testi.get(b.k);

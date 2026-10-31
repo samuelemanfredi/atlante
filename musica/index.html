@@ -193,6 +193,9 @@ img{max-width:100%;display:block}
 #mini .mt b{font-weight:500;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #mini .mt span{font-size:13px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #mini .mb{width:42px;height:42px;display:grid;place-items:center;font-size:24px}
+#mini .mb.fav{width:36px;font-size:21px}
+#mini .mb.fav.on,#npqFav.on,#nplFav.on{color:var(--accent)}
+.npqhead .cb{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:19px;background:rgba(255,255,255,.14)}
 
 /* ---------- titoli che scorrono (lo script «titoli che scorrono», dopo quello principale) ----------
    A riposo il titolo resta com'è, con i «…». Mentre scorre (data-ts) si sposta il testo intero (<ts-in>) con transform,
@@ -346,6 +349,16 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .lyrmsg{padding:40px 6px;font-size:21px;font-weight:700;line-height:1.3;opacity:.8}
 .lyrmsg small{display:block;margin-top:8px;font-size:15px;font-weight:400;opacity:.8}
 .lyrfonte{padding:26px 0 0;font-size:13px;opacity:.55}
+/* Whisper dal vivo: le righe nuove si scrivono da sinistra a destra, una dopo l'altra; in testa a che punto è il Mac */
+.lyr .lr.nuova{animation:lyrArriva .45s ease-out var(--d,0ms) both}
+.lyr .lr.nuova .lo{animation:lyrScrivi 1.1s steps(26,end) var(--d,0ms) both}
+.lyr .lr.rtl.nuova .lo{animation-name:lyrScriviRtl}
+@keyframes lyrArriva{from{opacity:0;transform:translateY(8px) scale(.97)}}
+@keyframes lyrScrivi{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@keyframes lyrScriviRtl{from{clip-path:inset(0 0 0 100%)}to{clip-path:inset(0 0 0 0)}}
+.nplhead #nplVivo{font-size:12px;font-weight:600;opacity:1;color:#fff;animation:vivoPulsa 1.6s ease-in-out infinite}
+.nplhead #nplVivo[hidden]{display:none}
+@keyframes vivoPulsa{50%{opacity:.45}}
 .npbot button{min-width:0;flex:0 1 44px}   /* un tasto in più: su un telefono stretto si stringono invece di uscire */
 
 /* schede d'azione */
@@ -435,6 +448,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 
 <div id="mini" hidden>
   <button class="tap" data-a="opennp" style="display:contents"><span class="art" id="miniArt"></span><span class="mt"><b id="miniT"></b><span id="miniA"></span></span></button>
+  <button class="mb fav" data-a="favcur" id="miniFav" aria-label="Preferito"></button>
   <button class="mb" data-a="toggle" id="miniPP" aria-label="Riproduci"></button>
   <button class="mb" data-a="next" id="miniNx" aria-label="Successivo"></button>
 </div>
@@ -453,7 +467,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
   <div class="npin">
     <div class="npart"><div class="art" id="npArt"></div><video id="npVid" muted playsinline webkit-playsinline preload="none" disablepictureinpicture hidden></video><div id="npVidMsg" hidden></div></div>
     <div class="npq">
-      <div class="npqhead"><div class="art" id="npqArt"></div><div class="tx"><b id="npqT"></b><span id="npqA"></span></div></div>
+      <div class="npqhead"><div class="art" id="npqArt"></div><div class="tx"><b id="npqT"></b><span id="npqA"></span></div><button class="cb" id="npqFav" data-a="favcur" aria-label="Preferito"></button></div>
       <div class="qbar"><h4>Successivi<small id="qFrom"></small></h4>
         <button class="tg" id="tShuf" data-a="shuffle" aria-label="Casuale"></button>
         <button class="tg" id="tRep" data-a="repeat" aria-label="Ripeti"></button>
@@ -1015,16 +1029,23 @@ function gemelloSalvato(id) {
   return null;
 }
 const sulTel = id => saved.has(id) || !!gemelloSalvato(id);
-// «Scarica tutta la musica», di serie su ogni dispositivo: tutta la libreria del Mac finisce nell'archivio del telefono, un brano
-// alla volta in fondo alla coda (prima preferiti, playlist e più ascoltati, poi il resto per artista e album), così gli ascolti e
-// gli «Scarica» toccati a mano passano sempre davanti. I brani tolti a mano dall'iPhone non tornano da soli; se lo spazio
-// finisce ci si ferma e si riprova il giorno dopo. I brani nuovi sul disco del Mac si aggiungono da soli a ogni collegamento.
+// «Scarica tutta la musica», di serie su ogni dispositivo dove si entra in Atlante (anche quelli degli invitati, senza chiedere):
+// tutta la libreria del Mac finisce nell'archivio del telefono, un brano alla volta in fondo alla coda (prima preferiti, playlist
+// e più ascoltati, poi il resto per artista e album), così gli ascolti e gli «Scarica» toccati a mano passano sempre davanti. Chi
+// usa il dispositivo può fermarli o cancellare i brani scaricati (il contatore dei download, Libreria); i brani tolti a mano
+// non tornano da soli; se lo spazio finisce ci si ferma e si riprova il giorno dopo. I brani nuovi sul disco del Mac si
+// aggiungono da soli a ogni collegamento. Solo sul Mac mini stesso no: la musica è già sul suo disco.
+// (31/10: acceso di nuovo una volta dove era spento, anche sui telefoni degli invitati, dove si spegneva da solo)
+if (!ls.get('am-tutto-2', false)) {
+  ls.set('am-tutto-2', true);
+  if (ls.get('am-tutto', true) === false && !(ls.get('am-io', {}) || {}).stessoMac) try { localStorage.removeItem('am-tutto'); } catch (e) {}
+}
 let TUTTO = ls.get('am-tutto', true);
 const TOLTI = new Set(ls.get('am-tolti', []));   // tolti a mano dall'iPhone: non si risalvano da soli (finché non si tocca «Scarica»)
 const AUTO = new Set(ls.get('am-auto', []));     // messi in coda da «Scarica tutta la musica»: escono dalla coda se lo si spegne
 // «Scarica tutto» scelto a mano (acceso o spento) su questo telefono, o solo il valore di partenza
 function tuttoScelto() { try { return localStorage.getItem('am-tutto') !== null; } catch (e) { return true; } }
-// spento senza avvisi (invitato appena arrivato): via dalla coda i brani messi lì da «Scarica tutto»
+// spento senza avvisi (il Mac mini stesso): via dalla coda i brani messi lì da «Scarica tutto»
 function tuttoSpento() {
   TUTTO = false; ls.set('am-tutto', false);
   for (let k = DLQ.length - 1; k >= 0; k--) if (AUTO.has(DLQ[k])) DLQ.splice(k, 1);
@@ -1032,8 +1053,8 @@ function tuttoSpento() {
 }
 function scaricaTutto() {
   if (!TUTTO || !DB || !SRV || SRVSCAN || !SRVN || Date.now() - ls.get('am-pieno', 0) < 86400000) return;
-  // finché non si sa chi è questo telefono (prima apertura, il Mac non ha ancora risposto a «chi sono»), niente
-  // download di tutta la libreria: se fosse un invitato si riempirebbe il telefono senza averlo chiesto
+  // finché non si sa chi è questo dispositivo (prima apertura, il Mac non ha ancora risposto a «chi sono»), niente
+  // download di tutta la libreria: se fosse il Mac mini stesso ne riempirebbe il disco interno
   if (!IO.ruolo && !tuttoScelto()) return;
   if (IO.stessoMac && !tuttoScelto()) return;   // sul Mac mini stesso (saputo dall'ultima volta) nemmeno in attesa del Mac
   const q = new Set(DLQ), inPl = new Set(); P.forEach(p => p.ids.forEach(x => inPl.add(x)));
@@ -1052,7 +1073,7 @@ function scaricaTutto() {
   }
   if (!scelti.length) { ls.set('am-auto', [...AUTO]); return; }
   scelti.forEach(t => AUTO.add(t.id)); ls.set('am-auto', [...AUTO]);
-  if (!ls.get('am-tutto-avviso', false)) { ls.set('am-tutto-avviso', true); toast('Scarico tutta la musica sull\'iPhone (' + scelti.length + ' brani): si ferma in Libreria', true); }
+  if (!ls.get('am-tutto-avviso', false)) { ls.set('am-tutto-avviso', true); toast('Scarico tutta la musica su questo dispositivo (' + scelti.length + ' brani): tocca il contatore dei download per fermarli o cancellarli', true); }
   queueDl(scelti.map(t => t.id), true);
 }
 function setTutto(on) {
@@ -1241,7 +1262,7 @@ function applicaPreferiti(l) {
   for (const t of T.values()) if (t.remote && !!t.fav !== s.has(t.id)) { t.fav = s.has(t.id); ch.push(t); }
   SYNC.favAltri = l.ids.filter(id => !T.has(id)); ls.set('am-fav-altri', SYNC.favAltri);
   ls.set('am-pl-visti', SYNC.visti);
-  if (ch.length) { dbBatch('meta', ch, []).catch(() => {}); render(true); }
+  if (ch.length) { dbBatch('meta', ch, []).catch(() => {}); render(true); favTasti(); }   // anche la stella del brano che suona
 }
 
 /* ---------- aggiornamento da solo ---------- */
@@ -1598,6 +1619,28 @@ const pbtns = (l) => { const L = lists[l], todo = L ? L.ids.filter(id => { const
   return '<div class="pbtns"><button data-a="playall" data-l="' + l + '">' + ic('play') + 'Riproduci</button><button data-a="shufall" data-l="' + l + '">' + ic('shuf') + 'Casuale</button></div>' +
     (SRV && L && L.ids.some(id => (T.get(id) || {}).remote) ? '<div class="pbtns" style="grid-template-columns:1fr"><button data-a="dlall" data-l="' + l + '">' + ic(todo ? 'down' : 'ok') + (todo ? 'Scarica sull\'iPhone (' + todo + ')' : 'Tutto sull\'iPhone') + '</button></div>' : ''); };
 const t1 = t => esc(t.title) + (t.fav ? ' <span class="fav">' + ic('star') + '</span>' : '');
+// la stella dei Preferiti sempre a schermo: lettore, testo, coda e mini lettore. Comandando un altro dispositivo vale per
+// il suo brano, se è anche in questa libreria (lo stesso brano del Mac)
+function favBrano() {
+  if (RC.id) { const b = RC.dev && RC.dev.stato && RC.dev.stato.brano; return (b && b.sid && T.get('r' + b.sid)) || null; }
+  return curId && !EXT.has(curId) ? T.get(curId) || null : null;
+}
+function favTasti() {
+  const t = favBrano(), on = !!(t && t.fav), ext = !RC.id && curId && EXT.has(curId);
+  for (const n of ['npFav', 'nplFav', 'npqFav', 'miniFav']) {
+    const b = $(n); if (!b) continue;
+    b.innerHTML = ic(on ? 'star' : 'staro'); b.classList.toggle('on', on);
+    b.hidden = n !== 'npFav' && !t && !ext;   // niente stella per un brano che qui non c'è
+    b.setAttribute('aria-label', on ? 'Togli dai Preferiti' : 'Aggiungi ai Preferiti');
+  }
+}
+function favCorrente() {
+  if (!RC.id && curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); return; }
+  const t = favBrano();
+  if (!t) { toast(RC.id ? 'Questo brano non è nella libreria del Mac' : 'Niente in riproduzione'); return; }
+  t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); favTasti(); favMark(t.id);
+  toast(t.fav ? 'Aggiunto ai Preferiti' : 'Tolto dai Preferiti');
+}
 function favMark(id) {   // preferito cambiato: si aggiornano solo le righe di quel brano (con 10 000 brani ridisegnare tutto è lento)
   const t = T.get(id); if (!t) return;
   if (curRoute().v === 'favs') { render(true); return; }
@@ -1672,7 +1715,8 @@ const pages = {
       }
       h += '<div class="lrows" style="margin-top:14px"><button class="lrow" data-a="tutto" role="switch" aria-checked="' + TUTTO + '"><span class="ic">' + ic('down') + '</span><span class="t">Scarica tutta la musica<small>' +
         (IO.stessoMac && !TUTTO ? 'Su questo Mac non serve: la musica è già sul suo disco' : sul + ' di ' + tot + ' brani sull\'iPhone') +
-        '</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button></div>';
+        '</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button>' +
+        (sul || DLQ.length ? '<button class="lrow" data-a="dlpill"><span class="ic">' + ic('trash') + '</span><span class="t">Ferma o cancella i download<small>Libera lo spazio di questo dispositivo: i brani restano sul Mac</small></span></button>' : '') + '</div>';
     }
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
     h += ritScaffale() + atlSezione();   // «Per ritmo», Playlist di Atlante (dal Mac mini) e «Crea con l'IA»
@@ -2115,8 +2159,8 @@ function updateNow() {
       $('np').style.setProperty('--npc', c2);
       mediaMeta(t);
     }
-    $('npFav').innerHTML = ic(t.fav ? 'star' : 'staro');
   }
+  favTasti();
   $('npMore').innerHTML = ic('more');
   $('qFrom').textContent = S.from ? 'Da ' + S.from : '';
   if ($('np').classList.contains('q')) renderQueue();
@@ -3298,14 +3342,18 @@ document.addEventListener('click', e => {
     case 'tutto': setTutto(!TUTTO); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': saltaA(+d.i, () => load(+d.i, true), true); break;   // col mix al salto, come «Successivo»
-    case 'favcur': if (curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); break; } if (curId) { const t = T.get(curId); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); updateNow(); favMark(curId); } break;
+    case 'favcur': favCorrente(); break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
     case 'xopen': if (b.closest('#side') && tab !== 'altro') setTab('altro'); openX(d.k); break;   // dalla barra dell'iPad: chiuso il modulo («‹ Altro») si torna ad Altro
     case 'sgo': sideVai(d.v); break;
     case 'condividi': closeSheet(); if (tab !== 'altro') setTab('altro'); openX('inviti'); break;   // il tasto in Libreria: «Condividi l'app»
     case 'caricax': closeSheet(); openX('carica', d.v ? '?' + d.v : ''); break;
-    case 'dlpill': closeX(); setTab('lib'); toast(dlText()); break;
+    case 'dlpill': dlScheda(); break;
+    case 'dl-ferma': closeSheet(); dlFerma(); break;
+    case 'dl-tutto': closeSheet(); setTutto(true); break;
+    case 'dl-cancella': dlCancellaChiedi(); break;
+    case 'dl-cancella-si': closeSheet(); dlCancella(); break;
     case 'sharecur': if (curId) shareTrack(curId); else toast('Nessun brano in riproduzione'); break;
     case 'm-share': closeSheet(); shareTrack(d.id); break;
     case 'closesheet': closeSheet(); break;
@@ -3454,9 +3502,10 @@ async function ioCarica() {
     if (!r.ok) return;
     const j = await r.json(), prima = JSON.stringify(IO);
     IO = {ruolo:j.ruolo || '', persona:j.persona || null, nuove:j.nuove || null, stessoMac:!!j.stesso_mac}; ls.set('am-io', IO);
-    // un invitato non si ritrova migliaia di brani sul telefono senza averlo chiesto: «Scarica tutto» lo accende lui;
-    // sul Mac mini stesso la musica è già sul suo disco: copiarla tutta riempie il disco interno (27/10)
-    if ((IO.ruolo === 'invitato' || IO.stessoMac) && !tuttoScelto()) tuttoSpento();
+    // sul Mac mini stesso la musica è già sul suo disco: copiarla tutta riempie il disco interno (27/10). Gli altri
+    // dispositivi, anche degli invitati, scaricano tutto (31/10): chi li usa può fermarli o cancellare i brani scaricati
+    if (IO.stessoMac && !tuttoScelto()) tuttoSpento();
+    else scaricaTutto();
     if (prima !== JSON.stringify(IO)) render(true);
     if (IO.ruolo === 'invitato') copieScaricati();
   } catch (e) {}
@@ -3541,6 +3590,38 @@ window.AM = {
 };
 ['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => auOn(n, xNotify));
 setInterval(() => { if (xSubs.size && !au.paused) xNotify(); }, 1000);
+// il contatore dei download toccato (o «Download» in Libreria): fermarli, o cancellare i brani scaricati dal Mac
+const scaricati = () => [...saved].filter(id => (T.get(id) || {}).remote);
+function dlScheda() {
+  const n = DLQ.length, sc = scaricati().length;
+  openSheet('<div class="grp"><div class="smsg"><b>Download</b>' + esc((n ? dlText() + ' ' : 'Nessun download in corso. ') +
+    sc + (sc === 1 ? ' brano del Mac è' : ' brani del Mac sono') + ' su questo dispositivo.') + '</div>' +
+    (n ? '<button data-a="dl-ferma"><span class="l">Ferma i download</span>' + ic('close') + '</button>' : '') +
+    (sc ? '<button class="red" data-a="dl-cancella"><span class="l">Cancella i brani scaricati</span>' + ic('trash') + '</button>' : '') +
+    (!TUTTO ? '<button data-a="dl-tutto"><span class="l">Scarica di nuovo tutta la musica</span>' + ic('down') + '</button>' : '') + '</div>' + cancel);
+}
+function dlFerma() {   // la coda si svuota (anche i «Scarica» toccati a mano) e «Scarica tutta la musica» si spegne
+  const n = DLQ.length;
+  TUTTO = false; ls.set('am-tutto', false);
+  DLQ.length = 0; AUTO.clear(); ls.set('am-auto', []); ls.set('am-dlq', DLQ);
+  toast('Download fermati' + (n ? ': ' + n + (n === 1 ? ' brano tolto' : ' brani tolti') + ' dalla coda' : '') + '. I brani già scaricati restano');
+  render(true); dlPill();
+}
+function dlCancellaChiedi() {
+  const sc = scaricati().length;
+  openSheet('<div class="grp"><div class="smsg"><b>Cancellare ' + sc + (sc === 1 ? ' brano scaricato' : ' brani scaricati') + '?</b>Si liberano dallo spazio di questo dispositivo e restano sul Mac: si ascoltano ancora quando il Mac risponde. I brani importati qui non si toccano. I download si fermano.</div>' +
+    '<button class="red" data-a="dl-cancella-si"><span class="l">Cancella</span>' + ic('trash') + '</button></div>' + cancel);
+}
+async function dlCancella() {
+  const ids = scaricati();
+  dlFerma();
+  for (const id of ids) {
+    if (id === curId && curUrl) { unsave(id); continue; }   // quello che suona continua dal Mac (o si ferma)
+    await dbDel('files', id).catch(() => {}); saved.delete(id); memFiles.delete(id);
+  }
+  toast(ids.length === 1 ? '1 brano cancellato da questo dispositivo: resta sul Mac' : ids.length + ' brani cancellati da questo dispositivo: restano sul Mac');
+  render(true); dlPill();
+}
 function dlPill() {   // contatore dei download sull'iPhone, fisso a destra
   const p = $('dlpill'), n = DLQ.length, done = saved.size;
   p.hidden = !n;
@@ -3687,7 +3768,7 @@ function rcMostra() {   // il lettore di questo dispositivo mostra il brano dell
     ['miniArt', 'npArt', 'npqArt'].forEach(n => { $(n).outerHTML = art(tr.cover).replace('<span class="art ', '<span id="' + n + '" class="art '); });
     $('miniT').textContent = tr.title; $('miniA').textContent = 'Su ' + RC.nome + (tr.artist ? ' · ' + tr.artist : '');
     $('npT').textContent = tr.title; $('npA').textContent = tr.artist || '';
-    $('npFav').innerHTML = ic(tr.fav ? 'star' : 'staro'); $('npMore').innerHTML = ic('more');
+    $('npMore').innerHTML = ic('more');
     $('npqT').textContent = tr.title; $('npqA').textContent = tr.artist || '';
     $('npDev').hidden = false; $('npDev').innerHTML = ic('devs') + '<span>' + esc(s.bloccato ? 'Tocca l\'app su ' + RC.nome + ' per farla suonare' : 'In riproduzione su ' + RC.nome) + '</span>';
     ensureColor(tr.cover);
@@ -3695,6 +3776,7 @@ function rcMostra() {   // il lettore di questo dispositivo mostra il brano dell
     $('np').style.setProperty('--npbg', 'linear-gradient(180deg,' + c1 + ' 0%,' + c3 + ' 55%,' + c2 + ' 100%)'); $('np').style.setProperty('--npc', c2);
   }
   if (!dragging) { const v = Math.round((s.vol == null ? 1 : s.vol) * 100); vol.value = v; vol.style.setProperty('--p', v + '%'); }
+  favTasti();
   rcTempo();
   markCur();
 }
@@ -3720,7 +3802,7 @@ const RC_SOLO = 'Dal telecomando: riproduci, pausa, avanti, indietro, posizione 
 const RC_TASTI = {
   toggle:() => rcInvia('toggle'), next:() => rcInvia('next'), prev:() => rcInvia('prev'),
   shuffle:() => toast(RC_SOLO), repeat:() => toast(RC_SOLO), mix:() => toast(RC_SOLO), queue:() => toast(RC_SOLO),
-  favcur:() => toast(RC_SOLO), morecur:() => toast(RC_SOLO), sharecur:() => toast(RC_SOLO), qjump:() => toast(RC_SOLO)
+  favcur:() => favCorrente(), morecur:() => toast(RC_SOLO), sharecur:() => toast(RC_SOLO), qjump:() => toast(RC_SOLO)
 };
 
 // scheda «Riproduci su»: questo dispositivo e gli altri con l'app aperta
@@ -5360,6 +5442,12 @@ function testoBrano() {   // il brano di cui mostrare il testo (di questo dispos
 function testoUrl(b, lingua) {   // con la lingua della traduzione, se scelta
   return lingua ? b.url + (b.url.indexOf('?') < 0 ? '?' : '&') + 'lingua=' + encodeURIComponent(lingua) : b.url;
 }
+// per il brano della libreria che suona adesso anche dove si è: senza testo, il Mac lo trascrive subito da lì (Whisper dal vivo)
+function testoUrlPos(b, lingua) {
+  const u = testoUrl(b, lingua), qui = b.sid ? testoBrano() : null;
+  if (!qui || qui.k !== b.k) return u;
+  return u + (u.indexOf('?') < 0 ? '?' : '&') + 'pos=' + Math.max(0, testoTempo()).toFixed(1);
+}
 const testoTempo = () => RC.id ? rcPos(RC.dev) : au.currentTime || 0;
 // tocco su una riga: la musica va lì. Sul lettore che suona adesso («au»: nel mix è quello del brano nuovo, il brano che
 // esce si ferma); comandando un altro dispositivo, il salto è un comando del telecomando. In pausa riparte da lì.
@@ -5389,15 +5477,16 @@ async function testoDalTelefono(k) {
   try { const db = await testoDB(); return await new Promise(ok => { const q = db.transaction('testi').objectStore('testi').get(k); q.onsuccess = () => ok(q.result ? q.result.j : null); q.onerror = () => ok(null); }); } catch (e) { return null; }
 }
 async function testoSalva(k, j) { try { const db = await testoDB(); db.transaction('testi', 'readwrite').objectStore('testi').put({j, t:Date.now()}, k); } catch (e) {} }
-// il Mac sta ancora lavorando sul brano: lo cerca su LRCLIB («in arrivo»), Whisper ne ascolta la voce o la traduzione è
-// in arrivo
-const testoInCorso = j => !!j && (j.stato === 'in arrivo' || (j.traduzione && j.traduzione.stato === 'in corso') || j.allineamento === 'in coda' || j.allineamento === 'in corso');
+// il Mac sta ancora lavorando sul brano: lo cerca su LRCLIB («in arrivo»), Whisper ne ascolta la voce (anche dal vivo) o la
+// traduzione è in arrivo
+const testoVivo = j => !!j && j.allineamento === 'dal vivo';
+const testoInCorso = j => !!j && (j.stato === 'in arrivo' || (j.traduzione && j.traduzione.stato === 'in corso') || j.allineamento === 'in coda' || j.allineamento === 'in corso' || testoVivo(j));
 // cosa fare con la risposta del Mac (ok, codice, JSON), con la copia sul telefono c se c'è: {j: il testo da usare, salva: da
 // tenere sul telefono, riprova: da richiedere la prossima volta, presto: subito e non dopo mezzo minuto}
 function testoEsito(ok, codice, j, c) {
   // il Mac lo sta ancora cercando: non si salva sul telefono (intanto la copia, se c'è)
   if (ok && j && j.stato === 'in arrivo') return c ? {j:c, riprova:true, presto:true} : {j};
-  if (ok && j && j.stato) return {j, salva:true};
+  if (ok && j && j.stato) return {j, salva:!testoVivo(j)};   // a metà della trascrizione dal vivo non si tiene: arriva il testo intero
   const presto = codice === 429;   // troppe richieste insieme (429): si può richiedere tra poco
   if (c) return {j:c, riprova:true, presto};
   if (codice === 404 || codice === 400) return {j:{stato:'nessuno'}, riprova:true};
@@ -5412,7 +5501,7 @@ function testoChiedi(b, lingua) {   // il testo dal Mac (una richiesta alla volt
     const c = await testoDalTelefono(b.k);
     if (c && !SRV) return c;
     try {
-      const r = await fetchT(testoUrl(b, lingua), {cache:'no-store'}, 25000);
+      const r = await fetchT(testoUrlPos(b, lingua), {cache:'no-store'}, 25000);
       const x = testoEsito(r.ok, r.status, await r.json().catch(() => null), c);
       if (x.salva) testoSalva(b.k, x.j);
       riprova = !!x.riprova; presto = !!x.presto;
@@ -5433,9 +5522,11 @@ setInterval(() => {
   const b = testoBrano();
   if (b && b.k !== TESTO.pronto) { TESTO.pronto = b.k; testoChiedi(b, ''); }
 }, 5000);
-// fra quanti ms richiedere il testo al Mac (0: non serve): finché ci lavora, il testo cercato su LRCLIB ogni 2,5 s, la
-// traduzione ogni 3 s, Whisper ogni 15 s; troppe richieste insieme (429): una volta sola, dopo 10 s
+// fra quanti ms richiedere il testo al Mac (0: non serve): finché ci lavora, Whisper dal vivo ogni 2 s (le righe nuove), il
+// testo cercato su LRCLIB ogni 2,5 s, la traduzione ogni 3 s, Whisper in coda ogni 15 s; troppe richieste insieme (429): una
+// volta sola, dopo 10 s
 function testoAttesa(j, tr, ritentato) {
+  if (testoVivo(j)) return 2000;
   if (j.stato === 'in arrivo') return 2500;
   if (tr && tr.stato === 'in corso') return 3000;
   if (j.allineamento === 'in coda' || j.allineamento === 'in corso') return 15000;
@@ -5455,7 +5546,7 @@ async function testoCarica(b) {
   if (tr && tr.stato === 'non riuscita' && TESTO.avvisato !== k + tr.lingua) { TESTO.avvisato = k + tr.lingua; toast('Traduzione non riuscita: ' + (tr.motivo || 'riprovo più tardi')); }
   const attesa = testoAttesa(j, tr, TESTO.ritentato);
   if (attesa && j.tardi) TESTO.ritentato = true;
-  if (attesa && TESTO.giri++ < 80) TESTO.poll = setTimeout(() => { TESTO.poll = 0; testoRiprendi(b); }, attesa);
+  if (attesa && (TESTO.giri++ < 80 || testoVivo(j))) TESTO.poll = setTimeout(() => { TESTO.poll = 0; testoRiprendi(b); }, attesa);
 }
 function testoRiprendi(b) {   // la richiesta che aspettava: solo per il brano di adesso, e solo se il testo si vede
   if (TESTO.k !== b.k) return;
@@ -5466,9 +5557,25 @@ function testoUsa(j) {   // si ridisegna solo se è cambiato qualcosa (parole da
   if (window.telScegli) j = telScegli(j) || j;   // senza testo dal Mac: quello trascritto su questo telefono (x/canta.js)
   const firma = x => !x ? '' : [x.stato, x.v || JSON.stringify(x.righe || []),
     JSON.stringify(x.traduzione && x.traduzione.lingua === TESTO.trad ? x.traduzione : null)].join('|');
-  if (!TESTO.j || firma(TESTO.j) !== firma(j)) return testoDisegna(j);
-  const f = $('lyr').querySelector('.lyrfonte');   // lo stesso testo: cambia al più la riga in fondo (Whisper in coda, al lavoro)
+  // righe nuove dal vivo: si aggiungono senza tornare in cima
+  if (!TESTO.j || firma(TESTO.j) !== firma(j)) return testoDisegna(j, !!(TESTO.j && testoVivo(TESTO.j) && TESTO.righe));
+  TESTO.j.dal_vivo = j.dal_vivo; TESTO.j.allineamento = j.allineamento; testoVivoChip(j);
+  const f = $('lyr').querySelector('.lyrfonte, .lyrmsg small');   // lo stesso testo: cambia al più la riga in fondo (Whisper al lavoro)
   if (f && TESTO.righe) f.textContent = testoNota(j);
+  else if (f && testoVivo(j)) f.textContent = testoVivoNota(j);
+}
+// Whisper dal vivo, a che punto è: la riga in testa al testo (pulsa finché scrive) e quella sotto il messaggio di attesa
+const mmss = x => Math.floor(x / 60) + ':' + String(Math.floor(x % 60)).padStart(2, '0');
+function testoVivoChip(j) {
+  const c = $('nplVivo'); if (!c) return;
+  const v = testoVivo(j) && j.dal_vivo;
+  c.hidden = !v;
+  if (v) c.textContent = '✎ Il Mac scrive' + (v.pezzi ? ' ' + Math.round(100 * v.fatti / v.pezzi) + '%' : '') + (v.ora ? ' · ' + mmss(v.ora[0]) + '–' + mmss(v.ora[1]) : '');
+}
+function testoVivoNota(j) {
+  const v = j.dal_vivo || {}, f = v.fase || '';
+  if (f === 'in coda' || f === 'trascrivo' || f === 'leggo il brano') return 'Whisper ascolta il brano da dove sei: le righe compaiono qui man mano' + (v.ora ? ' (ora ' + mmss(v.ora[0]) + '–' + mmss(v.ora[1]) + ')' : '');
+  return 'Whisper si prepara sul Mac mini: ' + f;
 }
 
 // ----- disegno e movimento -----
@@ -5482,7 +5589,7 @@ function testoNota(j) {   // in fondo al testo: com'è a tempo, da dove viene, l
     (j.parole_da === 'voce' ? 'A tempo con la voce, parola per parola' : j.parole_da === 'fonte' || (j.parole && !j.parole_da) ? 'A tempo, parola per parola' :
       j.parole_da === 'stima' ? (al ? 'A tempo, parole stimate: Whisper le sta per ascoltare' : 'A tempo, parole stimate dentro la riga') : 'A tempo') +
     ' · tocca una parola per andare lì';
-  const fonte = {file:'dal file del brano', lrclib:'da LRCLIB', voce:'trascritto dalla voce: può avere errori',
+  const fonte = {file:'dal file del brano', lrclib:'da LRCLIB', voce:testoVivo(j) ? 'il Mac mini lo scrive dalla voce mentre ascolti: ' + ((j.dal_vivo || {}).fatti || 0) + ' di ' + ((j.dal_vivo || {}).pezzi || '?') + ' pezzi' : 'trascritto dalla voce: può avere errori',
     telefono:'trascritto su questo telefono: può avere errori', netease:'da NetEase', lyricsovh:'da lyrics.ovh'}[j.fonte] || '';
   const tel = window.telNota ? telNota(j) : '';   // la trascrizione sul telefono a che punto è
   const t = j.traduzione && j.traduzione.lingua === TESTO.trad ? j.traduzione : null;
@@ -5490,12 +5597,14 @@ function testoNota(j) {   // in fondo al testo: com'è a tempo, da dove viene, l
     'non riuscita':'traduzione non riuscita'}[t.stato] || '' : '';
   return [tempi, fonte, tel, tr].filter(Boolean).join(' · ');
 }
-function testoDisegna(j) {
-  const L = $('lyr');
-  TESTO.j = j; TESTO.righe = null; TESTO.riga = -2; TESTO.primo = true; TESTO.libero = 0;
-  L.classList.remove('piano', 'libero');
+function testoDisegna(j, agg) {   // agg: righe nuove dal vivo (si resta dove si è e le nuove si scrivono)
+  const L = $('lyr'), prima = agg ? new Set((TESTO.righe || []).filter(r => r.testo).map(r => r.t + '|' + r.testo)) : null, su = L.scrollTop;
+  TESTO.j = j; TESTO.righe = null; TESTO.riga = -2; TESTO.primo = !agg; TESTO.libero = agg ? TESTO.libero : 0;
+  L.classList.remove('piano'); if (!agg) L.classList.remove('libero');
+  testoVivoChip(j);
   const msg = (a, b) => { L.innerHTML = '<div class="lyrmsg">' + esc(a) + (b ? '<small>' + esc(b) + '</small>' : '') + '</div>'; L.scrollTop = 0; testoTasti(); };
   if (!j || j.stato === 'in arrivo') return msg('Cerco il testo…', j ? 'Il Mac lo sta chiedendo a LRCLIB' : '');
+  if (j.stato === 'nessuno' && testoVivo(j)) return msg('Il Mac mini scrive il testo…', testoVivoNota(j));
   if (j.stato === 'trascrivo') return msg('Trascrivo il testo su questo telefono…', j.nota || '');   // x/canta.js
   if (j.stato === 'vuoto') return msg(RC.id || curId ? 'Nessun testo' : 'Niente in riproduzione', RC.id || curId ? 'Podcast, audiolibri e radio non hanno un testo a tempo' : '');
   if (j.stato === 'errore') return msg('Testo non disponibile', j.errore);
@@ -5509,14 +5618,16 @@ function testoDisegna(j) {
   const t = j.traduzione && j.traduzione.lingua === TESTO.trad && j.traduzione.stato === 'pronta' ? j.traduzione.righe || [] : [], tr = new Map();
   (j.righe || []).forEach((r, i) => { if (t[i]) tr.set(r, t[i]); });
   const sotto = r => tr.has(r) ? '<span class="lt">' + esc(tr.get(r)) + '</span>' : '';
+  let nuove = 0;
   const riga = (r, i) => {
     if (!j.sincronizzato) return '<p class="lr">' + (r.testo ? esc(r.testo) : '&nbsp;') + sotto(r) + '</p>';
     if (!r.testo) return '<button class="lr gap" data-a="testo-vai" data-i="' + i + '"><span class="dots" aria-label="Pausa"><i></i><i></i><i></i></span></button>';
-    return '<button class="lr' + (TESTO_RTL.test(r.testo) ? ' rtl' : '') + '" data-a="testo-vai" data-i="' + i + '"><span class="lo">' +
+    const nuova = prima && !prima.has(r.t + '|' + r.testo) ? ' nuova" style="--d:' + Math.min(2000, 110 * nuove++) + 'ms' : '';
+    return '<button class="lr' + (TESTO_RTL.test(r.testo) ? ' rtl' : '') + nuova + '" data-a="testo-vai" data-i="' + i + '"><span class="lo">' +
       testoPezzi(r).map((p, k) => '<span class="w" data-a="testo-vai" data-i="' + i + '" data-j="' + k + '">' + esc(p.testo) + '</span>').join('') + '</span>' + sotto(r) + '</button>';
   };
   L.innerHTML = R.map(riga).join('') + '<div class="lyrfonte">' + esc(testoNota(j)) + '</div>';
-  L.scrollTop = 0;
+  L.scrollTop = agg ? su : 0;
   testoTasti();
 }
 function testoTasti() {   // il tasto della traduzione, quando c'è un testo da tradurre
@@ -5625,8 +5736,10 @@ function testoTradUsa(c) {
   q.parentNode.insertBefore(b, q);
   const v = document.createElement('div'), npq = np.querySelector('.npq');
   v.className = 'npl';
-  v.innerHTML = '<div class="nplhead"><span class="art" id="nplArt"></span><div class="tx"><b id="nplT"></b><span id="nplA"></span></div>' +
+  v.innerHTML = '<div class="nplhead"><span class="art" id="nplArt"></span><div class="tx"><b id="nplT"></b><span id="nplA"></span><span id="nplVivo" hidden></span></div>' +
+    '<button class="cb" id="nplFav" data-a="favcur" aria-label="Preferito"></button>' +
     '<button class="cb" id="nplTrad" data-a="testo-trad" aria-label="Traduzione" hidden>' + ic('trad') + '</button></div><div class="qlist lyr" id="lyr"></div>';
+  favTasti();
   npq.parentNode.insertBefore(v, npq.nextSibling);
   // il dito sul testo: si legge liberamente (senza sfocatura) e dopo 4 s si torna alla riga cantata
   const L = $('lyr'), libero = () => { TESTO.libero = Date.now() + 4000; L.classList.add('libero'); };

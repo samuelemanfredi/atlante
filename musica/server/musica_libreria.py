@@ -93,6 +93,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 import uuid
+import wave
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 
@@ -5959,7 +5960,14 @@ TESTI_PAUSA_VOCE = 600           # un errore di tutto il Mac (disco scollegato, 
 # I tempi DTW di whisper.cpp arrivano in ritardo di circa 0,19 s sull'attacco vero della parola (misurato il 27/10 con
 # large-v3-turbo-q5_0 su una canzone di prova con i tempi noti: ritardo mediano 0,19 s, scarto 0,06 s): si anticipano
 WHISPER_ANTICIPO = 0.18
-ALLINEA_MINIMO = 0.3             # sotto questa quota di parole riconosciute le parole restano stimate
+# Whisper dal vivo: il brano che si ascolta e che non ha un testo da nessuna parte lo trascrive subito, a pezzi, da dove
+# si è arrivati; l'app vede le righe man mano
+VIVO_PEZZO = 30.0                # pezzi di al più 30 s: la finestra che Whisper ascolta in una volta
+VIVO_TAGLIO = 6.0                # ogni pezzo finisce nel decimo di secondo più silenzioso dei suoi ultimi 6 s (tra due parole)
+VIVO_SCADE = 900                 # un brano chiesto e poi lasciato: dopo 15 minuti senza richieste non si trascrive più (il fatto resta)
+VIVO_RIPROVA = 600               # trascrizione dal vivo non riuscita: si riprova dopo 10 minuti
+VIVO_NICE = 5                    # dal vivo qualcuno aspetta: prima degli scaricamenti, dopo il server e l'app
+ALLINEA_MINIMO = 0.3            # sotto questa quota di parole riconosciute le parole restano stimate
 MYMEMORY_BASE = "https://api.mymemory.translated.net"
 TRAD_RIPROVA = 600               # traduzione non riuscita: l'app la può richiedere dopo 10 minuti
 TRAD_CODA_MAX = 50               # traduzioni in coda al più (chi apre tanti testi non riempie il Mac di lavoro)
@@ -6110,9 +6118,9 @@ def _ferma_figli():
             _cancella(os.path.join(_FIGLI["dir"], "%d.json" % pid))
 
 
-def _esegui_piano(args, tempo, fermo=None, log=None, ambiente=None):
+def _esegui_piano(args, tempo, fermo=None, log=None, ambiente=None, priorita=TESTI_NICE):
     """Un programma pesante (ffmpeg, whisper-cli, brew) a bassa priorità: con nice passano prima il server, l'app e gli
-    scaricamenti della musica. Si ferma se il lavoro va in pausa (fermo() vero: Pausa) o se va oltre `tempo` secondi.
+    scaricamenti della musica (dal vivo, con priorita=VIVO_NICE, gli scaricamenti dopo). Si ferma se il lavoro va in pausa (fermo() vero: Pausa) o se va oltre `tempo` secondi.
     (codice d'uscita, uscita, errori); con `log` (un file aperto) uscita ed errori vanno lì. Un programma che non c'è o
     non parte è un errore del Mac (ErroreMac), non del brano."""
     nome = os.path.basename(args[0])
@@ -6120,7 +6128,7 @@ def _esegui_piano(args, tempo, fermo=None, log=None, ambiente=None):
         raise ErroreMac("%s non c'è o non si può avviare (%s)" % (nome, args[0]))
     nice = _programma("nice")
     if nice:
-        args = [nice, "-n", str(TESTI_NICE)] + list(args)
+        args = [nice, "-n", str(priorita)] + list(args)
     env = _ambiente()
     env.update(ambiente or {})
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
@@ -6217,10 +6225,11 @@ def parole_sentite(j, anticipo=0.0):
     return pulite
 
 
-def righe_da_voce(j, anticipo=0.0):
+def righe_da_voce(j, anticipo=0.0, entro=None, minimo=6):
     """Il testo trascritto da Whisper per un brano senza testo: una riga per frase (una pausa di oltre un secondo o
     10 parole la chiudono), senza le frasi che Whisper inventa sul silenzio (sottotitoli, ringraziamenti) né quelle
-    incerte. [] se la voce non c'è (brano strumentale)."""
+    incerte. [] se la voce non c'è (brano strumentale: meno di `minimo` parole). Con entro=(da, a) solo le parole che
+    cominciano lì (un pezzo del brano, dal vivo)."""
     righe = []
     for seg in (j or {}).get("transcription") or []:
         parole = parole_sentite({"transcription": [seg]}, anticipo)
@@ -6229,6 +6238,10 @@ def righe_da_voce(j, anticipo=0.0):
         testo = " ".join(w for _, _, w, _ in parole)
         if sum(p for *_, p in parole) / len(parole) < 0.35 or _INVENTATE.search(testo):
             continue
+        if entro:
+            parole = [x for x in parole if entro[0] <= x[0] < entro[1]]
+            if not parole:
+                continue
         riga = []
         for k, (t, _f, w, _p) in enumerate(parole):
             if riga and (len(riga) >= 10 or t - parole[k - 1][0] > 1.6):
@@ -6241,12 +6254,69 @@ def righe_da_voce(j, anticipo=0.0):
     for pezzi in righe:
         pezzi[-1][2] = pezzi[-1][2].rstrip()
         out.append({"t": pezzi[0][0], "x": " ".join("".join(p[2] for p in pezzi).split()), "p": pezzi})
-    if sum(len(r["p"]) for r in out) < 6:
+    if sum(len(r["p"]) for r in out) < minimo:
         return []
     return out
 
 
-def _wav16k(percorso, dest, fermo=None):
+def tagli_vivo(wav):
+    """Dove tagliare il brano (WAV a 16 kHz, mono, 16 bit) in pezzi per Whisper dal vivo: [0, t1, …, fine] in secondi.
+    Ogni pezzo dura al più VIVO_PEZZO e finisce nel decimo di secondo più silenzioso dei suoi ultimi VIVO_TAGLIO secondi:
+    di solito tra due parole, così nessuna resta tagliata a metà tra due pezzi."""
+    with wave.open(wav, "rb") as w:
+        sr, n = w.getframerate(), w.getnframes()
+        if w.getsampwidth() != 2 or w.getnchannels() != 1 or sr <= 0:
+            raise ErroreTesti("WAV inatteso per Whisper (serve mono a 16 bit)")
+        dati = array.array("h", w.readframes(n))
+    if sys.byteorder == "big":
+        dati.byteswap()
+    fine, passo = len(dati) / sr, max(1, sr // 10)
+    tagli = [0.0]
+    while fine - tagli[-1] > VIVO_PEZZO:
+        a = tagli[-1]
+        k0, k1 = int((a + VIVO_PEZZO - VIVO_TAGLIO) * sr), int((a + VIVO_PEZZO) * sr) - passo
+        meglio, dove = None, k1
+        for k in range(k0, k1 + 1, passo):
+            e = sum(map(abs, dati[k:k + passo:4]))   # un campione su quattro basta per sentire il silenzio
+            if meglio is None or e < meglio:
+                meglio, dove = e, k + passo // 2
+        tagli.append(round(dove / sr, 2))
+    tagli.append(round(fine, 2))
+    return tagli
+
+
+def pezzo_wav(wav, da, a, dest):
+    """Il pezzo del WAV dai secondi `da` ad `a`, in un WAV suo: Whisper lo ascolta da solo (la lingua la riconosce da
+    quel pezzo, non dall'inizio del brano, che può essere solo musica)."""
+    with wave.open(wav, "rb") as w:
+        sr = w.getframerate()
+        w.setpos(min(w.getnframes(), int(round(da * sr))))
+        dati = w.readframes(max(0, int(round((a - da) * sr))))
+        with wave.open(dest, "wb") as o:
+            o.setnchannels(w.getnchannels())
+            o.setsampwidth(w.getsampwidth())
+            o.setframerate(sr)
+            o.writeframes(dati)
+
+
+def sposta_voce(j, secondi):
+    """I tempi di un JSON di whisper-cli -ojf spostati avanti di `secondi` (un pezzo: i tempi nel brano intero)."""
+    ms, cs = int(round(secondi * 1000)), int(round(secondi * 100))
+    for seg in (j or {}).get("transcription") or []:
+        if not isinstance(seg, dict):
+            continue
+        for x in [seg] + [t for t in seg.get("tokens") or [] if isinstance(t, dict)]:
+            off = x.get("offsets")
+            if isinstance(off, dict):
+                for k in ("from", "to"):
+                    if isinstance(off.get(k), (int, float)):
+                        off[k] += ms
+            if isinstance(x.get("t_dtw"), (int, float)) and x["t_dtw"] >= 0:
+                x["t_dtw"] += cs
+    return j
+
+
+def _wav16k(percorso, dest, fermo=None, priorita=TESTI_NICE):
     """Il brano in WAV mono 16 kHz (quello che vuole Whisper), decodificato da ffmpeg: solo file del disco (un brano
     fatto apposta non può fargli aprire indirizzi in rete) e al più WHISPER_DURATA_MAX secondi (più un minuto)."""
     ff = _programma("ffmpeg")
@@ -6254,7 +6324,7 @@ def _wav16k(percorso, dest, fermo=None):
         raise ErroreMac("ffmpeg non è installato sul Mac: brew install ffmpeg")
     codice, _, err = _esegui_piano([ff, "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-i", percorso,
                                     "-map", "0:a:0", "-t", str(WHISPER_DURATA_MAX + 60), "-ac", "1", "-ar", "16000",
-                                    "-c:a", "pcm_s16le", "-f", "wav", dest], 600, fermo)
+                                    "-c:a", "pcm_s16le", "-f", "wav", dest], 600, fermo, priorita=priorita)
     if codice != 0 or not os.path.isfile(dest) or os.path.getsize(dest) < 1000:
         raise ErroreTesti("ffmpeg: " + (err.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
 
@@ -6567,7 +6637,7 @@ class Whisper:
                               "uso" + ("; lo riscarico più tardi" if nostro else ""))
         self._firma = firma
 
-    def trascrivi(self, wav, lingua="", prompt="", dtw=True):
+    def trascrivi(self, wav, lingua="", prompt="", dtw=True, priorita=TESTI_NICE):
         """Il JSON di whisper-cli -ojf per un WAV a 16 kHz: frasi, pezzi di parola e tempi (DTW se c'è). Se whisper-cli
         si ferma da solo (SIGABRT) con il DTW si riprova senza (i tempi vengono dai pezzi); se si ferma anche così è un
         errore del brano (ErroreTesti), non di tutto il Mac: Whisper passa al prossimo invece di aspettare per tutti."""
@@ -6586,14 +6656,14 @@ class Whisper:
             args.append("-sns")       # niente «[Musica]», «(applausi)»
         args += ["-t", str(max(2, min(8, (os.cpu_count() or 4) // 2)))]
         try:
-            codice, _, err = _esegui_piano(args, WHISPER_TEMPO, self.fermo)
+            codice, _, err = _esegui_piano(args, WHISPER_TEMPO, self.fermo, priorita=priorita)
         except ErroreSegnale as e:
             if e.segnale != signal.SIGABRT or _WHISPER_MEMORIA.search(e.errori):
                 raise   # il sistema l'ha fermato (poca memoria, il Mac che si spegne): è il Mac
             _cancella(out + ".json")
             if dtw:
                 print("Testi: whisper-cli si ferma con il DTW (segnale %d): riprovo senza" % e.segnale, flush=True)
-                return self.trascrivi(wav, lingua, prompt, dtw=False)
+                return self.trascrivi(wav, lingua, prompt, False, priorita)
             raise ErroreTesti("whisper-cli si ferma su questo brano (segnale %d)" % e.segnale)
         try:
             if codice != 0 or not os.path.isfile(out + ".json"):
@@ -6774,6 +6844,8 @@ class Traduttore:
 #                    un server fermato di colpo; con SIGTERM il server li ferma prima di uscire
 # Un errore di tutto il Mac (disco della musica scollegato, ffmpeg o Whisper che non partono, disco pieno, rete giù, tre
 # brani di fila) non conta contro i brani: Whisper aspetta 10 minuti per tutti.
+# Il brano che qualcuno ascolta e che non ha un testo da nessuna parte Whisper lo trascrive subito, a pezzi, anche con il
+# lavoro in pausa (Whisper dal vivo, più sotto): solo Whisper escluso da Gestione lo ferma.
 # ATLANTE_WHISPER=0 spegne Whisper (oppure un percorso: quel whisper-cli).
 
 class Testi:
@@ -6786,7 +6858,11 @@ class Testi:
         lavoro = _leggi_json(os.path.join(cartella, "lavoro.json"), {})
         self.acceso, self.con_whisper = lavoro.get("acceso") is True, lavoro.get("whisper") is not False
         self.trad = Traduttore()
-        self.whisper = Whisper(os.path.join(cartella, "modelli"), self.fermo_voce)
+        self.vivi = {}                                 # Whisper dal vivo: id → il brano che si ascolta, a pezzi
+        self.sveglia_v = threading.Event()
+        self.ora_v = ""
+        self._qui = threading.local()                  # nel thread dal vivo Whisper si ferma per motivi suoi
+        self.whisper = Whisper(os.path.join(cartella, "modelli"), self._fermo_whisper)
         self.subito_c, self.subito_a = [], []          # brani chiesti dall'app: prima degli altri
         self.coda_t = collections.OrderedDict()        # file della traduzione → {righe, da, a, chi, ia}
         self.errori_t = {}                             # file della traduzione → (quando, motivo)
@@ -6868,6 +6944,19 @@ class Testi:
         """Whisper non deve lavorare adesso: lavoro in pausa, Whisper escluso da Gestione o spento (ATLANTE_WHISPER=0), o
         il server sta uscendo (SIGTERM: dopo _ferma_figli non parte più niente)."""
         return not (self.acceso and self.con_whisper) or Whisper.spento() or _FIGLI["fine"]
+
+    def _fermo_sfondo(self):
+        """Il lavoro su tutta la libreria aspetta anche mentre Whisper trascrive dal vivo il brano che si ascolta."""
+        return self.fermo_voce() or self._vivo_attivo()
+
+    def _fermo_dal_vivo(self):
+        """Dal vivo Whisper si ferma solo se escluso da Gestione, spento (ATLANTE_WHISPER=0) o se il server esce: il
+        lavoro su tutta la libreria in pausa non conta (si trascrive solo il brano che qualcuno ascolta)."""
+        return not self.con_whisper or Whisper.spento() or _FIGLI["fine"]
+
+    def _fermo_whisper(self):
+        """Quando Whisper (installazione, modello, trascrizione) si ferma: dipende da chi lo usa, dal vivo o no."""
+        return self._fermo_dal_vivo() if getattr(self._qui, "vivo", False) else self._fermo_sfondo()
 
     def imposta(self, acceso=None, whisper=None):
         """Da Gestione: lavoro su tutta la libreria acceso o in pausa, con o senza Whisper. Resta così dopo un riavvio."""
@@ -7117,7 +7206,7 @@ class Testi:
         while True:
             self.sveglia_a.clear()
             x, ora = None, time.time()
-            if not self.fermo_voce() and ora >= self.pausa_voce:
+            if not self._fermo_sfondo() and ora >= self.pausa_voce:
                 x = self._prossimo(self.subito_a, lambda i, b: self._da_allineare(self.schede.get(i), ora)
                                    and (self.schede.get(i) or {}).get("f") == b.get("_f"))
             if not x:
@@ -7206,7 +7295,7 @@ class Testi:
             os.makedirs(self.tmp, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="voce-", dir=self.tmp) as tmp:
                 wav = os.path.join(tmp, "voce.wav")
-                _wav16k(p, wav, self.fermo_voce)
+                _wav16k(p, wav, self._fermo_sfondo)
                 if r.get("stato") == "ok":
                     testi = _testi_della_risposta(r)
                     lingua = lingua_testo(" ".join(testi))
@@ -7247,6 +7336,7 @@ class Testi:
                         self._salva_dati(i, {"stato": "strumentale", "fonte": "voce", "parole": "", "lingua": "",
                                              "f": f0, "righe": []})
                         self._scheda(i, al="fatto", alq=ora, vo="strumentale")
+                    _cancella(self._file_vivo(i))   # quello fatto dal vivo a metà non serve più
             return True
         except Pausa:
             print("Testi: Whisper in pausa a metà di %s: lo riprende dopo" % self.ora_a, flush=True)
@@ -7271,6 +7361,217 @@ class Testi:
         """Mentre Whisper ascoltava il testo o il file del brano non sono cambiati (se sì, il lavoro non vale più)."""
         s = self.schede.get(i) or {}
         return s.get("it", "") == it and s.get("f") == f
+
+    # Whisper dal vivo: il brano che si ascolta, se non ha un testo da nessuna parte, lo trascrive subito il Mac, a pezzi
+    # di al più 30 s tagliati dove c'è silenzio (tagli_vivo). Prima il pezzo che suona, poi i successivi, poi quelli già
+    # passati; l'app chiede ogni 2 s e vede le righe man mano. Ogni pezzo fatto resta in brani/<id>.vivo.json (ascoltato
+    # di nuovo, il brano riprende da lì); finito, il testo diventa quello «dalla voce» (fonte 'voce'), come lo fa il lavoro
+    # su tutta la libreria, per tutti i dispositivi. Va anche con quel lavoro in pausa (si trascrive solo il brano che
+    # qualcuno ascolta), non con Whisper escluso da Gestione; il lavoro su tutta la libreria intanto aspetta.
+
+    def _file_vivo(self, i):
+        return os.path.join(self.dir, "brani", i + ".vivo.json")
+
+    @staticmethod
+    def _vivo_aperto(v, ora):
+        return not v.get("errore") and ora - v.get("quando", 0) < VIVO_SCADE
+
+    def _vivo_attivo(self):
+        ora = time.time()
+        with self.blocco:
+            return any(self._vivo_aperto(v, ora) for v in self.vivi.values())
+
+    def _vivo_serve(self, i, b, p):
+        """Whisper può trascrivere dal vivo questo brano (senza testo): è acceso, il file c'è, non è troppo lungo e
+        Whisper non ha già fallito tre volte con lui."""
+        if self._fermo_dal_vivo() or self._troppo_lungo(b) or not p or not os.path.isfile(p):
+            return False
+        s = self.schede.get(i) or {}
+        return not (s.get("f") == b.get("_f") and s.get("al") == "errore" and s.get("aln", 0) >= WHISPER_ERRORI)
+
+    def _vivo_via(self, i):
+        """Il brano esce dal lavoro dal vivo (finito, lasciato, file cambiato): via il suo WAV. Chi chiama tiene il
+        blocco."""
+        v = self.vivi.pop(i, None)
+        if v and v.get("wav"):
+            shutil.rmtree(os.path.dirname(v["wav"]), ignore_errors=True)
+
+    def _vivo_chiedi(self, i, b, p, nomi, r, pos):
+        """Il brano che si ascolta adesso (pos: dove si è, in secondi): Whisper lo trascrive subito, cominciando da lì e
+        da quanto ha già fatto (brani/<id>.vivo.json)."""
+        ora = time.time()
+        with self.blocco:
+            v = self.vivi.get(i)
+            if v and (v.get("f") != b.get("_f") or (v.get("errore") and ora - v.get("eq", 0) >= VIVO_RIPROVA)):
+                self._vivo_via(i)   # file cambiato, o un errore di un po' fa: si riprova
+                v = None
+            if v is None:
+                v = {"f": b.get("_f"), "b": b, "p": p, "nomi": nomi, "r": r, "tagli": None, "pezzi": {}, "lingua": "",
+                     "ora": None, "wav": None, "errore": "", "eq": 0, "fase": "in coda", "quando": ora, "pos": pos}
+                d = _leggi_json(self._file_vivo(i), None)
+                tg = d.get("tagli") if isinstance(d, dict) else None
+                if d and d.get("v") == TESTI_V and d.get("f") == v["f"] and isinstance(d.get("pezzi"), dict) and \
+                        isinstance(tg, list) and len(tg) >= 2 and all(isinstance(x, (int, float)) for x in tg):
+                    v.update(tagli=tg, pezzi={str(k): x for k, x in d["pezzi"].items() if isinstance(x, list)},
+                             lingua=str(d.get("lingua") or "")[:5])
+                self.vivi[i] = v
+            if v.get("errore"):
+                return v
+            v.update(quando=ora, pos=pos)
+        self._parti("vivo", self._lavora_vivo)
+        self.sveglia_v.set()
+        return v
+
+    def _vivo_prossimo(self):
+        """Il brano da trascrivere adesso: quello chiesto per ultimo (due dispositivi con due brani: un pezzo a testa).
+        Quelli lasciati da tempo escono (quanto fatto resta sul disco)."""
+        ora = time.time()
+        with self.blocco:
+            for i, v in list(self.vivi.items()):
+                if ora - v.get("quando", 0) >= max(VIVO_SCADE, VIVO_RIPROVA):
+                    self._vivo_via(i)
+            aperti = [(v["quando"], i) for i, v in self.vivi.items() if self._vivo_aperto(v, ora)]
+        return max(aperti)[1] if aperti else None
+
+    def _lavora_vivo(self):
+        self._qui.vivo = True
+        while True:
+            self.sveglia_v.clear()
+            i = self._vivo_prossimo()
+            if i is None:
+                self.ora_v = ""
+                self.sveglia_a.set()   # niente dal vivo: il lavoro su tutta la libreria riprende
+                self.sveglia_v.wait(300)
+                continue
+            try:
+                self._vivo_pezzo(i)
+            except Exception as e:   # noqa: BLE001 — un baco su un brano non ferma gli altri
+                print("Testi: trascrizione dal vivo di %s non riuscita:\n%s" % (i, traceback.format_exc()), flush=True)
+                self._vivo_errore(i, "errore inatteso: %s" % str(e)[:150])
+            self.salva()
+
+    def _vivo_errore(self, i, motivo):
+        with self.blocco:
+            v = self.vivi.get(i)
+            if v:
+                v.update(errore=str(motivo)[:200], eq=time.time(), ora=None)
+        print("Testi: dal vivo, %s: %s" % (self.ora_v or i, motivo), flush=True)
+
+    def _vivo_pezzo(self, i):
+        """Un pezzo del brano: quello che suona adesso, se no il primo da fare dopo, se no il più vicino prima. Fatti
+        tutti, il testo del brano intero (_vivo_fine)."""
+        with self.blocco:
+            v = self.vivi.get(i)
+        if not v:
+            return
+        t, a = v["nomi"][:2]
+        self.ora_v = " — ".join(x for x in (t, a) if x)
+        d = self.dati(i)
+        if d and d.get("fonte") == "voce" and d.get("f") == v["f"]:   # fatto intanto dal lavoro su tutta la libreria
+            with self.blocco:
+                self._vivo_via(i)
+            return
+        v["fase"] = "preparo Whisper"
+        if not self.whisper.prepara():
+            w = self.whisper
+            return self._vivo_errore(i, "Whisper escluso da Gestione" if self._fermo_dal_vivo() else
+                                     "Whisper non è pronto sul Mac: " + (w.errore or w.stato or "?"))
+        try:
+            if not v.get("wav") or not os.path.isfile(v["wav"]):
+                v["fase"] = "leggo il brano"
+                os.makedirs(self.tmp, exist_ok=True)
+                cartella = tempfile.mkdtemp(prefix="vivo-", dir=self.tmp)
+                wav = os.path.join(cartella, "voce.wav")
+                try:
+                    _wav16k(v["p"], wav, self._fermo_dal_vivo, VIVO_NICE)
+                    tg = tagli_vivo(wav)
+                except BaseException:
+                    shutil.rmtree(cartella, ignore_errors=True)
+                    raise
+                with self.blocco:
+                    if v.get("tagli") != tg:   # non è il brano del lavoro di prima: da capo
+                        v["tagli"], v["pezzi"] = tg, {}
+                    v["wav"] = wav
+                    if self.vivi.get(i) is not v:   # uscito intanto (file cambiato)
+                        shutil.rmtree(cartella, ignore_errors=True)
+                        return
+            T = v["tagli"]
+            n = len(T) - 1
+            pos = min(T[-1], v["pos"] + max(0.0, time.time() - v["quando"]))   # intanto la musica va avanti
+            k0 = next((k for k in range(n) if T[k + 1] > pos + 1.0), n - 1)
+            k = next((k for k in list(range(k0, n)) + list(range(k0 - 1, -1, -1)) if str(k) not in v["pezzi"]), None)
+            if k is not None:
+                v["ora"], v["fase"] = k, "trascrivo"
+                lg = v.get("lingua") or ""
+                pezzo = os.path.join(os.path.dirname(v["wav"]), "pezzo.wav")
+                pezzo_wav(v["wav"], T[k], T[k + 1], pezzo)
+                j = sposta_voce(self.whisper.trascrivi(pezzo, lg, "", priorita=VIVO_NICE), T[k])
+                _cancella(pezzo)
+                # ogni parola a un pezzo solo, per il suo tempo nel brano (con l'anticipo del DTW)
+                an = self.whisper.anticipo
+                entro = (T[k] - an if k else -1e9, T[k + 1] - an if k < n - 1 else 1e9)
+                righe = righe_da_voce(j, an, entro, 0)
+                with self.blocco:
+                    if not lg and sum(len(x["p"]) for x in righe) >= 3:   # la lingua dal primo pezzo con la voce
+                        x = str((j.get("result") or {}).get("language") or "")[:5]
+                        v["lingua"] = x if x in LINGUE_TRAD else ""
+                    v["pezzi"][str(k)] = righe
+                    v["ora"] = None
+                    fatto = {"v": TESTI_V, "f": v["f"], "tagli": T, "pezzi": dict(v["pezzi"]), "lingua": v["lingua"]}
+                _scrivi_json(self._file_vivo(i), fatto)
+                if len(fatto["pezzi"]) < n:
+                    return
+            self._vivo_fine(i, v)
+        except Pausa:
+            if self._fermo_dal_vivo() and not _FIGLI["fine"]:
+                self._vivo_errore(i, "Whisper escluso da Gestione")
+        except (ErroreMac, ErroreTesti, OSError, subprocess.SubprocessError, ValueError, wave.Error, EOFError) as e:
+            self._vivo_errore(i, e)
+        finally:
+            v["ora"] = None
+
+    def _vivo_fine(self, i, v):
+        """Tutti i pezzi trascritti: il testo del brano intero (o strumentale), come lo fa il lavoro su tutta la
+        libreria, e la scheda del brano."""
+        t, a, _al, dur = v["nomi"]
+        n = len(v["tagli"]) - 1
+        righe = sorted((r for k in range(n) for r in v["pezzi"].get(str(k)) or []), key=lambda r: r["t"])
+        if sum(len(r["p"]) for r in righe) >= 6:
+            completa_tempi(righe, dur)
+            lingua = v.get("lingua") or lingua_testo(" ".join(x["x"] for x in righe))
+            self._salva_dati(i, {"stato": "trovato", "fonte": "voce", "parole": "allineate", "lingua": lingua,
+                                 "f": v["f"], "durata": dur, "righe": righe})
+        else:
+            self._salva_dati(i, {"stato": "strumentale", "fonte": "voce", "parole": "", "lingua": "", "f": v["f"],
+                                 "righe": []})
+        _cancella(self._file_vivo(i))
+        self._segna(i, v["b"], t, a, v["r"])   # la scheda: Whisper ha fatto (al 'fatto')
+        with self.blocco:
+            self._vivo_via(i)
+        self.salva(True)
+        print("Testi: trascritto dal vivo %s (%d pezzi)" % (self.ora_v, n), flush=True)
+
+    def _risposta_vivo(self, v, durata):
+        """Per l'app, mentre Whisper trascrive dal vivo: le righe fatte fin qui e a che punto è."""
+        with self.blocco:
+            T, k, fase = v.get("tagli"), v.get("ora"), v.get("fase") or ""
+            pezzi = json.loads(json.dumps(v.get("pezzi") or {}))   # una copia: completa_tempi la cambia
+            lingua = v.get("lingua") or ""
+        n = len(T) - 1 if T else 0
+        info = {"pezzi": n, "fatti": len(pezzi), "durata": T[-1] if T else durata,
+                "fase": (self.whisper.stato or fase) if fase == "preparo Whisper" else fase,
+                "ora": [T[k], T[k + 1]] if T and k is not None and k < n else None,
+                "trascritti": sorted([T[int(x)], T[int(x) + 1]] for x in pezzi if T and int(x) < n)}
+        righe = sorted((r for x in pezzi.values() for r in x), key=lambda r: r["t"])
+        if not righe:
+            return {"stato": "nessuno", "allineamento": "dal vivo", "dal_vivo": info}
+        completa_tempi(righe, durata)
+        app = _righe_app(righe)
+        o = {"stato": "ok", "sincronizzato": True, "parole": True, "fonte": "voce", "parole_da": "voce", "righe": app,
+             "lingua": lingua or lingua_testo(" ".join(x["testo"] for x in app)), "allineamento": "dal vivo",
+             "dal_vivo": info}
+        o["v"] = _impronta_testi([o["fonte"], o["parole_da"], app])
+        return o
 
     # traduzione
 
@@ -7383,14 +7684,27 @@ class Testi:
             return "in coda" if s.get("aln", 0) < WHISPER_ERRORI else "non riuscito"
         return "non riuscito"
 
-    def per_brano(self, i, lingua="", chi=None):
-        """GET testi/<id>: il testo di un brano della libreria."""
+    def per_brano(self, i, lingua="", chi=None, pos=None):
+        """GET testi/<id>: il testo di un brano della libreria. pos: dove si è nel brano (l'app lo dice per quello che
+        suona): se non ha un testo da nessuna parte, Whisper lo trascrive subito, da lì (dal vivo)."""
         b, p, (t, a, al, dur) = self.brano(i)
         try:
             r = testi_brano(t, a, al, dur, p, chi=chi)
         except TestiInArrivo:   # LRCLIB non ha ancora risposto: l'app richiede tra poco
             return {"stato": "in arrivo"}
         voce = self._voce(i, b, r)
+        if not voce and r.get("stato") == "nessuno":
+            if pos is not None and self._vivo_serve(i, b, p):
+                v = self._vivo_chiedi(i, b, p, (t, a, al, dur), r, pos)
+            else:
+                with self.blocco:
+                    v = self.vivi.get(i)
+            if v and not v.get("errore") and v.get("f") == b.get("_f"):
+                o = self._risposta_vivo(v, dur)
+                if lingua and o.get("stato") == "ok":   # la traduzione dopo, sul testo intero (non a ogni pezzo)
+                    o["traduzione"] = {"lingua": lingua, "stato": "uguale" if o.get("lingua") == lingua else
+                                       "in corso" if lingua in LINGUE_TRAD else "lingua non disponibile"}
+                return o
         if self.acceso:   # il brano che si ascolta passa davanti agli altri
             self._vivi()
             s = self.schede.get(i)
@@ -7456,7 +7770,7 @@ class Testi:
         pausa = "fino alle %s: %s" % (time.strftime("%H:%M", time.localtime(self.pausa_voce)), self.motivo_voce) \
             if self.pausa_voce > ora else ""
         return {"acceso": self.acceso, "con_whisper": self.con_whisper, "totale": len(voci), "conteggi": dict(c),
-                "ora": {"cerca": self.ora_c, "allinea": self.ora_a, "traduce": self.ora_t},
+                "ora": {"cerca": self.ora_c, "allinea": self.ora_a, "traduce": self.ora_t, "vivo": self.ora_v},
                 "lrclib": "in pausa fino alle %s" % time.strftime("%H:%M", time.localtime(self.pausa_rete))
                           if self.pausa_rete > ora else "ok",
                 "whisper": {"stato": "spento" if w.spento() else w.stato or ("pronto" if w.pronto() else "da preparare"),
@@ -7501,7 +7815,12 @@ def _testi(h, resto):
     c = _chi_e(h)   # l'IA del Mac traduce solo per Samuele (agli invitati non è permessa): per gli altri MyMemory
     chi = {"chi": str(c.get("persona") or c.get("chiave") or _ip_cliente(h)), "ia": c.get("ruolo") == "proprietario"}
     if resto:
-        return _tst().per_brano(resto[0], lingua, chi)
+        try:   # dove si è nel brano che suona: per Whisper dal vivo
+            pos = float(campo("pos")) if campo("pos") else None
+        except ValueError:
+            pos = None
+        pos = pos if pos is not None and 0 <= pos <= 86400 else None   # (nan e inf: fuori)
+        return _tst().per_brano(resto[0], lingua, chi, pos)
     durata = _durata_testi(campo("durata"))   # tra 1 s e un'ora (0: non si sa)
     if not campo("titolo"):
         raise ErroreExtra(400, "Serve il titolo del brano")
