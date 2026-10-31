@@ -432,6 +432,10 @@ function testiConferma(j, corpo) {
       n(c, 'parole_nessuna') + ' senza tempi · ' + n(c, 'trascritti') + ' trascritti dalla voce · ' + n(c, 'senza_testo') + ' senza testo' +
       (n(c, 'da_allineare') ? ' · ' + n(c, 'da_allineare') + ' da allineare' : '') + (n(c, 'non_allineati') ? ' · ' + n(c, 'non_allineati') + ' non allineabili' : '') + '</p>';
     h += '<p class="small">Whisper: <b>' + esc(w.stato || '') + '</b>' + (w.modello ? ' · modello ' + esc(w.modello) + (w.modello_scaricato ? '' : ' (non ancora scaricato)') : '') + '</p>';
+    // da dove vengono i testi: il file del brano, LRCLIB, NetEase (a tempo), lyrics.ovh (senza tempi), Whisper (trascritti)
+    const fonti = [['file', 'dal file'], ['lrclib', 'LRCLIB'], ['netease', 'NetEase'], ['lyricsovh', 'lyrics.ovh'], ['voce', 'dalla voce']]
+      .filter(([k]) => n(c, 'fonte_' + k)).map(([k, t]) => t + ' ' + n(c, 'fonte_' + k));
+    if (fonti.length) h += '<p class="small">Testi: ' + esc(fonti.join(' · ')) + '</p>';
     h += '<p class="small">LRCLIB: ' + esc(j.lrclib || '') + ' · Traduzioni: ' + esc(tr.motore || 'nessun traduttore') + ' (' + (tr.fatte || 0) + ' fatte' + (tr.in_coda ? ', ' + tr.in_coda + ' in coda' : '') + ')</p>';
     const adesso = [o.cerca && 'cerco «' + o.cerca + '»', o.allinea && 'ascolto «' + o.allinea + '»', o.traduce && 'traduco «' + o.traduce + '»'].filter(Boolean);
     if (adesso.length) h += '<p class="small">Adesso: ' + esc(adesso.join(' · ')) + '</p>';

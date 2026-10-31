@@ -5113,6 +5113,140 @@ def _lrclib_cerca(titolo, artista, album, durata, sfondo=False):
     return {"stato": "nessuno"}
 
 
+# ----- altre fonti dei testi, dopo LRCLIB: NetEase (testi a tempo) e lyrics.ovh (testi semplici) -----
+#
+# LRCLIB è la prima fonte; quando non ha il testo a tempo di un brano, NetEase Cloud Music (music.163.com: tanti testi a
+# tempo, anche italiani) e, se nemmeno lui, lyrics.ovh (testi senza tempi: le parole le mette a tempo Whisper, come per
+# un testo semplice di LRCLIB). Stesse regole di LRCLIB: stesso titolo e artista (_cl_titolo, _cl_principale), un testo
+# a tempo solo con la durata entro ±3 s, una richiesta alla volta e al più una al secondo, niente rimandi, al più 20 s.
+# La risposta resta nella cache di LRCLIB con la sua «fonte»; un «nessun testo» (o un testo senza tempi) di prima delle
+# altre fonti (fv < TESTI_FONTI_V) si richiede solo a loro, non di nuovo a LRCLIB.
+TESTI_FONTI_V = 2                 # 2: anche NetEase e lyrics.ovh
+NETEASE = "https://music.163.com"
+LYRICSOVH = "https://api.lyrics.ovh"
+NETEASE_INTESTAZIONI = {"Referer": "https://music.163.com/"}
+# le righe dei crediti che NetEase mette in testa al testo (testo, musica, arrangiamento…)
+NETEASE_CREDITI = re.compile(r"^\s*(?:作词|作曲|编曲|制作人|监制|混音|母带|录音|和声|配唱|吉他|贝斯|鼓|弦乐|钢琴|出品|发行|词|曲|"
+                             r"lyrics?\s*by|music\s*by|composed\s*by|produced\s*by|written\s*by|arranged\s*by)\s*[:：]", re.I)
+_ALTRE_BLOCCO = threading.Lock()
+_ALTRE_ULTIMA = [0.0]
+
+
+def _altre_spente():
+    """ATLANTE_TESTI_ALTRE=0 le spegne (le prove: mai i siti veri; un indirizzo: un sito finto al loro posto). Anche
+    con un LRCLIB finto (ATLANTE_LRCLIB) e nessun indirizzo per le altre: niente Internet."""
+    v = os.environ.get("ATLANTE_TESTI_ALTRE")
+    return v == "0" or (not v and bool(os.environ.get("ATLANTE_LRCLIB")))
+
+
+def _altre_chiedi(base, percorso, intestazioni=None):
+    """Il JSON di un'altra fonte dei testi; None se non ha il brano (404). ErroreExtra 503 se non risponde."""
+    finto = os.environ.get("ATLANTE_TESTI_ALTRE")
+    url = (finto if finto and finto != "0" else base).rstrip("/") + percorso   # le prove usano un sito finto
+    req = urllib.request.Request(url, headers=dict({"User-Agent": _agente_testi(), "Accept": "application/json"},
+                                                   **(intestazioni or {})))
+    with _ALTRE_BLOCCO:
+        attesa = _ALTRE_ULTIMA[0] + max(0.0, _numero_ambiente("ATLANTE_LRCLIB_INTERVALLO", TESTI_INTERVALLO)) - time.time()
+        if attesa > 0:
+            time.sleep(min(attesa, TESTI_INTERVALLO * 5))
+        _ALTRE_ULTIMA[0] = time.time()
+        try:
+            return _senza_surrogati(json.loads(_leggi_url(req, TESTI_TEMPO_MAX, TESTI_MAX).decode("utf-8")))
+        except urllib.error.HTTPError as e:
+            e.close()
+            if e.code == 404:
+                return None
+            raise ErroreExtra(503, "Il sito dei testi ha risposto con un errore (%d)" % e.code)
+        except (OSError, ValueError, http.client.HTTPException):
+            raise ErroreExtra(503, "Il sito dei testi non risponde")
+
+
+def _netease_cerca(titolo, artista, durata):
+    """Il testo a tempo da NetEase ({stato, fonte, lrc, semplice}) o None. Le voci: stesso titolo e artista, la durata
+    più vicina (entro ±3 s); al più tre testi chiesti; un testo con meno di 4 righe non conta."""
+    q = " ".join(x for x in (_primo_artista(artista) or artista, _titolo_pulito(titolo) or titolo) if x)
+    if not q:
+        return None
+    j = _altre_chiedi(NETEASE, "/api/search/get?" + urlencode({"s": q, "type": 1, "limit": 10}), NETEASE_INTESTAZIONI)
+    canzoni = ((j or {}).get("result") or {}).get("songs") if isinstance(j, dict) and isinstance(j.get("result"), dict) else []
+    buone = []
+    for c in (canzoni if isinstance(canzoni, list) else [])[:10]:
+        if not isinstance(c, dict) or not isinstance(c.get("id"), int):
+            continue
+        nome = str(c.get("name") or "")[:TESTI_MAX_NOME]
+        artisti = " ".join(str(a.get("name") or "") for a in (c.get("artists") or []) if isinstance(a, dict))[:TESTI_MAX_NOME]
+        if _cl_titolo(nome) != _cl_titolo(titolo):
+            continue
+        a = _cl_principale(artista)
+        if a and a not in _cl_semplice(artisti):
+            continue
+        try:
+            d = float(c.get("duration") or 0) / 1000
+        except (TypeError, ValueError):
+            d = 0
+        if not durata or not d or abs(d - durata) > TESTI_SCARTO:
+            continue   # senza la durata giusta un testo a tempo arriverebbe fuori tempo
+        buone.append((abs(d - durata), c["id"]))
+    for _, i in sorted(buone)[:3]:
+        x = _altre_chiedi(NETEASE, "/api/song/lyric?" + urlencode({"id": i, "lv": 1, "kv": 1, "tv": -1}), NETEASE_INTESTAZIONI)
+        lrc = (x.get("lrc") or {}).get("lyric") if isinstance(x, dict) and isinstance(x.get("lrc"), dict) else ""
+        if not isinstance(lrc, str) or not lrc.strip() or len(lrc) > TESTI_MAX_TESTO:
+            continue
+        lrc = "\n".join(r for r in lrc.splitlines() if not NETEASE_CREDITI.search(re.sub(r"^(?:\s*\[[^\]]*\])+", "", r)))
+        righe = _leggi_testo(leggi_lrc, lrc, "testo a tempo di NetEase")
+        if sum(1 for r in righe if r["testo"]) >= 4:
+            return {"stato": "ok", "fonte": "netease", "id": i, "lrc": lrc, "durata": durata,
+                    "semplice": "\n".join(r["testo"] for r in righe)}
+    return None
+
+
+def _lyricsovh_cerca(titolo, artista):
+    """Il testo senza tempi da lyrics.ovh ({stato, fonte, semplice}) o None: via la riga «Paroles de la chanson … par …»
+    che a volte mette in testa e le intestazioni tra parentesi quadre ([Verse 1], [Ritornello], il nome di chi canta)."""
+    a, t = _primo_artista(artista) or artista, _titolo_pulito(titolo) or titolo
+    if not a or not t:
+        return None
+    j = _altre_chiedi(LYRICSOVH, "/v1/" + quote(a, safe="") + "/" + quote(t, safe=""))
+    x = j.get("lyrics") if isinstance(j, dict) else None
+    if not isinstance(x, str) or not x.strip() or len(x) > TESTI_MAX_TESTO:
+        return None
+    righe = [r.strip() for r in x.replace("\r", "").split("\n")]
+    if righe and re.match(r"^paroles de la chanson\b", righe[0], re.I):
+        righe = righe[1:]
+    righe = [r for r in righe if not re.fullmatch(r"\[[^\]]{0,80}\]", r)]
+    testo = "\n".join(righe).strip()
+    return {"stato": "ok", "fonte": "lyricsovh", "semplice": testo} if sum(1 for r in righe if r) >= 4 else None
+
+
+def _serve_altre(rec):
+    """Una risposta nella cache che le altre fonti possono migliorare: «nessun testo», o un testo senza tempi, cercati
+    prima che ci fossero (fv più vecchio)."""
+    return isinstance(rec, dict) and (rec.get("fv") or 1) < TESTI_FONTI_V and (
+        rec.get("stato") == "nessuno" or (rec.get("stato") == "ok" and not rec.get("lrc")))
+
+
+def _testi_altre_fonti(rec, titolo, artista, durata):
+    """Dopo LRCLIB: un testo a tempo da NetEase se LRCLIB non l'ha; se non c'è nemmeno un testo semplice, quello di
+    lyrics.ovh. Un errore di un'altra fonte non ferma niente: la risposta resta quella di LRCLIB, senza «fv» (si
+    richiederà)."""
+    if rec.get("stato") == "strumentale" or rec.get("lrc") or _altre_spente():
+        return dict(rec, fv=TESTI_FONTI_V)
+    try:
+        ne = _netease_cerca(titolo, artista, durata)
+        if ne:
+            return dict(ne, fv=TESTI_FONTI_V)
+        if rec.get("stato") == "ok" and str(rec.get("semplice") or "").strip():
+            return dict(rec, fv=TESTI_FONTI_V)
+        ly = _lyricsovh_cerca(titolo, artista)
+        return dict(ly or rec, fv=TESTI_FONTI_V)
+    except ErroreExtra as e:
+        print("Testi: altre fonti per «%s»: %s" % (str(titolo)[:80], e.testo), flush=True)
+        return {k: v for k, v in rec.items() if k != "fv"}
+    except Exception:   # noqa: BLE001 — una risposta strana di un'altra fonte non deve far cadere la ricerca
+        print("Testi: altre fonti per «%s» non riuscite:\n%s" % (str(titolo)[:80], traceback.format_exc(limit=3)), flush=True)
+        return {k: v for k, v in rec.items() if k != "fv"}
+
+
 # la cache delle risposte di LRCLIB: <cache>/testi/<chiave>.json
 
 _TESTI_CACHE_NOME = re.compile(r"[0-9a-f]{24}\.json")
@@ -5325,7 +5459,8 @@ def _testi_cerca_a_parte(r, chiave, file, titolo, artista, album, durata):
     _TESTI_PRIORITA.p = 0 if r.samuele else 1   # nel turno di LRCLIB Samuele passa prima
     try:
         with _chiave_bloccata(chiave):
-            r.rec = _testi_dalla_cache(file) or _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, False)
+            c = _testi_dalla_cache(file)
+            r.rec = c if c and not _serve_altre(c) else _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, False, c)
     except ErroreExtra as e:
         r.errore = e
     except Exception as e:   # noqa: BLE001 — un baco: la richiesta riceve un errore, il server va avanti
@@ -5344,7 +5479,7 @@ def _testi_lrclib(titolo, artista, album, durata, sfondo=False, chi=None):
     parte (_testi_ricerca_app: può dare TestiInArrivo o 429); senza, si aspetta qui."""
     chiave, file = _testi_chiave(titolo, artista, album, durata)
     rec = _testi_dalla_cache(file)
-    if rec:
+    if rec and not _serve_altre(rec):
         return rec
     if chi is not None and not sfondo:
         return _testi_ricerca_app(chiave, file, titolo, artista, album, durata, chi)
@@ -5356,23 +5491,25 @@ def _testi_lrclib(titolo, artista, album, durata, sfondo=False, chi=None):
     try:
         with _chiave_bloccata(chiave):
             rec = _testi_dalla_cache(file)   # un altro dispositivo (o il lavoro in sottofondo) l'ha appena chiesto
-            if rec:
+            if rec and not _serve_altre(rec):
                 return rec
-            return _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo)
+            return _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo, rec)
     finally:
         if not sfondo:
             with _TESTI_APP_BLOCCO:
                 _TESTI_APP[0] -= 1
 
 
-def _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo):
-    """La ricerca su LRCLIB di un brano che non è nella cache del Mac, e la sua risposta messa nella cache."""
+def _testi_lrclib_cerca(file, chiave, titolo, artista, album, durata, sfondo, prima=None):
+    """La ricerca di un brano che non è nella cache del Mac (su LRCLIB, poi sulle altre fonti), e la sua risposta messa
+    nella cache. Con prima (una risposta di LRCLIB di quando le altre fonti non c'erano): solo le altre fonti."""
     try:
-        rec = _lrclib_cerca(titolo, artista, album, durata, sfondo)
+        rec = dict(prima) if _serve_altre(prima) else _lrclib_cerca(titolo, artista, album, durata, sfondo)
     except ErroreExtra:
         _testi_errore(chiave, time.time())
         raise
     _testi_errore(chiave, None)
+    rec = _testi_altre_fonti(rec, titolo, artista, durata)
     rec.update(quando=int(time.time()), brano={"titolo": titolo, "artista": artista, "album": album, "durata": durata})
     _testi_in_cache(file, rec)
     return rec
@@ -5387,14 +5524,14 @@ def _leggi_testo(leggi, x, nome):
         return []
 
 
-def _testi_leggi_lrclib(lyricsfile, lrc, semplice):
+def _testi_leggi_lrclib(lyricsfile, lrc, semplice, fonte="lrclib"):
     righe = _leggi_testo(leggi_lyricsfile, lyricsfile, "Lyricsfile") if lyricsfile else []
     if not any("parole" in r for r in righe):
         righe = _leggi_testo(leggi_lrc, lrc, "testo a tempo")
     if any(r["testo"] for r in righe):
-        return _testi_risposta(righe, "lrclib", True)
+        return _testi_risposta(righe, fonte, True)
     righe = _leggi_testo(testi_semplici, semplice, "testo")
-    return _testi_risposta(righe, "lrclib", False) if righe else {"stato": "nessuno"}
+    return _testi_risposta(righe, fonte, False) if righe else {"stato": "nessuno"}
 
 
 def _copia_risposta(o):
@@ -5412,6 +5549,8 @@ def _testi_da_lrclib(rec):
     if rec.get("stato") != "ok":
         return {"stato": rec.get("stato") or "nessuno"}
     campi = [rec.get(k) if isinstance(rec.get(k), str) else "" for k in ("lyricsfile", "lrc", "semplice")]
+    fonte = rec.get("fonte") if rec.get("fonte") in ("netease", "lyricsovh") else "lrclib"
+    campi.append(fonte)
     impronta = hashlib.sha1("\0".join(campi).encode("utf-8", "surrogatepass")).hexdigest()
     with _TESTI_LETTI_BLOCCO:
         o = _TESTI_LETTI.get(impronta)
@@ -6622,7 +6761,8 @@ class Traduttore:
 # senza voce è strumentale. Prima i brani chiesti dall'app, poi i più nuovi. Nella cartella <cache>/testi/, accanto
 # alle risposte di LRCLIB:
 #   schede.json      a che punto è ogni brano: v, f (il file), t e a (titolo e artista), s ('trovato' | 'nessuno' |
-#                    'strumentale' | 'errore'), q (quando), fo (fonte), sy (a tempo), pw (parole dalla fonte), ri (righe),
+#                    'strumentale' | 'errore'), q (quando), fo (fonte), fv (TESTI_FONTI_V: con quali fonti), sy (a tempo),
+#                    pw (parole dalla fonte), ri (righe),
 #                    it (impronta del testo), li (lingua), al (Whisper: '' se non serve | 'attesa' | 'fatto' |
 #                    'errore' | 'non riuscito', con alq, aln, ale, qa) e vo (cosa ha fatto: 'parole' | 'testo' |
 #                    'strumentale')
@@ -6836,6 +6976,10 @@ class Testi:
         if s.get("t") != t or s.get("a") != a:
             return True
         st = s.get("s")
+        # senza testo, o con un testo senza tempi, da prima delle altre fonti (NetEase, lyrics.ovh): subito a loro
+        if (s.get("fv") or 1) < TESTI_FONTI_V and (st == "nessuno" or (st == "trovato" and not s.get("sy"))) and \
+                ora - s.get("q", 0) > 60:   # (una scheda appena scritta senza fv non fa ricercare il brano di continuo)
+            return True
         return (st == "nessuno" and ora - s.get("q", 0) > TESTI_RIPROVA) or \
                (st == "errore" and ora - s.get("q", 0) > TESTI_RIPROVA_ERRORE)
 
@@ -6895,7 +7039,7 @@ class Testi:
                 al = vecchia["al"]   # stesso brano, stesso testo: Whisper non ci riesce, non si ricomincia da capo
             if al and lungo:
                 al = "non riuscito"
-        nuova = dict(v=TESTI_V, f=b.get("_f"), t=t, a=a, s=st, q=ora, n=0, fo=r.get("fonte") or "",
+        nuova = dict(v=TESTI_V, fv=TESTI_FONTI_V, f=b.get("_f"), t=t, a=a, s=st, q=ora, n=0, fo=r.get("fonte") or "",
                      sy=bool(r.get("sincronizzato")), pw=bool(r.get("parole")), ri=len(testi), it=it,
                      li=lingua_testo(" ".join(testi)), al=al, vo=vo)
         if al == "attesa":
@@ -7293,6 +7437,7 @@ class Testi:
                 c["strumentali"] += 1
             elif st == "trovato" or (st == "nessuno" and vo == "testo"):
                 c["con_testo"] += 1
+                c["fonte_" + ("voce" if vo == "testo" else s.get("fo") or "file")] += 1   # da dove viene il testo
                 if vo == "testo":
                     c["trascritti"] += 1
                 c["parole_" + ("allineate" if vo in ("parole", "testo") else "fonte" if s.get("pw") else
