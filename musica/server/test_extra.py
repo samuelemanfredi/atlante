@@ -8922,6 +8922,8 @@ class TestKaraokeDalVivo(unittest.TestCase):
                         pausa_pezzo=0.6)
         _brano_con_voce(cls.c["musica"], "W - Silenzio.mp3", "Silenzio", "Artista W", [], secondi=40)
         _brano_con_voce(cls.c["musica"], "X - Nessuno la sa.mp3", "Nessuno la sa", "Artista X", cls.PAROLE, secondi=70)
+        _brano_con_voce(cls.c["musica"], "Y - Lasciata a metà.mp3", "Lasciata a metà", "Artista Y", cls.PAROLE, secondi=70,
+                        pausa_pezzo=2.5)
         _brano_con_voce(cls.c["musica"], "A - Canzone sincronizzata.mp3", "Canzone sincronizzata", "Artista A",
                         TestKaraokeServer.BRANI["A - Canzone sincronizzata.mp3"][2])
         cls.modello = os.path.join(cls.base, "ggml-finto.bin")
@@ -8929,14 +8931,18 @@ class TestKaraokeDalVivo(unittest.TestCase):
             f.write(b"lmgg")
         cls.lrc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibKaraoke)
         threading.Thread(target=cls.lrc.serve_forever, daemon=True).start()
-        with unittest.mock.patch.dict(os.environ, {
-                "ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
-                "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"), "ATLANTE_WHISPER_FILE_MODELLO": cls.modello,
-                "ATLANTE_WHISPER_ANTICIPO": "0"}):
-            cls.s = Server(cls.base, cls.c).avvia()
-        cat = aspetta(lambda: (lambda j: j if len(j.get("brani") or []) == 4 else None)(
+        cls.ambiente = {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.lrc.server_address[1],
+                        "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"),
+                        "ATLANTE_WHISPER_FILE_MODELLO": cls.modello, "ATLANTE_WHISPER_ANTICIPO": "0"}
+        cls.s = cls.avvia()
+        cat = aspetta(lambda: (lambda j: j if len(j.get("brani") or []) == 5 else None)(
             cls.s.json("GET", "/api/musica/catalogo")), 30)
         cls.ids = {b["title"]: b["id"] for b in cat["brani"]}
+
+    @classmethod
+    def avvia(cls):
+        with unittest.mock.patch.dict(os.environ, cls.ambiente):
+            return Server(cls.base, cls.c).avvia()
 
     @classmethod
     def tearDownClass(cls):
@@ -9036,6 +9042,32 @@ class TestKaraokeDalVivo(unittest.TestCase):
         self.assertEqual(j["allineamento"], "dal vivo")
         j, _ = self.fino_a("Nessuno la sa", 3, lambda x: x.get("allineamento") == "fatto")
         self.assertEqual(len(j["righe"]), 5)
+
+    def pezzi_log(self):
+        try:
+            with open(os.path.join(self.c["finto"], "whisper-pezzi.log"), encoding="utf-8") as f:
+                return f.read().split()
+        except OSError:
+            return []
+
+    def test_5_lasciato_a_meta_riprende_da_li(self):
+        """Quello che Whisper ha già scritto resta: dopo un riavvio a metà brano si fanno solo i pezzi che mancano."""
+        i = self.ids["Lasciata a metà"]
+        p, _ = self.fino_a("Lasciata a metà", 30, lambda x: (x.get("dal_vivo") or {}).get("fatti") == 1)
+        self.assertEqual([r["testo"] for r in p["righe"]], ["dopo il taglio arriva"])
+        self.assertTrue(os.path.isfile(os.path.join(self.c["cache"], "testi", "brani", i + ".vivo.json")))
+        type(self).s.ferma()   # a metà del secondo pezzo
+        prima = len(self.pezzi_log())
+        type(self).s = self.avvia()
+        aspetta(lambda: len(self.s.json("GET", "/api/musica/catalogo").get("brani") or []) == 5, 30)
+        # subito il pezzo già fatto, senza Whisper; poi solo gli altri due
+        j = self.leggi("Lasciata a metà", 30)
+        self.assertEqual(([r["testo"] for r in j["righe"]], j["dal_vivo"]["trascritti"]),
+                         (["dopo il taglio arriva"], [[24.05, 48.1]]))
+        j, _ = self.fino_a("Lasciata a metà", 30, lambda x: x.get("allineamento") == "fatto")
+        self.assertEqual(len(j["righe"]), 5)
+        nuovi = self.pezzi_log()[prima:]
+        self.assertEqual(sorted(zip(nuovi[::2], nuovi[1::2])), [("0", "24050"), ("48100", "21900")])
 
 
 class TestKaraokeInvitati(unittest.TestCase):
