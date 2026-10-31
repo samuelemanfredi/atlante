@@ -890,7 +890,7 @@ async function loadServer() {
     if (old && old.added && b.added && old.added !== b.added && saved.has(id)) cambiati.push(id);
     const m = Object.assign({fav:false, plays:0, last:0}, old || {}, {id, sid:b.id, remote:true, src:'srv|' + b.id,
       title:b.title || '', artist:b.artist || '', album:b.album || '', albumArtist:b.albumArtist || '', track:b.track || 0, disc:b.disc || 0,
-      year:b.year || '', genre:b.genre || '', duration:b.duration || (old && old.duration) || 0, added:b.added || (old && old.added) || Date.now(),
+      year:b.year || '', genre:b.genre || '', duration:b.duration || (old && old.duration) || 0, added:b.added || (old && old.added) || Date.now(), size:b.size || 0,
       // la copertina già salvata sul telefono resta, a meno che sul Mac non sia cambiata (Gestione → Contenuti)
       compilation:!!b.compilation, cover: old && old.cover && !old.cover.startsWith('s:') && (!b.cover || old.cover === 'm' + b.cover.replace(/\.\w+$/, '')) ? old.cover : (b.cover ? 's:' + b.cover : null)});
     delete m.gone;
@@ -1714,9 +1714,10 @@ const pages = {
         tot++; if (g ? g.some(x => saved.has(x) || !(T.get(x) || {}).remote) : saved.has(t.id)) sul++;
       }
       h += '<div class="lrows" style="margin-top:14px"><button class="lrow" data-a="tutto" role="switch" aria-checked="' + TUTTO + '"><span class="ic">' + ic('down') + '</span><span class="t">Scarica tutta la musica<small>' +
-        (IO.stessoMac && !TUTTO ? 'Su questo Mac non serve: la musica è già sul suo disco' : sul + ' di ' + tot + ' brani sull\'iPhone') +
+        (IO.stessoMac && !TUTTO ? 'Su questo Mac non serve: la musica è già sul suo disco' : num(sul) + ' di ' + num(tot) + ' brani qui' + (SRVN > tot ? ' (sul Mac ' + num(SRVN) + ': i doppioni contano una volta)' : '')) +
         '</small></span><span class="sw' + (TUTTO ? ' on' : '') + '"></span></button>' +
-        (sul || DLQ.length ? '<button class="lrow" data-a="dlpill"><span class="ic">' + ic('trash') + '</span><span class="t">Ferma o cancella i download<small>Libera lo spazio di questo dispositivo: i brani restano sul Mac</small></span></button>' : '') + '</div>';
+        '<button class="lrow" data-a="dlpill"><span class="ic">' + ic('trash') + '</span><span class="t">Download e spazio<small>' +
+        (Date.now() - ls.get('am-pieno', 0) < 86400000 ? 'Spazio esaurito: tocca per vedere perché e cosa fare' : 'Cosa manca e perché · ferma o cancella i download') + '</small></span></button></div>';
     }
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
     h += ritScaffale() + atlSezione();   // «Per ritmo», Playlist di Atlante (dal Mac mini) e «Crea con l'IA»
@@ -3352,6 +3353,7 @@ document.addEventListener('click', e => {
     case 'dlpill': dlScheda(); break;
     case 'dl-ferma': closeSheet(); dlFerma(); break;
     case 'dl-tutto': closeSheet(); setTutto(true); break;
+    case 'dl-sveglio': closeSheet(); SVEGLIO.on = !SVEGLIO.on; if (SVEGLIO.on) { sveglioPrendi(); toast('Lo schermo resta acceso finché scarica: lascia il telefono in carica'); } else { sveglioLascia(); toast('Lo schermo si spegne come sempre'); } break;
     case 'dl-cancella': dlCancellaChiedi(); break;
     case 'dl-cancella-si': closeSheet(); dlCancella(); break;
     case 'sharecur': if (curId) shareTrack(curId); else toast('Nessun brano in riproduzione'); break;
@@ -3590,15 +3592,62 @@ window.AM = {
 };
 ['play', 'pause', 'loadedmetadata', 'ended'].forEach(n => auOn(n, xNotify));
 setInterval(() => { if (xSubs.size && !au.paused) xNotify(); }, 1000);
-// il contatore dei download toccato (o «Download» in Libreria): fermarli, o cancellare i brani scaricati dal Mac
+// il contatore dei download toccato (o «Download e spazio» in Libreria): cosa manca e perché, fermarli, cancellare i
+// brani scaricati dal Mac, tenere lo schermo acceso finché scarica
 const scaricati = () => [...saved].filter(id => (T.get(id) || {}).remote);
+// i conti di «Scarica tutta la musica»: i brani del Mac, i doppioni (se ne scarica uno solo), quelli qui, in coda e tolti a
+// mano, e quanto pesano (il Mac dice il peso di ogni file: «size»)
+function dlConti() {
+  const gm = gemelli(), visti = new Set(), q = new Set(DLQ), c = {mac:0, tot:0, sul:0, coda:0, tolti:0, peso:0, pesoSul:0, pesoManca:0};
+  for (const t of T.values()) if (t.remote) {
+    c.mac++;
+    const g = gm.get(t.id); if (g) { if (visti.has(g)) continue; visti.add(g); }
+    const ids = g || [t.id], qui = ids.find(x => saved.has(x) || !(T.get(x) || {}).remote);
+    const peso = Math.max(...ids.map(x => (T.get(x) || {}).size || 0));
+    c.tot++; c.peso += peso;
+    if (qui) { c.sul++; c.pesoSul += (T.get(qui) || {}).size || peso; continue; }
+    if (ids.some(x => TOLTI.has(x))) { c.tolti++; continue; }
+    if (ids.some(x => q.has(x) || dlCur === x || grabbing.has(x))) c.coda++;
+    c.pesoManca += peso;
+  }
+  return c;
+}
+function gb(b) { return (b / 1e9).toLocaleString('it', {maximumFractionDigits:1}) + ' GB'; }
+function num(n) { return n.toLocaleString('it'); }   // (funzioni: la Libreria le usa anche prima di arrivare qui)
+function dlPerche(c, st) {   // perché non c'è tutto: in parole semplici, con i numeri di questo dispositivo
+  const r = [];
+  r.push('Sul Mac: ' + num(c.mac) + ' brani' + (c.mac > c.tot ? ', di cui ' + num(c.mac - c.tot) + (c.mac - c.tot === 1 ? ' doppione' : ' doppioni') + ' (stesso titolo, artista e durata: se ne scarica uno solo), quindi ' + num(c.tot) + ' brani diversi' : '') + '.');
+  r.push('Qui: ' + num(c.sul) + (c.pesoSul ? ' (' + gb(c.pesoSul) + ')' : '') + (c.coda ? ' · in coda ' + num(c.coda) : '') + (c.tolti ? ' · tolti a mano ' + num(c.tolti) + ' (non tornano da soli)' : '') + '.');
+  if (c.peso) r.push('Tutta la musica pesa ' + gb(c.peso) + '; ne mancano ' + gb(c.pesoManca) + '.');
+  if (st && st.quota) {
+    const libero = Math.max(0, st.quota - (st.usage || 0));
+    r.push('Spazio per l\'app su questo dispositivo: ' + gb(st.quota) + ' al massimo (su iPhone circa il 60% del disco, se il disco è libero), già usati ' + gb(st.usage || 0) + '.');
+    if (c.pesoManca > libero) r.push('Non c\'è spazio per tutto: mancano ' + gb(c.pesoManca) + ' ma ne restano ' + gb(libero) + '. Per averne di più: libera spazio sul telefono, oppure togli dei brani (si tengono prima preferiti, playlist e i più ascoltati).');
+  }
+  const pieno = ls.get('am-pieno', 0);
+  if (Date.now() - pieno < 86400000) r.push('Spazio esaurito ' + new Date(pieno).toLocaleString('it', {weekday:'long', hour:'2-digit', minute:'2-digit'}) + ': i download riprovano da soli dopo un giorno.');
+  if (isIOS) r.push('Su iPhone e iPad scarica solo con l\'app aperta: chiusa o in sottofondo iOS la ferma. Per scaricare tutto lasciala aperta in carica, con lo schermo acceso (tasto qui sotto).');
+  return r;
+}
+// lo schermo resta acceso finché ci sono download (l'app aperta in carica scarica tutto, anche di notte)
+const SVEGLIO = {on:false, lock:null};
+async function sveglioPrendi() {
+  if (!SVEGLIO.on || SVEGLIO.lock || !DLQ.length || document.visibilityState !== 'visible' || !('wakeLock' in navigator)) return;
+  try { SVEGLIO.lock = await navigator.wakeLock.request('screen'); SVEGLIO.lock.addEventListener('release', () => { SVEGLIO.lock = null; }); } catch (e) {}
+}
+function sveglioLascia() { if (SVEGLIO.lock) { SVEGLIO.lock.release().catch(() => {}); SVEGLIO.lock = null; } }
+document.addEventListener('visibilitychange', sveglioPrendi);
+setInterval(() => { if (SVEGLIO.on && !DLQ.length) { SVEGLIO.on = false; sveglioLascia(); } }, 5000);
 function dlScheda() {
-  const n = DLQ.length, sc = scaricati().length;
-  openSheet('<div class="grp"><div class="smsg"><b>Download</b>' + esc((n ? dlText() + ' ' : 'Nessun download in corso. ') +
-    sc + (sc === 1 ? ' brano del Mac è' : ' brani del Mac sono') + ' su questo dispositivo.') + '</div>' +
+  const n = DLQ.length, sc = scaricati().length, c = dlConti(), pieno = Date.now() - ls.get('am-pieno', 0) < 86400000;
+  const testo = st => (n ? [dlText()] : []).concat(dlPerche(c, st)).map(esc).join('<br>');
+  openSheet('<div class="grp"><div class="smsg"><b>Download e spazio</b><span id="dlPerche">' + testo(null) + '</span></div>' +
+    (n && 'wakeLock' in navigator ? '<button data-a="dl-sveglio"><span class="l">' + (SVEGLIO.on ? 'Lascia spegnere lo schermo' : 'Tieni lo schermo acceso finché scarica') + '</span>' + ic(SVEGLIO.on ? 'check' : 'down') + '</button>' : '') +
     (n ? '<button data-a="dl-ferma"><span class="l">Ferma i download</span>' + ic('close') + '</button>' : '') +
     (sc ? '<button class="red" data-a="dl-cancella"><span class="l">Cancella i brani scaricati</span>' + ic('trash') + '</button>' : '') +
-    (!TUTTO ? '<button data-a="dl-tutto"><span class="l">Scarica di nuovo tutta la musica</span>' + ic('down') + '</button>' : '') + '</div>' + cancel);
+    (!TUTTO || pieno ? '<button data-a="dl-tutto"><span class="l">' + (TUTTO ? 'Riprova a scaricare adesso' : 'Scarica di nuovo tutta la musica') + '</span>' + ic('down') + '</button>' : '') + '</div>' + cancel);
+  // lo spazio che iOS (o il browser) lascia all'app: arriva un attimo dopo
+  if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(st => { const x = $('dlPerche'); if (x) x.innerHTML = testo(st); }).catch(() => {});
 }
 function dlFerma() {   // la coda si svuota (anche i «Scarica» toccati a mano) e «Scarica tutta la musica» si spegne
   const n = DLQ.length;
