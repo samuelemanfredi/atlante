@@ -9069,6 +9069,14 @@ class TestKaraokeDalVivo(unittest.TestCase):
         nuovi = self.pezzi_log()[prima:]
         self.assertEqual(sorted(zip(nuovi[::2], nuovi[1::2])), [("0", "24050"), ("48100", "21900")])
 
+    def test_6_peso_nel_catalogo(self):
+        """Il catalogo dice quanto pesa ogni brano: l'app sa quanto spazio serve per scaricare tutto."""
+        cat = self.s.json("GET", "/api/musica/catalogo")["brani"]
+        nomi = {b["title"]: b for b in cat}
+        p = os.path.join(self.c["musica"], "V - Mai trovata.mp3")
+        self.assertEqual(nomi["Mai trovata"]["size"], os.path.getsize(p))
+        self.assertTrue(all(isinstance(b.get("size"), int) and b["size"] > 0 for b in cat))
+
 
 class TestKaraokeInvitati(unittest.TestCase):
     """Gli invitati leggono i testi (come prima); Gestione → Testi e karaoke resta solo di Samuele."""

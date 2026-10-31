@@ -521,6 +521,14 @@ def da_nome(nome):
     return {"title": n}
 
 
+def _peso_file(b):
+    """Quanto pesa il file di un brano del catalogo, in byte (dalla sua firma «dimensione:data»); 0 se non si sa."""
+    try:
+        return max(0, int(str(b.get("_f") or "").split(":", 1)[0]))
+    except ValueError:
+        return 0
+
+
 def _intero(s):
     m = re.match(r"\s*(\d+)", s or "")
     return int(m.group(1)) if m else 0
@@ -773,6 +781,9 @@ class Libreria:
                 if b["id"] in via:
                     continue   # tolto da Samuele: fuori dall'app di tutti finché non lo rimette
                 x = {k: v for k, v in b.items() if not k.startswith("_")}
+                peso = _peso_file(b)
+                if peso:
+                    x["size"] = peso   # byte: l'app sa quanto spazio serve per scaricare tutto
                 if b["id"] in corr:
                     x.update(corr[b["id"]])   # titolo, artista, album, copertina corretti: il file non cambia
                 if b["id"] in self.compilation:
