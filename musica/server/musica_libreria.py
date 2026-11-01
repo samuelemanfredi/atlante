@@ -3041,6 +3041,7 @@ class Dispositivi:
             if x is None:
                 x = self.d[id_] = {"comandi": [], "di": di}
             x.update(nome=nome, tipo=tipo, stato=stato, visto=ora)
+            DIARI.aggiungi(id_, nome, tipo, di, stato)
             # escono quelli sentiti meno di recente (mai quello appena arrivato): prima tra i dispositivi della stessa
             # persona, così uno che ne inventa tanti non fa uscire quelli degli altri
             suoi = [k for k, v in self.d.items() if v.get("di", "p") == di]
@@ -3092,6 +3093,93 @@ class Dispositivi:
 
 
 DISP = Dispositivi()
+
+
+# ----- scatola nera: il diario audio di ogni dispositivo, sul disco -----
+# Ogni app manda con il suo stato le ultime 30 voci del diario dei passaggi (mixer, pause, pagina nascosta, telecomando…).
+# Il Mac le tiene (le ultime DIARI_MAX per dispositivo, in <cache>/diari.json): così, quando la musica si blocca su un
+# iPhone, si legge dopo che cosa è successo, anche se l'app nel frattempo è stata chiusa. Solo Samuele: GET diari.
+
+DIARI_MAX = 400          # voci per dispositivo
+DIARI_DISP = 30          # dispositivi ricordati
+DIARI_SCRIVI = 15        # secondi tra due scritture del file
+
+
+class Diari:
+    """Scatola nera: i diari audio che i dispositivi di Samuele mandano con il loro stato (passaggi tra i brani, mixer,
+    pause, telecomando…), tenuti sul disco del Mac (cache/diari.json, al più ogni DIARI_SCRIVI secondi). Così si legge
+    com'è andata anche dopo che l'app sull'iPhone è stata chiusa (api/extra/diari, solo Samuele). Ogni stato porta di
+    nuovo le ultime voci: si tengono solo quelle mai viste (uguali in tutto). Quelli degli invitati non si tengono."""
+
+    def __init__(self):
+        self.blocco = threading.Lock()
+        self.d = {}      # id -> {nome, tipo, agg, voci:[...]}
+        self.file = None
+        self.scritto = 0.0
+        self.cambiato = False
+
+    def _carica(self):
+        """Il file nella cartella della cache di adesso (nelle prove cambia): se è un altro, si rilegge da lì."""
+        try:
+            f = os.path.join(_cart("cache"), "diari.json")
+        except Exception:   # niente cartella della cache: resta tutto in memoria
+            return
+        if f == self.file:
+            return
+        self.file, self.d, self.cambiato = f, {}, False
+        try:
+            with open(f, encoding="utf-8") as fh:
+                o = json.load(fh)
+            if isinstance(o, dict):
+                self.d = {k: v for k, v in o.items() if isinstance(v, dict) and isinstance(v.get("voci"), list)}
+        except (OSError, ValueError):
+            pass
+
+    def aggiungi(self, id_, nome, tipo, di, stato):
+        if di != "p":
+            return
+        mix = (stato or {}).get("mix")
+        voci = mix.get("diario") if isinstance(mix, dict) else None
+        if not isinstance(voci, list) or not voci:
+            return
+        with self.blocco:
+            self._carica()
+            x = self.d.setdefault(id_, {"voci": []})
+            x.update(nome=nome, tipo=tipo, agg=time.time())
+            visti, nuove = {json.dumps(v, sort_keys=True) for v in x["voci"][-200:]}, []
+            for v in voci[-60:]:
+                k = json.dumps(v, sort_keys=True) if isinstance(v, dict) else None
+                if k and k not in visti:
+                    visti.add(k)
+                    nuove.append(v)
+            if not nuove:
+                return
+            x["voci"] = (x["voci"] + nuove)[-DIARI_MAX:]
+            if len(self.d) > DIARI_DISP:
+                for k in sorted(self.d, key=lambda k: self.d[k].get("agg", 0))[:len(self.d) - DIARI_DISP]:
+                    del self.d[k]
+            self.cambiato = True
+            if time.time() - self.scritto >= DIARI_SCRIVI:
+                self._scrivi()
+
+    def _scrivi(self):
+        if not self.file:
+            return
+        try:
+            _scrivi_json(self.file, self.d)
+            self.scritto, self.cambiato = time.time(), False
+        except OSError:
+            pass
+
+    def elenco(self):
+        with self.blocco:
+            self._carica()
+            if self.cambiato:
+                self._scrivi()
+            return [{"id": k, "nome": v.get("nome"), "tipo": v.get("tipo"), "agg": v.get("agg"), "voci": v.get("voci", [])}
+                    for k, v in sorted(self.d.items(), key=lambda kv: -kv[1].get("agg", 0))]
+
+DIARI = Diari()
 
 
 def _serve_pubblico():
@@ -15435,6 +15523,11 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "dispositivi" and not resto:
         solo("GET")
         _json(h, {"dispositivi": DISP.elenco(_di_disp(h))})
+    elif cosa == "diari" and not resto:   # la scatola nera dei diari audio (solo Samuele)
+        solo("GET")
+        if _chi_e(h)["ruolo"] != "proprietario":
+            raise ErroreExtra(403, "Solo per Samuele")
+        _json(h, {"dispositivi": DIARI.elenco()})
     elif cosa == "dispositivi" and len(resto) == 2 and resto[1] == "stato":
         solo("POST")
         _json(h, {"comandi": DISP.stato(resto[0], corpo, _di_disp(h))})
