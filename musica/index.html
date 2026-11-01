@@ -2271,6 +2271,36 @@ function menoCambia(id) {   // «Suggerisci meno»: fuori da riproduzione automa
   closeSheet(); toast(t.meno ? 'Suggerirò meno brani così' : 'Di nuovo tra i suggerimenti');
 }
 
+/* ★ DALLA SCHERMATA DI BLOCCO — «IL TELEFONO CHIEDE, IL MAC SA COSA SUONA». Una pagina web non può mettere un tasto suo
+   tra i comandi della schermata di blocco (lì iOS mostra solo ⏮ ⏯ ⏭ della Media Session), e dall'iOS 16 neanche le app
+   native vi hanno più il «mi piace». Il comando rapido «Preferito Atlante», messo tra i comandi della schermata di
+   blocco, chiede al Mac (POST api/extra/preferito): il Mac sa cosa suona su questo dispositivo (lo stato del telecomando),
+   lo mette nei Preferiti dell'account e manda qui il comando «preferito» (devPreferito), che accende la stella. */
+function bloccoUrl() { return new URL(XAPI + 'preferito?formato=testo&tipo=' + encodeURIComponent(DEV.tipo || 'iphone'), location.href).href; }
+function bloccoScheda() {
+  openSheet('<div class="grp"><div class="smsg"><b>★ dalla schermata di blocco</b>Come in Apple Music: un tocco e il brano che stai ascoltando va nei Preferiti, senza aprire l\'app. Serve il comando rapido «Preferito Atlante».</div>' +
+    '<button data-a="blocco-cr"><span class="l">Aggiungi il comando rapido</span>' + ic('star') + '</button></div>' +
+    '<div class="grp"><div class="smsg"><b>Poi, sulla schermata di blocco</b>1. Tieni premuto sulla schermata di blocco › Personalizza › Schermata di blocco.<br>2. In basso togli la torcia o la fotocamera (−) e tocca +.<br>3. Comandi Rapidi › «Preferito Atlante» › Fine.<br>Lo puoi mettere anche nel Centro di Controllo o sul tasto Azione.</div></div>' +
+    '<div class="grp"><div class="smsg"><b>Oppure a mano</b>In Comandi Rapidi: nuovo comando › «Ottieni contenuto dell\'URL» con l\'indirizzo qui sotto e metodo POST › «Mostra notifica» con «Contenuti dell\'URL».</div>' +
+    '<button data-a="blocco-copia"><span class="l">Copia l\'indirizzo</span>' + ic('share') + '</button></div>' + cancel);
+}
+async function bloccoComando() {
+  const u = new URL(XAPI + 'preferito/comando-rapido', location.href).href;
+  try {
+    const r = await fetchT(u, {method:'HEAD', cache:'no-store'}, 8000);
+    if (!r.ok) {
+      let e = ''; try { e = (await (await fetchT(u, {cache:'no-store'}, 8000)).json()).errore; } catch (x) { /* niente */ }
+      toast(e || 'Il comando rapido non è ancora pronto sul Mac', true); return;
+    }
+  } catch (e) { toast('Il Mac non risponde', true); return; }
+  closeSheet();
+  if (!window.open(u, '_blank')) location.href = u;   // Safari lo apre in Comandi Rapidi
+}
+function bloccoCopia() {
+  const u = bloccoUrl();
+  (navigator.clipboard ? navigator.clipboard.writeText(u) : Promise.reject(new Error('appunti'))).then(() => toast('Indirizzo copiato'), () => toast(u));
+}
+
 /* TIMER DI SPEGNIMENTO: la musica si ferma tra 15–90 minuti o alla fine del brano (si controlla a ogni avanzamento del
    lettore, che a schermo bloccato continua; i timer di JavaScript lì arrivano in ritardo) */
 const TIMER = {fine:0, finebrano:false};
@@ -3545,7 +3575,8 @@ function trackMenu(id, pl) {
     '<button data-a="m-last" data-id="' + id + '"><span class="l">Riproduci per ultimo</span>' + ic('last') + '</button>' +
     '<button data-a="m-stazione" data-id="' + id + '"><span class="l">Crea stazione</span>' + ic('radio') + '</button></div>' +
     (id === curId ? '<div class="grp"><button data-a="m-timer"><span class="l">Timer di spegnimento' + (TIMER.fine ? ': ' + Math.max(1, Math.round((TIMER.fine - Date.now()) / 60000)) + ' min' : TIMER.finebrano ? ': fine del brano' : '') + '</span>' + ic('timer') + '</button>' +
-      '<button data-a="volnorm"><span class="l">Volume uniforme: ' + (VOLN.on ? 'acceso' : 'spento') + '</span>' + ic('spkHi') + '</button></div>' : '') +
+      '<button data-a="volnorm"><span class="l">Volume uniforme: ' + (VOLN.on ? 'acceso' : 'spento') + '</span>' + ic('spkHi') + '</button>' +
+      '<button data-a="m-blocco"><span class="l">★ dalla schermata di blocco…</span>' + ic('star') + '</button></div>' : '') +
     '<div class="grp"><button data-a="m-fav" data-id="' + id + '"><span class="l">' + (t.fav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti') + '</span>' + ic(t.fav ? 'star' : 'staro') + '</button>' +
     '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' +
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
@@ -3662,6 +3693,9 @@ document.addEventListener('click', e => {
     case 'm-stazione': stazione(d.id); break;
     case 'm-meno': menoCambia(d.id); break;
     case 'm-timer': timerScheda(); break;
+    case 'm-blocco': bloccoScheda(); break;
+    case 'blocco-cr': bloccoComando(); break;
+    case 'blocco-copia': bloccoCopia(); break;
     case 'timer': timerImposta(d.v); break;
     case 'volnorm': closeSheet(); volNormCambia(); break;
     case 'tutto': setTutto(!TUTTO); break;
@@ -4068,10 +4102,19 @@ function devEsegui(c) {
     case 'seek': if (isFinite(c.t)) { try { au.currentTime = Math.max(0, +c.t); } catch (e) {} } break;
     case 'volume': if (isFinite(c.v)) { userVol = Math.max(0, Math.min(1, +c.v)); ALLAU.forEach(applyVol); vol.value = Math.round(userVol * 100); vol.style.setProperty('--p', vol.value + '%'); ls.set('am-vol', userVol); } break;
     case 'suona': devAvvia(c); break;
+    case 'preferito': devPreferito(c); break;
   }
   // l'iPhone fa partire la musica da lontano solo se l'app è stata toccata almeno una volta: se no lo si dice al telecomando
   if (voleva) setTimeout(() => { const b = au.paused && !!curId; if (b !== DEV.bloccato) { DEV.bloccato = b; devInvia(true); } }, 2500);
   devInvia(true);
+}
+function devPreferito(c) {   // ★ dalla schermata di blocco: il comando rapido ha chiesto al Mac, il Mac lo dice qui
+  const t = (typeof c.id === 'string' && T.get(c.id)) || favBrano();
+  if (!t) return;
+  const on = typeof c.on === 'boolean' ? c.on : !t.fav;
+  if (!!t.fav !== on) { t.fav = on; dbPut('meta', t).catch(() => {}); favCambiati(); favMark(t.id); }
+  favTasti();
+  toast(on ? 'Aggiunto ai Preferiti' : 'Tolto dai Preferiti');
 }
 async function devAvvia(c) {   // la coda di un altro dispositivo (Riproduci su… / Ascolta qui), dal punto in cui era
   const prendi = () => (c.coda || []).map(z => 'r' + z).filter(z => T.has(z));

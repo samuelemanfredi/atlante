@@ -35,7 +35,9 @@ Aperta da Internet (`tailscale funnel`) senza password, ogni API risponde 401 co
 | GET | `dispositivi` | `{dispositivi:[{id,nome,tipo,fa,stato}]}` — le app aperte sentite negli ultimi 60 s (telecomando dell'app: `fa` = secondi dall'ultimo stato) |
 | POST | `dispositivi/<id>/stato` `{nome,tipo,stato}` | `{comandi:[…]}` — lo manda ogni app ogni pochi secondi |
 | GET | `dispositivi/<id>/comandi?attesa=25` | `{comandi:[…]}` appena arriva un comando (attesa lunga) |
-| POST | `dispositivi/<id>/comando` `{azione, …}` | `{ok:true}` — toggle, play, pause, next, prev, seek {t}, volume {v}, suona {coda,t,da,shuffle,repeat} |
+| POST | `dispositivi/<id>/comando` `{azione, …}` | `{ok:true}` — toggle, play, pause, next, prev, seek {t}, volume {v}, suona {coda,t,da,shuffle,repeat}, preferito {id,on} |
+| POST | `preferito` `{azione:'aggiungi'\|'togli'\|'cambia', tipo}` (anche nell'indirizzo) | `{ok, preferito, prima, brano:{id,titolo,artista,album}, dispositivo:{id,nome,tipo}, testo}` — ★ dalla schermata di blocco: il brano che suona su un dispositivo della persona (prima uno che suona, poi quello del `tipo`, poi l'ultimo sentito) va nei Preferiti dell'account e l'app riceve `preferito` {id, on}; con `?formato=testo` solo la riga `testo` (anche gli errori, con ⚠️), sempre 200: la mostra il comando rapido. Solo con un account |
+| GET | `preferito/comando-rapido` | il comando rapido «Preferito Atlante» firmato (`<cache>/preferito.shortcut`, preparato da uno script sul Mac); 404 se non c'è. Solo Samuele |
 | GET | `diari` | `{dispositivi:[{id,nome,tipo,agg,voci:[…]}]}` — solo Samuele: la scatola nera dei diari audio (`stato.mix.diario`) dei suoi dispositivi, tenuta sul disco del Mac (al più 400 voci per dispositivo, 30 dispositivi) |
 | GET | `voci` | `{voci:[{nome, lingua, esempio}]}` — voci di sintesi del Mac (`say -v ?`), prima quelle italiane |
 | POST | `audiolibro` `{titolo, autore, voce, velocita, capitoli:[{titolo, testo}]}` | `{id}` — ogni capitolo diventa un file m4a con `say` |
