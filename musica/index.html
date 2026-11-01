@@ -3295,7 +3295,7 @@ function ritNome(sc) {
 }
 function ritSuona(sc, nome) {
   const L = ritBrani(sc);
-  if (!L.length) { toast(RITMI ? 'Nessun brano con questo ritmo' + (sc.regolare ? ' regolare' : '') + (SRV ? '' : ' tra quelli sull\'iPhone') : 'I BPM dei brani arrivano dal Mac mini: per ora non ci sono', true); return; }
+  if (!L.length) { toast(ritMisura() ? 'Il Mac mini sta ancora misurando i BPM (' + ritMisura().replace('BPM in misura · ', '') + '): riprova tra poco' : RITMI ? 'Nessun brano con questo ritmo' + (sc.regolare ? ' regolare' : '') + (SRV ? '' : ' tra quelli sull\'iPhone') : 'I BPM dei brani arrivano dal Mac mini: per ora non ci sono', true); return; }
   let ord = shuffleArr(L);
   if (MIX.on) {   // mix a tempo: dopo ogni brano il più vicino come ritmo, così i passaggi restano dentro lo stesso ritmo
     const resto = ord.slice(1); ord = [ord[0]];
@@ -3317,9 +3317,21 @@ function ritNp() {   // nel lettore: il BPM del brano in corso, quando suona «P
 }
 ['play', 'loadedmetadata'].forEach(n => auOn(n, ritNp));
 setInterval(ritNp, 2000);
+function ritMisura() {   // a che punto è il Mac mini con i BPM: '' quando li ha misurati tutti (o non lo dice)
+  const m = RITMI && RITMI.totale ? RITMI : null;
+  if (!m || !(m.misurati < m.totale)) return '';
+  if (m.attivo === false) return 'BPM da misurare sul Mac mini';
+  return 'BPM in misura · ' + Math.floor(100 * (m.misurati || 0) / m.totale) + '%';
+}
+function ritConta(sc) {   // sotto ogni ritmo: quanti brani, o che i BPM stanno ancora arrivando (mai «0 brani» per sbaglio)
+  if (!RITMI && !BPMC.size) return 'BPM in arrivo';
+  const n = ritBrani(sc).length;
+  if (n) return (n === 1 ? '1 brano' : n + ' brani') + (ritMisura() ? ' · altri in arrivo' : '');
+  return ritMisura() || '0 brani';
+}
 function ritTile(nome, sotto, sc, k, colore, a) {
   return '<button class="tile" data-a="' + a + '" data-k="' + k + '"><span class="art ritart" style="background:' + colore + '"><span class="rn">' + esc(sotto) + '</span><span class="ru">BPM</span></span>' +
-    '<div class="n">' + esc(nome) + '</div><div class="a">' + (RITMI || BPMC.size ? (n => n === 1 ? '1 brano' : n + ' brani')(ritBrani(sc).length) : 'BPM in arrivo') + '</div></button>';
+    '<div class="n">' + esc(nome) + '</div><div class="a">' + esc(ritConta(sc)) + '</div></button>';
 }
 const ritPronto = p => ({valori:[], intervalli:[[p.da, p.a]], tol:0, regolare:RSC.regolare, mezzo:RSC.mezzo});
 function ritScaffale() {   // in Home e in Libreria
@@ -3361,6 +3373,7 @@ pages.ritmo = function () {
   const sw = (a, on, t) => '<button class="lrow" data-a="' + a + '" role="switch" aria-checked="' + !!on + '"><span class="t">' + t + '</span><span class="sw' + (on ? ' on' : '') + '"></span></button>';
   let h = topBar() + '<h1 class="lt">Per ritmo</h1><p class="dlbar">Scegli un ritmo: parte subito una riproduzione casuale dei brani con quei BPM. Contano anche il mezzo e il doppio tempo (segno ×2 e ÷2: un brano a 85 vale per 170).</p>';
   if (!RITMI && SRV) h += '<p class="dlbar">I BPM dei brani li sta misurando il Mac mini: le scelte si riempiono man mano.</p>';
+  else if (ritMisura()) h += '<p class="dlbar" id="ritMis">Il Mac mini ha misurato i BPM di ' + RITMI.misurati.toLocaleString('it-IT') + ' brani su ' + RITMI.totale.toLocaleString('it-IT') + ': le scelte si riempiono man mano.</p>';
   h += '<div id="ritNow"></div><h2 class="h2">Pronti</h2><div class="ritg">' +
     RIT_PRONTI.map((p, i) => '<button class="ritb" data-a="rit-pronto" data-k="' + i + '" style="--c:' + p.c + '"><b>' + p.da + '–' + p.a + '</b><span>' + p.nome + '</span></button>').join('') +
     RITMIEI.map((p, i) => '<span class="ritb mio"><button data-a="rit-mio" data-k="' + i + '"><b>' + esc(ritNome(p.sc).replace(' BPM', '')) + '</b><span>' + esc(p.nome) + '</span></button><button class="x" data-a="rit-mio-x" data-k="' + i + '" aria-label="Togli ' + esc(p.nome) + '">' + ic('close') + '</button></span>').join('') + '</div>';
