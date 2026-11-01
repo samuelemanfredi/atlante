@@ -379,6 +379,9 @@ class Server:
         # i link da scaricare si controllano risolvendo il nome (solo indirizzi pubblici): qui senza chiedere al DNS vero,
         # così le prove non dipendono dalla rete (93.184.215.14 è un indirizzo pubblico qualsiasi)
         env.setdefault("ATLANTE_DNS_PROVE", "example.com=93.184.215.14,soundcloud.com=93.184.215.14")
+        # il lavoro sui BPM e sui generi è acceso di serie: nelle prove solo dove una prova lo chiede (--tematiche),
+        # così nessun server di prova chiede niente al MusicBrainz vero
+        env.setdefault("ATLANTE_TEMATICHE", "0")
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         for k, v in self.ambiente.items():
@@ -5048,6 +5051,202 @@ class TestMusicBrainz(unittest.TestCase):
                 mb.brano("Albachiara", "Vasco Rossi")
 
 
+# afconvert finto (come quello di macOS): `afconvert -f WAVE -d LEI16@11025 -c 1 <brano> <uscita>`; scrive l'audio di
+# SINTESI con i valori di <brano>.finto.json. Con AFC_SOLO_STEREO=1 non sa fare «@hz» né «-c»: con -d LEI16 scrive un WAV
+# stereo a 44100 Hz (il resto lo deve fare Python). Ogni chiamata si segna in afconvert.log.
+FINTO_AFCONVERT = SINTESI + r'''
+import json, os
+a = sys.argv[1:]
+with open(os.path.join(os.environ["FINTO_DIR"], "afconvert.log"), "a") as f:
+    f.write(json.dumps(a) + "\n")
+if a[:2] != ["-f", "WAVE"] or "-d" not in a:
+    sys.exit(2)
+fmt = a[a.index("-d") + 1]
+stereo = os.environ.get("AFC_SOLO_STEREO") == "1"
+if stereo and ("@" in fmt or "-c" in a):
+    sys.stderr.write("formato non supportato\n")
+    sys.exit(1)
+ingresso, uscita = a[-2], a[-1]
+with open(ingresso + ".finto.json") as f:
+    c = json.load(f)
+if stereo:
+    x = sintesi(c["bpm"], c.get("ampiezza", 0.5), c.get("rumore", 0.02), c["durata"], hz=44100)
+    d = array.array("h")
+    for v in x:
+        d.append(v)
+        d.append(v // 2)
+    if sys.byteorder == "big":
+        d.byteswap()
+    b = d.tobytes()
+    out = (b"RIFF" + struct.pack("<I", 36 + 12 + len(b)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 2, 44100, 44100 * 4, 4, 16)
+           + b"FLLR" + struct.pack("<I", 4) + b"\0\0\0\0" + b"data" + struct.pack("<I", len(b)) + b)
+else:
+    hz = int(fmt.split("@")[1])
+    out = wav(sintesi(c["bpm"], c.get("ampiezza", 0.5), c.get("rumore", 0.02), c["durata"], hz=hz), hz)
+with open(uscita, "wb") as f:
+    f.write(out)
+'''
+
+
+class TestMisuraSenzaFfmpeg(unittest.TestCase):
+    """I BPM anche su un Mac senza ffmpeg: afconvert (c'è su ogni Mac) decodifica il brano una volta sola."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_afconvert")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-afconvert-")
+        self.afc = os.path.join(self.base, "afconvert")
+        with open(self.afc, "w", encoding="utf-8") as f:
+            f.write("#!%s\n%s" % (sys.executable, FINTO_AFCONVERT))
+        os.chmod(self.afc, 0o755)
+        self.m._AFC_ULTIMO.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def brano(self, nome, bpm, durata):
+        p = os.path.join(self.base, nome)
+        with open(p, "wb") as f:
+            f.write(b"finto")
+        with open(p + ".finto.json", "w") as f:
+            json.dump({"bpm": bpm, "ampiezza": 0.6, "rumore": 0.02, "durata": durata}, f)
+        return p
+
+    def misura(self, percorso, durata, **amb):
+        prog = lambda n: None if n == "ffmpeg" else self.afc if n == "afconvert" else shutil.which(n)   # noqa: E731
+        with unittest.mock.patch.object(self.m, "_programma", prog), \
+                unittest.mock.patch.dict(os.environ, dict(amb, FINTO_DIR=self.base)):
+            return self.m.misura_audio(percorso, durata)
+
+    def chiamate(self):
+        try:
+            with open(os.path.join(self.base, "afconvert.log")) as f:
+                return [json.loads(r) for r in f]
+        except OSError:
+            return []
+
+    def test_afconvert_mono_11025(self):
+        r = self.misura(self.brano("a.mp3", 128, 150), 150)
+        self.assertEqual(r["pezzi"], 3)
+        self.assertAlmostEqual(r["bpm"], 128, delta=1.5)
+        self.assertEqual(len(self.chiamate()), 1)   # tre pezzi, una decodifica sola
+        self.assertEqual(self.chiamate()[0][:6], ["-f", "WAVE", "-d", "LEI16@11025", "-c", "1"])
+
+    def test_afconvert_che_non_cambia_formato(self):
+        # afconvert che dà solo il WAV com'è (stereo, 44100 Hz): mono e 11025 Hz li fa Python
+        r = self.misura(self.brano("b.mp3", 100, 75), 75, AFC_SOLO_STEREO="1")
+        self.assertAlmostEqual(r["bpm"], 100, delta=1.5)
+        self.assertEqual([c[2:4] for c in self.chiamate()], [["-d", "LEI16@11025"], ["-d", "LEI16"]])
+
+    def test_senza_ffmpeg_ne_afconvert(self):
+        with unittest.mock.patch.object(self.m, "_programma", lambda n: None):
+            self.assertEqual(self.m.misura_audio(self.brano("c.mp3", 120, 100), 100), {"senza_ffmpeg": True})
+
+    def test_afconvert_rotto(self):
+        with open(self.afc, "w") as f:
+            f.write("#!/bin/sh\necho rotto >&2\nexit 1\n")
+        r = self.misura(self.brano("d.mp3", 120, 100), 100)
+        self.assertIsNone(r["bpm"])   # nessun pezzo letto: niente BPM, ma niente blocchi
+        self.assertEqual(r["pezzi"], 0)
+
+    @unittest.skipUnless(sys.platform == "darwin" and os.path.exists("/usr/bin/afconvert"), "solo sul Mac")
+    def test_afconvert_vero_del_mac(self):
+        p = os.path.join(self.base, "vero.wav")
+        x = array.array("h", sintesi(120, 0.6, 0.02, 90, hz=44100))
+        with open(p, "wb") as f:
+            f.write(wav(x, 44100))
+        prog = lambda n: None if n == "ffmpeg" else shutil.which(n, path=self.m._percorso_programmi())   # noqa: E731
+        with unittest.mock.patch.object(self.m, "_programma", prog):
+            r = self.m.misura_audio(p, 90)
+        self.assertAlmostEqual(r["bpm"], 120, delta=1.5)
+
+
+class TestLottiInsieme(unittest.TestCase):
+    """L'audio di più brani si misura insieme (un processo ciascuno): con 20 000 brani uno alla volta ci vorrebbero
+    giorni. Le schede restano giuste e le scrive un filo solo."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = carica_modulo("musica_libreria_lotti")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-lotti-")
+        m = self.m
+        m.LIB = FintaLibreria([voce(k, "Brano " + k, "Artista " + k, added=n) for n, k in enumerate("abcd")])
+        self.t = m.Tematiche(os.path.join(self.base, "tematiche"))
+        self.t.mb.brano = lambda *a: {"generi": ["pop"], "italiano": False, "anno": 2020}
+
+    def tearDown(self):
+        self.m.LIB = None
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_lotto_misura_insieme(self):
+        bpm = {"/x/a.mp3": 72.0, "/x/b.mp3": 95.0, "/x/c.mp3": 128.0, "/x/d.mp3": 175.5}
+        insieme, ora, blocco = [0], [0], threading.Lock()
+
+        def misura(percorso, durata):
+            with blocco:
+                ora[0] += 1
+                insieme[0] = max(insieme[0], ora[0])
+            time.sleep(0.4)
+            with blocco:
+                ora[0] -= 1
+            return {"bpm": bpm[percorso], "energia": 0.5, "regolarita": 0.8, "db": -12.0, "modo": 1, "tonalita": "Do maggiore"}
+        lotto = self.t._prossimi(4)
+        self.assertEqual(len(lotto), 4)
+        self.assertEqual(lotto[0][0], "d")   # i più nuovi prima
+        t0 = time.time()
+        with unittest.mock.patch.object(self.m, "_misura_in_processo", misura):
+            self.t.un_lotto(lotto)
+        self.assertGreaterEqual(insieme[0], 2)   # misurati insieme
+        self.assertLess(time.time() - t0, 1.5)
+        for k, p in (("a", "/x/a.mp3"), ("b", "/x/b.mp3"), ("c", "/x/c.mp3"), ("d", "/x/d.mp3")):
+            s = self.t.schede[k]
+            self.assertEqual((s["audio"], s["bpm"], s["mb"], s["generi"]), ("fatto", bpm[p], "fatto", ["pop"]))
+        self.assertEqual(self.t._prossimi(4), [])
+        r = self.t.ritmi()
+        self.assertEqual((r["misurati"], r["totale"], r["attivo"]), (4, 4, False))
+        self.assertEqual(sorted(v[0] for v in r["ritmi"].values()), sorted(bpm.values()))
+
+    def test_un_brano_che_non_va_non_ferma_il_lotto(self):
+        def misura(percorso, durata):
+            if percorso == "/x/b.mp3":
+                raise RuntimeError("misura non riuscita: file rotto")
+            return {"bpm": 120.0, "energia": 0.5, "regolarita": 0.8, "db": -12.0, "modo": 0, "tonalita": ""}
+        with unittest.mock.patch.object(self.m, "_misura_in_processo", misura):
+            self.t.un_lotto(self.t._prossimi(4))
+        self.assertEqual(self.t.schede["b"]["audio"], "errore")
+        self.assertEqual([self.t.schede[k]["bpm"] for k in "acd"], [120.0, 120.0, 120.0])
+        r = self.t.ritmi()
+        self.assertEqual((r["misurati"], len(r["ritmi"])), (4, 3))   # anche quello rotto conta come visto
+
+
+class TestTematicheAcceseDiSerie(unittest.TestCase):
+    """Senza impostazioni il server misura BPM e generi in sottofondo; ATLANTE_TEMATICHE=0 lo spegne."""
+
+    def stato(self, ambiente):
+        base = tempfile.mkdtemp(prefix="atlante-tematiche-serie-")
+        try:
+            c = prepara_cartelle(base)
+            # MusicBrainz chiuso: le prove non chiedono niente a quello vero
+            amb = dict(ambiente, ATLANTE_MUSICBRAINZ="http://127.0.0.1:%d" % porta_libera())
+            s = Server(base, c, ambiente=amb).avvia()
+            try:
+                return s.json("GET", "/api/extra/tematiche")["stato"]
+            finally:
+                s.ferma()
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_acceso_di_serie(self):
+        self.assertTrue(self.stato({"ATLANTE_TEMATICHE": None})["attivo"])
+
+    def test_spento_con_zero(self):
+        self.assertFalse(self.stato({"ATLANTE_TEMATICHE": "0"})["attivo"])
+
+
 class TestTematicheServer(unittest.TestCase):
     """Il lavoro in sottofondo sul server vero (MusicBrainz, IA e ffmpeg finti), la ripresa dopo un riavvio, «Crea con
     l'IA» (una richiesta alla volta, limite al giorno), le condivise e gli invitati."""
@@ -5119,6 +5318,28 @@ class TestTematicheServer(unittest.TestCase):
                 return [json.loads(r)["i"] for r in f]
         except OSError:
             return []
+
+    def test_1b_per_ritmo_e_fasce_di_bpm(self):
+        """«Per ritmo» nell'app (api/extra/tematiche/ritmi) e le fasce «Ritmo (BPM)»: ogni brano misurato sta nella
+        fascia del suo BPM e in nessun'altra; l'app sa quanti brani sono misurati e che il lavoro è acceso."""
+        self.finito(4)
+        r = self.s.json("GET", "/api/extra/tematiche/ritmi")
+        self.assertEqual((r["misurati"], r["totale"], r["attivo"]), (4, 4, True))
+        self.assertEqual(len(r["ritmi"]), 4)
+        bpm = {i: v[0] for i, v in r["ritmi"].items()}
+        attesi = {"Albachiara": 120, "Ain't My Fault": 150, "Brano misterioso": 95, "All I Want for Christmas Is You": 128}
+        for titolo, b in attesi.items():
+            self.assertAlmostEqual(bpm[self.id_di(titolo)], b, delta=2.5)
+        el = self.s.json("GET", "/api/extra/tematiche")
+        fasce = {p["id"]: set(self.s.json("GET", "/api/extra/tematiche/" + p["id"])["brani"])
+                 for g in el["gruppi"] if g["id"] == "ritmo" for p in g["playlist"]}
+        self.assertTrue(fasce)
+        regole = {p["id"]: p["regola"]["bpm"] for g in self.m.regole_atlante()[0] if g["id"] == "ritmo" for p in g["playlist"]}
+        for i, b in bpm.items():
+            dove = [f for f, ids in fasce.items() if i in ids]
+            self.assertEqual(len(dove), 1, (i, b, dove))
+            a, z = regole[dove[0]]
+            self.assertTrue(a <= b <= z, (b, dove))
 
     def test_1_classificazione(self):
         self.finito(4)

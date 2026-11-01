@@ -43,9 +43,9 @@ Per aprire l'app anche da Internet, senza Tailscale sul telefono (`tailscale fun
 
 Dalla rete Tailscale, dalla rete di casa e dal Mac stesso la password non serve (vedi controlla_accesso).
 
-Playlist di Atlante (playlist tematiche per tutti) e «Crea con l'IA»: con --tematiche (o ATLANTE_TEMATICHE=1) il Mac
-prepara in sottofondo, un brano alla volta, generi (MusicBrainz), BPM ed energia (dall'audio) di ogni brano. Le regole
-delle playlist sono in playlist-atlante.json; le proprie modifiche in <cache>/tematiche/regole.json.
+Playlist di Atlante (playlist tematiche per tutti), «Per ritmo» e «Crea con l'IA»: il Mac prepara in sottofondo
+generi (MusicBrainz), BPM ed energia (dall'audio) di ogni brano, acceso di serie (ATLANTE_TEMATICHE=0 lo spegne). Le
+regole delle playlist sono in playlist-atlante.json; le proprie modifiche in <cache>/tematiche/regole.json.
 
 Testi e karaoke (api/extra/testi, vedi x/CONTRATTO.md): il testo a tempo del brano che suona, dal file o da LRCLIB.
 Il lavoro su tutta la libreria (i testi di tutti i brani e, con Whisper, le parole a tempo dalla voce) parte solo da
@@ -56,6 +56,7 @@ import array
 import cmath
 import base64
 import collections
+import concurrent.futures
 import contextlib
 import difflib
 import getpass
@@ -870,10 +871,11 @@ PEZZO_HZ = 11025   # basta per il ritmo (cassa, rullante, charleston fino a 5 kH
 
 def _pezzo_wav(percorso, da, durata):
     """WAV mono 11025 Hz di un pezzo di brano (da «da» secondi, lungo «durata», al più 60 s), decodificato da ffmpeg con
-    il taglio preciso al campione. None se ffmpeg manca. Il primo campione è proprio il secondo «da» del brano."""
+    il taglio preciso al campione; senza ffmpeg da afconvert di macOS (vedi _pezzo_afconvert). None se mancano tutti e
+    due. Il primo campione è proprio il secondo «da» del brano."""
     ff = _programma("ffmpeg")
     if not ff:
-        return None
+        return _pezzo_afconvert(percorso, da, durata)
     da, durata = max(0.0, da), min(60.0, max(1.0, durata))
     args = [ff, "-nostdin", "-v", "error", "-ss", "%.3f" % da, "-t", "%.3f" % durata, "-i", percorso,
             "-map", "0:a:0", "-ac", "1", "-ar", str(PEZZO_HZ), "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
@@ -881,6 +883,94 @@ def _pezzo_wav(percorso, da, durata):
     if r.returncode != 0 or len(r.stdout) < 64:
         raise RuntimeError("ffmpeg: " + (r.stderr.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
     return r.stdout
+
+
+_AFC_ULTIMO = {}   # percorso → PCM (mono, 16 bit, PEZZO_HZ) dell'ultimo brano decodificato da afconvert
+
+
+def _wav_da_pcm(pcm, hz=PEZZO_HZ):
+    """WAV mono a 16 bit da campioni PCM (little endian)."""
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " +
+            struct.pack("<IHHIIHH", 16, 1, 1, hz, hz * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def _pcm_da_wav(b):
+    """(canali, Hz, campioni a 16 bit) di un WAV PCM a 16 bit, cercando i blocchi fmt e data (afconvert aggiunge FLLR)."""
+    if len(b) < 12 or b[:4] != b"RIFF" or b[8:12] != b"WAVE":
+        raise RuntimeError("afconvert: non è un WAV")
+    p, can, hz, bit, dati = 12, 0, 0, 0, None
+    while p + 8 <= len(b):
+        cid, sz = b[p:p + 4], struct.unpack("<I", b[p + 4:p + 8])[0]
+        if cid == b"fmt " and sz >= 16:
+            _, can, hz, _, _, bit = struct.unpack("<HHIIHH", b[p + 8:p + 24])
+        elif cid == b"data":
+            dati = b[p + 8:] if sz in (0, 0xFFFFFFFF) else b[p + 8:p + 8 + sz]
+            break
+        p += 8 + sz + (sz & 1)
+    if dati is None or bit != 16 or not can or not hz:
+        raise RuntimeError("afconvert: WAV senza audio a 16 bit")
+    a = array.array("h")
+    a.frombytes(dati[:len(dati) // 2 * 2])
+    if sys.byteorder == "big":
+        a.byteswap()
+    return can, hz, a
+
+
+def _a_mono_pezzo_hz(can, hz, a):
+    """Campioni a 16 bit portati a mono e a PEZZO_HZ (media dei canali, poi interpolazione lineare)."""
+    if can > 1:
+        a = array.array("h", (int(sum(a[i:i + can]) / can) for i in range(0, len(a) - can + 1, can)))
+    if hz != PEZZO_HZ and len(a) > 1:
+        passo, n = hz / PEZZO_HZ, int(len(a) * PEZZO_HZ / hz)
+        out = array.array("h", bytes(2 * n))
+        for k in range(n):
+            x = k * passo
+            i = int(x)
+            j = min(i + 1, len(a) - 1)
+            out[k] = int(a[i] + (a[j] - a[i]) * (x - i))
+        a = out
+    if sys.byteorder == "big":
+        a = array.array("h", a)
+        a.byteswap()
+    return a.tobytes()
+
+
+def _pezzo_afconvert(percorso, da, durata):
+    """Senza ffmpeg: afconvert (c'è su ogni Mac) decodifica il brano intero in WAV mono a PEZZO_HZ, una volta sola per
+    brano (le misure dello stesso brano prendono i loro pezzi da lì). None se manca anche afconvert."""
+    afc = _programma("afconvert")
+    if not afc:
+        return None
+    pcm = _AFC_ULTIMO.get(percorso)
+    if pcm == b"":
+        raise RuntimeError("afconvert: questo brano non si decodifica")   # già provato per un altro pezzo
+    if pcm is None:
+        _AFC_ULTIMO.clear()
+        _AFC_ULTIMO[percorso] = b""
+        fd, tmp = tempfile.mkstemp(prefix="atlante-misura-", suffix=".wav")
+        os.close(fd)
+        try:
+            # mono a PEZZO_HZ già da afconvert; se una versione non lo sa fare, il WAV com'è e il resto lo fa Python
+            for opz in (["-d", "LEI16@%d" % PEZZO_HZ, "-c", "1"], ["-d", "LEI16"]):
+                r = subprocess.run([afc, "-f", "WAVE"] + opz + [percorso, tmp], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180, env=_ambiente())
+                if r.returncode == 0 and os.path.getsize(tmp) > 64:
+                    break
+            else:
+                raise RuntimeError("afconvert: " + (r.stderr.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
+            with open(tmp, "rb") as f:
+                pcm = _a_mono_pezzo_hz(*_pcm_da_wav(f.read()))
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+        _AFC_ULTIMO.clear()
+        _AFC_ULTIMO[percorso] = pcm
+    da, durata = max(0.0, da), min(60.0, max(1.0, durata))
+    a = int(round(da * PEZZO_HZ)) * 2
+    pezzo = pcm[a:a + int(round(durata * PEZZO_HZ)) * 2]
+    if len(pezzo) < 64:
+        raise RuntimeError("afconvert: nessun audio da %.0f s" % da)
+    return _wav_da_pcm(pezzo)
 
 
 def gestisci(h):
@@ -11663,8 +11753,9 @@ def _chiedi_ia(corpo):
 # MusicBrainz (al più una richiesta al secondo, con un User-Agent che dice chi siamo, come chiedono loro), il genere
 # proposto dall'IA locale quando MusicBrainz non lo conosce, BPM, energia e regolarità del ritmo misurati sull'audio
 # (lo stesso metodo del mix a tempo dell'app, beatGrid, in un processo a parte per non rallentare il server) e l'anno.
-# Il lavoro gira in sottofondo un brano alla volta (--tematiche o ATLANTE_TEMATICHE=1) e dopo un riavvio riprende da
-# dove era: le schede fatte restano. Le playlist sono regole su questi dati scritte in playlist-atlante.json (accanto al
+# Il lavoro gira in sottofondo, acceso di serie (ATLANTE_TEMATICHE=0 lo spegne), e dopo un riavvio riprende da dove
+# era: le schede fatte restano. L'audio si misura su TEM_PROCESSI brani insieme (processi a bassa priorità): con
+# 20 000 brani e più, uno alla volta ci vorrebbero giorni; senza ffmpeg l'audio lo decodifica afconvert di macOS. Le playlist sono regole su questi dati scritte in playlist-atlante.json (accanto al
 # server); le modifiche di Samuele vanno in <cache>/tematiche/regole.json, che un aggiornamento non tocca. Un brano sta
 # in tutte le playlist a cui appartiene; una playlist vuota non compare.
 #
@@ -11684,6 +11775,9 @@ TEM_RIPOSO = 120          # secondi di pausa quando non c'è niente da fare
 TEM_RIPROVA = 6 * 3600    # brano non riuscito per un motivo passeggero (rete, IA spenta, ffmpeg mancante): si riprova dopo
 TEM_PAUSA_MB = 600        # MusicBrainz non risponde: per dieci minuti si misura solo l'audio
 TEM_RICALCOLO = 30        # mentre arrivano schede nuove le playlist si ricalcolano al più ogni 30 s
+# brani misurati insieme (un processo ciascuno, a bassa priorità): metà dei core, al più 4 (ATLANTE_TEMATICHE_PROCESSI)
+TEM_PROCESSI = max(1, min(8, int(os.environ.get("ATLANTE_TEMATICHE_PROCESSI") or 0) or
+                          max(1, min(4, (os.cpu_count() or 2) // 2))))
 MB_BASE = "https://musicbrainz.org"
 MB_INTERVALLO = 1.1       # secondi tra due richieste: MusicBrainz ne chiede al più una al secondo
 MB_TEMPO = 20
@@ -11985,10 +12079,15 @@ def _misura_da_riga(args):
     return 0
 
 
+def _bassa_priorita():
+    with contextlib.suppress(OSError, AttributeError):
+        os.nice(10)   # la misura non deve rallentare il server né la musica che suona
+
+
 def _misura_in_processo(percorso, durata):
     r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), "--misura-audio", percorso, "%.3f" % (durata or 0)],
                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900,
-                       env=_ambiente())
+                       env=_ambiente(), preexec_fn=_bassa_priorita if os.name == "posix" else None)
     righe = r.stdout.decode("utf-8", "replace").strip().splitlines()
     if r.returncode != 0 or not righe:
         raise RuntimeError("misura non riuscita: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
@@ -12740,7 +12839,11 @@ class Tematiche:
         allegri = set(ris["brani"].get("umore-buonumore", ())) | set(ris["brani"].get("umore-energia", ()))
         buonumore = [[d["id"], 2 if d["modo"] == 1 else 0.5 if d["modo"] == -1 else 1] for d in ris["dati"]
                      if d["id"] in allegri and (d["energia"] is None or d["energia"] >= 0.45)]
-        return {"ritmi": ritmi, "buonumore": buonumore}
+        # a che punto è la misura: l'app scrive «BPM in misura» invece di «0 brani» finché non ha finito
+        with self.blocco:
+            misurati = sum(1 for d in ris["dati"] if (self.schede.get(d["id"]) or {}).get("audio") in ("fatto", "errore"))
+        return {"ritmi": ritmi, "buonumore": buonumore, "misurati": misurati, "totale": len(ris["dati"]),
+                "attivo": self.attivo}
 
     # --- il lavoro in sottofondo ---
 
@@ -12833,35 +12936,56 @@ class Tematiche:
         threading.Thread(target=self._lavora, daemon=True).start()
 
     def _prossimo(self):
+        lotto = self._prossimi(1)
+        return lotto[0] if lotto else None
+
+    def _prossimi(self, n):
+        """Fino a n brani con qualcosa da fare: i brani nuovi (classifiche, caricamenti) per primi."""
         voci = self._voci()
-        voci.sort(key=lambda x: -(x[1].get("added") or 0))   # i brani nuovi (classifiche, caricamenti) per primi
-        ora = time.time()
+        voci.sort(key=lambda x: -(x[1].get("added") or 0))
+        ora, lotto = time.time(), []
         with self.blocco:
             for i, b in voci:
                 p = self._passi(self.schede.get(i), b, ora)
                 if p:
-                    return i, b, p
-        return None
+                    lotto.append((i, b, p))
+                    if len(lotto) >= n:
+                        break
+        return lotto
 
     def _lavora(self):
         while LIB is None or not LIB.ultima:   # si aspetta la prima lettura del disco
             time.sleep(2)
-        print("Playlist di Atlante: lavoro in sottofondo avviato", flush=True)
+        print("Playlist di Atlante: lavoro in sottofondo avviato (%s)" % (
+            "%d brani insieme" % TEM_PROCESSI if TEM_PROCESSI > 1 else "un brano alla volta"), flush=True)
         while True:
-            x = self._prossimo()
-            if not x:
+            lotto = self._prossimi(TEM_PROCESSI)
+            if not lotto:
                 self.ora = ""
                 self.salva()
                 self.sveglia.wait(TEM_RIPOSO)
                 self.sveglia.clear()
                 continue
-            self.un_brano(*x)
+            self.un_lotto(lotto)
             self.salva()
 
-    def un_brano(self, i, b, passi):
+    def un_lotto(self, lotto):
+        """L'audio dei brani del lotto si misura tutto insieme (un processo per brano); MusicBrainz e l'IA intanto
+        vanno avanti uno alla volta, e ogni scheda si scrive qui, in questo filo, come con un brano solo."""
+        audio = [x for x in lotto if "audio" in x[2]]
+        if len(audio) < 2:
+            for x in lotto:
+                self.un_brano(*x)
+            return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(audio)) as ex:
+            misure = {i: ex.submit(_misura_in_processo, b["_p"], b.get("duration") or 0) for i, b, _ in audio}
+            for i, b, passi in lotto:
+                self.un_brano(i, b, passi, misura=misure.get(i))
+
+    def un_brano(self, i, b, passi, misura=None):
         self.ora = " — ".join(v for v in (b.get("title"), b.get("artist")) if v)
         try:
-            self.classifica(i, b, passi)
+            self.classifica(i, b, passi, misura=misura)
         except Exception as e:   # noqa: BLE001  un brano che non va non ferma gli altri (e si riprova più tardi)
             print("Playlist di Atlante: %s non riuscito: %s" % (self.ora, e), flush=True)
             with self.blocco:
@@ -12876,8 +13000,9 @@ class Tematiche:
                 self.versione += 1
                 self.ora = ""
 
-    def classifica(self, i, b, passi):
-        """Un passo dopo l'altro sulla scheda di un brano: MusicBrainz, IA (se serve), audio."""
+    def classifica(self, i, b, passi, misura=None):
+        """Un passo dopo l'altro sulla scheda di un brano: MusicBrainz, IA (se serve), audio. `misura`: la misura
+        dell'audio già partita (un Future di un_lotto), altrimenti si misura qui."""
         with self.blocco:
             s = dict(self.schede.get(i) or {})
         if s.get("v") != TEM_VERSIONE:
@@ -12912,7 +13037,7 @@ class Tematiche:
                 _IA_UNA.release()
         if "audio" in passi:
             try:
-                m = _misura_in_processo(b["_p"], b.get("duration") or 0)
+                m = misura.result() if misura is not None else _misura_in_processo(b["_p"], b.get("duration") or 0)
             except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
                 print("Playlist di Atlante: audio di %s non misurato: %s" % (self.ora, e), flush=True)
                 s.update(audio="errore", audio_q=ora, f=b.get("_f"), audio_n=s.get("audio_n", 0) + 1)
@@ -17483,9 +17608,11 @@ def main():
     ap.add_argument("--classifiche", action="store_true", default=os.environ.get("ATLANTE_CLASSIFICHE") == "1",
                     help="classifiche come playlist con i brani che hai, e brani nuovi dai siti di musica libera "
                          "(Jamendo con ATLANTE_JAMENDO_CLIENT_ID, Internet Archive) (anche ATLANTE_CLASSIFICHE=1)")
-    ap.add_argument("--tematiche", action="store_true", default=os.environ.get("ATLANTE_TEMATICHE") == "1",
-                    help="prepara in sottofondo, un brano alla volta, i dati delle playlist di Atlante (generi da "
-                    "MusicBrainz, BPM ed energia dall'audio); anche ATLANTE_TEMATICHE=1")
+    # acceso di serie: «Per ritmo», «Mettimi di buonumore» e le Playlist di Atlante vivono di questi dati (prima
+    # bisognava accenderlo nel LaunchAgent e restava spento: le playlist per BPM restavano vuote)
+    ap.add_argument("--tematiche", action="store_true", default=os.environ.get("ATLANTE_TEMATICHE", "1") != "0",
+                    help="prepara in sottofondo i dati delle playlist di Atlante e di «Per ritmo» (generi da "
+                    "MusicBrainz, BPM ed energia dall'audio); acceso di serie, ATLANTE_TEMATICHE=0 lo spegne")
     ap.add_argument("--tematiche-prova", type=int, default=int(os.environ.get("ATLANTE_TEMATICHE_PROVA") or 0),
                     help="come --tematiche, ma solo su questo numero di brani, da controllare a mano in "
                     "api/extra/tematiche/campione prima di farlo su tutta la libreria (anche ATLANTE_TEMATICHE_PROVA)")
