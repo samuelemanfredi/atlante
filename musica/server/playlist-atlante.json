@@ -106,6 +106,20 @@
     {"generi": ["classica", "lofi"], "energia": [0, 0.35]},
     {"etichette": ["sleep", "lullaby", "ambient"], "energia": [0, 0.45]}]}}
   ]},
+  {"id": "ritmo", "nome": "Ritmo (BPM)", "playlist": [
+   {"id": "ritmo-060-080", "nome": "60–80 BPM", "descrizione": "Da 60 a 80 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [60, 79.9]}},
+   {"id": "ritmo-080-090", "nome": "80–90 BPM", "descrizione": "Da 80 a 90 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [80, 89.9]}},
+   {"id": "ritmo-090-100", "nome": "90–100 BPM", "descrizione": "Da 90 a 100 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [90, 99.9]}},
+   {"id": "ritmo-100-110", "nome": "100–110 BPM", "descrizione": "Da 100 a 110 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [100, 109.9]}},
+   {"id": "ritmo-110-120", "nome": "110–120 BPM", "descrizione": "Da 110 a 120 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [110, 119.9]}},
+   {"id": "ritmo-120-130", "nome": "120–130 BPM", "descrizione": "Da 120 a 130 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [120, 129.9]}},
+   {"id": "ritmo-130-140", "nome": "130–140 BPM", "descrizione": "Da 130 a 140 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [130, 139.9]}},
+   {"id": "ritmo-140-150", "nome": "140–150 BPM", "descrizione": "Da 140 a 150 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [140, 149.9]}},
+   {"id": "ritmo-150-160", "nome": "150–160 BPM", "descrizione": "Da 150 a 160 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [150, 159.9]}},
+   {"id": "ritmo-160-170", "nome": "160–170 BPM", "descrizione": "Da 160 a 170 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [160, 169.9]}},
+   {"id": "ritmo-170-180", "nome": "170–180 BPM", "descrizione": "Da 170 a 180 battiti al minuto, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [170, 179.9]}},
+   {"id": "ritmo-180-oltre", "nome": "Oltre 180 BPM", "descrizione": "180 battiti al minuto e più, dal più lento al più veloce", "ordine": "bpm", "regola": {"bpm": [180, 300]}}
+  ]},
   {"id": "epoche", "nome": "Epoche", "playlist": [
    {"id": "epoca-anno", "nome": "Successi di quest'anno", "regola": {"anni_fa": [0, 0]}},
    {"id": "epoca-2020", "nome": "Anni 2020", "regola": {"anni": [2020, 2029]}},
