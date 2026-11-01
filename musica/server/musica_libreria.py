@@ -150,7 +150,8 @@ def tag_id3(f):
     nomi = {"TIT2": "title", "TT2": "title", "TPE1": "artist", "TP1": "artist", "TALB": "album", "TAL": "album",
             "TPE2": "albumArtist", "TP2": "albumArtist", "TRCK": "track", "TRK": "track", "TPOS": "disc", "TPA": "disc",
             "TYER": "year", "TYE": "year", "TDRC": "year", "TCON": "genre", "TCO": "genre",
-            "TCMP": "compilation", "TCP": "compilation", "TLEN": "_tlen", "TLE": "_tlen"}
+            "TCMP": "compilation", "TCP": "compilation", "TLEN": "_tlen", "TLE": "_tlen",
+            "TCOM": "composer", "TCM": "composer", "MVNM": "movement"}   # compositore e movimento (Musica, classica)
     o, pic, tipo_pic = {}, None, -1
     hs = 6 if v == 2 else 10
     while p + hs <= len(d):
@@ -279,7 +280,8 @@ def tag_mp4(f):
                     ilst = (a3, z3)
     if not ilst:
         return o
-    nomi = {"\xa9nam": "title", "\xa9ART": "artist", "\xa9alb": "album", "aART": "albumArtist", "\xa9day": "year", "\xa9gen": "genre"}
+    nomi = {"\xa9nam": "title", "\xa9ART": "artist", "\xa9alb": "album", "aART": "albumArtist", "\xa9day": "year", "\xa9gen": "genre",
+            "\xa9wrt": "composer", "\xa9wrk": "work", "\xa9mvn": "movement"}
     for ty, a, z in _scatole(moov, *ilst):
         for t2, a2, z2 in _scatole(moov, a, z):
             if t2 != "data":
@@ -322,7 +324,8 @@ def tag_flac(f):
             n = struct.unpack("<I", d[p:p + 4])[0]
             p += 4
             nomi = {"TITLE": "title", "ARTIST": "artist", "ALBUM": "album", "ALBUMARTIST": "albumArtist", "ALBUM ARTIST": "albumArtist",
-                    "TRACKNUMBER": "track", "DISCNUMBER": "disc", "DATE": "year", "GENRE": "genre", "COMPILATION": "compilation"}
+                    "TRACKNUMBER": "track", "DISCNUMBER": "disc", "DATE": "year", "GENRE": "genre", "COMPILATION": "compilation",
+                    "COMPOSER": "composer", "WORK": "work", "MOVEMENTNAME": "movement"}
             for _ in range(n):
                 if p + 4 > len(d):
                     break
@@ -537,7 +540,19 @@ def _intero(s):
 
 # ---------- la libreria ----------
 
-VERSIONE = 2   # versione delle voci dell'indice: le più vecchie si rileggono una volta (durata MP3/WAV, compilation)
+VERSIONE = 3   # versione delle voci dell'indice: le più vecchie si rileggono una volta (2: durata MP3/WAV, compilation; 3: compositore, opera, movimento)
+VOCE_EXTRA = ("composer", "work", "movement")   # nel catalogo solo se ci sono: 50 000 brani restano leggeri
+VOCE_EXTRA_MAX = 300
+
+
+def _voce_extra(t):
+    """Compositore, opera e movimento dai tag (TCOM, ©wrt, COMPOSER; ©wrk, WORK; MVNM, ©mvn, MOVEMENTNAME), puliti."""
+    o = {}
+    for k in VOCE_EXTRA:
+        v = " ".join(str(t.get(k) or "").replace("\x00", " ").split())[:VOCE_EXTRA_MAX]
+        if v:
+            o[k] = v
+    return o
 
 
 def _dentro(p, radice):
@@ -752,7 +767,7 @@ class Libreria:
                             f.write(dati)
                     copertina = chiave + est
                     break
-        return {
+        return dict({
             "id": hashlib.sha1(p.encode("utf-8")).hexdigest()[:16],
             "title": t.get("title") or nm.get("title") or os.path.basename(p),
             "artist": t.get("artist") or nm.get("artist") or "",
@@ -769,7 +784,7 @@ class Libreria:
             "_f": firma,
             "_v": VERSIONE,
             "_comp": (t.get("compilation") or "").strip().lower() in ("1", "true", "yes"),
-        }
+        }, **_voce_extra(t))
 
     def catalogo(self):
         if any(os.path.isdir(r) for r in self._mancanti):   # disco ricollegato: si rilegge subito (con l'indice è veloce)
@@ -3262,6 +3277,89 @@ class Diari:
                     for k, v in sorted(self.d.items(), key=lambda kv: -kv[1].get("agg", 0))]
 
 DIARI = Diari()
+
+
+# ----- pronuncia dei testi: le righe in altri alfabeti in lettere latine, con la trascrizione di macOS -----
+# La fa ICU dentro macOS (NSString, «Any-Latin»), con osascript come per le prove dell'app: pinyin con i toni per il
+# cinese, il coreano, il cirillico, il greco, l'arabo, l'ebraico, il devanagari, il thai. Per il giapponese solo i kana
+# («Hiragana-Latin; Katakana-Latin»): i kanji letti alla cinese sarebbero sbagliati, restano come sono. Le righe già
+# fatte si ricordano (PRON_MEMORIA); quelle già in lettere latine tornano uguali, senza chiedere niente a macOS.
+
+PRON_RIGHE_MAX = 300
+PRON_RIGA_MAX = 300
+PRON_MEMORIA = 20000
+PRON_ALTRO = re.compile("[\u0370-\u03ff\u0400-\u052f\u0590-\u05ff\u0600-\u06ff\u0900-\u097f\u0e00-\u0e7f\u1100-\u11ff"
+                        "\u3040-\u30ff\u3130-\u318f\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+PRON_JXA = r"""ObjC.import('Foundation');
+function run(argv) {
+  const d = $.NSData.dataWithContentsOfFile(argv[0]);
+  const righe = JSON.parse($.NSString.alloc.initWithDataEncoding(d, $.NSUTF8StringEncoding).js);
+  return JSON.stringify(righe.map(s => {
+    const t = /[\u3040-\u30ff]/.test(s) ? 'Hiragana-Latin; Katakana-Latin' : 'Any-Latin';
+    const r = $(s).stringByApplyingTransformReverse(t, false);
+    return r && !r.isNil() ? r.js : s;
+  }));
+}"""
+
+
+def _trascrivi(righe):
+    """Le righe in lettere latine, con macOS (osascript). Fuori da un Mac: 503."""
+    osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+    if not osa or sys.platform != "darwin":
+        raise ErroreExtra(503, "La pronuncia la fa il Mac (macOS): qui non c'è")
+    fd, nome = tempfile.mkstemp(prefix="pronuncia.", suffix=".json", dir=_cartella_tmp())
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(righe, f, ensure_ascii=False)
+        r = subprocess.run([osa, "-l", "JavaScript", "-", nome], input=PRON_JXA.encode("utf-8"),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        try:
+            out = json.loads(r.stdout.decode("utf-8", "replace") or "null")
+        except ValueError:
+            out = None
+        if r.returncode != 0 or not isinstance(out, list) or len(out) != len(righe):
+            raise ErroreExtra(502, "Trascrizione non riuscita: " + r.stderr.decode("utf-8", "replace")[-200:])
+        return [x if isinstance(x, str) else righe[i] for i, x in enumerate(out)]
+    except subprocess.TimeoutExpired:
+        raise ErroreExtra(504, "Trascrizione troppo lenta")
+    finally:
+        _cancella(nome)
+
+
+class Pronuncia:
+    def __init__(self):
+        self.blocco = threading.Lock()
+        self.memo = collections.OrderedDict()   # riga → in lettere latine
+
+    def righe(self, righe):
+        fuori, manca = [None] * len(righe), []
+        with self.blocco:
+            for i, s in enumerate(righe):
+                if not PRON_ALTRO.search(s):
+                    fuori[i] = s
+                elif s in self.memo:
+                    self.memo.move_to_end(s)
+                    fuori[i] = self.memo[s]
+                else:
+                    manca.append(i)
+        if manca:
+            fatte = _trascrivi([righe[i] for i in manca])
+            with self.blocco:
+                for i, t in zip(manca, fatte):
+                    fuori[i] = self.memo[righe[i]] = t[:PRON_RIGA_MAX * 3]
+                while len(self.memo) > PRON_MEMORIA:
+                    self.memo.popitem(last=False)
+        return fuori
+
+
+PRON = Pronuncia()
+
+
+def _pronuncia(corpo):
+    r = (corpo or {}).get("righe") if isinstance(corpo, dict) else None
+    if not isinstance(r, list) or not r or len(r) > PRON_RIGHE_MAX or not all(isinstance(x, str) and 0 < len(x) <= PRON_RIGA_MAX for x in r):
+        raise ErroreExtra(400, "Servono da 1 a %d righe di testo (al più %d caratteri l'una)" % (PRON_RIGHE_MAX, PRON_RIGA_MAX))
+    return {"righe": PRON.righe(r)}
 
 
 def _serve_pubblico():
@@ -15340,7 +15438,8 @@ def _stessa_origine(h):
 # che ha visto.
 # La stessa playlist creata su due dispositivi (stesso nome, es. le playlist di Apple Music importate sull'iPhone e sul
 # Mac) diventa una sola, con i brani di entrambe: niente doppioni; l'app ne riceve il nuovo id in «alias».
-# «_preferiti» porta i Preferiti dell'account.
+# «_preferiti» porta i Preferiti dell'account; «_fissati» i Fissati in cima alla Libreria (brani, album, artisti e playlist:
+# «fissati» = [{t, k}]). Una playlist può stare in una cartella («cartella», solo il nome: le cartelle sono quelle usate).
 
 LISTE = None                      # Liste, preparato da main()
 LISTE_MAX = 1000                  # playlist di un account (comprese quelle cancellate da poco)
@@ -15350,6 +15449,10 @@ LISTE_INVIO_MAX = 500             # playlist in una richiesta
 LISTA_TOLTA_DURATA = 180 * 86400
 ID_LISTA = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ID_BRANO_LISTA = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+FISSATI_MAX = 30
+TIPI_FISSATI = ("song", "album", "artist", "playlist")
+FISSATO_CHIAVE_MAX = 300
+CARTELLA_MAX = 100
 
 
 def _nome_lista(s):
@@ -15368,15 +15471,30 @@ def _lista_valida(x, ora_ms):
     if x.get("deleted") is True:
         l["deleted"] = True
         return l
+    cr = x.get("created")
+    creata = int(cr) if isinstance(cr, (int, float)) and not isinstance(cr, bool) and cr > 0 else l["updated"]
+    if x["id"] == "_fissati":   # i Fissati in cima alla Libreria: tipo e chiave di ognuno, niente brani
+        f = x.get("fissati")
+        if not isinstance(f, list) or len(f) > FISSATI_MAX:
+            return None
+        v = []
+        for y in f:
+            if not (isinstance(y, dict) and y.get("t") in TIPI_FISSATI and isinstance(y.get("k"), str)
+                    and 0 < len(y["k"]) <= FISSATO_CHIAVE_MAX):
+                return None
+            v.append({"t": y["t"], "k": y["k"]})
+        l.update(ids=[], name="", fissati=v, created=creata)
+        return l
     ids = x.get("ids")
     if not isinstance(ids, list) or len(ids) > LISTA_BRANI_MAX or not all(isinstance(i, str) and ID_BRANO_LISTA.match(i) for i in ids):
         return None
     nome = x.get("name", "")
     if x["id"] != "_preferiti" and (not isinstance(nome, str) or not nome.strip()):
         return None
-    l.update(ids=list(ids), name=str(nome).strip()[:LISTA_NOME_MAX])
-    cr = x.get("created")
-    l["created"] = int(cr) if isinstance(cr, (int, float)) and not isinstance(cr, bool) and cr > 0 else l["updated"]
+    l.update(ids=list(ids), name=str(nome).strip()[:LISTA_NOME_MAX], created=creata)
+    c = x.get("cartella")
+    if isinstance(c, str) and c.split():
+        l["cartella"] = " ".join(c.split())[:CARTELLA_MAX]
     if x.get("apple") is True:
         l["apple"] = True
     if isinstance(x.get("atl"), str) and ID_LISTA.match(x["atl"]):
@@ -15465,9 +15583,9 @@ class Liste:
                     if nuovi:
                         segna(dict(cur, ids=(cur["ids"] + nuovi)[:LISTA_BRANI_MAX], updated=ora_ms))
                     continue
-                if cur is None and not l.get("deleted") and l["id"] != "_preferiti":
+                if cur is None and not l.get("deleted") and not l["id"].startswith("_"):   # non _preferiti né _fissati
                     n = _nome_lista(l["name"])
-                    gem = next((y for y in d.values() if not y.get("deleted") and y["id"] != "_preferiti"
+                    gem = next((y for y in d.values() if not y.get("deleted") and not y["id"].startswith("_")
                                 and _nome_lista(y.get("name")) == n), None)
                     if gem is not None:   # la stessa playlist da un altro dispositivo: una sola, con i brani di entrambe
                         visti = set(gem["ids"])
@@ -15563,6 +15681,9 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "testi" and len(resto) <= 1:   # il testo del brano, a tempo (karaoke): vedi la sua sezione
         solo("GET")
         _json(h, _testi(h, resto))
+    elif cosa == "pronuncia" and not resto:   # le righe del testo in altri alfabeti, in lettere latine (vedi Pronuncia)
+        solo("POST")
+        _json(h, _pronuncia(corpo))
     elif cosa == "ascoltati":
         _ascoltati(h, metodo, resto, corpo)
     elif cosa == "gestione":

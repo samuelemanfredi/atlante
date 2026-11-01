@@ -823,7 +823,7 @@ function versioneIOS(src) {
   for (const ua of ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)'])
     vero(F.iosDa27(ua, true) === true && F.iosDa27(ua, false) === false, 'app Home bloccata a 18_6: decidono le novità');
-  vero(/function mixerInit\(\) \{\n  if \(MIX\.ctx \|\| !NEEDS_MIXER \|\| IOS_PRIMA_27 \|\|/.test(src), 'mixerInit deve restare spento prima di iOS 27');
+  vero(/function mixerInit\(perEQ\) \{\n  if \(MIX\.ctx \|\| IOS_PRIMA_27 \|\|/.test(src), 'mixerInit deve restare spento prima di iOS 27 (anche con l\'equalizzatore)');
   vero(/const IOS_PRIMA_27 = isIOS && !iosDa27\(navigator\.userAgent, novita27\(\)\);/.test(src), 'IOS_PRIMA_27');
   vero(/240405/.test(src), 'il commento con il numero del bug');
 }
