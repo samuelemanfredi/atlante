@@ -88,6 +88,11 @@ img{max-width:100%;display:block}
 .tile .art{width:100%;aspect-ratio:1;border-radius:8px}
 .tile .n{font-size:15px;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile .a{font-size:15px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grid.fis{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:16px 12px}
+.grid.fis .tile .n{font-size:14px}
+.round.on{color:var(--accent)}
+.cartart{display:grid;place-items:center;background:var(--fill);color:var(--accent)}
+.cartart .i{width:26px;height:26px}
 .shelf{display:grid;grid-auto-flow:column;grid-auto-columns:clamp(140px,40vw,180px);gap:14px;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;margin-inline:calc(-1 * max(16px,env(safe-area-inset-left,0px)));padding-inline:max(16px,env(safe-area-inset-left,0px))}
 .shelf::-webkit-scrollbar{display:none}
 .shelf>*{scroll-snap-align:start}
@@ -110,6 +115,9 @@ img{max-width:100%;display:block}
 .trk .t1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .trk .t2{font-size:14px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 .trk .fav{color:var(--accent);font-size:12px}
+.h2 .hcanc{margin-left:auto;font-size:16px;font-weight:400;color:var(--accent)}
+.sricon{display:grid;place-items:center;background:var(--fill);color:var(--fg2)}
+.sricon .i{width:22px;height:22px}
 .trk .fav svg{display:inline-block;vertical-align:-1px}
 .morerows{height:1px;grid-column:1/-1}
 .vl{overflow-anchor:none}.vl>*{height:var(--vh,auto)}
@@ -285,6 +293,16 @@ body.xnav #xp iframe{height:calc(100% - 52px - env(safe-area-inset-bottom,0px))}
 .qrow b{display:block;font-weight:500;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qrow span{display:block;font-size:14px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qempty{opacity:.6;padding:20px 0;font-size:15px}
+/* coda modificabile: ≡ per trascinare, − per togliere, «Svuota» in cima */
+.qrow .qgo{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}
+.qrow .qdel,.qrow .qh{flex:none;width:34px;height:40px;display:grid;place-items:center;color:inherit;opacity:.5}
+.qrow .qdel .i,.qrow .qh .i{width:21px;height:21px}
+.qrow .qh{cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}
+.qrow.drag{position:relative;z-index:2;background:rgba(255,255,255,.12);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.35);transition:none}
+.qrow.sopra{box-shadow:inset 0 2px 0 rgba(255,255,255,.85)}
+.qrow.sotto{box-shadow:inset 0 -2px 0 rgba(255,255,255,.85)}
+.qtop{display:flex;align-items:center;justify-content:space-between;font-size:14px;opacity:.75;padding:2px 0 4px}
+.qtop button{font-size:15px;font-weight:600;color:inherit;padding:4px 0 4px 12px}
 .npmeta{display:flex;align-items:center;gap:10px;margin:8px 0 14px}
 .npmeta .tx{flex:1;min-width:0}
 .npmeta b{display:block;font-size:21px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -333,10 +351,22 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .lyr .lr.on .w.s{color:#fff;top:-2px;text-shadow:0 0 14px rgba(255,255,255,.28)}
 .lyr .lr.on .w.c{top:-2px;color:transparent;-webkit-text-fill-color:transparent;background-image:linear-gradient(90deg,#fff 0,#fff var(--x,0px),rgba(255,255,255,.32) calc(var(--x,0px) + .45em));-webkit-background-clip:text;background-clip:text}
 .lyr .lr.rtl{direction:rtl;text-align:right;transform-origin:100% 50%}
+/* condividi un verso: si scelgono le righe (al più 4) */
+.lyr.scegli .lr{filter:none;transform:none;color:rgba(255,255,255,.45)}
+.lyr.scegli .lr .w{color:inherit!important;-webkit-text-fill-color:currentColor!important;background:none!important}
+.lyr.scegli .lr.scelto{color:#fff;background:rgba(255,255,255,.14);border-radius:12px;padding-inline:10px;margin-inline:-10px;width:calc(100% + 20px)}
+.versobar{display:flex;align-items:center;gap:12px;padding:10px 0 4px}
+.versobar span{flex:1;font-size:14px;opacity:.75}
+.versobar button{height:36px;padding:0 16px;border-radius:18px;background:rgba(255,255,255,.16);font-weight:600}
+.versobar button.pri{background:#fff;color:var(--npc,#333)}
+.versobar button:disabled{opacity:.4}
 .lyr .lr.on.rtl .w.c{background-image:linear-gradient(270deg,#fff 0,#fff var(--x,0px),rgba(255,255,255,.32) calc(var(--x,0px) + .45em))}
 .lyr .lt{display:block;margin-top:.3em;font-size:.6em;line-height:1.25;font-weight:650;color:rgba(255,255,255,.4);transition:color .45s}   /* la traduzione */
 .lyr .lr.on .lt{color:rgba(255,255,255,.78)}
 .lyr.piano .lt{font-size:.8em;margin-top:.1em}
+.lyr .lp{display:block;margin-top:.2em;font-size:.56em;line-height:1.25;font-weight:600;color:rgba(255,255,255,.5);transition:color .45s}   /* la pronuncia */
+.lyr .lr.on .lp{color:rgba(255,255,255,.85)}
+.lyr.piano .lp{font-size:.78em;margin-top:.05em}
 /* le pause: tre puntini che si accendono uno alla volta; toccati, il punto vale il suo secondo */
 .lyr .gap .dots{display:flex;justify-content:space-between;width:110px;padding:8px 0}
 .lyr .gap i{display:block;width:11px;height:11px;border-radius:50%;background:currentColor;transition:background .3s}
@@ -650,7 +680,7 @@ async function readID3(file) {
     if (!/^[A-Z0-9]{3,4}$/.test(id) || sz <= 0 || p + hs + sz > d.length) break;
     let f = d.subarray(p + hs, p + hs + sz);
     if (v === 4) { const f2 = d[p + 9]; if (f2 & 0x02) f = unsync(f); if (f2 & 0x01) f = f.subarray(4); }
-    const k = {TIT2:'title',TT2:'title',TPE1:'artist',TP1:'artist',TALB:'album',TAL:'album',TPE2:'albumArtist',TP2:'albumArtist',TRCK:'track',TRK:'track',TPOS:'disc',TPA:'disc',TYER:'year',TYE:'year',TDRC:'year',TCON:'genre',TCO:'genre'}[id];
+    const k = {TIT2:'title',TT2:'title',TPE1:'artist',TP1:'artist',TALB:'album',TAL:'album',TPE2:'albumArtist',TP2:'albumArtist',TRCK:'track',TRK:'track',TPOS:'disc',TPA:'disc',TYER:'year',TYE:'year',TDRC:'year',TCON:'genre',TCO:'genre',TCOM:'composer',TCM:'composer',MVNM:'movement'}[id];
     if (k) { const t = id3text(f); if (t && !o[k]) o[k] = t; }
     else if (id === 'APIC' || id === 'PIC') {
       const e = f[0]; let i = 1, mime = 'image/jpeg';
@@ -697,7 +727,7 @@ async function readMP4(file) {
     else if (t === 'meta' && !ilst) findMeta(a, z);
   });
   if (!ilst) return o;
-  const map = {'©nam':'title','©ART':'artist','©alb':'album','aART':'albumArtist','©day':'year','©gen':'genre'};
+  const map = {'©nam':'title','©ART':'artist','©alb':'album','aART':'albumArtist','©day':'year','©gen':'genre','©wrt':'composer','©wrk':'work','©mvn':'movement'};
   boxes(moov, ilst[0], ilst[1], (t, a, z) => {
     boxes(moov, a, z, (t2, a2, z2) => {
       if (t2 !== 'data') return;
@@ -725,7 +755,7 @@ async function readFLAC(file) {
         for (let i = 0; i < cnt && p + 4 <= d.length; i++) {
           const l = le32(d, p); p += 4; const kv = td('utf-8', d.subarray(p, p + l)); p += l;
           const eq = kv.indexOf('='); if (eq < 0) continue;
-          const k = {TITLE:'title',ARTIST:'artist',ALBUM:'album',ALBUMARTIST:'albumArtist','ALBUM ARTIST':'albumArtist',TRACKNUMBER:'track',DISCNUMBER:'disc',DATE:'year',GENRE:'genre'}[kv.slice(0, eq).toUpperCase()];
+          const k = {TITLE:'title',ARTIST:'artist',ALBUM:'album',ALBUMARTIST:'albumArtist','ALBUM ARTIST':'albumArtist',TRACKNUMBER:'track',DISCNUMBER:'disc',DATE:'year',GENRE:'genre',COMPOSER:'composer',WORK:'work',MOVEMENTNAME:'movement'}[kv.slice(0, eq).toUpperCase()];
           if (k && !o[k]) o[k] = kv.slice(eq + 1).trim();
         }
       } else {
@@ -802,7 +832,8 @@ async function importFiles(list) {
     const id = uid();
     const m = { id, src, title: tg.title || nm.title || f.name, artist: tg.artist || nm.artist || '', album: tg.album || '',
       albumArtist: tg.albumArtist || '', track: parseInt(tg.track) || 0, disc: parseInt(tg.disc) || 0,
-      year: (tg.year || '').slice(0, 4), genre: tg.genre || '', duration: dur, added: Date.now() + i, fav: false, plays: 0, last: 0, cover: null };
+      year: (tg.year || '').slice(0, 4), genre: tg.genre || '', duration: dur, added: Date.now() + i, fav: false, plays: 0, last: 0, cover: null,
+      composer: tg.composer || undefined, work: tg.work || undefined, movement: tg.movement || undefined };
     if (tg.pic) { const c = await makeCover(tg.pic); if (c) { m.cover = c.key; if (!C.has(c.key)) { C.set(c.key, {url:URL.createObjectURL(c.blob), color:c.color}); await dbPut('covers', c).catch(() => {}); } } }
     try { if (DB) await dbPut('files', f, id); else memFiles.set(id, f); await dbPut('meta', m); }
     catch (e) { toast(e && e.name === 'QuotaExceededError' ? 'Spazio esaurito sul dispositivo' : 'Impossibile salvare ' + f.name); break; }
@@ -901,6 +932,7 @@ async function loadServer() {
     const m = Object.assign({fav:false, plays:0, last:0}, old || {}, {id, sid:b.id, remote:true, src:'srv|' + b.id,
       title:b.title || '', artist:b.artist || '', album:b.album || '', albumArtist:b.albumArtist || '', track:b.track || 0, disc:b.disc || 0,
       year:b.year || '', genre:b.genre || '', duration:b.duration || (old && old.duration) || 0, added:b.added || (old && old.added) || Date.now(), size:b.size || 0,
+      composer:b.composer || undefined, work:b.work || undefined, movement:b.movement || undefined,   // dai tag, solo se ci sono
       // la copertina già salvata sul telefono resta, a meno che sul Mac non sia cambiata (Gestione → Contenuti)
       compilation:!!b.compilation, cover: old && old.cover && !old.cover.startsWith('s:') && (!b.cover || old.cover === 'm' + b.cover.replace(/\.\w+$/, '')) ? old.cover : (b.cover ? 's:' + b.cover : null)});
     delete m.gone;
@@ -1197,10 +1229,49 @@ addEventListener('online', () => { if (!srvWait) reconnect(true); });
 const SYNC = {visti:ls.get('am-pl-visti', {}), tolte:ls.get('am-pl-tolte', {}), seq:ls.get('am-pl-seq', 0), fav:ls.get('am-fav-agg', 0),
   favAltri:ls.get('am-fav-altri', []), toccate:new Set(), favToccati:false, t:0, corre:false, ancora:false, no:false};
 function syncPresto() { clearTimeout(SYNC.t); SYNC.t = setTimeout(syncListe, 2000); }
+/* ---------- Fissati in cima alla Libreria (come in Apple Music) ----------
+   Brani, album, artisti e playlist, dal più recente (al più 30). Uguali su tutti i dispositivi dell'account, come le
+   playlist: viaggiano nella pseudo-playlist «_fissati» (vince la modifica più recente). */
+I.puntina = '<path d="M14.8 2.6l6.6 6.6-1.5 1.5-1.4-.3-3.6 3.6.4 4.4-1.6 1.6-3.7-3.7L5 21.3 3.6 20l4.9-5L4.8 11.3l1.6-1.6 4.4.4 3.6-3.6-.3-1.4z"/>';
+const FIX = {lista:ls.get('am-fissati', []), agg:ls.get('am-fissati-agg', 0), MAX:30};
+function fissato(t, k) { return FIX.lista.some(x => x.t === t && x.k === k); }
+function fissaCambia(t, k) {
+  if (!t || !k) return false;
+  const era = fissato(t, k);
+  FIX.lista = era ? FIX.lista.filter(x => !(x.t === t && x.k === k)) : [{t, k:String(k)}].concat(FIX.lista).slice(0, FIX.MAX);
+  FIX.agg = Date.now(); ls.set('am-fissati', FIX.lista); ls.set('am-fissati-agg', FIX.agg);
+  if (SYNC.corre) SYNC.fixToccati = true;
+  syncPresto(); toast(era ? 'Tolto dai Fissati' : 'Fissato in cima alla Libreria'); render(true);
+  return !era;
+}
+function applicaFissati(l) {
+  if (SYNC.fixToccati) return;   // cambiati qui mentre si sincronizzava: partono la prossima volta
+  SYNC.visti._fissati = l.updated; ls.set('am-pl-visti', SYNC.visti);
+  const v = Array.isArray(l.fissati) ? l.fissati.filter(x => x && x.t && x.k).map(x => ({t:x.t, k:x.k})) : [];
+  if (FIX.agg === l.updated && JSON.stringify(v) === JSON.stringify(FIX.lista)) return;
+  FIX.lista = v; FIX.agg = l.updated; ls.set('am-fissati', v); ls.set('am-fissati-agg', l.updated); render(true);
+}
+function fissaTasto(t, k) {
+  const on = fissato(t, k);
+  return '<button class="round' + (on ? ' on' : '') + '" data-a="fissa" data-t="' + t + '" data-k="' + esc(k) + '" aria-pressed="' + on + '" aria-label="' + (on ? 'Togli dai Fissati' : 'Fissa in cima alla Libreria') + '">' + ic('puntina') + '</button>';
+}
+function fissaVoce(t, k) { return '<button data-a="fissa" data-t="' + t + '" data-k="' + esc(k) + '"><span class="l">' + (fissato(t, k) ? 'Togli dai Fissati' : 'Fissa in cima alla Libreria') + '</span>' + ic('puntina') + '</button>'; }
+function fissatoTile(x) {
+  const tl = (attr, lead, n, a) => '<button class="tile" ' + attr + '>' + lead + '<div class="n">' + esc(n) + '</div><div class="a">' + esc(a) + '</div></button>';
+  if (x.t === 'album') { const a = albumByKey(x.k); return a ? tl('data-a="go" data-v="album" data-k="' + esc(a.key) + '"', art(a.cover), a.name, a.artist) : ''; }
+  if (x.t === 'artist') { const a = artists().find(y => y.name === x.k); return a ? tl('data-a="go" data-v="artist" data-k="' + esc(a.name) + '"', art(a.cover, 'av'), a.name, 'Artista') : ''; }
+  if (x.t === 'playlist') { const p = P.find(y => y.id === x.k); return p ? tl('data-a="go" data-v="playlist" data-k="' + esc(p.id) + '"', mosaic(plTracks(p)), p.name, 'Playlist') : ''; }
+  if (x.t === 'song') { const t = T.get(x.k); return t && !t.gone ? tl('data-a="fisplay" data-k="' + esc(t.id) + '"', art(t.cover), t.title, t.artist || UNK_ART) : ''; }
+  return '';
+}
+function fissatiHtml() {
+  const R = FIX.lista.map(fissatoTile).filter(Boolean);
+  return R.length ? '<h2 class="h2" style="margin-top:14px">Fissati</h2><div class="grid fis">' + R.join('') + '</div>' : '';
+}
 function favCambiati() { SYNC.fav = Date.now(); ls.set('am-fav-agg', SYNC.fav); if (SYNC.corre) SYNC.favToccati = true; syncPresto(); }
 function plTolta(id) { SYNC.tolte[id] = Date.now(); ls.set('am-pl-tolte', SYNC.tolte); syncPresto(); }
 const plInvio = p => { const x = {id:p.id, name:p.name, ids:p.ids, created:p.created || 1, updated:p.updated || p.created || 1};
-  if (p.apple) x.apple = true; if (p.atl) x.atl = p.atl; return x; };
+  if (p.apple) x.apple = true; if (p.atl) x.atl = p.atl; if (p.cartella) x.cartella = p.cartella; return x; };
 function favInvio() {   // i Preferiti di questo dispositivo, più quelli dell'account con brani che qui ancora non ci sono
   const ids = [], c = new Set();
   for (const t of T.values()) if (t.fav && t.remote) { ids.push(t.id); c.add(t.id); }
@@ -1212,7 +1283,7 @@ async function syncListe() {
   clearTimeout(SYNC.t);
   if (!SRV || !DB || SYNC.no) return;   // senza Mac si riprova al prossimo collegamento
   if (SYNC.corre) { SYNC.ancora = true; return; }
-  SYNC.corre = true; SYNC.toccate.clear(); SYNC.favToccati = false;
+  SYNC.corre = true; SYNC.toccate.clear(); SYNC.favToccati = false; SYNC.fixToccati = false;
   try {
     const manda = P.filter(p => (p.updated || p.created || 1) !== SYNC.visti[p.id]).map(plInvio);
     const tolte = Object.keys(SYNC.tolte);
@@ -1222,6 +1293,7 @@ async function syncListe() {
       const ids = favInvio();
       if (!primo || ids.length) manda.push(Object.assign({id:'_preferiti', ids, updated:SYNC.fav || 1}, primo ? {unisci:true} : {}));
     }
+    if (FIX.agg && FIX.agg !== SYNC.visti._fissati) manda.push({id:'_fissati', name:'', ids:[], fissati:FIX.lista, updated:FIX.agg});
     // a gruppi sotto i 700 KB: il Mac accetta 1 MB per richiesta
     const gruppi = [[]]; let n = 0;
     for (const x of manda) { const k = JSON.stringify(x).length; if (n + k > 700000 && gruppi[gruppi.length - 1].length) { gruppi.push([]); n = 0; } gruppi[gruppi.length - 1].push(x); n += k; }
@@ -1250,15 +1322,17 @@ function applicaListe(arr, alias) {
   }
   for (const l of arr) {
     if (l.id === '_preferiti') { applicaPreferiti(l); continue; }
+    if (l.id === '_fissati') { applicaFissati(l); continue; }
     if (SYNC.toccate.has(l.id)) continue;   // cambiata qui mentre si sincronizzava: parte la prossima volta
     SYNC.visti[l.id] = l.updated;
     const k = P.findIndex(p => p.id === l.id), loc = k >= 0 ? P[k] : null;
     if (l.deleted) { if (loc) { P.splice(k, 1); dbDel('playlists', l.id).catch(() => {}); cambi = true; } continue; }
-    if (loc && loc.updated === l.updated && loc.name === l.name && loc.ids.length === l.ids.length && loc.ids.every((x, i) => x === l.ids[i])) continue;
+    if (loc && loc.updated === l.updated && loc.name === l.name && (loc.cartella || '') === (l.cartella || '') && loc.ids.length === l.ids.length && loc.ids.every((x, i) => x === l.ids[i])) continue;
     const n = loc || {id:l.id};
     Object.assign(n, {name:l.name, ids:l.ids.slice(), created:l.created, updated:l.updated});
     if (l.apple) n.apple = true; else delete n.apple;
     if (l.atl) n.atl = l.atl; else delete n.atl;
+    if (l.cartella) n.cartella = l.cartella; else delete n.cartella;
     if (!loc) P.push(n);
     dbPut('playlists', n).catch(() => {}); cambi = true;
   }
@@ -1657,15 +1731,155 @@ function favMark(id) {   // preferito cambiato: si aggiornano solo le righe di q
   document.querySelectorAll('.trk[data-id="' + id + '"] .t1').forEach(el => { if (!el.closest('[data-a="pickt"]')) el.innerHTML = t1(t); });
 }
 function tile(a) { return '<button class="tile" data-a="go" data-v="album" data-k="' + esc(a.key) + '">' + art(a.cover) + '<div class="n">' + esc(a.name) + '</div><div class="a">' + esc(a.artist) + '</div></button>'; }
+/* ---------- compositori e opere (come in Apple Music) ----------
+   Il compositore viene dal tag del file (TCOM, ©wrt, COMPOSER: il Mac lo manda nel catalogo) o, per la musica classica
+   senza tag, si riconosce dal numero di catalogo nel titolo (BWV → Bach, HWV → Händel, K. → Mozart, RV → Vivaldi…) o dal
+   nome nell'artista («… & Johann Sebastian Bach»). I cognomi da soli («Mozart», «Verdi») contano solo per la musica
+   classica (genere o parole come Sinfonia, Concerto, Aria): «Mozart La Para» resta reggaeton. Opera e movimento dai tag
+   (©wrk/©mvn, WORK/MOVEMENTNAME, MVNM) o dal titolo: «Partenope, HWV 27, Act 1: Recitativo…» → opera «Partenope,
+   HWV 27», movimento «Act 1: Recitativo…»; senza indizi fa da opera l'album.
+   Libreria › Compositori › compositore (opere, poi i brani senza opera) › opera (i movimenti, nell'ordine dell'album). */
+I.compositore = '<path d="M9 3h10v3.5h-8.2v9.7a3.6 3.6 0 1 1-1.8-3.1zm-2.4 12a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2zM13 9h6v1.8h-6zm0 3.5h6v1.8h-6z"/>';
+const COMP_CATALOGHI = [   // [numero di catalogo, compositore, solo con altri segni di musica classica]
+  [/\bBWV\s?\d/i, 'Johann Sebastian Bach'], [/\bHWV\s?\d/i, 'Georg Friedrich Händel'], [/\bKV\s?\d/, 'Wolfgang Amadeus Mozart'],
+  [/\bK\.\s?\d{1,3}[a-z]?\b/, 'Wolfgang Amadeus Mozart', true], [/\bRV\s?\d{1,3}\b/, 'Antonio Vivaldi', true],
+  [/\bD\.?\s?\d{1,3}\b(?!\s*(?:major|minor|maggiore|minore|dur|moll))/, 'Franz Schubert', true], [/\bHob\.?\s?[IVXL]/, 'Joseph Haydn'],
+  [/\bWoO\s?\d/, 'Ludwig van Beethoven'], [/\bTWV\s?\d/, 'Georg Philipp Telemann'], [/\bSWV\s?\d/, 'Heinrich Schütz'],
+  [/\bBuxWV\s?\d/, 'Dietrich Buxtehude'], [/\bWWV\s?\d/, 'Richard Wagner'], [/\bMWV\s?[A-Z]?\s?\d/, 'Felix Mendelssohn'],
+  [/\bTrV\s?\d/, 'Richard Strauss'], [/\bSz\.?\s?\d/, 'Béla Bartók', true], [/\bZ\.?\s?\d{2,3}\b/, 'Henry Purcell', true]];
+const COMP_NOMI = [   // [compositore, nome intero (basta da solo), cognome (solo con altri segni di musica classica)]
+  ['Johann Sebastian Bach', /\b(?:Johann Sebastian|J\. ?S\.) Bach\b/i], ['Georg Friedrich Händel', /\b(?:George Frideric|Georg Friedrich|G\. ?F\.) H(?:ä|a|ae)ndel\b/i, /\bH(?:ä|ae)ndel\b|\bHandel\b/i],
+  ['Wolfgang Amadeus Mozart', /\b(?:Wolfgang Amadeus|W\. ?A\.) Mozart\b/i, /\bMozart\b/i], ['Ludwig van Beethoven', /\bLudwig van Beethoven\b/i, /\bBeethoven\b/i],
+  ['Antonio Vivaldi', /\bAntonio Vivaldi\b/i, /\bVivaldi\b/i], ['Fryderyk Chopin', /\b(?:Fr[ée]d[ée]ric|Fryderyk) Chopin\b/i, /\bChopin\b/i],
+  ['Franz Schubert', /\bFranz (?:Peter )?Schubert\b/i, /\bSchubert\b/i], ['Robert Schumann', /\bRobert Schumann\b/i, /\bSchumann\b/i],
+  ['Johannes Brahms', /\bJohannes Brahms\b/i, /\bBrahms\b/i], ['Pëtr Il\'ič Čajkovskij', /\b(?:Pyotr|Peter|Pëtr|Piotr) (?:Ilyich |Il\'ič |Iljitsch )?(?:Tchaikovsky|Čajkovskij|Tschaikowsky|Ciaikovsky)\b/i, /\b(?:Tchaikovsky|Čajkovskij|Tschaikowsky|Ciaikovsky|Ciajkovskij)\b/i],
+  ['Claude Debussy', /\bClaude Debussy\b/i, /\bDebussy\b/i], ['Maurice Ravel', /\bMaurice Ravel\b/i, /\bRavel\b/i],
+  ['Joseph Haydn', /\b(?:Franz )?Joseph Haydn\b/i, /\bHaydn\b/i], ['Giuseppe Verdi', /\bGiuseppe Verdi\b/i, /\bVerdi\b/i],
+  ['Giacomo Puccini', /\bGiacomo Puccini\b/i, /\bPuccini\b/i], ['Gioachino Rossini', /\bGioac?chino Rossini\b/i, /\bRossini\b/i],
+  ['Richard Wagner', /\bRichard Wagner\b/i], ['Franz Liszt', /\bFranz Liszt\b/i, /\bLiszt\b/i], ['Felix Mendelssohn', /\bFelix Mendelssohn(?:[- ]Bartholdy)?\b/i, /\bMendelssohn\b/i],
+  ['Antonín Dvořák', /\bAnton[íi]n Dvo[řr][áa]k\b/i, /\bDvo[řr][áa]k\b/i], ['Edvard Grieg', /\bEdvard Grieg\b/i, /\bGrieg\b/i],
+  ['Gustav Mahler', /\bGustav Mahler\b/i, /\bMahler\b/i], ['Richard Strauss', /\bRichard Strauss\b/i], ['Johann Strauss II', /\bJohann Strauss\b/i],
+  ['Igor Stravinskij', /\bIgor Stravinsk(?:y|ij|i)\b/i, /\bStravinsk(?:y|ij|i)\b/i], ['Sergej Rachmaninov', /\bSerg(?:ei|ej|e) Rach?maninoff?\b|\bSerg(?:ei|ej) Rachmaninov\b/i, /\bRach?maninoff?\b|\bRachmaninov\b/i],
+  ['Sergej Prokof\'ev', /\bSerg(?:ei|ej|e) Prokof(?:iev|\'?ev|jew)\b/i, /\bProkof(?:iev|\'?ev|jew)\b/i], ['Dmitrij Šostakovič', /\bD(?:mitri|mitrij|mitry) (?:Shostakovich|Šostakovič|Schostakowitsch)\b/i, /\b(?:Shostakovich|Šostakovič|Schostakowitsch)\b/i],
+  ['Erik Satie', /\bErik Satie\b/i, /\bSatie\b/i], ['Gabriel Fauré', /\bGabriel Faur[ée]\b/i, /\bFaur[ée]\b/i], ['Camille Saint-Saëns', /\bSaint-Sa[ëe]ns\b/i],
+  ['Georges Bizet', /\bGeorges Bizet\b/i, /\bBizet\b/i], ['Hector Berlioz', /\bHector Berlioz\b/i, /\bBerlioz\b/i], ['Edward Elgar', /\bEdward Elgar\b/i, /\bElgar\b/i],
+  ['Henry Purcell', /\bHenry Purcell\b/i, /\bPurcell\b/i], ['Claudio Monteverdi', /\bClaudio Monteverdi\b/i, /\bMonteverdi\b/i],
+  ['Giovanni Battista Pergolesi', /\bG(?:iovanni|\.) ?B(?:attista|\.) Pergolesi\b/i, /\bPergolesi\b/i], ['Tomaso Albinoni', /\bTomaso Albinoni\b/i, /\bAlbinoni\b/i],
+  ['Arcangelo Corelli', /\bArcangelo Corelli\b/i, /\bCorelli\b/i], ['Domenico Scarlatti', /\bDomenico Scarlatti\b/i], ['Georg Philipp Telemann', /\bGeorg Philipp Telemann\b/i, /\bTelemann\b/i],
+  ['Johann Pachelbel', /\bJohann Pachelbel\b/i, /\bPachelbel\b/i], ['Niccolò Paganini', /\bNiccol[òo] Paganini\b/i, /\bPaganini\b/i],
+  ['Vincenzo Bellini', /\bVincenzo Bellini\b/i], ['Gaetano Donizetti', /\bGaetano Donizetti\b/i, /\bDonizetti\b/i], ['Pietro Mascagni', /\bPietro Mascagni\b/i, /\bMascagni\b/i],
+  ['Ottorino Respighi', /\bOttorino Respighi\b/i, /\bRespighi\b/i], ['Arvo Pärt', /\bArvo P[äa]rt\b/i]];
+// musica classica: dal genere o da parole tipiche del titolo
+const COMP_GENERE = /classic|classica|klassik|cl[áa]sic|opera|lirica|baroque|barocc|orchestr|symphon|sinfon|chamber|camera|choral|corale|early music/i;
+const COMP_PAROLE = /\b(?:Op\.\s?\d|No\.\s?\d|Nr\.\s?\d|Symphon|Sinfonia|Concert[oi]|Sonat[ae]|Aria|Recitativ|Allegro|Andante|Adagio|Presto|Largo|Menuet|Minuett|Prelud|Pr[ée]lude|Fug[ae]|Mass[ae]?\b|Messa|Cantata|Kantate|Overture|Ouverture|Sinfonia|Suite|Partita|Variation|Quartet|Quartett|Trio\b|Nocturne|Notturno|[ÉE]tude|Impromptu|Lied|Requiem|Magnificat|Gloria|Kyrie|Chorus|Coro|Atto|Act \d|Scena|Bolero|Rondo|Scherzo|Toccata|Passacaglia|Chaconne|Ciaccona|Barcarol|Mazurka|Polonaise|Rhapsod|Rapsodia|Serenat|Divertiment)/i;
+const compClassica = t => COMP_GENERE.test(t.genre || '') || COMP_PAROLE.test(t.title || '');
+const COMPC = new WeakMap();   // per brano: {k: titolo|artista|genere|tag, c, o, m}
+function compositoreDi(t) {
+  const k = (t.title || '') + '\u0001' + (t.artist || '') + '\u0001' + (t.genre || '') + '\u0001' + (t.composer || '') + '\u0001' + (t.work || '') + '\u0001' + (t.movement || '') + '\u0001' + (t.album || '');
+  let x = COMPC.get(t); if (x && x.k === k) return x.c;
+  const classica = compClassica(t);
+  let c = '';
+  const tag = (t.composer || '').split(/\s+/).filter(Boolean).join(' ');
+  if (tag) {   // dal tag: un nome solo, conosciuto, diventa quello di tutti (George Frideric Handel = Georg Friedrich Händel)
+    const n = COMP_NOMI.find(([, piena, cogn]) => piena.test(tag) || cogn && cogn.test(tag) && tag.split(/\s+/).length <= 3 && !/[,&/;]/.test(tag));
+    c = n && !/[,&/;]| e | and /.test(tag) ? n[0] : tag;
+  } else {
+    const cat = COMP_CATALOGHI.find(([re, , debole]) => re.test(t.title || '') && (!debole || classica));
+    if (cat) c = cat[1];
+    else {
+      const a = (t.artist || '') + ' / ' + (t.albumArtist || '');
+      const n = COMP_NOMI.find(([, piena, cogn]) => piena.test(a) || classica && cogn && cogn.test(a));
+      if (n) c = n[0];
+    }
+  }
+  COMPC.set(t, x = {k, c, o:null});
+  return c;
+}
+// opera e movimento di un brano con il compositore (dai tag o dal titolo); {opera:'', mov} se non è di un'opera
+function operaDi(t) {
+  const c = compositoreDi(t), x = COMPC.get(t);
+  if (x.o) return x.o;
+  let o;
+  if (t.work) o = {opera:t.work, mov:t.movement || t.title};
+  else if (!c || !(compClassica(t) || COMP_CATALOGHI.some(([re]) => re.test(t.title || '')))) o = {opera:'', mov:t.title};
+  else {
+    let ti = (t.title || '').trim();
+    const piano = x => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(), pre = /^([^:]{2,30}):\s/.exec(ti);
+    if (pre && pre[1].split(/\s+/).length <= 3 && piano(c).indexOf(piano(pre[1]).replace(/ae/g, 'a')) >= 0) ti = ti.slice(pre[0].length).trim();   // «Handel: Tolomeo…»
+    const m = /^(.*?\b(?:BWV|HWV|KV|K\.|RV|D\.?|Hob\.?|WoO|TWV|SWV|BuxWV|WWV|MWV|TrV|Sz\.?|Z\.?|Op\.)\s?[IVXL]*[:.]?\s?\d+[a-z]?(?:\s?(?:No\.|Nr\.|n\.)\s?\d+)?)\s*[,:/–—-]\s*(.+)$/.exec(ti);
+    const k = ti.indexOf(': ');
+    if (m) o = {opera:m[1].trim(), mov:m[2].trim()};
+    else if (k > 2) o = {opera:ti.slice(0, k).trim(), mov:ti.slice(k + 2).trim()};
+    else o = {opera:t.album || '', mov:ti};
+  }
+  x.o = o; return o;
+}
+function compositori() {
+  const m = new Map();
+  for (const t of T.values()) {
+    if (t.gone) continue;
+    const c = compositoreDi(t); if (!c) continue;
+    let x = m.get(c); if (!x) m.set(c, x = {nome:c, brani:[], cover:null, opere:0, _o:new Set()});
+    x.brani.push(t); if (!x.cover && t.cover) x.cover = t.cover;
+    const o = operaDi(t).opera; if (o && !x._o.has(o)) { x._o.add(o); x.opere++; }
+  }
+  return [...m.values()].sort((a, b) => coll.compare(a.nome, b.nome));
+}
+function haCompositori() { for (const t of T.values()) if (!t.gone && compositoreDi(t)) return true; return false; }
+function opereDi(c) {
+  const m = new Map();
+  for (const t of c.brani) {
+    const o = operaDi(t).opera; if (!o) continue;
+    let x = m.get(o); if (!x) m.set(o, x = {nome:o, brani:[], cover:null, artisti:new Map()});
+    x.brani.push(t); if (!x.cover && t.cover) x.cover = t.cover;
+    const a = t.artist || ''; x.artisti.set(a, (x.artisti.get(a) || 0) + 1);
+  }
+  const ordine = (a, b) => coll.compare(a.album || '', b.album || '') || (a.disc || 0) - (b.disc || 0) || (a.track || 0) - (b.track || 0) || coll.compare(a.title || '', b.title || '');
+  return [...m.values()].map(x => { x.brani.sort(ordine); x.artista = [...x.artisti].sort((a, b) => b[1] - a[1])[0][0]; return x; }).sort((a, b) => coll.compare(a.nome, b.nome));
+}
+/* ---------- cartelle di playlist (come in Apple Music) ----------
+   Ogni playlist può stare in una cartella (campo «cartella», sincronizzato con il Mac come il resto della playlist): in
+   Playlist prima le cartelle, poi le playlist fuori. Dal menu ⋯ della playlist: Sposta in una cartella (anche una nuova);
+   dalla cartella: Rinomina e Togli la cartella (le playlist restano). */
+function plRiga(p) {
+  const tr = plTracks(p);
+  return '<button class="trk" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>';
+}
+function cartelle() {
+  const m = new Map();
+  for (const p of P) if (p.cartella) { if (!m.has(p.cartella)) m.set(p.cartella, []); m.get(p.cartella).push(p); }
+  return [...m].map(([nome, pl]) => ({nome, pl})).sort((a, b) => coll.compare(a.nome, b.nome));
+}
+function cartRiga(c) {
+  return '<button class="trk" data-a="go" data-v="cartella" data-k="' + esc(c.nome) + '"><span class="art cartart">' + ic('folder') + '</span><span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">Cartella · ' + c.pl.length + ' playlist</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>';
+}
+const nomeCartella = s => String(s || '').split(/\s+/).filter(Boolean).join(' ').slice(0, 60);
+async function cartellaMetti(id, nome) {
+  const p = P.find(x => x.id === id); if (!p) return false;
+  nome = nomeCartella(nome);
+  if ((p.cartella || '') === nome) { closeSheet(); return false; }
+  if (nome) p.cartella = nome; else delete p.cartella;
+  await savePl(p); closeSheet(); render(true);
+  toast(nome ? '«' + p.name + '» è in «' + nome + '»' : '«' + p.name + '» è fuori dalle cartelle');
+  return true;
+}
+async function cartellaRinomina(vecchio, nuovo) {
+  nuovo = nomeCartella(nuovo);
+  const pl = P.filter(p => p.cartella === vecchio);
+  for (const p of pl) { if (nuovo) p.cartella = nuovo; else delete p.cartella; await savePl(p); }
+  if (nuovo) Object.values(tabs).forEach(st => st.forEach(r => { if (r.v === 'cartella' && r.k === vecchio) r.k = nuovo; }));
+  render(true);
+  return pl.length;
+}
 function topBar(right) {
   const st = tabs[tab];
   const prev = st.length > 1 ? st[st.length - 2] : null;
   return '<div class="top">' + (prev ? '<button class="back" data-a="back">' + ic('chevL') + '<span>' + esc(routeTitle(prev)) + '</span></button>' : '<span></span>') + (right || '') + '</div>';
 }
 function routeTitle(r) {
-  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche', atl:'Playlist di Atlante', iaprev:'Anteprima', ritmo:'Per ritmo', generi:'Generi', replay:'Replay'}[r.v] ||
+  return {home:'Home', lib:'Libreria', search:'Cerca', songs:'Brani', albums:'Album', artists:'Artisti', playlists:'Playlist', favs:'Preferiti', saved:'Sull\'iPhone', classifiche:'Classifiche', atl:'Playlist di Atlante', iaprev:'Anteprima', ritmo:'Per ritmo', generi:'Generi', replay:'Replay', compositori:'Compositori'}[r.v] ||
     (r.v === 'genere' ? ((generi().find(g => g.k === r.k) || {}).nome || 'Genere') : '') || (r.v === 'classifica' ? ((CLS.find(c => c.id === r.k) || {}).nome || 'Classifica') : '') ||
-    (r.v === 'artist' ? r.k : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : r.v === 'atlpl' ? ((atlPl(r.k) || {}).nome || 'Playlist') : r.v === 'macpl' ? mplNome(r.k) : '');
+    (r.v === 'artist' || r.v === 'cartella' || r.v === 'compositore' ? r.k : r.v === 'opera' ? r.k.split('\u0001')[1] || 'Opera' : r.v === 'album' ? ((albumByKey(r.k) || {}).name || 'Album') : r.v === 'playlist' ? ((P.find(p => p.id === r.k) || {}).name || 'Playlist') : r.v === 'pick' ? 'Aggiungi brani' : r.v === 'atlpl' ? ((atlPl(r.k) || {}).nome || 'Playlist') : r.v === 'macpl' ? mplNome(r.k) : '');
 }
 function emptyState() {
   if (SRV && SRVSCAN) return '<div class="empty"><div class="big">' + ic('note') + '</div><h3>Il Mac sta leggendo il disco…</h3><p>La prima volta ci vuole qualche minuto: i brani compaiono man mano.</p></div>';
@@ -1716,7 +1930,8 @@ const pages = {
     if (SRV && SRVSCAN) h += '<div class="banner"><span class="bt">Il Mac sta leggendo il disco di backup' + (SRVN ? ': ' + SRVN + ' brani finora…' : '…') + '</span></div>';
     else if (SRV) h += '<div class="banner"><span class="bt">' + (SRVN ? 'Musica del disco di backup: ' + SRVN + ' brani' : 'Il disco di backup sul Mac sembra scollegato.') + '</span>' + (IO.ruolo !== 'invitato' ? '<button class="ba" data-a="rescan">Aggiorna</button>' : '') + '</div>';
     else if (rem && !srvWait) h += '<div class="banner"><span class="bt">Il Mac non risponde: puoi ascoltare i brani già sull\'iPhone.</span><button class="ba" data-a="retry">Riprova</button></div>';
-    h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + (CLS.length ? row('classifiche', 'classifica', 'Classifiche') : '') + row('artists', 'person', 'Artisti') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('generi', 'note', 'Generi') + row('favs', 'star', 'Preferiti') + row('replay', 'classifica', 'Replay') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
+    h += fissatiHtml();
+    h += '<div class="lrows">' + row('playlists', 'plist', 'Playlist') + (CLS.length ? row('classifiche', 'classifica', 'Classifiche') : '') + row('artists', 'person', 'Artisti') + (haCompositori() ? row('compositori', 'compositore', 'Compositori') : '') + row('albums', 'album', 'Album') + row('songs', 'songs', 'Brani') + row('generi', 'note', 'Generi') + row('favs', 'star', 'Preferiti') + row('replay', 'classifica', 'Replay') + (rem ? row('saved', 'down', 'Sull\'iPhone') : '') + '</div>';
     if (rem) {
       // brani diversi: un gruppo di doppioni conta una volta
       const gm = gemelli(), visti = new Set(); let tot = 0, sul = 0;
@@ -1760,7 +1975,7 @@ const pages = {
     const tr = [...T.values()].filter(t => primary(t) === r.k || t.artist === r.k || albArt(t) === r.k);
     const al = albums().filter(a => a.artist === r.k).sort((a, b) => (b.year || '').localeCompare(a.year || ''));
     const l = regList(tr.slice().sort((a, b) => coll.compare(a.album, b.album) || trkSort(a, b)).map(t => t.id), r.k);
-    let h = topBar() + '<h1 class="lt">' + esc(r.k) + '</h1>' + pbtns(l);
+    let h = topBar(fissaTasto('artist', r.k)) + '<h1 class="lt">' + esc(r.k) + '</h1>' + pbtns(l);
     if (al.length) h += '<h2 class="h2">Album</h2><div class="shelf">' + al.map(tile).join('') + '</div>';
     h += '<h2 class="h2">Brani</h2>' + trackRows(tr.sort((a, b) => coll.compare(a.title, b.title)), {label:r.k, noAlbum:false});
     return h;
@@ -1772,7 +1987,7 @@ const pages = {
     const tot = a.tracks.reduce((s, t) => s + (t.duration || 0), 0), mins = Math.max(1, Math.round(tot / 60));
     const allDur = a.tracks.every(t => t.duration > 0);   // finché manca la durata di qualche brano non si scrive il totale
     const meta = [a.tracks[0].genre, a.year].filter(Boolean).join(' · ');
-    return topBar() + '<div class="hero">' + art(a.cover) + '<div class="hb"><div class="ht">' + esc(a.name) + '</div><button class="ha" data-a="go" data-v="artist" data-k="' + esc(a.artist) + '">' + esc(a.artist) + '</button>' + (meta ? '<div class="hm">' + esc(meta) + '</div>' : '') + '</div></div>' +
+    return topBar(fissaTasto('album', a.key)) + '<div class="hero">' + art(a.cover) + '<div class="hb"><div class="ht">' + esc(a.name) + '</div><button class="ha" data-a="go" data-v="artist" data-k="' + esc(a.artist) + '">' + esc(a.artist) + '</button>' + (meta ? '<div class="hm">' + esc(meta) + '</div>' : '') + '</div></div>' +
       pbtns(l) + trackRows(a.tracks, {num:true, albumArtist:a.artist, label:a.name}) +
       '<p class="foot">' + a.tracks.length + (a.tracks.length === 1 ? ' brano' : ' brani') + (allDur ? ', ' + (mins === 1 ? '1 minuto' : mins + ' minuti') : '') + '</p>';
   },
@@ -1780,9 +1995,38 @@ const pages = {
     let h = topBar() + '<h1 class="lt">Playlist</h1><div>';
     h += '<button class="trk" data-a="newpl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:24px">' + ic('plus') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Nuova playlist…</span></span></span></button>';
     h += '<button class="trk" data-a="impl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('down') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Importa da Apple Music…</span><span class="t2">File esportato da Musica sul Mac</span></span></span></button>';
-    h += P.map(p => { const tr = plTracks(p); return '<button class="trk" data-a="go" data-v="playlist" data-k="' + p.id + '">' + mosaic(tr) + '<span class="rt"><span class="tx"><span class="t1">' + esc(p.name) + '</span><span class="t2">' + tr.length + (tr.length === 1 ? ' brano' : ' brani') + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>'; }).join('');
+    h += cartelle().map(cartRiga).join('') + P.filter(p => !p.cartella).map(plRiga).join('');
     h += mplRighe();   // dopo le proprie, quelle del Mac (dal disco e dalla vecchia radio)
     return h + '</div>';
+  },
+  compositori() {
+    const C = compositori();
+    return topBar() + '<h1 class="lt">Compositori</h1>' + (C.length ? '<div>' + chunk(C, c => '<button class="trk" data-a="go" data-v="compositore" data-k="' + esc(c.nome) + '">' + art(c.cover, 'av') +
+      '<span class="rt"><span class="tx"><span class="t1">' + esc(c.nome) + '</span><span class="t2">' + (c.opere ? c.opere + (c.opere === 1 ? ' opera · ' : ' opere · ') : '') + c.brani.length + (c.brani.length === 1 ? ' brano' : ' brani') + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>', true) + '</div>' : emptyState());
+  },
+  compositore(r) {
+    const c = compositori().find(x => x.nome === r.k);
+    if (!c) return topBar() + '<div class="empty"><h3>Compositore non trovato</h3></div>';
+    const l = regList(c.brani.map(t => t.id), c.nome);
+    let h = topBar() + '<h1 class="lt">' + esc(c.nome) + '</h1>' + pbtns(l);
+    const O = opereDi(c), sole = c.brani.filter(t => !operaDi(t).opera);
+    if (O.length) h += '<h2 class="h2">Opere</h2>' + O.map(o => '<button class="trk" data-a="go" data-v="opera" data-k="' + esc(c.nome + '\u0001' + o.nome) + '">' + art(o.cover) +
+      '<span class="rt"><span class="tx"><span class="t1">' + esc(o.nome) + '</span><span class="t2">' + o.brani.length + (o.brani.length === 1 ? ' movimento' : ' movimenti') + (o.artista ? ' · ' + esc(o.artista) : '') + '</span></span><span class="more" style="color:var(--fg3);font-size:16px">' + ic('chevR') + '</span></span></button>').join('');
+    if (sole.length) h += '<h2 class="h2">Brani</h2>' + trackRows(sole.sort((a, b) => coll.compare(a.title, b.title)), {label:c.nome});
+    return h;
+  },
+  opera(r) {
+    const [nome, op] = r.k.split('\u0001'), c = compositori().find(x => x.nome === nome), o = c && opereDi(c).find(x => x.nome === op);
+    if (!o) return topBar() + '<div class="empty"><h3>Opera non trovata</h3></div>';
+    const l = regList(o.brani.map(t => t.id), o.nome);
+    return topBar() + '<div class="hero">' + art(o.cover) + '<div class="hb"><div class="ht">' + esc(o.nome) + '</div><button class="ha" data-a="go" data-v="compositore" data-k="' + esc(nome) + '">' + esc(nome) + '</button>' + (o.artista ? '<div class="hm">' + esc(o.artista) + '</div>' : '') + '</div></div>' +
+      pbtns(l) + trackRows(o.brani, {label:o.nome}) + '<p class="foot">' + o.brani.length + (o.brani.length === 1 ? ' movimento' : ' movimenti') + '</p>';
+  },
+  cartella(r) {
+    const pl = P.filter(p => p.cartella === r.k);
+    const h = topBar('<button class="round" data-a="cartmenu" data-k="' + esc(r.k) + '" aria-label="Opzioni cartella">' + ic('more') + '</button>') + '<h1 class="lt">' + esc(r.k) + '</h1>';
+    if (!pl.length) return h + '<div class="empty"><h3>Cartella vuota</h3><p>Sposta qui una playlist dal suo menu ⋯ › Sposta in una cartella.</p></div>';
+    return h + '<div>' + pl.map(plRiga).join('') + '</div>';
   },
   playlist(r) {
     const p = P.find(x => x.id === r.k);
@@ -1815,12 +2059,49 @@ const pages = {
     return topBar() + '<h1 class="lt">Cerca</h1><div class="sbox"><label class="sfield">' + ic('search') + '<input id="sq" type="search" placeholder="Artisti, album, brani, testi" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' + esc(q) + '"><button class="sclear" data-a="sclear" aria-label="Cancella"' + (q ? '' : ' hidden') + '>' + ic('xc') + '</button></label></div><div id="sres">' + searchResults() + '</div>';
   }
 };
+/* ---------- ricerche recenti (come in Apple Music) ----------
+   Con il campo vuoto, in cima a Cerca: quello che si è toccato tra i risultati (artista, album, playlist, brano) e le
+   parole cercate con Invio, dal più recente (al più 15, su questo dispositivo). «Cancella» le toglie tutte. */
+const RICERCHE = {k:'am-cerca-recenti', max:15, viste:12};
+function ricercheLeggi() { const v = ls.get(RICERCHE.k, []); return Array.isArray(v) ? v.filter(x => x && x.t && x.k) : []; }
+function ricercaAggiungi(x) {
+  if (!x || !x.t || !x.k) return;
+  const k = String(x.k).slice(0, 200), L = ricercheLeggi().filter(y => !(y.t === x.t && y.k === k));
+  L.unshift({t:x.t, k}); ls.set(RICERCHE.k, L.slice(0, RICERCHE.max));
+}
+// dall'elemento toccato tra i risultati: che cosa ricordare
+function ricercaDaTocco(el) {
+  const go = el.closest('[data-a="go"]');
+  if (go && /^(artist|album|playlist)$/.test(go.dataset.v || '')) return {t:go.dataset.v, k:go.dataset.k};
+  const r = el.closest('.trk[data-id]');
+  if (r && el.closest('[data-a="play"]')) return {t:'song', k:r.dataset.id};
+  return null;
+}
+function ricercaRiga(x) {
+  const riga = (a, k, lead, t1, t2) => '<button class="trk" ' + a + (k != null ? ' data-k="' + esc(k) + '"' : '') + '>' + lead + '<span class="rt"><span class="tx"><span class="t1">' + esc(t1) + '</span>' + (t2 ? '<span class="t2">' + esc(t2) + '</span>' : '') + '</span></span></button>';
+  if (x.t === 'q') return riga('data-a="srecq"', x.k, '<span class="art sricon">' + ic('search') + '</span>', x.k, '');
+  if (x.t === 'artist') { const a = artists().find(y => y.name === x.k); return a ? riga('data-a="go" data-v="artist"', a.name, art(a.cover, 'av'), a.name, 'Artista') : ''; }
+  if (x.t === 'album') { const a = albums().find(y => y.key === x.k); return a ? riga('data-a="go" data-v="album"', a.key, art(a.cover), a.name, 'Album · ' + (a.artist || UNK_ART)) : ''; }
+  if (x.t === 'playlist') { const p = P.find(y => y.id === x.k); return p ? riga('data-a="go" data-v="playlist"', p.id, mosaic(plTracks(p)), p.name, 'Playlist') : ''; }
+  if (x.t === 'song') { const t = T.get(x.k); return t && !t.gone ? riga('data-a="srecs"', t.id, art(t.cover), t.title, 'Brano · ' + (t.artist || UNK_ART)) : ''; }
+  return '';
+}
+function ricercheHtml() {
+  const R = ricercheLeggi().map(ricercaRiga).filter(Boolean).slice(0, RICERCHE.viste);
+  if (!R.length) return '';
+  return '<h2 class="h2" style="margin-top:12px">Ricerche recenti<button class="hcanc" data-a="srecvia">Cancella</button></h2><div class="srec">' + R.join('') + '</div>';
+}
+document.addEventListener('click', e => {   // prima degli altri: il tocco su un risultato si ricorda
+  if (tab !== 'search' || !q.trim() || !e.target.closest || !e.target.closest('#sres')) return;
+  ricercaAggiungi(ricercaDaTocco(e.target));
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target && e.target.id === 'sq' && q.trim()) ricercaAggiungi({t:'q', k:q.trim()}); });
 function searchResults() {
   if (!T.size) return emptyState();
   const n = q.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (!n) {
     const rec = albums().sort((a, b) => b.added - a.added).slice(0, 8);
-    return '<h2 class="h2" style="margin-top:12px">Sfoglia</h2><div class="lrows">' + ['playlists:plist:Playlist', 'artists:person:Artisti', 'albums:album:Album', 'songs:songs:Brani'].map(s => { const [v, i, t] = s.split(':'); return '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(i) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>'; }).join('') + '</div>' +
+    return ricercheHtml() + '<h2 class="h2" style="margin-top:12px">Sfoglia</h2><div class="lrows">' + ['playlists:plist:Playlist', 'artists:person:Artisti', 'albums:album:Album', 'songs:songs:Brani'].map(s => { const [v, i, t] = s.split(':'); return '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(i) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>'; }).join('') + '</div>' +
       '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + rec.map(tile).join('') + '</div>';
   }
   const words = n.split(/\s+/);
@@ -2461,9 +2742,82 @@ function updateNow() {
 function renderQueue() {
   const up = S.queue.slice(S.qi + 1);
   let auto = false;   // i brani della riproduzione automatica stanno sotto il loro titolo
-  $('qlist').innerHTML = (up.length ? up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; const h = !auto && AUTOP.ids.has(id) ? (auto = true, '<div class="qauto">' + ic('inf') + 'Riproduzione automatica</div>') : ''; return h + '<button class="qrow" data-a="qjump" data-i="' + (S.qi + 1 + j) + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>'; }).join('') :
+  const top = up.length ? '<div class="qtop"><span>' + up.length + (up.length === 1 ? ' brano' : ' brani') + '</span><button data-a="qsvuota">Svuota</button></div>' : '';
+  $('qlist').innerHTML = (up.length ? top + up.slice(0, 200).map((id, j) => { const t = TT(id); if (!t) return ''; const h = !auto && AUTOP.ids.has(id) ? (auto = true, '<div class="qauto">' + ic('inf') + 'Riproduzione automatica</div>') : ''; const k = S.qi + 1 + j;
+    return h + '<div class="qrow" data-i="' + k + '"><button class="qgo" data-a="qjump" data-i="' + k + '">' + art(t.cover) + '<span class="tx"><b>' + esc(t.title) + '</b><span>' + esc(t.artist || UNK_ART) + '</span></span></button>' +
+      '<button class="qdel" data-a="qdel" data-i="' + k + '" aria-label="Togli dalla coda">' + ic('togli') + '</button><span class="qh" data-i="' + k + '" role="button" aria-label="Trascina per spostare">' + ic('presa') + '</span></div>'; }).join('') :
     '<div class="qempty">Nessun brano in coda.' + (S.repeat === 'all' ? ' Si ricomincia dall\'inizio.' : AUTOP.on ? ' Continua la riproduzione automatica.' : '') + '</div>') + ascLettore();
 }
+/* ---------- coda modificabile (come «Successivi» di Apple Music) ----------
+   ≡ per trascinare un brano più su o più giù, − per toglierlo, «Svuota» per togliere tutti i successivi. Mai durante
+   un passaggio tra i brani (dissolvenza, salto in preparazione, rampa a fine brano): il mix usa il brano dopo. */
+I.togli = '<path d="M12 2.5a9.5 9.5 0 1 1 0 19 9.5 9.5 0 0 1 0-19zM7 11v2h10v-2z"/>';   // − nel cerchio (I.meno è il pollice in giù)
+I.presa = '<path d="M4 7h16v1.8H4zm0 4.1h16v1.8H4zm0 4.1h16V17H4z"/>';
+const CODA_ATTESA = 'Un attimo: sta finendo il passaggio tra i brani';
+function codaBloccata() { const P = MIX.plan; return !!(MIX.act || MIX.salto || P && P.st === 'ready' && au.currentTime >= P.tR - 0.5); }
+function codaCambiata() { saveState(); renderQueue(); if (typeof devInvia === 'function') devInvia(true); }
+// sposta il brano i della coda prima della posizione k (indici della coda di adesso)
+function codaSposta(i, k) {
+  if (codaBloccata()) { toast(CODA_ATTESA); return false; }
+  if (!(i > S.qi && i < S.queue.length)) return false;
+  k = Math.max(S.qi + 1, Math.min(S.queue.length, k));
+  if (k === i || k === i + 1) return false;   // stesso posto
+  const [id] = S.queue.splice(i, 1);
+  S.queue.splice(k > i ? k - 1 : k, 0, id);
+  if (!S.shuffle) S.orig = S.queue.slice();   // in ordine: l'ordine nuovo resta anche togliendo e rimettendo il casuale
+  codaCambiata(); return true;
+}
+function codaTogli(i) {
+  if (codaBloccata()) { toast(CODA_ATTESA); return false; }
+  if (!(i > S.qi && i < S.queue.length)) return false;
+  const [id] = S.queue.splice(i, 1);
+  if (S.shuffle) { const o = S.orig.lastIndexOf(id); if (o >= 0) S.orig.splice(o, 1); } else S.orig = S.queue.slice();
+  codaCambiata(); return true;
+}
+function codaSvuota() {
+  if (codaBloccata()) { toast(CODA_ATTESA); return false; }
+  const n = S.queue.length - S.qi - 1; if (S.qi < 0 || n <= 0) return false;
+  S.queue = S.queue.slice(0, S.qi + 1);
+  const resta = new Set(S.queue);
+  S.orig = S.shuffle ? S.orig.filter(id => resta.has(id)) : S.queue.slice();
+  codaCambiata(); toast(n === 1 ? 'Tolto 1 brano dai successivi' : 'Tolti ' + n + ' brani dai successivi'); return true;
+}
+// trascinare: si tiene premuto ≡ e si porta il brano dove va (la riga sotto il dito dice dove); vicino ai bordi la
+// lista scorre da sola
+(function codaTrascina() {
+  const L = $('qlist'); if (!L) return;
+  let D = null;
+  const pulisci = () => L.querySelectorAll('.qrow.sopra,.qrow.sotto').forEach(x => x.classList.remove('sopra', 'sotto'));
+  L.addEventListener('pointerdown', e => {
+    const h = e.target.closest('.qh'); if (!h || RC.id) return;
+    e.preventDefault();
+    if (codaBloccata()) { toast(CODA_ATTESA); return; }
+    const row = h.closest('.qrow'); D = {i:+row.dataset.i, row, y0:e.clientY, s0:L.scrollTop, k:null};
+    row.classList.add('drag'); try { h.setPointerCapture(e.pointerId); } catch (x) {}
+  });
+  L.addEventListener('pointermove', e => {
+    if (!D) return;
+    const r = L.getBoundingClientRect();
+    if (e.clientY < r.top + 40) L.scrollTop -= 12; else if (e.clientY > r.bottom - 40) L.scrollTop += 12;
+    D.row.style.transform = 'translateY(' + (e.clientY - D.y0 + L.scrollTop - D.s0) + 'px)';
+    D.row.style.pointerEvents = 'none';
+    const sotto = document.elementFromPoint(e.clientX, e.clientY), t = sotto && sotto.closest('.qrow');
+    D.row.style.pointerEvents = '';
+    pulisci();
+    if (!t || t === D.row || !L.contains(t)) { D.k = null; return; }
+    const rr = t.getBoundingClientRect(), giu = e.clientY > rr.top + rr.height / 2;
+    t.classList.add(giu ? 'sotto' : 'sopra');
+    D.k = +t.dataset.i + (giu ? 1 : 0);
+  });
+  const fine = annulla => {
+    if (!D) return;
+    const {i, k, row} = D; D = null;
+    row.classList.remove('drag'); row.style.transform = ''; pulisci();
+    if (!annulla && k != null) codaSposta(i, k);
+  };
+  L.addEventListener('pointerup', () => fine(false));
+  L.addEventListener('pointercancel', () => fine(true));
+})();
 let dragging = false, lastSave = 0, lastPos = 0;
 function tick() {
   const d = au.duration, c = au.currentTime;
@@ -2535,7 +2889,7 @@ const MIX = {on:ls.get('am-mix', true), X:12, RAMPA:8, plan:null, act:null, ctx:
 let userVol = 1;
 function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iPhone il volume dei lettori non si cambia: lo fa il mixer)
   const g = el._g == null ? 1 : el._g;
-  if (MIX.gains.has(el)) { el.volume = 1; return; }
+  if (MIX.gains.has(el)) { el.volume = 1; eqLivello(); return; }   // su Mac e PC con il mixer: il volume lo fa il mixer
   try { el.volume = Math.max(0, Math.min(1, userVol * g * (el._n == null ? 1 : el._n))); } catch (e) {}   // _n: volume uniforme
 }
 function setGain(el, g) { el._g = g; if (MIX.gains.has(el)) { const n = MIX.gains.get(el).gain; try { n.cancelScheduledValues(MIX.ctx.currentTime); n.setValueAtTime(g, MIX.ctx.currentTime); } catch (e) { n.value = g; } } else applyVol(el); }
@@ -2558,20 +2912,91 @@ function novita27() {   // in Safari 27: «width: stretch» e i ReadableStream d
   try { return CSS.supports('width', 'stretch') && typeof ReadableStream === 'function' && Symbol.asyncIterator in ReadableStream.prototype; } catch (e) { return false; }
 }
 const IOS_PRIMA_27 = isIOS && !iosDa27(navigator.userAgent, novita27());
-function mixerInit() {
-  if (MIX.ctx || !NEEDS_MIXER || IOS_PRIMA_27 || !MIX.on || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
+function mixerInit(perEQ) {
+  if (MIX.ctx || IOS_PRIMA_27 || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
+  if (!perEQ && EQ.id === 'no' && (!NEEDS_MIXER || !MIX.on)) return;   // senza mix (iPhone) e senza equalizzatore non serve
   try {
     if (navigator.audioSession) navigator.audioSession.type = 'playback';
-    else return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
+    else if (NEEDS_MIXER) return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
     const ctx = new AudioContext({latencyHint:'playback'});
+    const uscita = eqCostruisci(ctx);   // equalizzatore e volume (su Mac e PC), poi le casse
     // dissolvenza (g) e volume uniforme (n, vedi volNorm) in due nodi: le curve della dissolvenza non lo toccano
-    DECKS.forEach(el => { const g = ctx.createGain(), n = ctx.createGain(); n.gain.value = el._n == null ? 1 : el._n; ctx.createMediaElementSource(el).connect(g); g.connect(n); n.connect(ctx.destination); MIX.gains.set(el, g); MIX.norm.set(el, n); applyVol(el); });
-    MIX.ctx = ctx; ctx.resume().catch(() => {});
+    DECKS.forEach(el => { const g = ctx.createGain(), n = ctx.createGain(); n.gain.value = el._n == null ? 1 : el._n; ctx.createMediaElementSource(el).connect(g); g.connect(n); n.connect(uscita); MIX.gains.set(el, g); MIX.norm.set(el, n); applyVol(el); });
+    MIX.ctx = ctx; ctx.resume().catch(() => {}); eqApplica(EQ.id, true);
     ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && !au.paused && au !== AUX) ctx.resume().catch(() => {}); });
     ctx.addEventListener('statechange', () => diario('mixer', {stato:ctx.state, nascosta:document.hidden}));   // ogni cambio nel diario
   } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
 }
 addEventListener('pointerdown', () => { mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {}); }, {capture:true, passive:true});
+/* ---------- equalizzatore (come Impostazioni › Musica › EQ dell'iPhone) ----------
+   10 bande (32 Hz – 16 kHz, come l'EQ di iTunes) dopo il mixer, con i preset di Musica; vale su questo dispositivo
+   (am-eq). Serve il mixer (Web Audio): sull'iPhone c'è già (da iOS 27); su Mac e PC si accende la prima volta che si
+   sceglie un preset, e da lì fa anche il volume. «No» = tutte le bande a 0 dB: il suono passa com'è. Prima dei filtri
+   un po' di margine (preamp), così i preset che alzano molto non saturano. */
+const EQ_BANDE = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const EQ_PRESET = [
+  ['no', 'No', [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
+  ['acustica', 'Acustica', [5, 5, 4, 1, 1.5, 1.5, 3.5, 4, 3.5, 2]],
+  ['bassi-su', 'Aumento bassi', [5.5, 4.5, 3.5, 2.5, 1, 0, 0, 0, 0, 0]],
+  ['bassi-giu', 'Riduzione bassi', [-5.5, -4.5, -3.5, -2.5, -1, 0, 0, 0, 0, 0]],
+  ['acuti-su', 'Aumento acuti', [0, 0, 0, 0, 0, 1, 2.5, 3.5, 4.5, 5.5]],
+  ['acuti-giu', 'Riduzione acuti', [0, 0, 0, 0, 0, -1, -2.5, -3.5, -4.5, -5.5]],
+  ['voce', 'Aumento voce', [-1.5, -3, -3, 1.5, 3.5, 3.5, 3, 1.5, 0, -1.5]],
+  ['parlato', 'Parlato', [-3.5, -0.5, 0, 0.5, 3.5, 4.5, 5, 4, 2.5, 0]],
+  ['classica', 'Classica', [4.5, 4, 3, 2.5, -1.5, -1.5, 0, 2, 3, 4]],
+  ['dance', 'Dance', [3.5, 6.5, 5, 0, 2, 3.5, 5, 4.5, 3.5, 0]],
+  ['profondo', 'Profondo', [5, 3.5, 1.5, 1, 3, 2.5, 1.5, -2, -3.5, -4.5]],
+  ['elettronica', 'Elettronica', [4, 3.5, 1, 0, -2, 2, 1, 1, 4, 5]],
+  ['hiphop', 'Hip hop', [5, 4, 1, 3, -1, -1, 1, -0.5, 2, 3]],
+  ['jazz', 'Jazz', [4, 3, 1.5, 2, -1.5, -1.5, 0, 1.5, 3, 3.5]],
+  ['latina', 'Latina', [4.5, 3, 0, 0, -1.5, -1.5, -1.5, 0, 3, 4.5]],
+  ['loudness', 'Loudness', [6, 4, 0, 0, -2, 0, -1, -5, 5, 1]],
+  ['lounge', 'Lounge', [-3, -1.5, -0.5, 1.5, 4, 2.5, 0, -1.5, 2, 1]],
+  ['pianoforte', 'Pianoforte', [3, 2, 0, 2.5, 3, 1.5, 3.5, 4.5, 3, 3.5]],
+  ['pop', 'Pop', [-1.5, -1, 0, 2, 4, 4, 2, 0, -1, -1.5]],
+  ['rnb', 'R&B', [2.5, 7, 5.5, 1.5, -2.5, -1.5, 2.5, 3, 3, 4]],
+  ['rock', 'Rock', [5, 4, 3, 1.5, -0.5, -1, 0.5, 2.5, 3.5, 4.5]],
+  ['piccoli', 'Altoparlanti piccoli', [5.5, 4.5, 4, 2.5, 1.5, 0, -1.5, -2.5, -3.5, -4]]];
+const EQ = {id:ls.get('am-eq', 'no'), nodi:[], pre:null};
+if (!EQ_PRESET.some(p => p[0] === EQ.id)) EQ.id = 'no';
+function eqValori(id) { const p = EQ_PRESET.find(x => x[0] === id); return p ? p[2] : EQ_PRESET[0][2]; }
+function eqNome(id) { const p = EQ_PRESET.find(x => x[0] === id); return p ? p[1] : 'No'; }
+function eqPre(v) { return Math.pow(10, -Math.max(0, Math.max.apply(null, v) - 2) / 20); }   // oltre +2 dB, margine contro la saturazione
+function eqCostruisci(ctx) {   // ingresso (preamp e volume) → 10 filtri → casse; risponde l'ingresso
+  const pre = ctx.createGain(); let ult = pre;
+  EQ.nodi = EQ_BANDE.map((f, i) => {
+    const b = ctx.createBiquadFilter();
+    b.type = i === 0 ? 'lowshelf' : i === EQ_BANDE.length - 1 ? 'highshelf' : 'peaking'; b.frequency.value = f; b.Q.value = 1.1; b.gain.value = 0;
+    ult.connect(b); ult = b; return b;
+  });
+  ult.connect(ctx.destination); EQ.pre = pre;
+  return pre;
+}
+const eqImposta = (par, v, subito) => { try { if (subito) par.value = v; else { par.cancelScheduledValues(MIX.ctx.currentTime); par.setTargetAtTime(v, MIX.ctx.currentTime, 0.04); } } catch (e) { par.value = v; } };
+function eqLivello(subito) { if (EQ.pre && MIX.ctx) eqImposta(EQ.pre.gain, eqPre(eqValori(EQ.id)) * (NEEDS_MIXER ? 1 : userVol), subito); }   // sull'iPhone il volume è dei tasti
+function eqApplica(id, subito) {
+  EQ.id = id; const v = eqValori(id);
+  if (!EQ.pre || !MIX.ctx) return false;
+  EQ.nodi.forEach((b, i) => eqImposta(b.gain, v[i], subito));
+  eqLivello(subito);
+  return true;
+}
+function eqDisponibile() { return !IOS_PRIMA_27 && !ls.get('am-mix-noweb', false) && typeof AudioContext === 'function'; }
+function eqScegli(id) {
+  if (!EQ_PRESET.some(x => x[0] === id) || !eqDisponibile()) return false;
+  ls.set('am-eq', id); EQ.id = id;
+  if (!MIX.ctx && id !== 'no') mixerInit(true);   // su Mac e PC il mixer si accende per l'equalizzatore (è un tocco: si può)
+  if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+  eqApplica(id);
+  closeSheet(); toast(id === 'no' ? 'Equalizzatore spento' : 'Equalizzatore: ' + eqNome(id));
+  return true;
+}
+I.eq = '<path d="M5 3h2v6.2a2.5 2.5 0 0 1 0 4.6V21H5v-7.2a2.5 2.5 0 0 1 0-4.6zm6 0h2v12.2a2.5 2.5 0 0 1 0 4.6V21h-2v-1.2a2.5 2.5 0 0 1 0-4.6zm6 0h2v2.2a2.5 2.5 0 0 1 0 4.6V21h-2V9.8a2.5 2.5 0 0 1 0-4.6z"/>';
+function eqSheet() {
+  const ok = eqDisponibile();
+  openSheet('<div class="grp scroll"><div class="smsg"><b>Equalizzatore</b>' + (ok ? 'Come l\'EQ di Musica sull\'iPhone. Vale per tutta la musica su questo dispositivo.' : IOS_PRIMA_27 ? 'Su questo iPhone serve iOS 27 o successivo.' : 'Serve il mixer dell\'app, che qui è spento.') + '</div>' +
+    (ok ? EQ_PRESET.map(p => '<button data-a="eq" data-k="' + p[0] + '" aria-pressed="' + (p[0] === EQ.id) + '"><span class="l">' + esc(p[1]) + '</span>' + (p[0] === EQ.id ? ic('check') : '') + '</button>').join('') : '') + '</div>' + cancel);
+}
 // iPhone e iPad: un lettore può partire da solo (a fine brano, a schermo bloccato) solo se è già partito una volta durante
 // un tocco. Il passaggio a tempo fa partire il brano nuovo sull'ALTRO lettore: se quello non era mai stato toccato,
 // l'iPhone lo rifiutava e la musica si fermava. Al tocco che fa partire la musica i lettori liberi partono per un attimo
@@ -3576,9 +4001,10 @@ function trackMenu(id, pl) {
     '<button data-a="m-stazione" data-id="' + id + '"><span class="l">Crea stazione</span>' + ic('radio') + '</button></div>' +
     (id === curId ? '<div class="grp"><button data-a="m-timer"><span class="l">Timer di spegnimento' + (TIMER.fine ? ': ' + Math.max(1, Math.round((TIMER.fine - Date.now()) / 60000)) + ' min' : TIMER.finebrano ? ': fine del brano' : '') + '</span>' + ic('timer') + '</button>' +
       '<button data-a="volnorm"><span class="l">Volume uniforme: ' + (VOLN.on ? 'acceso' : 'spento') + '</span>' + ic('spkHi') + '</button>' +
+      '<button data-a="m-eq"><span class="l">Equalizzatore: ' + esc(eqNome(EQ.id)) + '</span>' + ic('eq') + '</button>' +
       '<button data-a="m-blocco"><span class="l">★ dalla schermata di blocco…</span>' + ic('star') + '</button></div>' : '') +
     '<div class="grp"><button data-a="m-fav" data-id="' + id + '"><span class="l">' + (t.fav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti') + '</span>' + ic(t.fav ? 'star' : 'staro') + '</button>' +
-    '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' +
+    '<button data-a="m-addpl" data-id="' + id + '"><span class="l">Aggiungi a una playlist…</span>' + ic('plist') + '</button>' + fissaVoce('song', id) +
     '<button data-a="m-album" data-k="' + esc(alb) + '"><span class="l">Vai all\'album</span>' + ic('album') + '</button>' +
     '<button data-a="m-artist" data-k="' + esc(primary(t)) + '"><span class="l">Vai all\'artista</span>' + ic('person') + '</button>' +
     '<button data-a="m-share" data-id="' + id + '"><span class="l">Condividi brano…</span>' + ic('share') + '</button>' +
@@ -3701,6 +4127,8 @@ document.addEventListener('click', e => {
     case 'tutto': setTutto(!TUTTO); break;
     case 'queue': np.classList.toggle('q'); $('bQ').classList.toggle('on', np.classList.contains('q')); if (np.classList.contains('q')) renderQueue(); break;
     case 'qjump': saltaA(+d.i, () => load(+d.i, true), true); break;   // col mix al salto, come «Successivo»
+    case 'qdel': codaTogli(+d.i); break;
+    case 'qsvuota': codaSvuota(); break;
     case 'favcur': favCorrente(); break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
@@ -3740,8 +4168,25 @@ document.addEventListener('click', e => {
     case 'm-del': { const t = T.get(d.id); openSheet('<div class="grp"><div class="smsg"><b>Eliminare «' + esc(t.title) + '»?</b>Il brano verrà tolto dalla libreria e da tutte le playlist su questo dispositivo.</div><button class="red cancel" data-a="m-del2" data-id="' + d.id + '">Elimina brano</button></div>' + cancel); break; }
     case 'm-del2': closeSheet(); delTrack(d.id); break;
     case 'newpl': nameSheet('Nuova playlist', '', 'newpl'); break;
-    case 'plmenu': openSheet('<div class="grp"><button data-a="plren" data-k="' + d.k + '"><span class="l">Rinomina</span>' + ic('edit') + '</button><button data-a="go-pick" data-k="' + d.k + '"><span class="l">Aggiungi brani</span>' + ic('plus') + '</button>' + atlVoci(d.k) + '<button class="red" data-a="pldel" data-k="' + d.k + '"><span class="l">Elimina playlist</span>' + ic('trash') + '</button></div>' + cancel); break;
+    case 'plmenu': openSheet('<div class="grp"><button data-a="plren" data-k="' + d.k + '"><span class="l">Rinomina</span>' + ic('edit') + '</button><button data-a="go-pick" data-k="' + d.k + '"><span class="l">Aggiungi brani</span>' + ic('plus') + '</button>' +
+      '<button data-a="cartsposta" data-k="' + d.k + '"><span class="l">Sposta in una cartella…</span>' + ic('folder') + '</button>' + fissaVoce('playlist', d.k) + atlVoci(d.k) + '<button class="red" data-a="pldel" data-k="' + d.k + '"><span class="l">Elimina playlist</span>' + ic('trash') + '</button></div>' + cancel); break;
     case 'go-pick': closeSheet(); go('pick', d.k); break;
+    case 'fissa': closeSheet(); fissaCambia(d.t, d.k); break;
+    case 'm-eq': eqSheet(); break;
+    case 'eq': eqScegli(d.k); break;
+    case 'fisplay': playList([d.k], 0, false, 'Fissati'); break;
+    case 'cartsposta': { const p = P.find(x => x.id === d.k); if (!p) break; const cs = cartelle().map(c => c.nome).filter(n => n !== p.cartella);
+      openSheet('<div class="grp scroll"><div class="smsg"><b>Sposta «' + esc(p.name) + '»</b>' + (p.cartella ? 'Ora è nella cartella «' + esc(p.cartella) + '».' : 'In una cartella della pagina Playlist.') + '</div>' +
+        '<button class="acc" data-a="cartnuova" data-k="' + p.id + '"><span class="l">Nuova cartella…</span>' + ic('plus') + '</button>' +
+        cs.map(n => '<button data-a="cartin" data-k="' + p.id + '" data-c="' + esc(n) + '"><span class="l">' + esc(n) + '</span>' + ic('folder') + '</button>').join('') +
+        (p.cartella ? '<button data-a="cartfuori" data-k="' + p.id + '"><span class="l">Fuori dalle cartelle</span>' + ic('plist') + '</button>' : '') + '</div>' + cancel); break; }
+    case 'cartnuova': nameSheet('Nuova cartella', '', 'cartnuova', d.k); break;
+    case 'cartin': cartellaMetti(d.k, d.c); break;
+    case 'cartfuori': cartellaMetti(d.k, ''); break;
+    case 'cartmenu': openSheet('<div class="grp"><button data-a="cartren" data-k="' + esc(d.k) + '"><span class="l">Rinomina cartella</span>' + ic('edit') + '</button><button class="red" data-a="cartvia" data-k="' + esc(d.k) + '"><span class="l">Togli la cartella</span>' + ic('trash') + '</button></div>' + cancel); break;
+    case 'cartren': nameSheet('Rinomina cartella', d.k, 'cartren', esc(d.k)); break;
+    case 'cartvia': openSheet('<div class="grp"><div class="smsg"><b>Togliere la cartella «' + esc(d.k) + '»?</b>Le playlist restano, in Playlist.</div><button class="red cancel" data-a="cartvia2" data-k="' + esc(d.k) + '">Togli la cartella</button></div>' + cancel); break;
+    case 'cartvia2': closeSheet(); cartellaRinomina(d.k, '').then(() => { back(); toast('Cartella tolta: le playlist sono in Playlist'); }); break;
     case 'plmiss': {
       const p = P.find(x => x.id === d.k); if (!p || !(p.miss || []).length) break;
       const why = waitWhy(), L = p.miss.slice(0, 300);
@@ -3755,6 +4200,9 @@ document.addEventListener('click', e => {
     case 'pldel2': { P = P.filter(x => x.id !== d.k); dbDel('playlists', d.k).catch(() => {}); plTolta(d.k); closeSheet(); back(); toast('Playlist eliminata'); break; }
     case 'pickt': { const p = P.find(x => x.id === d.k); if (!p) break; const i = p.ids.indexOf(d.id); if (i >= 0) p.ids.splice(i, 1); else p.ids.push(d.id); b.classList.toggle('on', i < 0); savePl(p); break; }
     case 'sclear': q = ''; $('sq').value = ''; b.hidden = true; render(true); $('sq').focus(); break;
+    case 'srecq': q = d.k; { const i = $('sq'); if (i) i.value = q; const c = document.querySelector('.sclear'); if (c) c.hidden = false; } ricercaAggiungi({t:'q', k:q}); render(true); break;
+    case 'srecs': ricercaAggiungi({t:'song', k:d.k}); playList([d.k], 0, false, 'Ricerche recenti'); break;
+    case 'srecvia': ls.set(RICERCHE.k, []); render(true); break;
     case 'install': installSheet(); break;
     case 'noinstall': ls.set('am-noinstall', true); render(true); break;
     case 'rescan': rescan(); break;
@@ -3776,6 +4224,8 @@ document.addEventListener('submit', async e => {
     const p = {id:uid(), name, ids:k ? [k] : [], created:Date.now()}; P.push(p); await savePl(p); closeSheet();
     if (k) { toast('Aggiunto a «' + name + '»'); render(true); } else { if (tab !== 'lib') tab = 'lib'; go('playlist', p.id); }
   } else if (kind === 'renpl') { const p = P.find(x => x.id === k); if (p) { p.name = name; await savePl(p); } closeSheet(); render(true); }
+  else if (kind === 'cartnuova') { await cartellaMetti(k, name); }
+  else if (kind === 'cartren') { closeSheet(); await cartellaRinomina(k, name); }
   else if (kind === 'devnome') { DEV.nome = name.slice(0, 40); ls.set('am-dev-nome', DEV.nome); closeSheet(); devInvia(true); toast('Questo dispositivo ora si chiama «' + DEV.nome + '»'); }
 });
 document.addEventListener('input', e => { if (e.target.id === 'sq') { q = e.target.value; const c = document.querySelector('.sclear'); if (c) c.hidden = !q; render(true); } });
@@ -4219,7 +4669,7 @@ const RC_SOLO = 'Dal telecomando: riproduci, pausa, avanti, indietro, posizione 
 const RC_TASTI = {
   toggle:() => rcInvia('toggle'), next:() => rcInvia('next'), prev:() => rcInvia('prev'),
   shuffle:() => toast(RC_SOLO), repeat:() => toast(RC_SOLO), mix:() => toast(RC_SOLO), queue:() => toast(RC_SOLO), autoplay:() => toast(RC_SOLO),
-  favcur:() => favCorrente(), morecur:() => toast(RC_SOLO), sharecur:() => toast(RC_SOLO), qjump:() => toast(RC_SOLO)
+  favcur:() => favCorrente(), morecur:() => toast(RC_SOLO), sharecur:() => toast(RC_SOLO), qjump:() => toast(RC_SOLO), qdel:() => toast(RC_SOLO), qsvuota:() => toast(RC_SOLO)
 };
 
 // scheda «Riproduci su»: questo dispositivo e gli altri con l'app aperta
@@ -6064,10 +6514,11 @@ function testoDisegna(j, agg) {   // agg: righe nuove dal vivo (si resta dove si
   // la traduzione: una riga tradotta per ogni riga del Mac (i puntini non hanno traduzione)
   const t = j.traduzione && j.traduzione.lingua === TESTO.trad && j.traduzione.stato === 'pronta' ? j.traduzione.righe || [] : [], tr = new Map();
   (j.righe || []).forEach((r, i) => { if (t[i]) tr.set(r, t[i]); });
-  const sotto = r => tr.has(r) ? '<span class="lt">' + esc(tr.get(r)) + '</span>' : '';
+  const sotto = r => testoPronRiga(r) + (tr.has(r) ? '<span class="lt">' + esc(tr.get(r)) + '</span>' : '');
+  testoPronChiedi(R);
   let nuove = 0;
   const riga = (r, i) => {
-    if (!j.sincronizzato) return '<p class="lr">' + (r.testo ? esc(r.testo) : '&nbsp;') + sotto(r) + '</p>';
+    if (!j.sincronizzato) return '<p class="lr"' + (r.testo ? ' data-a="testo-vai" data-i="' + i + '"' : '') + '>' + (r.testo ? esc(r.testo) : '&nbsp;') + sotto(r) + '</p>';
     if (!r.testo) return '<button class="lr gap" data-a="testo-vai" data-i="' + i + '"><span class="dots" aria-label="Pausa"><i></i><i></i><i></i></span></button>';
     const nuova = prima && !prima.has(r.t + '|' + r.testo) ? ' nuova" style="--d:' + Math.min(2000, 110 * nuove++) + 'ms' : '';
     return '<button class="lr' + (TESTO_RTL.test(r.testo) ? ' rtl' : '') + nuova + '" data-a="testo-vai" data-i="' + i + '"><span class="lo">' +
@@ -6077,7 +6528,154 @@ function testoDisegna(j, agg) {   // agg: righe nuove dal vivo (si resta dove si
   L.scrollTop = agg ? su : 0;
   testoTasti();
 }
+/* ---------- pronuncia (come in Apple Music) ----------
+   Sotto le righe in altri alfabeti (cinese, giapponese, coreano, cirillico, greco, arabo, ebraico, devanagari, thai…) la
+   pronuncia in lettere latine. La fa il Mac mini con la trascrizione di macOS (api/extra/pronuncia): pinyin con i toni
+   per il cinese; per il giapponese solo i kana (i kanji restano: letti alla cinese sarebbero sbagliati). Tasto «Aあ»
+   nel testo, acceso o spento su questo dispositivo (am-pronuncia); le righe già chieste restano per questa apertura. */
+const PRON = {on:ls.get('am-pronuncia', false), righe:new Map(), attesa:new Set(), t:0};
+/* ---------- condividi un verso (come in Apple Music) ----------
+   ⤴ nel testo, poi si toccano le righe (al più 4): un'immagine con le righe, la copertina, titolo e artista, che va
+   alla condivisione dell'iPhone (Messaggi, Instagram, WhatsApp…) o, se non c'è, si scarica. L'immagine si prepara a
+   ogni scelta, così al tocco su «Condividi» è già pronta (l'iPhone vuole la condivisione subito dopo il tocco). */
+const VERSO = {on:false, scelti:[], blob:null, gen:0, t:0, MAX:4, W:1080, H:1350};
+function versoInizia() {
+  if (!TESTO.righe || !TESTO.righe.some(r => r.testo)) return;
+  VERSO.on = true; VERSO.scelti = []; VERSO.blob = null; VERSO.gen++;
+  const i = TESTO.riga >= 0 && TESTO.righe[TESTO.riga] && TESTO.righe[TESTO.riga].testo ? TESTO.riga : -1;   // si parte dalla riga cantata
+  if (i >= 0) VERSO.scelti.push(i);
+  $('lyr').classList.add('scegli'); $('versoBar').hidden = false; versoSegna(); versoPrepara();
+  toast('Tocca le righe da condividere (al più ' + VERSO.MAX + ')');
+}
+function versoFine() {
+  VERSO.on = false; VERSO.scelti = []; VERSO.blob = null; VERSO.gen++;
+  const L = $('lyr'); if (L) { L.classList.remove('scegli'); L.querySelectorAll('.lr.scelto').forEach(x => x.classList.remove('scelto')); }
+  const b = $('versoBar'); if (b) b.hidden = true;
+}
+function versoTocca(i) {
+  const r = TESTO.righe && TESTO.righe[i]; if (!r || !r.testo) return false;
+  const k = VERSO.scelti.indexOf(i);
+  if (k >= 0) VERSO.scelti.splice(k, 1);
+  else if (VERSO.scelti.length >= VERSO.MAX) { toast('Al più ' + VERSO.MAX + ' righe'); return false; }
+  else VERSO.scelti.push(i);
+  VERSO.scelti.sort((a, b) => a - b);
+  versoSegna(); versoPrepara(); return true;
+}
+function versoSegna() {
+  const L = $('lyr'); if (!L) return;
+  L.querySelectorAll('.lr[data-i]').forEach(x => x.classList.toggle('scelto', VERSO.scelti.indexOf(+x.dataset.i) >= 0));
+  const n = VERSO.scelti.length, s = $('versoN'), c = L.parentNode && L.parentNode.querySelector('[data-a="verso-condividi"]');
+  if (s) s.textContent = n ? (n === 1 ? '1 riga' : n + ' righe') : 'Tocca le righe';
+  if (c) c.disabled = !n;
+}
+function versoRighe() { return VERSO.scelti.map(i => TESTO.righe && TESTO.righe[i] && TESTO.righe[i].testo).filter(Boolean); }
+// a capo nelle parole (o nei caratteri, per cinese e giapponese senza spazi) entro «w» pixel
+function versoACapo(ctx, testo, w) {
+  const out = []; let r = '';
+  const parti = /\s/.test(testo.trim()) ? testo.trim().split(/(\s+)/) : Array.from(testo.trim());
+  for (const p of parti) {
+    const prova = r + p;
+    if (r && ctx.measureText(prova.trim()).width > w) { out.push(r.trim()); r = /^\s+$/.test(p) ? '' : p; }
+    else r = prova;
+    while (ctx.measureText(r.trim()).width > w && r.length > 1) {   // una parola sola più larga della riga: si spezza
+      let k = r.length - 1; while (k > 1 && ctx.measureText(r.slice(0, k)).width > w) k--;
+      out.push(r.slice(0, k)); r = r.slice(k);
+    }
+  }
+  if (r.trim()) out.push(r.trim());
+  return out;
+}
+// disegna la scheda: sfondo dal colore del lettore, copertina, titolo e artista, le righe, «Atlante Musica»
+function versoDisegna(ctx, d) {
+  const {W, H} = VERSO, F = '-apple-system, "SF Pro Display", system-ui, sans-serif';
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, d.colore || '#3a3a3c'); g.addColorStop(1, '#0d0d0f');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const C = 260, x0 = 90, y0 = 110;
+  if (d.img) { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x0, y0, C, C, 22); else ctx.rect(x0, y0, C, C); ctx.clip(); ctx.drawImage(d.img, x0, y0, C, C); ctx.restore(); }
+  const tx = d.img ? x0 + C + 40 : x0, tw = W - tx - 90;
+  ctx.fillStyle = '#fff'; ctx.textBaseline = 'alphabetic';
+  ctx.font = '700 46px ' + F; const t1 = versoACapo(ctx, d.titolo || '', tw).slice(0, 2);
+  ctx.font = '500 36px ' + F; const a1 = versoACapo(ctx, d.artista || '', tw).slice(0, 1);
+  let y = (d.img ? y0 + C / 2 : y0 + 50) - ((t1.length * 54 + a1.length * 44) / 2) + 42;
+  ctx.font = '700 46px ' + F; t1.forEach(l => { ctx.fillText(l, tx, y); y += 54; });
+  ctx.globalAlpha = 0.72; ctx.font = '500 36px ' + F; a1.forEach(l => { ctx.fillText(l, tx, y); y += 44; }); ctx.globalAlpha = 1;
+  // le righe: grandi finché ci stanno
+  const areaT = y0 + (d.img ? C : 100) + 90, areaB = H - 170;
+  let size = 66, righe = [];
+  for (; size >= 34; size -= 4) {
+    ctx.font = '800 ' + size + 'px ' + F;
+    righe = []; d.righe.forEach((r, k) => { versoACapo(ctx, r, W - 180).forEach(l => righe.push(l)); if (k < d.righe.length - 1) righe.push(''); });
+    if (righe.length * size * 1.22 <= areaB - areaT) break;
+  }
+  y = areaT + size;
+  righe.forEach(l => { if (l) ctx.fillText(l, 90, y); y += l ? size * 1.22 : size * 0.5; });
+  ctx.globalAlpha = 0.6; ctx.font = '600 30px ' + F; ctx.fillText('Atlante Musica', 90, H - 90); ctx.globalAlpha = 1;
+  return righe.length;
+}
+function versoImg(url) {
+  return new Promise(ok => {
+    if (!url) return ok(null);
+    const i = new Image(); if (!/^(blob:|data:)/.test(url) && new URL(url, location.href).origin !== location.origin) i.crossOrigin = 'anonymous';
+    i.onload = () => ok(i); i.onerror = () => ok(null); i.src = url;
+  });
+}
+function versoPrepara() {
+  clearTimeout(VERSO.t); VERSO.blob = null;
+  const gen = ++VERSO.gen, righe = versoRighe(); if (!righe.length) return;
+  VERSO.t = setTimeout(async () => {
+    const b = TESTO.b || {}, t = curId && TT(curId);
+    const d = {righe, titolo:b.titolo || (t && t.title) || '', artista:b.artista || (t && t.artist) || '', colore:getComputedStyle($('np')).getPropertyValue('--npc').trim(),
+      img:await versoImg(coverUrl(b.cover || (t && t.cover)))};
+    const cv = document.createElement('canvas'); cv.width = VERSO.W; cv.height = VERSO.H;
+    const fai = d2 => new Promise(ok => { try { versoDisegna(cv.getContext('2d'), d2); cv.toBlob(x => ok(x), 'image/png'); } catch (e) { ok(null); } });
+    let blob = await fai(d); if (!blob && d.img) blob = await fai(Object.assign({}, d, {img:null}));   // copertina di un altro sito: senza
+    if (gen === VERSO.gen) VERSO.blob = blob;
+  }, 120);
+}
+async function versoCondividi() {
+  const righe = versoRighe(); if (!righe.length) return;
+  if (!VERSO.blob) { versoPrepara(); await new Promise(ok => { const g = VERSO.gen, f = () => VERSO.blob || g !== VERSO.gen ? ok() : setTimeout(f, 60); setTimeout(f, 150); }); }
+  const blob = VERSO.blob; if (!blob) { toast('Immagine non riuscita'); return; }
+  const b = TESTO.b || {}, titolo = b.titolo || '', nome = 'verso-' + (titolo || 'atlante').replace(/[^\p{L}\p{N}]+/gu, '-').slice(0, 40) + '.png';
+  const f = new File([blob], nome, {type:'image/png'}), testo = '«' + righe.join(' / ') + '»' + (titolo ? ' — ' + titolo + (b.artista ? ', ' + b.artista : '') : '');
+  try {
+    if (navigator.canShare && navigator.canShare({files:[f]})) { await navigator.share({files:[f], text:testo}); versoFine(); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nome; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000); toast('Immagine del verso scaricata'); versoFine();
+}
+const PRON_ALTRO = /[\u0370-\u03ff\u0400-\u052f\u0590-\u05ff\u0600-\u06ff\u0900-\u097f\u0e00-\u0e7f\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/;
+I.pron = '<path d="M7.2 4h1.9l4.2 11h-2.1l-1-2.9H5.9l-1 2.9H2.8zm.9 2.6-1.6 4.6h3.2zM15 8.2h2v1.6h4v1.7h-1.3c-.3 2.1-1.2 3.9-2.6 5.3 1 .7 2.2 1.2 3.6 1.5l-.6 1.7c-1.7-.4-3.1-1.1-4.3-2-1.2.9-2.7 1.6-4.4 2l-.5-1.7c1.4-.3 2.6-.8 3.6-1.5-1-1-1.8-2.3-2.3-3.7h1.9c.4.9 1 1.7 1.7 2.4 1-1 1.7-2.4 2-4H13v-1.7h2z"/>';
+const testoPronServe = r => !!(r && r.testo && PRON_ALTRO.test(r.testo));
+function testoPronRiga(r) {
+  if (!PRON.on || !testoPronServe(r)) return '';
+  const p = PRON.righe.get(r.testo);
+  return p && p !== r.testo ? '<span class="lp">' + esc(p) + '</span>' : '';
+}
+// le righe che mancano, al Mac in una volta sola (al più 300); al ritorno si ridisegna il testo dov'è
+function testoPronChiedi(R) {
+  if (!PRON.on || !SRV) return;
+  const manca = [...new Set((R || []).filter(r => testoPronServe(r) && !PRON.righe.has(r.testo) && !PRON.attesa.has(r.testo)).map(r => r.testo))].slice(0, 300);
+  if (!manca.length) return;
+  manca.forEach(x => PRON.attesa.add(x));
+  fetchT(XAPI + 'pronuncia', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({righe:manca})}, 15000)
+    .then(r => r.ok ? r.json() : null).then(j => {
+      const P = j && Array.isArray(j.righe) ? j.righe : [];
+      manca.forEach((x, i) => { PRON.righe.set(x, typeof P[i] === 'string' ? P[i] : x); });
+      if (PRON.righe.size > 3000) for (const k of [...PRON.righe.keys()].slice(0, 1000)) PRON.righe.delete(k);
+      if (TESTO.j && TESTO.righe) testoDisegna(TESTO.j, true);
+    }).catch(() => {}).finally(() => manca.forEach(x => PRON.attesa.delete(x)));
+}
+function testoPronCambia() {
+  PRON.on = !PRON.on; ls.set('am-pronuncia', PRON.on);
+  toast(PRON.on ? 'Pronuncia accesa: sotto le righe in altri alfabeti' : 'Pronuncia spenta');
+  if (TESTO.j && TESTO.righe) testoDisegna(TESTO.j, true); else testoTasti();
+}
 function testoTasti() {   // il tasto della traduzione, quando c'è un testo da tradurre
+  const pr = $('nplPron');
+  if (pr) { pr.hidden = !(TESTO.righe && TESTO.righe.some(testoPronServe)); pr.classList.toggle('on', PRON.on); pr.setAttribute('aria-pressed', String(PRON.on)); }
+  const ve = $('nplVerso'); if (ve) ve.hidden = !(TESTO.righe && TESTO.righe.some(r => r.testo));
+  if (VERSO.on && !TESTO.righe) versoFine(); else if (VERSO.on) versoSegna();
   const b = $('nplTrad'), sc = $('nplSinc'); if (!b) return;
   b.hidden = !TESTO.righe;
   if (sc) { sc.hidden = !(TESTO.righe && TESTO.j && TESTO.j.sincronizzato); if (sc.hidden) { $('lyrSinc').hidden = true; sc.classList.remove('on'); } }
@@ -6188,10 +6786,13 @@ function testoTradUsa(c) {
   v.innerHTML = '<div class="nplhead"><span class="art" id="nplArt"></span><div class="tx"><b id="nplT"></b><span id="nplA"></span><span id="nplVivo" hidden></span></div>' +
     '<button class="cb" id="nplFav" data-a="favcur" aria-label="Preferito"></button>' +
     '<button class="cb" id="nplSinc" data-a="testo-sinc" aria-label="Sincronia del testo con la voce" hidden>' + ic('sinc') + '</button>' +
+    '<button class="cb" id="nplVerso" data-a="testo-verso" aria-label="Condividi un verso" hidden>' + ic('share') + '</button>' +
+    '<button class="cb" id="nplPron" data-a="testo-pron" aria-label="Pronuncia" aria-pressed="false" hidden>' + ic('pron') + '</button>' +
     '<button class="cb" id="nplTrad" data-a="testo-trad" aria-label="Traduzione" hidden>' + ic('trad') + '</button></div>' +
     '<div class="lyrsinc" id="lyrSinc" hidden><button data-a="testo-sinc-p" aria-label="Testo prima: 0,05 secondi">Prima</button>' +
     '<span id="lyrSincT"></span><button data-a="testo-sinc-d" aria-label="Testo dopo: 0,05 secondi">Dopo</button>' +
-    '<button data-a="testo-sinc-a" aria-label="Sincronia automatica">Auto</button></div><div class="qlist lyr" id="lyr"></div>';
+    '<button data-a="testo-sinc-a" aria-label="Sincronia automatica">Auto</button></div><div class="qlist lyr" id="lyr"></div>' +
+    '<div class="versobar" id="versoBar" hidden><button data-a="verso-annulla">Annulla</button><span id="versoN"></span><button class="pri" data-a="verso-condividi" disabled>Condividi</button></div>';
   favTasti();
   npq.parentNode.insertBefore(v, npq.nextSibling);
   // il dito sul testo: si legge liberamente (senza sfocatura) e dopo 4 s si torna alla riga cantata
@@ -6201,6 +6802,10 @@ function testoTradUsa(c) {
     const x = e.target.closest('[data-a]'); if (!x) return;
     const a = x.dataset.a;
     if (a === 'testo') testoCambia();
+    else if (a === 'testo-vai' && VERSO.on) versoTocca(+x.dataset.i);   // scegliendo il verso il tocco sceglie, non salta
+    else if (a === 'testo-verso') versoInizia();
+    else if (a === 'verso-annulla') versoFine();
+    else if (a === 'verso-condividi') versoCondividi();
     else if (a === 'testo-vai') {   // una riga, una parola o i puntini di una pausa
       const i = +x.dataset.i, d = x.querySelector('.dots'), r = d && d.getBoundingClientRect();
       const t = testoTocco(TESTO.righe || [], i, x.dataset.j != null ? +x.dataset.j : null, r && r.width ? (e.clientX - r.left) / r.width : null);
@@ -6214,6 +6819,7 @@ function testoTradUsa(c) {
     else if (a === 'testo-sinc-d') testoSincroniaCambia(0.05);
     else if (a === 'testo-sinc-a') testoSincroniaCambia(null);
     else if (a === 'testo-trad') testoTradScegli();
+    else if (a === 'testo-pron') testoPronCambia();
     else if (a === 'testo-trad-l') testoTradUsa(x.dataset.v || '');
     else if (a === 'queue' && TESTO.on && np.classList.contains('q')) { TESTO.on = false; ls.set('am-testo', false); testoSegna(); }   // la coda al posto del testo
   });

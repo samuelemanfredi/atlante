@@ -823,6 +823,29 @@ class TestExtra(unittest.TestCase):
         x.aggiungi("ospite-diario-01", "iPhone", "iphone", "ospite1", {"mix": {"diario": [v1]}})
         self.assertEqual((x.d, x.file), ({}, None))
 
+    def test_pronuncia(self):
+        """Le righe del testo in altri alfabeti in lettere latine (macOS); quelle già latine tornano uguali, sempre."""
+        self.assertEqual(self.s.json("POST", "/api/extra/pronuncia", {"righe": ["Ciao amore", "Hello"]}), {"righe": ["Ciao amore", "Hello"]})
+        for male in ({}, {"righe": []}, {"righe": "Привет"}, {"righe": [1]}, {"righe": [""]}, {"righe": ["x" * 301]}, {"righe": ["a"] * 301}):
+            self.s.json("POST", "/api/extra/pronuncia", male, codice=400)
+        self.s.json("GET", "/api/extra/pronuncia", codice=405)
+        if sys.platform == "darwin":   # sul Mac mini: la trascrizione vera di macOS
+            r = self.s.json("POST", "/api/extra/pronuncia", {"righe": ["Привет", "Ciao", "我爱你", "ありがとう 君"]})["righe"]
+            self.assertEqual(r[0], "Privet")
+            self.assertEqual(r[1], "Ciao")
+            self.assertIn("ài", r[2])
+            self.assertTrue(r[3].startswith("arigatou") and r[3].endswith("君"), r[3])   # i kanji restano
+        else:
+            self.s.json("POST", "/api/extra/pronuncia", {"righe": ["Привет"]}, codice=503)
+        # la memoria: ogni riga a macOS una volta sola
+        m = carica_modulo("musica_libreria_pronuncia")
+        chiamate = []
+        m._trascrivi = lambda r: (chiamate.append(list(r)), [x[::-1] for x in r])[1]
+        p = m.Pronuncia()
+        self.assertEqual(p.righe(["Ciao", "Привет", "我爱你"]), ["Ciao", "тевирП", "你爱我"])
+        self.assertEqual(p.righe(["Привет", "Hello", "Ελλάδα"]), ["тевирП", "Hello", "αδάλλΕ"])
+        self.assertEqual(chiamate, [["Привет", "我爱你"], ["Ελλάδα"]])
+
     def test_dispositivi(self):
         iphone, mac = "iphone-prova-0001", "mac-prova-00000001"
         stato = {"brano": {"sid": "abc", "titolo": "Without Me", "artista": "Eminem"}, "suona": True, "t": 12.5,
@@ -1162,6 +1185,36 @@ class TestPreferitoBlocco(unittest.TestCase):
     def tearDownClass(cls):
         cls.s.ferma()
         shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_fissati_e_cartelle(self):
+        """I Fissati in cima alla Libreria (pseudo-playlist «_fissati») e le cartelle delle playlist si sincronizzano."""
+        L = lambda: {x["id"]: x for x in self.s.json("GET", "/api/extra/liste")["playlist"]}
+        fis = [{"t": "album", "k": "Dua Lipa\u0001Future Nostalgia"}, {"t": "song", "k": "rabc"}, {"t": "artist", "k": "Mina"},
+               {"t": "playlist", "k": "pl1"}]
+        self.s.json("POST", "/api/extra/liste", {"playlist": [
+            {"id": "_fissati", "name": "", "ids": [], "fissati": fis, "updated": 5000, "extra": 1},
+            {"id": "pl1", "name": "Corsa", "ids": ["rabc"], "updated": 5000, "cartella": "  Sport   e   corsa  "},
+            {"id": "pl2", "name": "Sera", "ids": [], "updated": 5000, "cartella": "   "}]})
+        d = L()
+        self.assertEqual(d["_fissati"]["fissati"], fis)
+        self.assertEqual((d["_fissati"]["ids"], d["_fissati"]["name"]), ([], ""))
+        self.assertNotIn("extra", d["_fissati"])
+        self.assertEqual(d["pl1"]["cartella"], "Sport e corsa")
+        self.assertNotIn("cartella", d["pl2"])
+        # vince il più recente; quelli sbagliati non passano (e non cancellano quelli buoni)
+        for male in ([{"t": "video", "k": "x"}], [{"t": "song", "k": ""}], [{"t": "song"}], "no", [{"t": "song", "k": "x" * 301}],
+                     [{"t": "song", "k": "r%d" % i} for i in range(31)]):
+            self.s.json("POST", "/api/extra/liste", {"playlist": [{"id": "_fissati", "ids": [], "fissati": male, "updated": 9000}]})
+            self.assertEqual(L()["_fissati"]["fissati"], fis, male)
+        self.s.json("POST", "/api/extra/liste", {"playlist": [{"id": "_fissati", "ids": [], "fissati": fis[:1], "updated": 4000}]})
+        self.assertEqual(L()["_fissati"]["fissati"], fis, "uno più vecchio non vince")
+        self.s.json("POST", "/api/extra/liste", {"playlist": [{"id": "_fissati", "ids": [], "fissati": [], "updated": 6000}]})
+        self.assertEqual(L()["_fissati"]["fissati"], [])
+        # una playlist nuova con il nome vuoto o uguale non diventa i Fissati (né il contrario)
+        self.s.json("POST", "/api/extra/liste", {"playlist": [{"id": "plX", "name": "Corsa", "ids": ["rz"], "updated": 7000}]})
+        d = L()
+        self.assertEqual(d["pl1"]["ids"], ["rabc", "rz"], "la stessa playlist da un altro dispositivo resta una")
+        self.assertEqual(d["_fissati"]["fissati"], [])
 
     def preferiti(self):
         l = next((x for x in self.s.json("GET", "/api/extra/liste")["playlist"] if x["id"] == "_preferiti"), None)
@@ -8090,6 +8143,20 @@ def m4a_con_testo(percorso, testo):
         f.write(scatola(b"ftyp", b"M4A \0\0\0\0M4A mp42isom") + moov)
 
 
+def m4a_con_tag(percorso, tag):
+    """M4A minimo con i tag dati ({b"\\xa9nam": "Titolo", …})."""
+    def scatola(ty, d):
+        return struct.pack(">I", 8 + len(d)) + ty + d
+
+    def dato(b):
+        return scatola(b"data", struct.pack(">I", 1) + bytes(4) + b)
+    ilst = scatola(b"ilst", b"".join(scatola(k, dato(v.encode("utf-8"))) for k, v in tag.items()))
+    moov = scatola(b"moov", scatola(b"mvhd", bytes(12) + struct.pack(">II", 1000, 200000) + bytes(80)) +
+                   scatola(b"udta", scatola(b"meta", bytes(4) + scatola(b"hdlr", bytes(25)) + ilst)))
+    with open(percorso, "wb") as f:
+        f.write(scatola(b"ftyp", b"M4A \0\0\0\0M4A mp42isom") + moov)
+
+
 def flac_con_testo(percorso, commenti):
     """FLAC minimo (STREAMINFO e commenti Vorbis)."""
     info = bytes(10) + ((44100 << 44) | (44100 * 200)).to_bytes(8, "big") + bytes(16)
@@ -8714,6 +8781,31 @@ class TestKaraokeLettori(unittest.TestCase):
         self.assertEqual(self.m.leggi_lyricsfile("lines:\n- text: |\n    blocco\n"), [])
         # strumentale: lo dice la voce di LRCLIB
         self.assertEqual(self.m._lrclib_voce({"instrumental": True}, 0), {"stato": "strumentale"})
+
+    def test_compositore_opera_movimento(self):
+        """Compositore, opera e movimento dai tag di MP3 (TCOM, MVNM), M4A (©wrt, ©wrk, ©mvn) e FLAC; nel catalogo solo se ci sono."""
+        m = carica_modulo("musica_libreria_compositori")
+        d = tempfile.mkdtemp(prefix="atlante-comp-")
+        try:
+            p1 = os.path.join(d, "a.mp3")
+            mp3_con_testo(p1, "Partenope, HWV 27: Overture", "Philippe Jaroussky", "Partenope", frame=_id3_frame("TCOM", b"\x01" + "George Frideric Handel".encode("utf-16"), 3) +
+                          _id3_frame("MVNM", b"\x01" + "Overture".encode("utf-16"), 3))
+            t1 = m.leggi_tag(p1)
+            self.assertEqual((t1.get("composer"), t1.get("movement")), ("George Frideric Handel", "Overture"))
+            p2 = os.path.join(d, "b.m4a")
+            m4a_con_tag(p2, {b"\xa9nam": "I. Allegro", b"\xa9wrt": "Antonio  Vivaldi", b"\xa9wrk": "La primavera, RV 269", b"\xa9mvn": "Allegro"})
+            t2 = m.leggi_tag(p2)
+            self.assertEqual((t2.get("composer"), t2.get("work"), t2.get("movement")), ("Antonio  Vivaldi", "La primavera, RV 269", "Allegro"))
+            self.assertEqual(m._voce_extra(t2), {"composer": "Antonio Vivaldi", "work": "La primavera, RV 269", "movement": "Allegro"})
+            p3 = os.path.join(d, "c.flac")
+            flac_con_testo(p3, ["TITLE=Aria", "COMPOSER=Johann Sebastian Bach", "WORK=Goldberg-Variationen, BWV 988", "MOVEMENTNAME=Aria"])
+            t3 = m.leggi_tag(p3)
+            self.assertEqual((t3.get("composer"), t3.get("work"), t3.get("movement")), ("Johann Sebastian Bach", "Goldberg-Variationen, BWV 988", "Aria"))
+            self.assertEqual(m._voce_extra({"title": "Pop", "composer": "  ", "work": None}), {}, "vuoti: niente nel catalogo")
+            self.assertEqual(len(m._voce_extra({"composer": "x" * 500})["composer"]), 300)
+            self.assertGreaterEqual(m.VERSIONE, 3, "le voci vecchie si rileggono una volta, per il compositore")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_tag_e_file_lrc(self):
         m, d = self.m, tempfile.mkdtemp(prefix="atlante-karaoke-tag-")
@@ -12137,6 +12229,23 @@ class TestTitoliScorrono(unittest.TestCase):
         if not osa:
             self.skipTest("osascript non c'è: non è un Mac")
         js, app = os.path.join(QUI, "test_titoli.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestBlocco1(unittest.TestCase):
+    """Le funzioni di Apple Music che mancavano (blocco 1): coda modificabile, ricerche recenti, Fissati, cartelle di
+    playlist, equalizzatore, compositori e opere, pronuncia dei testi, condividi un verso. Gira in JavaScriptCore come
+    test_titoli.js: test_blocco1.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_blocco1(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_blocco1.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
         r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
         if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
