@@ -36,6 +36,9 @@ from urllib.parse import parse_qs, quote as _quote, urlsplit
 QUI =os.path.dirname(os.path.abspath(__file__))
 # le altre fonti dei testi (NetEase, lyrics.ovh): nelle prove mai i siti veri (TestTestiAltreFonti ne dà uno finto)
 os.environ.setdefault("ATLANTE_TESTI_ALTRE", "0")
+# la voce separata con Demucs: nelle prove mai quello vero (sul Mac mini c'è, sul disco Cloud); TestKaraokeVoceSeparata
+# ne dà uno finto
+os.environ["ATLANTE_SEPARA"] = "0"
 SERVER = os.path.join(QUI, "musica_libreria.py")
 
 FINTO_YTDLP = r'''
@@ -11921,6 +11924,322 @@ class TestKaraokeWhisperSiFerma(unittest.TestCase):
         self.assertIn("segnale 6", log)
         # il brano che non riesce non è «fatto» (Whisper lo riproverà più tardi, come gli altri errori del brano)
         self.assertNotEqual(self.s.json("GET", "/api/extra/testi/" + self.ids["Si ferma sempre"]).get("allineamento"), "fatto")
+
+
+# ----- voce separata dagli strumenti (Demucs) prima di Whisper, per i brani dove Whisper riconosce poche parole -----
+# demucs finto: scrive come lo chiamano (argomenti, TORCH_HOME, fili, priorità) in demucs.log e mette in <-o>/<-n>/ la
+# voce sola (vocals.wav) e il resto (no_vocals.wav), come Demucs con --two-stems=vocals e --filename {stem}.{ext}. Le
+# parole che Whisper (finto) sente nella voce sola sono «voce_sola» nelle parole del brano (se mancano, le stesse del
+# brano intero). Con «demucs: "errore"» non riesce, con «demucs: "lento"» aspetta (per la pausa).
+FINTO_DEMUCS = r'''
+import json, os, shutil, sys, time
+a = sys.argv[1:]
+ingresso = a[-1]
+try:
+    with open(ingresso + ".parole.json", encoding="utf-8") as f:
+        d = json.load(f)
+except OSError:
+    d = {}
+with open(os.path.join(os.environ["FINTO_DIR"], "demucs.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"args": a, "nome": d.get("brano", ""), "torch": os.environ.get("TORCH_HOME", ""),
+                        "fili": os.environ.get("OMP_NUM_THREADS", ""), "nice": os.getpriority(os.PRIO_PROCESS, 0)}) + "\n")
+if d.get("demucs") == "errore":
+    sys.stderr.write("RuntimeError: separazione non riuscita\n")
+    sys.exit(1)
+if d.get("demucs") == "lento":
+    with open(os.path.join(os.environ["FINTO_DIR"], "demucs-lento.pid"), "w") as f:
+        f.write(str(os.getpid()))
+    time.sleep(120)
+cartella = os.path.join(a[a.index("-o") + 1], a[a.index("-n") + 1])
+os.makedirs(cartella, exist_ok=True)
+for stem in ("vocals", "no_vocals"):
+    shutil.copy(ingresso, os.path.join(cartella, stem + ".wav"))
+with open(os.path.join(cartella, "vocals.wav.parole.json"), "w", encoding="utf-8") as f:
+    json.dump(dict(d, parole=d.get("voce_sola", d.get("parole") or [])), f)
+'''
+
+# il testo dei brani della prova (in un .lrc accanto, righe a tempo) e quando si canta ogni parola, nella voce sola
+TESTO_SEPARA = [("sole mare vento luce notte", 1.0), ("casa fiume monte cielo lago", 5.0)]
+VOCE_SEPARA = [[t + 0.5 * k, w] for x, t in TESTO_SEPARA for k, w in enumerate(x.split())]
+
+
+def _sentite(*quali):
+    """Le parole che Whisper sente nel brano intero (con la musica): solo quelle dei numeri dati, un quarto di secondo
+    dopo (così si vede da quale ascolto vengono i tempi)."""
+    return [[t + 0.25, w] for k, (t, w) in enumerate(VOCE_SEPARA) if k in quali]
+
+
+def _demucs_finto(base):
+    """Demucs finto dentro un ambiente virtuale finto (con pyvenv.cfg): il modello va in <ambiente>/torch."""
+    amb = os.path.join(base, "Strumenti", "demucs")
+    os.makedirs(os.path.join(amb, "bin"))
+    with open(os.path.join(amb, "pyvenv.cfg"), "w", encoding="utf-8") as f:
+        f.write("home = /usr/bin\n")
+    p = os.path.join(amb, "bin", "demucs")
+    _scrivi_programma(p, FINTO_DEMUCS)
+    return p
+
+
+def _chiamate_demucs(cartella):
+    try:
+        with open(os.path.join(cartella, "demucs.log"), encoding="utf-8") as f:
+            return [json.loads(x) for x in f if x.strip()]
+    except OSError:
+        return []
+
+
+class TestSeparaVoce(unittest.TestCase):
+    """La voce separata dagli strumenti con Demucs, senza server: quale programma, dove sta il modello, come lo si chiama
+    (a bassa priorità, fermabile), i file temporanei, lo spazio sul disco; se manca o non parte, si va avanti senza."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_separa")
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="atlante-separa-")
+        self.bin = os.path.join(self.d, "bin")
+        os.makedirs(self.bin)
+        os.makedirs(os.path.join(self.d, "finto"))
+        _scrivi_programma(os.path.join(self.bin, "ffmpeg"), FINTO_FFMPEG_TESTI)
+        self.demucs = _demucs_finto(self.d)
+        self.brano = _brano_con_voce(self.d, "brano.mp3", "Brano", "Artista", _sentite(0), brano="brano",
+                                     voce_sola=VOCE_SEPARA)
+        self.amb = unittest.mock.patch.dict(os.environ, {
+            "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""), "FINTO_DIR": os.path.join(self.d, "finto"),
+            "ATLANTE_SEPARA": self.demucs, "ATLANTE_SEPARA_SPAZIO_MIN_GB": "0"})
+        self.amb.start()
+
+    def tearDown(self):
+        self.amb.stop()
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_programma(self):
+        m, S = self.m, self.m.Separa
+        self.assertEqual(S.programma(), self.demucs)
+        os.environ["ATLANTE_SEPARA"] = "0"
+        self.assertTrue(S.spento())
+        self.assertIsNone(S.programma())
+        self.assertEqual(S().descrivi(), "spenta")
+        os.environ["ATLANTE_SEPARA"] = os.path.join(self.d, "non-c-e")
+        self.assertIsNone(S.programma())
+        self.assertEqual(S().descrivi(), "non installata")
+        # senza ATLANTE_SEPARA: quello sul disco Cloud (SEPARA_PROGRAMMA), se no «demucs» dove sono i programmi
+        del os.environ["ATLANTE_SEPARA"]
+        with unittest.mock.patch.object(m, "SEPARA_PROGRAMMA", self.demucs):
+            self.assertEqual(S.programma(), self.demucs)
+        with unittest.mock.patch.object(m, "SEPARA_PROGRAMMA", os.path.join(self.d, "staccato", "demucs")):
+            self.assertIsNone(S.programma())
+            _scrivi_programma(os.path.join(self.bin, "demucs"), FINTO_DEMUCS)
+            self.assertEqual(S.programma(), os.path.join(self.bin, "demucs"))
+            self.assertIsNone(S.modelli(S.programma()))   # fuori da un ambiente virtuale: dove vuole Demucs
+
+    def test_modelli_accanto_al_programma(self):
+        S = self.m.Separa
+        self.assertEqual(S.modelli(self.demucs), os.path.join(self.d, "Strumenti", "demucs", "torch"))
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_SEPARA_MODELLI": os.path.join(self.d, "modelli")}):
+            self.assertEqual(S.modelli(self.demucs), os.path.join(self.d, "modelli"))
+
+    def test_voce_sola(self):
+        tmp = os.path.join(self.d, "tmp")
+        os.makedirs(tmp)
+        dest = os.path.join(tmp, "voce-sola.wav")
+        s = self.m.Separa()
+        self.assertTrue(s.pronta())
+        s.voce(self.brano, dest, tmp)
+        # la voce sola in WAV a 16 kHz per Whisper (le sue parole: quelle della voce sola); il resto buttato via
+        with open(dest + ".parole.json", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["parole"], VOCE_SEPARA)
+        self.assertEqual(sorted(x for x in os.listdir(tmp) if not x.endswith(".parole.json")), ["voce-sola.wav"])
+        c = _chiamate_demucs(os.path.join(self.d, "finto"))
+        self.assertEqual(len(c), 1)
+        a = c[0]["args"]
+        self.assertIn("--two-stems=vocals", a)
+        self.assertEqual((a[a.index("-n") + 1], a[a.index("--filename") + 1]), ("htdemucs", "{stem}.{ext}"))
+        self.assertNotIn("-d", a)   # il dispositivo lo sceglie Demucs, se non lo dice ATLANTE_SEPARA_DISPOSITIVO
+        self.assertTrue(a[-1].startswith(tmp) and a[a.index("-o") + 1].startswith(tmp))
+        self.assertEqual(c[0]["torch"], os.path.join(self.d, "Strumenti", "demucs", "torch"))
+        self.assertGreaterEqual(int(c[0]["fili"]), 2)
+        self.assertGreaterEqual(c[0]["nice"], min(19, os.getpriority(os.PRIO_PROCESS, 0) + 10))
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_SEPARA_DISPOSITIVO": "mps"}):
+            s.voce(self.brano, dest, tmp)
+        a = _chiamate_demucs(os.path.join(self.d, "finto"))[1]["args"]
+        self.assertEqual(a[a.index("-d") + 1], "mps")
+
+    def test_poco_spazio(self):
+        """Sotto i 5 GB liberi (il disco interno del Mac mini) niente separazione: si va avanti senza."""
+        tmp = os.path.join(self.d, "tmp")
+        os.makedirs(tmp)
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_SEPARA_SPAZIO_MIN_GB": "1000000"}):
+            with self.assertRaises(self.m.ErroreTesti) as e:
+                self.m.Separa().voce(self.brano, os.path.join(tmp, "v.wav"), tmp)
+        self.assertIn("spazio", str(e.exception))
+        self.assertEqual(_chiamate_demucs(os.path.join(self.d, "finto")), [])
+        self.assertEqual(self.m.SEPARA_SPAZIO_MIN, 5.0)
+
+    def test_pausa(self):
+        """In pausa (o il brano dal vivo) Demucs si ferma a metà: Pausa, come Whisper."""
+        brano = _brano_con_voce(self.d, "lento.mp3", "Lento", "Artista", _sentite(0), demucs="lento")
+        tmp = os.path.join(self.d, "tmp")
+        os.makedirs(tmp)
+        pid = os.path.join(self.d, "finto", "demucs-lento.pid")
+        prima = time.time()
+        with self.assertRaises(self.m.Pausa):
+            self.m.Separa().voce(brano, os.path.join(tmp, "v.wav"), tmp, fermo=lambda: os.path.isfile(pid))
+        self.assertLess(time.time() - prima, 10)
+        with open(pid) as f:
+            self.assertTrue(aspetta(lambda: not _vivo(int(f.read())), 10))
+
+    def test_non_parte(self):
+        """Demucs che non parte (disco Cloud staccato a metà, Python rotto): errore, e la separazione aspetta 6 ore per
+        tutti (Gestione → Riprova la rimette subito)."""
+        rotto = os.path.join(self.d, "rotto")
+        with open(rotto, "w") as f:
+            f.write("#!/non/c/e/python\n")
+        os.chmod(rotto, 0o755)
+        os.environ["ATLANTE_SEPARA"] = rotto
+        tmp = os.path.join(self.d, "tmp")
+        os.makedirs(tmp)
+        s = self.m.Separa()
+        with self.assertRaises(self.m.ErroreTesti):
+            s.voce(self.brano, os.path.join(tmp, "v.wav"), tmp)
+        self.assertFalse(s.pronta())
+        self.assertTrue(s.descrivi().startswith("in pausa"), s.descrivi())
+        s.prova = 0.0
+        self.assertTrue(s.pronta())
+
+    def test_brano_che_non_riesce(self):
+        """Demucs che non riesce con un brano: errore di quel brano, gli altri sì."""
+        brano = _brano_con_voce(self.d, "rotto.mp3", "Rotto", "Artista", _sentite(0), demucs="errore")
+        tmp = os.path.join(self.d, "tmp")
+        os.makedirs(tmp)
+        s = self.m.Separa()
+        with self.assertRaises(self.m.ErroreTesti):
+            s.voce(brano, os.path.join(tmp, "v.wav"), tmp)
+        self.assertTrue(s.pronta())
+        self.assertEqual([x for x in os.listdir(tmp) if not x.endswith(".parole.json")], [])
+
+
+class TestKaraokeVoceSeparata(unittest.TestCase):
+    """Sul server vero: Whisper sente poche parole di un brano (la musica copre la voce)? Si separa la voce con Demucs
+    (finto) e Whisper la riascolta da sola; vince l'ascolto che riconosce più parole del testo. Solo per i brani nuovi
+    e per quelli che si ascoltano (uno vecchio già allineato male si rifà quando lo si ascolta); Demucs che non riesce
+    non ferma niente. Gestione dice quanti brani ha provato e se è servito."""
+
+    BRANI = {   # titolo: (parole sentite nel brano intero, altro nelle parole del brano, vecchio)
+        "Nuovo difficile": (_sentite(0, 1, 5, 6), {"voce_sola": VOCE_SEPARA}, False),
+        "Nuovo facile": (_sentite(*range(9)), {"voce_sola": VOCE_SEPARA}, False),
+        "Demucs rotto": (_sentite(0, 1, 5, 6), {"demucs": "errore"}, False),
+        "Voce peggio": (_sentite(0, 1, 2, 5, 6), {"voce_sola": VOCE_SEPARA[:2]}, False),
+        "Vecchio difficile": (_sentite(0, 1, 5, 6), {"voce_sola": VOCE_SEPARA}, True),
+        "Vecchio non riuscito": (_sentite(0, 5), {"voce_sola": VOCE_SEPARA}, True),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-karaoke-separa-")
+        cls.c = prepara_cartelle(cls.base)
+        _scrivi_programma(os.path.join(cls.c["bin"], "ffmpeg"), FINTO_FFMPEG_TESTI)
+        _scrivi_programma(os.path.join(cls.c["bin"], "whisper-cli"), FINTO_WHISPER)
+        cls.demucs = _demucs_finto(cls.base)
+        lrc = "".join("[00:%05.2f]%s\n" % (t, x) for x, t in TESTO_SEPARA)
+        vecchio = time.time() - 90 * 86400
+        for titolo, (sentite, altro, vec) in cls.BRANI.items():
+            p = _brano_con_voce(cls.c["musica"], titolo + ".mp3", titolo, "Artista", sentite, brano=titolo, **altro)
+            with open(p[:-4] + ".lrc", "w", encoding="utf-8") as f:
+                f.write(lrc)
+            if vec:   # nella libreria da tre mesi
+                os.utime(p, (vecchio, vecchio))
+        cls.modello = os.path.join(cls.base, "ggml-finto.bin")
+        with open(cls.modello, "wb") as f:
+            f.write(b"lmgg")
+        with unittest.mock.patch.dict(os.environ, {
+                "ATLANTE_WHISPER": os.path.join(cls.c["bin"], "whisper-cli"), "ATLANTE_WHISPER_FILE_MODELLO": cls.modello,
+                "ATLANTE_WHISPER_ANTICIPO": "0", "ATLANTE_SEPARA": cls.demucs, "ATLANTE_SEPARA_SPAZIO_MIN_GB": "0"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) == len(cls.BRANI) else None)(
+            cls.s.json("GET", "/api/musica/catalogo").get("brani") or []), 30)
+        cls.ids = {b["title"]: b["id"] for b in brani or []}
+        _accendi(cls.s)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def gestione(self):
+        return self.s.json("GET", "/api/extra/gestione/testi")
+
+    def finito(self, provati, tempo=60):
+        def pronto():
+            j = self.gestione()
+            c = j.get("conteggi") or {}
+            return j if c.get("cercati") == len(self.BRANI) and not c.get("da_allineare") and not j["ora"]["allinea"] \
+                and (j.get("separazione") or {}).get("provati") == provati else None
+        j = aspetta(pronto, tempo, 0.2)
+        self.assertTrue(j, "%r\n%s" % (self.gestione(), self.s.leggi_log()[-3000:]))
+        return j
+
+    def leggi(self, titolo):
+        return self.s.json("GET", "/api/extra/testi/" + self.ids[titolo])
+
+    def primo(self, titolo):
+        """Il tempo della prima parola: 1.0 dalla voce sola, 1.25 dal brano intero."""
+        return self.leggi(titolo)["righe"][0]["parole"][0]["t"]
+
+    def chiamate(self):
+        return _chiamate_demucs(self.c["finto"])
+
+    def whisper(self):
+        with open(os.path.join(self.c["finto"], "whisper.log"), encoding="utf-8") as f:
+            return len(f.read().splitlines())
+
+    def test_1_brani_nuovi(self):
+        j = self.finito(3)
+        sep = j["separazione"]
+        self.assertEqual((sep["stato"], sep["programma"], sep["migliorati"], sep["non_riusciti"]),
+                         ("pronta", self.demucs, 1, 1), sep)
+        # punti di quota guadagnati davvero (mediana dei brani dove Demucs è riuscito): 40% → 100% e 50% → 50% (resta)
+        self.assertEqual(sep["guadagno"], 30)
+        # solo i brani nuovi dove Whisper sente meno del 60% delle parole; ognuno una volta
+        self.assertEqual(sorted(c["nome"] for c in self.chiamate()), ["Demucs rotto", "Nuovo difficile", "Voce peggio"])
+        self.assertEqual(self.primo("Nuovo difficile"), 1.0)    # le parole dalla voce sola
+        self.assertEqual(self.primo("Nuovo facile"), 1.25)      # non serviva
+        self.assertEqual(self.primo("Voce peggio"), 1.25)       # la voce sola ne riconosce meno: resta il brano intero
+        t = self.leggi("Demucs rotto")                          # Demucs non riesce: si va avanti senza
+        self.assertEqual((t["parole_da"], t["allineamento"], t["righe"][0]["parole"][0]["t"]), ("voce", "fatto", 1.25))
+        # i brani vecchi che nessuno ascolta restano come sono (leggerne il testo qui sarebbe già ascoltarli: test_2)
+        log = self.s.leggi_log()
+        self.assertNotIn("Whisper aspetta", log)                # non è un errore del Mac
+        self.assertIn("40% → 100%", log)
+        self.assertEqual(os.listdir(os.path.join(self.c["cache"], "testi", "tmp")), [])
+        a = self.chiamate()[0]
+        self.assertEqual(a["torch"], os.path.join(self.base, "Strumenti", "demucs", "torch"))
+        self.assertGreaterEqual(a["nice"], 10)
+
+    def test_2_brani_che_si_ascoltano(self):
+        """Un brano vecchio allineato male (o non riuscito) si rifà con la voce sola quando lo si ascolta: solo
+        l'ascolto della voce sola (quello del brano intero c'è già), una volta."""
+        self.finito(3)
+        n = self.whisper()
+        t = self.leggi("Vecchio difficile")   # l'ascolto: intanto le parole del brano intero
+        self.assertEqual((t["allineamento"], t["righe"][0]["parole"][0]["t"]), ("fatto", 1.25))
+        self.assertIn(self.leggi("Vecchio non riuscito")["allineamento"], ("in coda", "in corso"))   # era non riuscito
+        self.leggi("Nuovo facile")   # sente già il 90% delle parole: non serve
+        j = self.finito(5)
+        self.assertEqual((j["separazione"]["migliorati"], j["separazione"]["guadagno"]), (3, 60), j["separazione"])
+        self.assertEqual(self.primo("Vecchio difficile"), 1.0)
+        t = self.leggi("Vecchio non riuscito")
+        self.assertEqual((t["allineamento"], t["parole_da"], t["righe"][0]["parole"][0]["t"]), ("fatto", "voce", 1.0))
+        self.assertEqual(self.whisper(), n + 2)
+        # riascoltati, non si rifanno
+        self.leggi("Vecchio difficile")
+        self.leggi("Voce peggio")
+        self.leggi("Demucs rotto")
+        time.sleep(1.5)
+        self.finito(5)
+        self.assertEqual(len(self.chiamate()), 5)
+        self.assertEqual(sorted(c["nome"] for c in self.chiamate()[-2:]), ["Vecchio difficile", "Vecchio non riuscito"])
 
 
 

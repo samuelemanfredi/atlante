@@ -5971,6 +5971,20 @@ TESTI_PAUSA_VOCE = 600           # un errore di tutto il Mac (disco scollegato, 
 # I tempi DTW di whisper.cpp arrivano in ritardo di circa 0,19 s sull'attacco vero della parola (misurato il 27/10 con
 # large-v3-turbo-q5_0 su una canzone di prova con i tempi noti: ritardo mediano 0,19 s, scarto 0,06 s): si anticipano
 WHISPER_ANTICIPO = 0.18
+# La voce separata dagli strumenti (Demucs, modello htdemucs, --two-stems=vocals) per i brani dove Whisper riconosce
+# poche parole del testo: Whisper riascolta la voce sola e vince l'ascolto che ne riconosce di più. Solo per i brani
+# nuovi e per quelli che si ascoltano (gli altri restano come sono: niente lavoro rifatto su tutta la libreria). Demucs e
+# il suo modello stanno sul disco Cloud (un ambiente virtuale di Python, il modello nella sua cartella torch): se mancano
+# o non riescono si va avanti senza, non è un errore del Mac. ATLANTE_SEPARA=0 la spegne (oppure un percorso: quel demucs).
+SEPARA_PROGRAMMA = "/Volumes/Cloud/Atlante Musica/Strumenti/demucs/bin/demucs"
+SEPARA_MODELLO = "htdemucs"
+SEPARA_SOTTO = 0.6              # sotto questa quota di parole riconosciute si prova con la voce sola
+SEPARA_TEMPO = 1800             # Demucs al più mezz'ora per brano
+SEPARA_NUOVI = 30 * 86400       # «nuovo»: nella libreria da meno di 30 giorni
+SEPARA_ASCOLTATO = 86400        # «si ascolta»: l'app ne ha chiesto il testo nelle ultime 24 ore
+SEPARA_SPAZIO_MIN = 5.0         # GB che devono restare liberi sul disco dei file temporanei (il disco interno del Mac)
+SEPARA_RIPROVA = 6 * 3600       # Demucs che non parte: si riprova dopo sei ore
+SEPARA_DISPOSITIVO = ""         # cpu o mps (ATLANTE_SEPARA_DISPOSITIVO); "": lo sceglie Demucs
 # Whisper dal vivo: il brano che si ascolta e che non ha un testo da nessuna parte lo trascrive subito, a pezzi, da dove
 # si è arrivati; l'app vede le righe man mano
 VIVO_PEZZO = 30.0                # pezzi di al più 30 s: la finestra che Whisper ascolta in una volta
@@ -6691,6 +6705,112 @@ class Whisper:
             _cancella(out + ".json")
 
 
+class Separa:
+    """La voce sola di un brano, con Demucs (vedi SEPARA_PROGRAMMA): il brano decodificato da ffmpeg (solo file del
+    disco, al più WHISPER_DURATA_MAX secondi), Demucs a bassa priorità e fermabile come Whisper, la voce in WAV a 16 kHz
+    per Whisper. Non installa niente da sola: Demucs c'è (sul disco Cloud) o no."""
+
+    def __init__(self):
+        self.errore, self.prova = "", 0.0   # prova: quando Demucs non è partito (si riprova dopo SEPARA_RIPROVA)
+
+    @staticmethod
+    def spento():
+        return os.environ.get("ATLANTE_SEPARA", "").strip() == "0"
+
+    @staticmethod
+    def programma():
+        p = os.environ.get("ATLANTE_SEPARA", "").strip()
+        if p == "0":
+            return None
+        if p not in ("", "1"):
+            return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
+        if os.path.isfile(SEPARA_PROGRAMMA) and os.access(SEPARA_PROGRAMMA, os.X_OK):
+            return SEPARA_PROGRAMMA
+        return _programma("demucs")
+
+    @staticmethod
+    def modelli(programma):
+        """Dove Demucs tiene il modello (TORCH_HOME): ATLANTE_SEPARA_MODELLI, se no accanto al programma quando è in un
+        ambiente virtuale (<ambiente>/torch: sullo stesso disco, il Cloud); None: dove vuole Demucs."""
+        m = os.environ.get("ATLANTE_SEPARA_MODELLI", "").strip()
+        if m:
+            return m
+        amb = os.path.dirname(os.path.dirname(os.path.abspath(programma or "")))
+        return os.path.join(amb, "torch") if os.path.isfile(os.path.join(amb, "pyvenv.cfg")) else None
+
+    def pronta(self):
+        return bool(self.programma()) and not (self.prova and time.time() - self.prova < SEPARA_RIPROVA)
+
+    def descrivi(self):
+        if self.spento():
+            return "spenta"
+        if not self.programma():
+            return "non installata"
+        if not self.pronta():
+            return "in pausa fino alle %s: %s" % (time.strftime("%H:%M", time.localtime(self.prova + SEPARA_RIPROVA)),
+                                                  self.errore)
+        return "pronta"
+
+    @staticmethod
+    def _spazio(cartella, servono):
+        minimo = max(0.0, _numero_ambiente("ATLANTE_SEPARA_SPAZIO_MIN_GB", SEPARA_SPAZIO_MIN)) * 1024 ** 3
+        try:
+            libero = shutil.disk_usage(cartella).free
+        except OSError:
+            return
+        if libero - servono < minimo:
+            raise ErroreTesti("poco spazio sul disco (%.1f GB liberi): la voce non si separa" % (libero / 1024 ** 3))
+
+    def voce(self, percorso, dest, tmp, fermo=None, durata=0, priorita=TESTI_NICE):
+        """La voce sola del brano in `dest` (WAV a 16 kHz per Whisper); i file di Demucs in una cartella dentro `tmp`, buttata
+        alla fine. Pausa se fermo() diventa vero; ErroreTesti se non riesce (se Demucs non parte, la separazione aspetta
+        SEPARA_RIPROVA per tutti i brani)."""
+        prog = self.programma()
+        if not prog:
+            raise ErroreTesti("Demucs non c'è")
+        try:
+            d = float(durata or 0)
+        except (TypeError, ValueError):
+            d = 0.0
+        # il brano in WAV a 44,1 kHz stereo e le due parti di Demucs: circa 10 MB al minuto ciascuno
+        self._spazio(tmp, 3 * 10 * 1024 * 1024 * min(max(d, 300.0), WHISPER_DURATA_MAX + 60) / 60)
+        ff = _programma("ffmpeg")
+        if not ff:
+            raise ErroreTesti("ffmpeg non è installato sul Mac")
+        lavoro = tempfile.mkdtemp(prefix="separa-", dir=tmp)
+        try:
+            brano = os.path.join(lavoro, "brano.wav")
+            codice, _, err = _esegui_piano([ff, "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-i",
+                                            percorso, "-map", "0:a:0", "-t", str(WHISPER_DURATA_MAX + 60), "-ac", "2",
+                                            "-ar", "44100", "-c:a", "pcm_s16le", "-f", "wav", brano], 600, fermo,
+                                           priorita=priorita)
+            if codice != 0 or not os.path.isfile(brano):
+                raise ErroreTesti("ffmpeg: " + (err.decode("utf-8", "replace").strip()[-200:] or "nessun audio"))
+            args = [prog, "--two-stems=vocals", "-n", SEPARA_MODELLO, "-o", os.path.join(lavoro, "uscita"),
+                    "--filename", "{stem}.{ext}"]
+            disp = (os.environ.get("ATLANTE_SEPARA_DISPOSITIVO") or SEPARA_DISPOSITIVO).strip()
+            if disp:
+                args += ["-d", disp]
+            amb = {"OMP_NUM_THREADS": str(max(2, min(8, (os.cpu_count() or 4) // 2))), "PYTHONIOENCODING": "utf-8"}
+            mod = self.modelli(prog)
+            if mod:
+                amb["TORCH_HOME"] = mod
+            try:
+                codice, _, err = _esegui_piano(args + [brano], SEPARA_TEMPO, fermo, ambiente=amb, priorita=priorita)
+            except ErroreMac as e:   # Demucs non parte o lo ferma il sistema: si riprova più tardi, per tutti i brani
+                self.prova, self.errore = time.time(), str(e)[:200]
+                raise ErroreTesti("Demucs: %s" % e)
+            _cancella(brano)
+            voce = os.path.join(lavoro, "uscita", SEPARA_MODELLO, "vocals.wav")
+            if codice != 0 or not os.path.isfile(voce):
+                raise ErroreTesti("Demucs: " + (err.decode("utf-8", "replace").strip()[-200:] or
+                                                "nessuna voce (codice %d)" % codice))
+            _wav16k(voce, dest, fermo, priorita)
+            self.errore = ""
+        finally:
+            shutil.rmtree(lavoro, ignore_errors=True)
+
+
 # --- traduzione ---
 
 class Traduttore:
@@ -6862,6 +6982,12 @@ class Traduttore:
 # lavoro in pausa (Whisper dal vivo, più sotto): solo Whisper escluso da Gestione lo ferma.
 # ATLANTE_WHISPER=0 spegne Whisper (oppure un percorso: quel whisper-cli).
 
+def _mediana(v):
+    v = sorted(v)
+    n = len(v)
+    return 0.0 if not n else v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0
+
+
 class Testi:
     """Le risposte di api/extra/testi (testo, parole dalla voce o stimate, traduzione) e il lavoro in sottofondo."""
 
@@ -6879,6 +7005,8 @@ class Testi:
         self.indice, self._norm_indice = self._indice_leggi(), {}   # ricerca nei testi: id → (file, impronta, testo)
         self._indice_sporco, self._indice_salvato = False, time.time()
         self.whisper = Whisper(os.path.join(cartella, "modelli"), self._fermo_whisper)
+        self.separa = Separa()                         # la voce sola (Demucs), per i brani dove Whisper sente poco
+        self.ascoltati = {}                            # id → quando l'app ne ha chiesto il testo (il brano si ascolta)
         self.subito_c, self.subito_a = [], []          # brani chiesti dall'app: prima degli altri
         self.coda_t = collections.OrderedDict()        # file della traduzione → {righe, da, a, chi, ia}
         self.errori_t = {}                             # file della traduzione → (quando, motivo)
@@ -7007,6 +7135,7 @@ class Testi:
         self.pausa_rete = self.pausa_voce = 0.0
         self.motivo_voce, self.di_fila = "", 0
         self.whisper.prova = 0.0
+        self.separa.prova = 0.0
         self.trad.pausa = 0.0
         self.errori_t.clear()
         with self.blocco:
@@ -7148,9 +7277,9 @@ class Testi:
                 al = "non riuscito"
         nuova = dict(v=TESTI_V, fv=TESTI_FONTI_V, f=b.get("_f"), t=t, a=a, s=st, q=ora, n=0, fo=r.get("fonte") or "",
                      sy=bool(r.get("sincronizzato")), pw=bool(r.get("parole")), ri=len(testi), it=it,
-                     li=lingua_testo(" ".join(testi)), al=al, vo=vo)
-        if al == "attesa":
-            nuova.update(aln=0, alq=0)
+                     li=lingua_testo(" ".join(testi)), al=al, vo=vo, rs=None)
+        if al == "attesa":   # da fare (di nuovo): anche la voce sola, se serve
+            nuova.update(aln=0, alq=0, sp=None)
         elif al == "non riuscito" and lungo:
             nuova.update(alq=ora, ale=lungo)
         self._scheda(i, **nuova)
@@ -7306,32 +7435,48 @@ class Testi:
                 self.pausa_rete = time.time() + TESTI_PAUSA_RETE
                 raise ErroreMac(e.testo)
             voce = self._voce(i, b, r)
-            if voce or not self._serve_voce(r):
-                self._scheda(i, al="fatto" if voce else "", vo=voce[0] if voce else "")
+            # da rifare con la voce sola (un brano che si ascolta e che Whisper aveva sentito poco): quanto aveva
+            # riconosciuto nel brano intero lo dice la scheda, non si riascolta
+            rifai = bool(s.get("rs")) and r.get("stato") == "ok" and isinstance(s.get("qa"), (int, float)) and \
+                s.get("it") == self._impronta_di(r) and (voce is None or voce[0] == "parole")
+            if rifai and not self.separa.pronta():   # Demucs intanto non c'è più (disco Cloud staccato): resta com'era
+                self._scheda(i, al="fatto" if voce else "non riuscito", rs=None)
+                return False
+            if (voce and not rifai) or not self._serve_voce(r):
+                self._scheda(i, al="fatto" if voce else "", vo=voce[0] if voce else "", rs=None)
                 return False
             if self._troppo_lungo(b):
-                self._scheda(i, al="non riuscito", alq=ora, ale=self._troppo_lungo(b))
+                self._scheda(i, al="non riuscito", alq=ora, ale=self._troppo_lungo(b), rs=None)
                 return False
             it0, f0 = self._impronta_di(r), b.get("_f")
             os.makedirs(self.tmp, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="voce-", dir=self.tmp) as tmp:
                 wav = os.path.join(tmp, "voce.wav")
-                _wav16k(p, wav, self._fermo_sfondo)
                 if r.get("stato") == "ok":
                     testi = _testi_della_risposta(r)
                     lingua = lingua_testo(" ".join(testi))
-                    j = self.whisper.trascrivi(wav, lingua, " ".join(testi)[:400])
-                    sentite = [(x, f, w) for x, f, w, _p in parole_sentite(j, self.whisper.anticipo)]
-                    a_tempo = bool(r.get("sincronizzato"))
-                    nuove = [{"t": x.get("t") if a_tempo else None, "f": x.get("fine") if a_tempo else None,
-                              "x": x.get("testo") or "", "p": [[None, None, w] for w in _pezzi(x.get("testo"))]}
-                             for x in r["righe"]]
-                    quota = allinea_parole(nuove, sentite, a_tempo)
+                    prompt, a_tempo = " ".join(testi)[:400], bool(r.get("sincronizzato"))
+                    if rifai:
+                        nuove, quota = None, float(s["qa"])
+                    else:
+                        _wav16k(p, wav, self._fermo_sfondo)
+                        nuove, quota = self._parole(wav, r, lingua, prompt, a_tempo)
+                    sp = None
+                    if quota < self._soglia() and self.separa.pronta() and (rifai or self._separa_qui(i, b)):
+                        sole, q, sp = self._voce_sola(p, tmp, r, lingua, prompt, a_tempo, quota, dur)
+                        if sole is not None and q > quota:   # vince l'ascolto che riconosce più parole
+                            nuove, quota = sole, q
                     self.di_fila = 0
                     if not self._stesso(i, it0, f0):
                         return True
+                    altro = {"rs": None}
+                    if sp:
+                        altro["sp"] = sp
+                    if nuove is None:   # rifatto con la voce sola, ma non meglio: resta com'era
+                        self._scheda(i, al="fatto" if voce else "non riuscito", **altro)
+                        return True
                     if quota < ALLINEA_MINIMO:
-                        self._scheda(i, al="non riuscito", alq=ora, qa=round(quota, 2))
+                        self._scheda(i, al="non riuscito", alq=ora, qa=round(quota, 2), **altro)
                         return True
                     if not a_tempo:
                         tempi_righe_libere(nuove)
@@ -7339,8 +7484,9 @@ class Testi:
                     self._salva_dati(i, {"stato": "trovato", "fonte": r.get("fonte") or "", "parole": "allineate",
                                          "lingua": lingua, "quota": round(quota, 2), "f": f0, "durata": dur,
                                          "righe": nuove})
-                    self._scheda(i, al="fatto", alq=ora, qa=round(quota, 2), vo="parole")
+                    self._scheda(i, al="fatto", alq=ora, qa=round(quota, 2), vo="parole", **altro)
                 else:   # nessun testo da nessuna parte: lo trascrive Whisper dalla voce
+                    _wav16k(p, wav, self._fermo_sfondo)
                     j = self.whisper.trascrivi(wav, "", "")
                     righe = righe_da_voce(j, self.whisper.anticipo)
                     self.di_fila = 0
@@ -7378,6 +7524,79 @@ class Testi:
             return False
         finally:
             self.ora_a = self.id_a = ""
+
+    def _parole(self, wav, r, lingua, prompt, a_tempo):
+        """Whisper ascolta il WAV: (le righe del testo r con i tempi delle parole sentite, quota di parole del testo
+        riconosciute)."""
+        j = self.whisper.trascrivi(wav, lingua, prompt)
+        sentite = [(x, f, w) for x, f, w, _p in parole_sentite(j, self.whisper.anticipo)]
+        nuove = [{"t": x.get("t") if a_tempo else None, "f": x.get("fine") if a_tempo else None,
+                  "x": x.get("testo") or "", "p": [[None, None, w] for w in _pezzi(x.get("testo"))]}
+                 for x in r["righe"]]
+        return nuove, allinea_parole(nuove, sentite, a_tempo)
+
+    @staticmethod
+    def _soglia():
+        return _numero_ambiente("ATLANTE_SEPARA_SOTTO", SEPARA_SOTTO)
+
+    def _ascoltato(self, i):
+        with self.blocco:
+            self.ascoltati[i] = time.time()
+            if len(self.ascoltati) > 2000:   # quelli di più di un giorno fa non contano più
+                ora = time.time()
+                for k, t in list(self.ascoltati.items()):
+                    if ora - t >= SEPARA_ASCOLTATO:
+                        del self.ascoltati[k]
+
+    def _separa_qui(self, i, b):
+        """Per questo brano la voce sola si prova: lo si ascolta (l'app ne ha chiesto il testo nelle ultime 24 ore) o è
+        nuovo (nella libreria da meno di 30 giorni). Gli altri restano come sono."""
+        ora = time.time()
+        if ora - self.ascoltati.get(i, 0) < SEPARA_ASCOLTATO:
+            return True
+        try:
+            return ora - float(b.get("added") or 0) / 1000.0 < SEPARA_NUOVI
+        except (TypeError, ValueError):
+            return False
+
+    def _da_separare(self, i, b, r, voce):
+        """Il brano che si ascolta va rifatto con la voce sola: Whisper aveva riconosciuto poche parole del testo (meno
+        di SEPARA_SOTTO) e la voce sola non si è mai provata per questo file e questo testo."""
+        s = self.schede.get(i) or {}
+        if self.fermo_voce() or not self.separa.pronta() or s.get("v") != TESTI_V or s.get("f") != b.get("_f") or \
+                s.get("sp") is not None or s.get("rs") or r.get("stato") != "ok" or s.get("it") != self._impronta_di(r):
+            return False
+        qa = s.get("qa")
+        if not isinstance(qa, (int, float)) or qa >= self._soglia():
+            return False
+        return (s.get("al") == "fatto" and bool(voce) and voce[0] == "parole") or \
+               (s.get("al") == "non riuscito" and qa < ALLINEA_MINIMO and not self._troppo_lungo(b))
+
+    def _voce_sola(self, p, tmp, r, lingua, prompt, a_tempo, quota, dur):
+        """Demucs separa la voce dagli strumenti e Whisper la riascolta da sola: (righe, quota, sp). sp va nella scheda:
+        [quota nel brano intero, quota nella voce sola (None se non è riuscito), secondi di Demucs, secondi di Whisper].
+        Se Demucs non riesce si va avanti senza (righe None): non è un errore del Mac."""
+        t0 = time.time()
+        dest = os.path.join(tmp, "voce-sola.wav")
+        try:
+            self.separa.voce(p, dest, tmp, self._fermo_sfondo, dur)
+        except Pausa:
+            raise
+        except (ErroreTesti, OSError, subprocess.SubprocessError, ValueError) as e:
+            print("Testi: voce non separata per %s: %s (vado avanti senza)" % (self.ora_a, e), flush=True)
+            return None, quota, [round(quota, 2), None, int(round(time.time() - t0)), 0]
+        secondi, t1 = int(round(time.time() - t0)), time.time()
+        try:
+            righe, q = self._parole(dest, r, lingua, prompt, a_tempo)
+        except ErroreMac:
+            raise
+        except (ErroreTesti, subprocess.SubprocessError, ValueError) as e:
+            print("Testi: Whisper non riesce con la voce sola di %s: %s" % (self.ora_a, e), flush=True)
+            return None, quota, [round(quota, 2), None, secondi, int(round(time.time() - t1))]
+        print("Testi: voce separata per %s: parole riconosciute %d%% → %d%% (Demucs %d s, Whisper %d s)%s" % (
+            self.ora_a, round(quota * 100), round(q * 100), secondi, round(time.time() - t1),
+            "" if q > quota else ": resta l'ascolto del brano intero"), flush=True)
+        return righe, q, [round(quota, 2), round(q, 2), secondi, int(round(time.time() - t1))]
 
     def _stesso(self, i, it, f):
         """Mentre Whisper ascoltava il testo o il file del brano non sono cambiati (se sì, il lavoro non vale più)."""
@@ -7832,12 +8051,15 @@ class Testi:
                     o["traduzione"] = {"lingua": lingua, "stato": "uguale" if o.get("lingua") == lingua else
                                        "in corso" if lingua in LINGUE_TRAD else "lingua non disponibile"}
                 return o
+        self._ascoltato(i)
         if self.acceso:   # il brano che si ascolta passa davanti agli altri
             self._vivi()
             s = self.schede.get(i)
             vecchia = not voce and self._serve_voce(r) and (s or {}).get("al") in ("fatto", "", None)
             if vecchia or self._da_cercare(i, b, s, {i: CORR.di(i)} if CORR else {}, time.time()):
                 self._segna(i, b, t, a, r)   # anche una scheda «fatto» per un testo di prima: Whisper lo rifà
+            if self._da_separare(i, b, r, voce):   # Whisper l'aveva sentito poco: si rifà con la voce sola
+                self._scheda(i, al="attesa", rs=1)
             if self._da_allineare(self.schede.get(i), time.time()) and not self.fermo_voce():
                 self._metti_prima(self.subito_a, i, self.sveglia_a)
         o = self._risposta(r, dur, voce)
@@ -7896,6 +8118,16 @@ class Testi:
         w = self.whisper
         pausa = "fino alle %s: %s" % (time.strftime("%H:%M", time.localtime(self.pausa_voce)), self.motivo_voce) \
             if self.pausa_voce > ora else ""
+        # la voce sola: su quanti brani si è provata, quanti ne hanno guadagnato, di quanto (la mediana dei punti di
+        # quota guadagnati davvero, dove Demucs è riuscito) e quanti secondi in più per brano (Demucs e Whisper)
+        sp = [x for x in (s.get("sp") for s in schede.values()) if isinstance(x, list) and len(x) >= 3]
+        riuscite = [x for x in sp if isinstance(x[1], (int, float)) and isinstance(x[0], (int, float))]
+        sep = {"stato": self.separa.descrivi(), "programma": self.separa.programma() or "",
+               "soglia": int(round(self._soglia() * 100)), "provati": len(sp),
+               "migliorati": sum(1 for x in riuscite if x[1] > x[0]), "non_riusciti": len(sp) - len(riuscite),
+               "guadagno": int(round(_mediana([max(0.0, x[1] - x[0]) for x in riuscite]) * 100)) if riuscite else None,
+               "secondi": int(round(_mediana([sum(y for y in x[2:] if isinstance(y, (int, float))) for x in sp])))
+               if sp else None}
         return {"acceso": self.acceso, "con_whisper": self.con_whisper, "totale": len(voci), "conteggi": dict(c),
                 "ora": {"cerca": self.ora_c, "allinea": self.ora_a, "traduce": self.ora_t, "vivo": self.ora_v},
                 "lrclib": "in pausa fino alle %s" % time.strftime("%H:%M", time.localtime(self.pausa_rete))
@@ -7903,6 +8135,7 @@ class Testi:
                 "whisper": {"stato": "spento" if w.spento() else w.stato or ("pronto" if w.pronto() else "da preparare"),
                             "modello": w.modello, "programma": w.cli or w.programma() or "",
                             "modello_scaricato": os.path.isfile(w.file_modello), "pausa": pausa},
+                "separazione": sep,
                 "traduzioni": {"motore": self.trad.motore(), "in_coda": len(self.coda_t), "fatte": fatte}}
 
 
