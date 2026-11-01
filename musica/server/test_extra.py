@@ -4711,9 +4711,9 @@ class TestRegoleAtlante(unittest.TestCase):
     def test_regole_predefinite(self):
         gruppi, nomi, errori = self.m.regole_atlante()
         self.assertEqual(errori, [])
-        self.assertEqual([g["id"] for g in gruppi], ["generi", "umore", "attivita", "epoche", "momenti"])
+        self.assertEqual([g["id"] for g in gruppi], ["generi", "umore", "attivita", "ritmo", "epoche", "momenti"])
         conta = {g["id"]: len(g["playlist"]) for g in gruppi}
-        self.assertEqual((conta["generi"], conta["umore"], conta["attivita"]), (30, 12, 12))
+        self.assertEqual((conta["generi"], conta["umore"], conta["attivita"], conta["ritmo"]), (30, 12, 12, 12))
         self.assertEqual(set(nomi), set(self.m.GENERI))   # i generi del file sono quelli del programma
         pl = {p["id"]: p for g in gruppi for p in g["playlist"]}
         self.assertEqual(pl["attivita-handbike-salita"]["nome"], "Handbike: salita e scatti")
@@ -4723,6 +4723,35 @@ class TestRegoleAtlante(unittest.TestCase):
         self.assertIn("regolarita", pl["attivita-handbike-ritmo"]["regola"])
         self.assertEqual(len([p for p in pl if p.startswith("epoca-")]), 8)
         self.assertEqual(len([p for p in pl if p.startswith("momento-")]), 6)
+
+    def test_ritmo_fasce_di_bpm(self):
+        """Ritmo (BPM): fasce 60–80, 80–90, 90–100… senza buchi né sovrapposizioni, ognuna dal brano più lento."""
+        gruppi, _, errori = self.m.regole_atlante()
+        self.assertEqual(errori, [])
+        ritmo = next(g for g in gruppi if g["id"] == "ritmo")
+        fasce = [p["regola"]["bpm"] for p in ritmo["playlist"]]
+        self.assertEqual(fasce[0], [60, 79.9])
+        self.assertEqual(fasce[1:3], [[80, 89.9], [90, 99.9]])
+        for (a, b), (c, _) in zip(fasce, fasce[1:]):
+            self.assertAlmostEqual(c - b, 0.1)          # la fascia dopo parte subito dopo: nessun brano perso
+        self.assertGreaterEqual(fasce[-1][1], 220)     # «Oltre 180» prende anche i più veloci
+        self.assertTrue(all(p["ordine"] == "bpm" and p["nome"].endswith("BPM") for p in ritmo["playlist"]))
+        # un BPM misurato (arrotondato a 0,1) sta in una fascia sola, anche sul confine
+        prove = {p["id"]: p["_prova"] for p in ritmo["playlist"]}
+        for bpm, attesa in ((70.0, "ritmo-060-080"), (79.9, "ritmo-060-080"), (80.0, "ritmo-080-090"),
+                            (89.9, "ritmo-080-090"), (90.0, "ritmo-090-100"), (150.2, "ritmo-150-160"),
+                            (180.0, "ritmo-180-oltre"), (189.9, "ritmo-180-oltre")):
+            dentro = [i for i, f in prove.items() if f({"bpm": bpm})]
+            self.assertEqual(dentro, [attesa], bpm)
+        self.assertEqual([i for i, f in prove.items() if f({"bpm": None})], [])   # non ancora misurato: in nessuna
+        # sui brani finti: a (150,2) b (120) e (70); c senza scheda non entra
+        pl, _ = self.playlist()
+        brani = lambda i: self.t.playlist(i, "p")["brani"] if i in pl else []   # noqa: E731
+        self.assertEqual(brani("ritmo-150-160"), ["a"])
+        self.assertEqual(brani("ritmo-120-130"), ["b"])
+        self.assertEqual(brani("ritmo-060-080"), ["e"])
+        self.assertNotIn("ritmo-090-100", pl)          # vuota: non compare
+        self.assertFalse(any("c" in brani(i) for i in pl if i.startswith("ritmo-")))
 
     def test_un_brano_in_piu_playlist_e_vuote_nascoste(self):
         pl, gruppi = self.playlist()
@@ -4805,8 +4834,10 @@ class TestRegoleAtlante(unittest.TestCase):
     def test_ritmi_e_buonumore(self):
         # per «Per ritmo» (anche senza rete, nell'app) e «Mettimi di buonumore»: i dati dell'audio di ogni brano misurato
         self.t.schede["a"]["modo"] = 1
+        self.t.schede["a"]["db"] = -9.04   # il volume misurato: per il volume uniforme nell'app
         r = self.t.ritmi()
-        self.assertEqual(r["ritmi"]["a"], [150.2, 0.9, 0.85, 1])
+        self.assertEqual(r["ritmi"]["a"], [150.2, 0.9, 0.85, 1, -9.0])
+        self.assertIsNone(r["ritmi"]["b"][4])   # misurato prima che si tenesse il volume
         self.assertEqual(set(r["ritmi"]), {"a", "b", "e"})   # c e d non hanno ancora l'audio misurato
         self.assertEqual(dict((i, p) for i, p in r["buonumore"]), {"a": 2})   # Energia e Buonumore; modo maggiore pesa di più
         self.t.schede["e"]["modo"] = -1
@@ -8678,6 +8709,19 @@ class TestKaraokeServer(unittest.TestCase):
         self.assertEqual(len(FintoLrclibKaraoke.richieste), n)   # niente ricerche né allineamenti rifatti
         self.assertEqual(os.path.getsize(os.path.join(self.c["finto"], "whisper.log")), w)
 
+    def test_8_ricerca_nei_testi(self):
+        """Cerca una frase: i brani che l'hanno nel testo (dalla fonte o trascritto da Whisper), con la riga."""
+        self.finito()
+        cerca = lambda q: self.s.json("GET", "/api/extra/testi/cerca?q=" + quote(q))   # noqa: E731
+        j = cerca("SORGE piàno")   # maiuscole e accenti non contano
+        self.assertEqual([x["id"] for x in j["brani"]], [self.ids["Canzone sincronizzata"]])
+        self.assertEqual(j["brani"][0]["riga"], "Il sole sorge piano sul mare")
+        self.assertEqual([x["id"] for x in cerca("non la conosce")["brani"]], [self.ids["Mai sentita"]])   # da Whisper
+        self.assertEqual([x["id"] for x in cerca("riga del testo")["brani"]], [self.ids["Solo testo"]])
+        self.assertEqual(cerca("ole")["brani"], [])        # troppo corta
+        self.assertEqual(cerca("rge piano")["brani"], [])  # dall'inizio di una parola
+        self.assertGreaterEqual(cerca("qualcosa che non c'è")["indicizzati"], 5)
+
     def test_7_gestione_riprova(self):
         self.assertEqual(self.s.json("POST", "/api/extra/gestione/testi/riprova", {}), {"ok": True})
         self.s.json("GET", "/api/extra/gestione/testi/altro", codice=404)
@@ -12493,6 +12537,22 @@ class TestLrclibSoloQuesto(unittest.TestCase):
             with self.assertRaises(self.m.ErroreExtra) as e:
                 self.m._lrclib_cerca("IV. Recitativo. Ach, schmelze doch", "Bach Collegium", "", 120)
             self.assertNotIsInstance(e.exception, self.m.LrclibSoloQuesto)   # LRCLIB giù davvero: pausa per tutti
+
+
+class TestAscoltoApp(unittest.TestCase):
+    """Le funzioni «come in Apple Music» dell'app (riproduzione automatica e stazioni, generi, Replay, volume uniforme):
+    test_ascolto.js in JavaScriptCore. Senza osascript (non è un Mac) si salta."""
+
+    def test_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_ascolto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
 if __name__ == "__main__":

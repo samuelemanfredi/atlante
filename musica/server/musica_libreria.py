@@ -5992,6 +5992,9 @@ VIVO_TAGLIO = 6.0                # ogni pezzo finisce nel decimo di secondo più
 VIVO_SCADE = 900                 # un brano chiesto e poi lasciato: dopo 15 minuti senza richieste non si trascrive più (il fatto resta)
 VIVO_RIPROVA = 600               # trascrizione dal vivo non riuscita: si riprova dopo 10 minuti
 VIVO_NICE = 5                    # dal vivo qualcuno aspetta: prima degli scaricamenti, dopo il server e l'app
+INDICE_V = 1                     # l'indice dei testi per la ricerca nei testi (cambia: si rifà)
+INDICE_SALVA = 600               # l'indice sul disco al più ogni 10 minuti (e quando il server si ferma)
+INDICE_MAX = 20000               # di un testo si tengono al più 20 000 caratteri
 ALLINEA_MINIMO = 0.3            # sotto questa quota di parole riconosciute le parole restano stimate
 MYMEMORY_BASE = "https://api.mymemory.translated.net"
 TRAD_RIPROVA = 600               # traduzione non riuscita: l'app la può richiedere dopo 10 minuti
@@ -6999,6 +7002,8 @@ class Testi:
         self.sveglia_v = threading.Event()
         self.ora_v = ""
         self._qui = threading.local()                  # nel thread dal vivo Whisper si ferma per motivi suoi
+        self.indice, self._norm_indice = self._indice_leggi(), {}   # ricerca nei testi: id → (file, impronta, testo)
+        self._indice_sporco, self._indice_salvato = False, time.time()
         self.whisper = Whisper(os.path.join(cartella, "modelli"), self._fermo_whisper)
         self.separa = Separa()                         # la voce sola (Demucs), per i brani dove Whisper sente poco
         self.ascoltati = {}                            # id → quando l'app ne ha chiesto il testo (il brano si ascolta)
@@ -7048,9 +7053,11 @@ class Testi:
         """Il server sta per uscire (SIGTERM): le schede sul disco, via i file temporanei (i programmi pesanti li ha già
         fermati _ferma_figli)."""
         self.salva(True)
+        self._indice_salva(True)
         self._svuota_tmp()
 
     def salva(self, subito=False):
+        self._indice_salva(subito)
         with self.blocco:
             if not self._sporco or (not subito and time.time() - self._salvato < TESTI_SALVA):
                 return
@@ -7276,6 +7283,7 @@ class Testi:
         elif al == "non riuscito" and lungo:
             nuova.update(alq=ora, ale=lungo)
         self._scheda(i, **nuova)
+        self.indicizza(i, b.get("_f"), r, voce)
         if al == "attesa":
             self.sveglia_a.set()
 
@@ -7328,6 +7336,8 @@ class Testi:
                 x = self._prossimo(self.subito_c, lambda i, b: self._da_cercare(i, b, self.schede.get(i), corr, ora))
             if not x:
                 self.ora_c = ""
+                if self.acceso and time.time() >= self.pausa_rete and self._indice_riempi(100):
+                    continue   # brani cercati prima della ricerca nei testi: nell'indice, a gruppi
                 self.salva(True)
                 attesa = self.pausa_rete - time.time() if self.acceso and self.pausa_rete > time.time() else TESTI_RIPOSO
                 self.sveglia_c.wait(max(5.0, min(TESTI_RIPOSO, attesa)))
@@ -7489,6 +7499,7 @@ class Testi:
                         self._salva_dati(i, {"stato": "trovato", "fonte": "voce", "parole": "allineate",
                                              "lingua": lingua, "f": f0, "durata": dur, "righe": righe})
                         self._scheda(i, al="fatto", alq=ora, vo="testo", li=lingua)
+                        self.indicizza(i, f0, r, ("testo", {"righe": righe}))
                     else:
                         self._salva_dati(i, {"stato": "strumentale", "fonte": "voce", "parole": "", "lingua": "",
                                              "f": f0, "righe": []})
@@ -7803,6 +7814,110 @@ class Testi:
         o["v"] = _impronta_testi([o["fonte"], o["parole_da"], app])
         return o
 
+    # ricerca nei testi: un indice dei testi che il Mac conosce già (dal file, da LRCLIB, NetEase, lyrics.ovh, Whisper),
+    # riempito quando un brano si cerca o si ascolta e, con il lavoro acceso, nei momenti liberi per quelli cercati prima.
+    # Sul disco in indice_testi.json.gz (al più ogni INDICE_SALVA secondi). Cerca una frase: i brani che la contengono.
+
+    def _file_indice(self):
+        return os.path.join(self.dir, "indice_testi.json.gz")
+
+    def _indice_leggi(self):
+        try:
+            with gzip.open(self._file_indice(), "rt", encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError, EOFError):
+            return {}
+        b = d.get("brani") if isinstance(d, dict) and d.get("v") == INDICE_V else None
+        return {i: tuple(x) for i, x in (b or {}).items() if isinstance(x, list) and len(x) == 3}
+
+    def _indice_salva(self, subito=False):
+        with self.blocco:
+            if not self._indice_sporco or (not subito and time.time() - self._indice_salvato < INDICE_SALVA):
+                return
+            dati, self._indice_sporco, self._indice_salvato = dict(self.indice), False, time.time()
+        tmp = self._file_indice() + ".tmp"
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=5) as f:
+                json.dump({"v": INDICE_V, "brani": {i: list(x) for i, x in dati.items()}}, f, ensure_ascii=False)
+            os.replace(tmp, self._file_indice())
+        except OSError as e:
+            self._indice_sporco = True
+            _cancella(tmp)
+            print("Testi: indice dei testi non salvato:", e, flush=True)
+
+    def indicizza(self, i, f, r, voce=None):
+        """Il testo di un brano nell'indice (r: risposta di testi_brano; voce: quello che ha fatto Whisper)."""
+        if voce and voce[0] == "testo":
+            testi = [x.get("x") or "" for x in voce[1].get("righe") or []]
+        else:
+            testi = _testi_della_risposta(r) if r.get("stato") == "ok" else []
+        testi = [" ".join(str(x).split()) for x in testi if x and str(x).strip()]
+        it = _impronta_testi(testi) if testi else ""
+        with self.blocco:
+            vecchio = self.indice.get(i)
+            if vecchio and vecchio[0] == f and vecchio[1] == it:
+                return
+            if testi:
+                self.indice[i] = (f, it, "\n".join(testi)[:INDICE_MAX])
+            elif vecchio:
+                del self.indice[i]
+            else:
+                return
+            self._norm_indice.pop(i, None)
+            self._indice_sporco = True
+
+    def _indice_riempi(self, quanti):
+        """Nei momenti liberi del lavoro su tutta la libreria: i brani con un testo trovato prima che ci fosse l'indice.
+        True se ne ha fatto almeno uno (ce ne possono essere altri)."""
+        per_id, fatti = dict(self._voci()), 0
+        with self.blocco:
+            mancano = [(i, s) for i, s in self.schede.items() if i in per_id and s.get("v") == TESTI_V and
+                       s.get("f") == per_id[i].get("_f") and (s.get("s") == "trovato" or s.get("vo") == "testo") and
+                       (self.indice.get(i) or ("",))[0] != s.get("f")][:quanti]
+        corr = CORR.tutte() if CORR else {}
+        for i, s in mancano:
+            b = per_id[i]
+            t, a, al, dur = self._nomi(i, b, corr)
+            try:
+                r = testi_brano(t, a, al, dur, LIB.percorsi.get(i) if LIB else None, sfondo=True)
+            except ErroreExtra:   # LRCLIB non risponde: si riprova più tardi, come la ricerca
+                break
+            self.indicizza(i, b.get("_f"), r, self._voce(i, b, r))
+            with self.blocco:
+                if i not in self.indice:   # nessun testo (cambiato?): non si riprova a ogni giro
+                    self.indice[i] = (b.get("_f"), "", "")
+                    self._indice_sporco = True
+            fatti += 1
+        return fatti > 0
+
+    def cerca_testi(self, q, limite=30):
+        """GET testi/cerca?q=: i brani della libreria che hanno nel testo la frase cercata (senza maiuscole, accenti e
+        segni), con la riga dove sta."""
+        qn = _norm(q)
+        if len(qn) < 4:
+            return {"q": q, "brani": [], "indicizzati": len(self.indice)}
+        via = TOLTI.ids() if TOLTI else set()
+        with LIB.blocco if LIB else threading.Lock():
+            presenti = set(LIB.brani) if LIB else set()
+        with self.blocco:
+            voci = list(self.indice.items())
+        out, prima = [], qn.split(" ")[0]
+        for i, (_f, _it, testo) in voci:
+            if not testo or i in via or i not in presenti:
+                continue
+            n = self._norm_indice.get(i)
+            if n is None:
+                n = self._norm_indice[i] = " " + _norm(testo) + " "
+            if " " + qn not in n:   # dall'inizio di una parola
+                continue
+            righe = testo.split("\n")
+            riga = next((x for x in righe if qn in _norm(x)), "") or next((x for x in righe if prima in _norm(x)), "")
+            out.append({"id": i, "riga": riga[:160]})
+            if len(out) >= limite:
+                break
+        return {"q": q, "brani": out, "indicizzati": sum(1 for x in voci if x[1][2])}
+
     # traduzione
 
     def _file_trad(self, testi, lingua):
@@ -7923,6 +8038,7 @@ class Testi:
         except TestiInArrivo:   # LRCLIB non ha ancora risposto: l'app richiede tra poco
             return {"stato": "in arrivo"}
         voce = self._voce(i, b, r)
+        self.indicizza(i, b.get("_f"), r, voce)
         if not voce and r.get("stato") == "nessuno":
             if pos is not None and self._vivo_serve(i, b, p):
                 v = self._vivo_chiedi(i, b, p, (t, a, al, dur), r, pos)
@@ -8058,6 +8174,8 @@ def _testi(h, resto):
     lingua = campo("lingua").lower()[:10]   # la traduzione, nella lingua scelta nell'app
     c = _chi_e(h)   # l'IA del Mac traduce solo per Samuele (agli invitati non è permessa): per gli altri MyMemory
     chi = {"chi": str(c.get("persona") or c.get("chiave") or _ip_cliente(h)), "ia": c.get("ruolo") == "proprietario"}
+    if resto == ["cerca"]:   # ricerca nei testi
+        return _tst().cerca_testi(campo("q")[:200])
     if resto:
         try:   # dove si è nel brano che suona: per Whisper dal vivo
             pos = float(campo("pos")) if campo("pos") else None
@@ -12378,7 +12496,7 @@ def _dati_brano(i, b, s, anno_ora):
     anno = min(anni) if anni else None   # l'uscita originale: una raccolta di successi ha l'anno della raccolta
     return {"id": i, "generi": frozenset(generi), "italiano": italiano if isinstance(italiano, bool) else None,
             "bpm": s.get("bpm"), "energia": s.get("energia"), "regolarita": s.get("regolarita"), "anno": anno,
-            "modo": s.get("modo") or 0,
+            "modo": s.get("modo") or 0, "db": s.get("db"),
             "anni_fa": anno_ora - anno if anno else None, "durata": b.get("duration") or None,
             "etichette": frozenset(s.get("etichette") or ()), "aggiunto": b.get("added") or 0,
             "testo": " " + _norm("%s %s" % (b.get("title"), b.get("album"))) + " ",
@@ -12845,11 +12963,13 @@ class Tematiche:
         return dict(ris["info"][pid], brani=ris["brani"][pid])
 
     def ritmi(self):
-        """Per «Per ritmo» e «Mettimi di buonumore» nell'app, che li tiene anche per quando non c'è rete: BPM,
-        regolarità, energia e modo di ogni brano misurato; i brani di «Buonumore» ed «Energia» (con energia almeno
-        media) con il loro peso: il modo maggiore conta di più, il minore meno (la misura del modo è una stima)."""
+        """Per «Per ritmo», «Mettimi di buonumore» e il volume uniforme nell'app, che li tiene anche per quando non c'è
+        rete: BPM, regolarità, energia, modo e volume (dB RMS dei pezzi misurati) di ogni brano misurato; i brani di
+        «Buonumore» ed «Energia» (con energia almeno media) con il loro peso: il modo maggiore conta di più, il minore
+        meno (la misura del modo è una stima)."""
         ris = self._calcola()
-        ritmi = {d["id"]: [d["bpm"], d["regolarita"], d["energia"], d["modo"]] for d in ris["dati"] if d["bpm"] is not None}
+        ritmi = {d["id"]: [d["bpm"], d["regolarita"], d["energia"], d["modo"],
+                           None if d.get("db") is None else round(d["db"], 1)] for d in ris["dati"] if d["bpm"] is not None}
         allegri = set(ris["brani"].get("umore-buonumore", ())) | set(ris["brani"].get("umore-energia", ()))
         buonumore = [[d["id"], 2 if d["modo"] == 1 else 0.5 if d["modo"] == -1 else 1] for d in ris["dati"]
                      if d["id"] in allegri and (d["energia"] is None or d["energia"] >= 0.45)]
