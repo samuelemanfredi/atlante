@@ -2959,7 +2959,7 @@ DISP_CORPO = 32 * 1024   # stato o comando, in JSON
 COMANDI_MAX = 50         # comandi in attesa per dispositivo
 COMANDO_SCADE = 30       # secondi: un comando non consegnato in tempo si scarta («riproduci» dieci minuti dopo no)
 ATTESA_MAX = 25          # secondi dell'attesa lunga (dietro Tailscale una richiesta ferma più a lungo può essere chiusa)
-AZIONI = ("toggle", "play", "pause", "next", "prev", "seek", "volume", "suona")
+AZIONI = ("toggle", "play", "pause", "next", "prev", "seek", "volume", "suona", "preferito")
 TIPI_DISP = ("iphone", "ipad", "android", "mac", "pc")
 ID_DISP = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 BRANO_DISP_TESTO = 300   # caratteri di titolo, artista e album nello stato di un dispositivo
@@ -3051,6 +3051,20 @@ class Dispositivi:
                     del self.d[v]
             return self._prendi(x, ora)
 
+    def chi_suona(self, di="p", tipo=""):
+        """Il dispositivo della persona con il brano che sta ascoltando adesso (★ dalla schermata di blocco): prima uno
+        che suona, poi uno del tipo chiesto (il comando rapido dell'iPhone dice «iphone»), poi quello sentito per
+        ultimo. (id, nome, tipo, stato) oppure None se nessun suo dispositivo ha un brano."""
+        ora = time.time()
+        with self.cond:
+            cand = [(i, x) for i, x in self.d.items() if "nome" in x and self._vivo(x, ora) and self._suo(x, di)
+                    and isinstance((x.get("stato") or {}).get("brano"), dict)]
+            if not cand:
+                return None
+            i, x = max(cand, key=lambda ix: (bool(ix[1]["stato"].get("suona")), bool(tipo) and ix[1].get("tipo") == tipo,
+                                             ix[1].get("visto", 0)))
+            return i, x["nome"], x["tipo"], dict(x["stato"])
+
     def elenco(self, di="p"):
         ora = time.time()
         with self.cond:
@@ -3092,6 +3106,74 @@ class Dispositivi:
 
 
 DISP = Dispositivi()
+
+
+# ----- ★ dalla schermata di blocco: il comando rapido «Preferito» -----
+#
+# Da ricordare: «IL TELEFONO CHIEDE, IL MAC SA COSA SUONA».
+# Una pagina web non può mettere un tasto suo tra i comandi della schermata di blocco (lì iOS mostra solo ⏮ ⏯ ⏭, dalla
+# Media Session), e dall'iOS 16 neanche le app native vi mostrano più il «mi piace». Quindi un comando rapido dell'iPhone,
+# messo tra i comandi della schermata di blocco (o nel Centro di Controllo, o sul tasto Azione), chiede al Mac
+# POST preferito. Il Mac sa cosa suona su ogni dispositivo (lo stato del telecomando): mette quel brano nei Preferiti
+# dell'account (così resta anche se l'app dorme, e lo vedono tutti i dispositivi) e manda all'app il comando
+# «preferito» {id, on}, che accende subito la stella.
+#
+#   POST preferito {azione: aggiungi (predefinita) | togli | cambia, tipo: iphone|ipad|mac|…}   (anche nell'indirizzo)
+#        → {ok, preferito, prima, brano:{id,titolo,artista,album}, dispositivo:{id,nome,tipo}, testo}
+#        ?formato=testo: solo la riga «testo», sempre 200 (anche gli errori, con ⚠️): il comando rapido la mostra
+#   GET  preferito/comando-rapido   il comando rapido firmato (<cache>/preferito.shortcut, lo prepara uno script sul Mac)
+# Solo con un account (Samuele o un invitato): i Preferiti stanno lì; la rete di casa non ce l'ha.
+
+PREF_AZIONI = ("aggiungi", "togli", "cambia")
+PREF_FILE = "preferito.shortcut"
+
+
+def _risposta_testo(h, s, stato=200):
+    corpo = s.encode("utf-8")
+    h._musica_risposto = True
+    h.send_response(stato)
+    h.send_header("Content-Type", "text/plain; charset=utf-8")
+    h.send_header("Content-Length", str(len(corpo)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(corpo)
+
+
+def _preferito_ora(h, corpo):
+    """La ★ al brano che la persona sta ascoltando (vedi sopra)."""
+    q = parse_qs(urlsplit(h.path).query)
+    azione = corpo.get("azione") or (q.get("azione") or [""])[0] or "aggiungi"
+    if azione not in PREF_AZIONI:
+        raise ErroreExtra(400, "Azione non valida: aggiungi, togli o cambia")
+    tipo = corpo.get("tipo") or (q.get("tipo") or [""])[0]
+    tipo = tipo if tipo in TIPI_DISP else ""
+    conto = _conto_liste(h)   # i Preferiti stanno nell'account (la rete di casa non ne ha: 403)
+    if LISTE is None:
+        raise ErroreExtra(503, "Preferiti dell'account non disponibili")
+    di = _di_disp(h)
+    d = DISP.chi_suona(di, tipo)
+    if d is None:
+        raise ErroreExtra(409, "Niente in riproduzione: apri Atlante Musica e fai partire un brano")
+    did, nome, tipo_disp, stato = d
+    b = stato.get("brano") or {}
+    titolo = b.get("titolo") or "Questo brano"
+    if not b.get("sid"):
+        raise ErroreExtra(409, "«%s» non è nella libreria del Mac: la stella si mette dall'app" % titolo)
+    id_brano = "r" + b["sid"]
+    prima, dopo = LISTE.preferito(conto, id_brano, azione)
+    try:
+        DISP.comando(did, {"azione": "preferito", "id": id_brano, "on": dopo}, di)   # la stella nell'app, subito
+    except ErroreExtra:
+        pass   # il dispositivo è appena sparito: i Preferiti dell'account sono già a posto
+    chi = "«%s»%s" % (titolo, " – " + b["artista"] if b.get("artista") else "")
+    if dopo:
+        testo = ("★ È già nei Preferiti: " if prima else "★ Aggiunto ai Preferiti: ") + chi
+    else:
+        testo = ("☆ Tolto dai Preferiti: " if prima else "☆ Non è nei Preferiti: ") + chi
+    return {"ok": True, "preferito": dopo, "prima": prima,
+            "brano": {"id": id_brano, "titolo": b.get("titolo", ""), "artista": b.get("artista", ""), "album": b.get("album", "")},
+            "dispositivo": {"id": did, "nome": nome, "tipo": tipo_disp}, "testo": testo}
 
 
 def _serve_pubblico():
@@ -15247,6 +15329,27 @@ class Liste:
             seq, liste = self._leggi(conto)
             return self._risposta(seq, liste, dopo, {})
 
+    def preferito(self, conto, id_brano, azione):
+        """Un brano nei Preferiti dell'account (o fuori), deciso dal Mac: ★ dalla schermata di blocco. azione: aggiungi,
+        togli o cambia. Diventa la modifica più recente (le app la ricevono alla prossima sincronizzazione, come quelle
+        fatte da un altro dispositivo). Risponde (c'era prima, c'è adesso)."""
+        ora_ms = int(time.time() * 1000)
+        with self.blocco:
+            seq, d = self._leggi(conto)
+            cur = d.get("_preferiti")
+            vivi = cur is not None and not cur.get("deleted") and isinstance(cur.get("ids"), list)
+            ids = list(cur["ids"]) if vivi else []
+            prima = id_brano in ids
+            dopo = (not prima) if azione == "cambia" else azione == "aggiungi"
+            if dopo != prima:
+                ids = (ids + [id_brano])[:LISTA_BRANI_MAX] if dopo else [i for i in ids if i != id_brano]
+                seq += 1
+                d["_preferiti"] = {"id": "_preferiti", "name": "", "ids": ids,
+                                   "created": (cur or {}).get("created") or ora_ms,
+                                   "updated": max(ora_ms, int((cur or {}).get("updated") or 0) + 1), "seq": seq}
+                _scrivi_json(self._file(conto), {"seq": seq, "liste": d})
+            return prima, dopo
+
     def sincronizza(self, conto, arrivate, dopo=0):
         """Unisce le playlist arrivate a quelle dell'account e risponde con quelle cambiate dopo «dopo» (il «seq» che
         l'app ha già visto), il «seq» di adesso e «alias» ({id dell'app: id che resta} per le playlist unite)."""
@@ -15447,6 +15550,38 @@ def _instrada(h, metodo, parti, corpo):
         solo("POST")
         DISP.comando(resto[0], corpo, _di_disp(h))
         _json(h, {"ok": True})
+    elif cosa == "preferito" and not resto:   # ★ dalla schermata di blocco: il comando rapido dell'iPhone
+        solo("POST")
+        riga = (parse_qs(urlsplit(h.path).query).get("formato") or [""])[0] == "testo"
+        try:
+            r = _preferito_ora(h, corpo)
+        except ErroreExtra as e:
+            if not riga:
+                raise
+            _risposta_testo(h, "⚠️ " + e.testo)   # il comando rapido mostra la risposta così com'è: sempre una riga, sempre 200
+            return
+        if riga:
+            _risposta_testo(h, r["testo"])
+        else:
+            _json(h, r)
+    elif cosa == "preferito" and resto == ["comando-rapido"]:   # il comando rapido firmato, preparato dal Mac
+        solo("GET")
+        if _chi_e(h)["ruolo"] != "proprietario":
+            raise ErroreExtra(403, "Solo per Samuele")
+        p = os.path.join(_cart("cache"), PREF_FILE)
+        if not os.path.isfile(p):
+            raise ErroreExtra(404, "Il comando rapido non è ancora pronto: sul Mac mini apri «Prepara ★ Preferito.command»")
+        with open(p, "rb") as f:   # pochi KB; mai dalla cache del browser (si rifà se cambia l'indirizzo del Mac)
+            dati = f.read()
+        h._musica_risposto = True
+        h.send_response(200)
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Content-Disposition", 'attachment; filename="Preferito Atlante.shortcut"')
+        h.send_header("Content-Length", str(len(dati)))
+        h.send_header("Cache-Control", "no-store")
+        h.end_headers()
+        if h.command != "HEAD":
+            h.wfile.write(dati)
     elif cosa in ("chiavi", "posizione"):   # posizione condivisa, cifrata da telefono a telefono: vedi la sua sezione
         _posizione(h, metodo, cosa, resto, corpo)
     elif cosa == "voci" and not resto:

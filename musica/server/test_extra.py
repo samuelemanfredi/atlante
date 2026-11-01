@@ -1123,6 +1123,115 @@ class TestDispositiviTempi(unittest.TestCase):
         self.assertEqual([x["id"] for x in d.elenco()], ["disp-0004", "disp-0003", "disp-0002"])
 
 
+class TestPreferitoBlocco(unittest.TestCase):
+    """★ dalla schermata di blocco: il comando rapido dell'iPhone chiede al Mac (POST preferito); il Mac sa cosa suona su
+    ogni dispositivo (lo stato del telecomando), mette quel brano nei Preferiti dell'account e lo dice all'app (comando
+    «preferito»). Un server tutto suo: i dispositivi delle altre prove non contano."""
+
+    IPHONE, MAC = "iphone-pref-0001", "mac-pref-00000001"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-pref-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def preferiti(self):
+        l = next((x for x in self.s.json("GET", "/api/extra/liste")["playlist"] if x["id"] == "_preferiti"), None)
+        return l["ids"] if l and not l.get("deleted") else []
+
+    def riga(self, percorso="/api/extra/preferito?formato=testo", corpo=None):
+        st, h, b = richiesta(self.s.porta, "POST", percorso, corpo or {})
+        self.assertEqual(st, 200, b)
+        self.assertTrue(h.get("Content-Type", "").startswith("text/plain"), h.get("Content-Type"))
+        return b.decode("utf-8")
+
+    def stato(self, disp, tipo, sid, titolo, suona, artista=""):
+        brano = {"sid": sid, "titolo": titolo}
+        if artista:
+            brano["artista"] = artista
+        self.s.json("POST", "/api/extra/dispositivi/%s/stato" % disp,
+                    {"nome": tipo.capitalize(), "tipo": tipo, "stato": {"brano": brano, "suona": suona, "t": 30}})
+
+    def test_1_niente_in_riproduzione(self):
+        self.assertIn("Niente in riproduzione", self.s.json("POST", "/api/extra/preferito", codice=409)["errore"])
+        # per il comando rapido: una riga, sempre 200
+        self.assertTrue(self.riga().startswith("⚠️ Niente in riproduzione"))
+
+    def test_2_il_brano_che_suona(self):
+        # il Mac ha un brano in pausa ed è sentito per ultimo, l'iPhone suona: vale l'iPhone
+        self.stato(self.IPHONE, "iphone", "abc123", "Levitating", True, "Dua Lipa")
+        self.stato(self.MAC, "mac", "mac999", "Altro brano", False)
+        seq = self.s.json("GET", "/api/extra/liste")["seq"]
+        j = self.s.json("POST", "/api/extra/preferito")
+        self.assertEqual((j["ok"], j["preferito"], j["prima"]), (True, True, False))
+        self.assertEqual(j["brano"], {"id": "rabc123", "titolo": "Levitating", "artista": "Dua Lipa", "album": ""})
+        self.assertEqual(j["dispositivo"], {"id": self.IPHONE, "nome": "Iphone", "tipo": "iphone"})
+        self.assertEqual(j["testo"], "★ Aggiunto ai Preferiti: «Levitating» – Dua Lipa")
+        self.assertEqual(self.preferiti(), ["rabc123"])
+        # l'app dell'iPhone riceve il comando che accende la stella (una volta sola)
+        self.assertEqual(self.s.json("GET", "/api/extra/dispositivi/%s/comandi?attesa=1" % self.IPHONE)["comandi"],
+                         [{"azione": "preferito", "id": "rabc123", "on": True}])
+        self.assertEqual(self.s.json("GET", "/api/extra/dispositivi/%s/comandi?attesa=0.2" % self.IPHONE)["comandi"], [])
+        # le altre app lo ricevono alla prossima sincronizzazione: i Preferiti dell'account sono cambiati dopo «seq»
+        r = self.s.json("POST", "/api/extra/liste", {"playlist": [], "dopo": seq})
+        self.assertEqual([(l["id"], l["ids"]) for l in r["playlist"]], [("_preferiti", ["rabc123"])])
+        # di nuovo: già lì, niente doppioni
+        self.assertEqual(self.riga(), "★ È già nei Preferiti: «Levitating» – Dua Lipa")
+        self.assertEqual(self.preferiti(), ["rabc123"])
+        # «cambia», come la stella di Apple Music: la toglie; «togli» quando non c'è: resta fuori
+        j = self.s.json("POST", "/api/extra/preferito", {"azione": "cambia"})
+        self.assertEqual((j["preferito"], j["prima"], j["testo"]), (False, True, "☆ Tolto dai Preferiti: «Levitating» – Dua Lipa"))
+        self.assertEqual(self.preferiti(), [])
+        self.assertEqual(self.riga("/api/extra/preferito?formato=testo&azione=togli"), "☆ Non è nei Preferiti: «Levitating» – Dua Lipa")
+        # un'app che sincronizza dopo con i suoi Preferiti vecchi non rimette il brano: vince la modifica più recente
+        self.s.json("POST", "/api/extra/liste", {"playlist": [{"id": "_preferiti", "ids": ["rabc123"], "updated": 1000}]})
+        self.assertEqual(self.preferiti(), [])
+        self.s.json("POST", "/api/extra/preferito")   # e di nuovo dentro, in coda agli altri
+        self.s.json("POST", "/api/extra/liste", {"playlist": [{"id": "_preferiti", "ids": ["rx1", "rabc123"],
+                                                                 "updated": int(time.time() * 1000) + 5000}]})
+        self.s.json("POST", "/api/extra/preferito?azione=togli")
+        self.s.json("POST", "/api/extra/preferito")
+        self.assertEqual(self.preferiti(), ["rx1", "rabc123"])
+
+    def test_3_due_dispositivi_che_suonano(self):
+        self.stato(self.IPHONE, "iphone", "abc123", "Levitating", True)
+        self.stato(self.MAC, "mac", "mac999", "Altro brano", True)   # sentito per ultimo
+        self.assertEqual(self.s.json("POST", "/api/extra/preferito")["dispositivo"]["id"], self.MAC)
+        # il comando rapido dell'iPhone dice «iphone»: vale l'iPhone (anche nell'indirizzo)
+        self.assertEqual(self.s.json("POST", "/api/extra/preferito", {"tipo": "iphone"})["dispositivo"]["id"], self.IPHONE)
+        self.assertEqual(self.s.json("POST", "/api/extra/preferito?tipo=iphone")["dispositivo"]["id"], self.IPHONE)
+        self.assertEqual(self.s.json("POST", "/api/extra/preferito", {"tipo": "frigorifero"})["dispositivo"]["id"], self.MAC)
+
+    def test_4_errori(self):
+        # un brano che non è nella libreria del Mac (solo su quel telefono): la stella si mette dall'app
+        self.stato(self.IPHONE, "iphone", "", "Registrazione mia", True)
+        self.stato(self.MAC, "mac", "", "Altro", False)
+        self.assertIn("non è nella libreria del Mac", self.s.json("POST", "/api/extra/preferito", codice=409)["errore"])
+        self.assertEqual(self.riga(), "⚠️ «Registrazione mia» non è nella libreria del Mac: la stella si mette dall'app")
+        self.assertIn("errore", self.s.json("POST", "/api/extra/preferito", {"azione": "spegni"}, codice=400))
+        self.assertIn("errore", self.s.json("GET", "/api/extra/preferito", codice=405))
+        # un altro sito aperto nel browser non mette stelle
+        self.s.json("POST", "/api/extra/preferito", codice=403, intest={"Origin": "http://cattivo.example"})
+
+    def test_5_comando_rapido(self):
+        p = os.path.join(self.c["cache"], "preferito.shortcut")
+        if os.path.exists(p):
+            os.unlink(p)
+        self.assertIn("non è ancora pronto", self.s.json("GET", "/api/extra/preferito/comando-rapido", codice=404)["errore"])
+        with open(p, "wb") as f:
+            f.write(b"AEA1-finto")
+        st, h, b = self.s.get("/api/extra/preferito/comando-rapido")
+        self.assertEqual((st, b), (200, b"AEA1-finto"))
+        self.assertIn('filename="Preferito Atlante.shortcut"', h.get("Content-Disposition", ""))
+        self.assertEqual(h.get_all("Cache-Control"), ["no-store"])
+
+
 class TestProxyInterno(unittest.TestCase):
     """Il proxy dentro un server qualsiasi (gestisci_extra), verso un sito «pubblico» finto su 127.0.0.1:
     rimandi, Content-Type, limite di 15 MB, codici d'errore e rimando verso un indirizzo vietato."""
@@ -12023,6 +12132,23 @@ class TestControlloRemoto(unittest.TestCase):
         if not osa:
             self.skipTest("osascript non c'è: non è un Mac")
         js, app = os.path.join(QUI, "test_remoto.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestPreferitoApp(unittest.TestCase):
+    """★ dalla schermata di blocco, nell'app: il comando «preferito» del Mac accende o spegne la stella del brano giusto
+    e sincronizza; il menu del brano che suona ha la sua scheda (comando rapido, passi, indirizzo da copiare).
+    Gira in JavaScriptCore come test_remoto.js: test_preferito.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_preferito(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_preferito.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
         r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
         if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
