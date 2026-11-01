@@ -1,11 +1,11 @@
 {
   "name": "Atlante Musica",
-  "short_name": "Musica",
+  "short_name": "Atlante Musica",
   "description": "La tua musica, sul tuo dispositivo. Anche senza connessione.",
   "lang": "it",
   "start_url": "./",
   "scope": "./",
-  "id": "./",
+  "id": "/atlante-musica",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#ffffff",

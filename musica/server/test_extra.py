@@ -801,6 +801,28 @@ class TestExtra(unittest.TestCase):
         self.assertNotIn("Ida", nomi)
         self.assertNotIn("Ugo", nomi)
 
+    def test_diari_scatola_nera(self):
+        """I diari audio arrivano con lo stato e restano sul disco del Mac (uguali in tutto: una volta sola)."""
+        iphone = "iphone-diario-0001"
+        v1 = {"q": "11-01T21:00:01", "e": "mix", "b": "Brano A", "match": True}
+        v2 = {"q": "11-01T21:00:01", "e": "allineo", "b": "Brano B", "scarto": 0.12, "ms": 400}
+        v3 = {"q": "11-01T21:00:01", "e": "allineo", "b": "Brano B", "scarto": 0.07, "ms": 800}   # stesso secondo, altra voce
+        st = lambda voci: {"nome": "iPhone di Samuele", "tipo": "iphone", "stato": {"mix": {"on": True, "diario": voci}}}
+        self.s.json("POST", "/api/extra/dispositivi/%s/stato" % iphone, st([v1, v2]))
+        self.s.json("POST", "/api/extra/dispositivi/%s/stato" % iphone, st([v1, v2, v3]))   # ogni stato rimanda le ultime
+        self.s.json("POST", "/api/extra/dispositivi/mac-senza-diario-01/stato", {"nome": "Mac", "tipo": "mac", "stato": {}})
+        d = {x["id"]: x for x in self.s.json("GET", "/api/extra/diari")["dispositivi"]}
+        self.assertNotIn("mac-senza-diario-01", d)
+        self.assertEqual((d[iphone]["nome"], d[iphone]["tipo"], d[iphone]["voci"]), ("iPhone di Samuele", "iphone", [v1, v2, v3]))
+        with open(os.path.join(self.c["cache"], "diari.json"), encoding="utf-8") as f:   # sul disco: si legge anche dopo
+            self.assertEqual(json.load(f)[iphone]["voci"], [v1, v2, v3])
+        self.s.json("POST", "/api/extra/diari", {}, codice=405)
+        # gli invitati: il loro diario non si tiene (il controllo è prima di qualsiasi file)
+        m = carica_modulo("musica_libreria_diari")
+        x = m.Diari()
+        x.aggiungi("ospite-diario-01", "iPhone", "iphone", "ospite1", {"mix": {"diario": [v1]}})
+        self.assertEqual((x.d, x.file), ({}, None))
+
     def test_dispositivi(self):
         iphone, mac = "iphone-prova-0001", "mac-prova-00000001"
         stato = {"brano": {"sid": "abc", "titolo": "Without Me", "artista": "Eminem"}, "suona": True, "t": 12.5,

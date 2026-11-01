@@ -126,6 +126,9 @@ function prove(src, fatte) {
   prova('mix a fine brano senza mixer', () => scenarioFineBrano(src, false));
   prova('mix a fine brano con il mixer', () => scenarioFineBrano(src, true));
   prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
+  prova('ritardo di partenza imparato', () => ritardoImparato(src));
+  prova('▶︎ bloccato: si sblocca da sola', () => partenzaBloccata(src));
+  prova('fine vera del brano', () => fineVera(src));
   prova('iOS prima del 27 senza mixer', () => versioneIOS(src));
   prova('niente più «un lettore solo»', () => senzaUnSolo(src));
   prova('preparazione interrotta', () => preparazioneInterrotta(src));
@@ -142,7 +145,14 @@ function sintassi(src) {
 // i tasti giusti passano dal mix al salto (un'unione di rami potrebbe rimettere il cambio immediato)
 function collegamenti(src) {
   const c = (re, msg) => vero(re.test(src), 'collegamento mancante: ' + msg);
-  c(/\nMIX\.XS = 6;/, 'MIX.XS = 6');
+  c(/\nMIX\.XS = 10;/, 'MIX.XS = 10 (dissolvenza al salto)');
+  c(/RAMPA:8, /, 'MIX.RAMPA = 8 (a fine brano la velocità cambia in 8 s)');
+  c(/P\.tR = tS - MIX\.RAMPA;/, 'la rampa a fine brano usa MIX.RAMPA');
+  c(/const SALTO = \{MISURA:4, PRONTO:6, RAMPA:2\};/, 'rampa al salto di 2 s');
+  c(/function gradini\(sec\) \{ return MIX\.gains\.size \? 1 : 0; \}/, 'con il mixer un gradino solo');
+  c(/else allineaMuto\(A, e, TBe\);/, 'con il mixer i battiti si sistemano spostando il brano nuovo');
+  c(/pos = p\.pos \+ ritAvvio\(\);/, 'a fine brano il nuovo parte avanti del ritardo imparato');
+  c(/saltoVia\(X, p\.pos \+ ritAvvio\(\)\)/, 'al salto il nuovo parte avanti del ritardo imparato');
   c(/case 'next': avanti\(\); break;[\s\S]*case 'next': avanti\(\); break;/, "tasto Successivo e comando dal telecomando → avanti()");
   c(/case 'qjump': saltaA\(\+d\.i, /, 'tocco su un brano di «In coda» → saltaA');
   // i tasti fuori dall'app passano da fuoriTasto (sezione «controlli fuori dall'app»): «next» → avanti()
@@ -243,7 +253,7 @@ function pezziGrid(src) {
     wavPCM:() => ({x:new Float32Array(20 * SR), sr:SR}),
     beatGrid:(x, sr) => { log.bg.push([x.length, x[0]]); return {bpm:128, b0:0.25, c:2}; }
   };
-  const F = carica(src, ['grid', 'gridPezzo'], ['const gridWait = '], env, c => {
+  const F = carica(src, ['grid', 'gridPezzo', 'fineUdibile'], ['const gridWait = '], env, c => {
     vero(c.indexOf('(async () => {') > 0 && c.indexOf('})().catch(() => null)') > 0, 'grid(): forma cambiata, aggiornare la prova');
     return c.replace('(async () => {', 'corri(function* () {').replace('})().catch(() => null)', '}).catch(() => null)').replace(/\bawait /g, 'yield ');
   });
@@ -302,8 +312,11 @@ function mondo(src, opz) {
     return {dur:b.duration, ms:u.startsWith('blob:') ? 60 : (opz.streamMs != null ? opz.streamMs : 700)};
   };
   class Lettore {
-    constructor(nome) { Object.assign(this, {nome, paused:true, currentTime:0, _v:1, cambi:[], readyState:0, muted:false, duration:NaN, ended:false, seeking:false, volume:1, _src:null, _l:{}, _vuole:false, _da:0, rifiuta:false, rifiutaUnaVolta:false}); }
+    constructor(nome) { Object.assign(this, {nome, paused:true, _t:0, salti:[], currentTime:0, _v:1, cambi:[], readyState:0, muted:false, duration:NaN, ended:false, seeking:false, volume:1, _src:null, _l:{}, _vuole:false, _da:0, rifiuta:false, rifiutaUnaVolta:false}); }
     get playbackRate() { return this._v; }
+    get currentTime() { return this._t; }
+    // uno spostamento mentre suona: si segna (salti) e il lettore resta fermo latenzaSpost ms, come il vero
+    set currentTime(v) { if (!this.paused && !this._vuole && this.readyState >= 3 && Math.abs(v - this._t) > 1e-9) { this.salti.push([W.t, v - this._t]); this._da = Math.max(this._da, W.t + (opz.latenzaSpost || 0)); } this._t = v; }
     set playbackRate(v) { if (v !== this._v) this.cambi.push([W.t, v]); this._v = v; }   // i cambi veri di velocità
     get buffered() { const d = this.readyState >= 3 ? this.duration : 0; return {length:d ? 1 : 0, start:() => 0, end:() => d}; }
     addEventListener(ev, fn, o) { (this._l[ev] = this._l[ev] || []).push({fn, once:!!(o && o.once)}); }
@@ -320,17 +333,19 @@ function mondo(src, opz) {
     pause() { if (!this.paused) { this.paused = true; this.emit('pause'); } }
     avanza(dt) {
       if (this.paused || this.readyState < 3 || this._vuole || W.t < this._da) return;
-      this.currentTime += dt * this.playbackRate;
-      if (this.currentTime >= this.duration) { this.currentTime = this.duration; this.ended = true; this.paused = true; this.emit('pause'); this.emit('ended'); }
+      this._t += dt * this.playbackRate;
+      if (this._t >= this.duration) { this._t = this.duration; this.ended = true; this.paused = true; this.emit('pause'); this.emit('ended'); }
     }
   }
   const DECKS = [new Lettore('au'), new Lettore('au2')], AUX = new Lettore('auX'), tutti = DECKS.concat(AUX);
   const ritardo = (ms, v) => new SP(ok => tempo.setTimeout(() => ok(v), ms));
+  const memoria = opz.memoria || {};   // localStorage: si può passare da un mondo al successivo
   const env = {
     au:DECKS[0], DECKS, AUX, curId:null, curUrl:null, keptFor:null, countFor:null, userVol:1, pausaVoluta:0,
     S:{queue:brani.map(b => b.id), orig:[], qi:0, shuffle:false, repeat:'off', from:''}, T,
-    MIX:{on:true, X:10, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0, XS:6, salto:null},
-    BPMC:new Map(), RC:{id:null}, NEEDS_MIXER:false, API:'api/musica/', SRV:true, ls:{get:(k, d) => d, set:() => {}},
+    MIX:{on:true, X:10, RAMPA:8, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0, XS:6, salto:null},
+    BPMC:new Map(), RC:{id:null}, NEEDS_MIXER:false, API:'api/musica/', SRV:true,
+    ls:{get:(k, d) => k in memoria ? JSON.parse(memoria[k]) : d, set:(k, v) => { memoria[k] = JSON.stringify(v); }},
     Promise:SP, setTimeout:tempo.setTimeout, setInterval:tempo.setInterval, clearTimeout:tempo.clear, clearInterval:tempo.clear,
     performance:{now:() => W.t}, Date:{now:() => 1e12 + W.t},
     URL:{createObjectURL:f => 'blob:' + f.nome, revokeObjectURL:() => {}},
@@ -349,13 +364,15 @@ function mondo(src, opz) {
       const b = brani.find(x => x.id === id); if (!b || b.c == null) return SP.resolve(null);
       let v = {bpm:b.bpm, b0:b.b0, c:b.c};
       if (part !== 'i') { const da = part === 'f' ? b.duration - 30 : part, TT = 60 / b.bpm; v.b0 = b.b0 + Math.ceil((da - b.b0) / TT) * TT; }
+      if (part === 'f' && b.fine) v.fine = b.fine;   // la fine vera (dopo, silenzio)
       return ritardo(opz.misuraMs != null ? opz.misuraMs : 500, v);
     }
   };
   const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev', 'xfPausa', 'diarioPausa', 'mixInfo', 'osservaNuovo',
     'mixFattore', 'rampaVel', 'pezzoQui', 'partenzaBattito', 'accorciaW', 'saltoResto', 'velocita', 'conPitch', 'gradini', 'rampaGradini', 'correzioneFase',
-    'avanti', 'saltaA', 'saltoIdx', 'gridQui', 'saltoMisurato', 'saltoTick', 'saltoParti', 'saltoCarica', 'saltoVia', 'saltoSubito', 'saltoAnnulla', 'saltoPausa', 'saltoSpostato'],
-  ['const wrap = ', 'const otherDeck = ', 'const SALTO = '], env, null,
+    'avanti', 'saltaA', 'saltoIdx', 'gridQui', 'saltoMisurato', 'saltoTick', 'saltoParti', 'saltoCarica', 'saltoVia', 'saltoSubito', 'saltoAnnulla', 'saltoPausa', 'saltoSpostato',
+    'allineaMuto', 'ritImpara', 'ritAvvio'],
+  ['const wrap = ', 'const otherDeck = ', 'const SALTO = ', 'const ALLINEA = ', 'MIX.rit = '], env, null,
   {xfPrepare:opz.finebrano ? sincrona(src, 'xfPrepare') : 'function xfPrepare(P) { return xfPreparaFinto(P); }'});
   // gli eventi come auOn nell'app: contano solo quelli del lettore in uso
   tutti.forEach(el => {
@@ -383,7 +400,7 @@ function mondo(src, opz) {
   // si comincia con il brano A che suona, al secondo «da»
   env.curId = 'rA'; env.S.qi = 0; DECKS[0].src = 'blob:rA'; DECKS[0].play(); passa(0.2);
   DECKS[0].currentTime = opz.da != null ? opz.da : 60;
-  return {W, log, env, F, DECKS, AUX, passa, fai, brano:id => brani.find(b => b.id === id), ora:() => W.t};
+  return {W, log, env, F, DECKS, AUX, passa, fai, memoria, brano:id => brani.find(b => b.id === id), ora:() => W.t};
 }
 const ultimo = (log, e) => log.diario.filter(x => x.e === e).pop();
 // scarto di fase (in battiti) tra il brano che esce e quello che entra, dalle griglie vere dei due brani
@@ -625,7 +642,7 @@ function gradiniPuri(src) {
   vicino(F.rampaGradini(0.3, 1.07, 4), F.rampaVel(0.5, 1.07), 1e-12, 'secondo gradino');
   vero(F.gradini(4) === 0, 'senza mixer: rampa continua');
   env.MIX.gains.set(1, 1);
-  vero(F.gradini(4) === 4 && F.gradini(2) === 2 && F.gradini(9) === 4 && F.gradini(0.2) === 1, 'con il mixer: un gradino al secondo, da 1 a 4');
+  vero(F.gradini(4) === 1 && F.gradini(2) === 1 && F.gradini(9) === 1 && F.gradini(0.2) === 1, 'con il mixer: un gradino solo (ogni cambio è un buco nel suono)');
   // correzione dei battiti
   vicino(F.correzioneFase(0.1, 0.5, false), -0.1 * 0.5 / 1.5, 1e-12, 'senza mixer come prima');
   vicino(F.correzioneFase(-2, 0.5, false), 0.05, 1e-12, 'al più +5%');
@@ -659,10 +676,13 @@ function scenarioFineBrano(src, mixer) {
   vero(Math.max.apply(null, err.slice(-25)) < (mixer ? 0.08 : 0.03), 'battiti non agganciati a fine dissolvenza: ' + Math.max.apply(null, err.slice(-25)));
   const inDiss = A.cambi.slice(cambiRampa).filter(c => c[0] < M.ora() - 100 && c[1] !== 1);
   if (mixer) {
-    vero(cambiRampa <= 4, 'con il mixer la rampa deve avere al più 4 gradini (' + cambiRampa + ')');
-    vero(inDiss.length >= 1, 'con il mixer serviva una correzione dei battiti');
-    for (let i = 1; i < inDiss.length; i++) vero(inDiss[i][0] - inDiss[i - 1][0] >= 1990, 'con il mixer al più una correzione ogni 2 s: ' + JSON.stringify(inDiss));
+    // ogni cambio di velocità con il mixer è un buco nel suono: uno solo prima della dissolvenza, nessuno durante
+    vero(cambiRampa === 1, 'con il mixer la velocità del brano che esce cambia una volta sola (' + cambiRampa + ')');
+    vero(inDiss.length === 0, 'con il mixer il brano che esce non cambia velocità nella dissolvenza: ' + JSON.stringify(inDiss));
     vero(B.cambi.length === 0, 'il brano nuovo non cambia velocità');
+    vero(B.salti.length >= 1 && B.salti.length <= 2 && B.salti.every(x => x[0] - partito <= 1800), 'con il mixer il brano nuovo si sposta al più 2 volte, nel primo secondo e mezzo: ' + JSON.stringify(B.salti));
+    vero(log.diario.some(x => x.e === 'allineo'), 'lo spostamento va nel diario');
+    vero(env.MIX.rit.p > 0.02 && env.MIX.rit.p < 0.06, 'ritardo di partenza imparato: ' + env.MIX.rit.p);
   } else vero(cambiRampa > 20, 'senza mixer la rampa resta continua (' + cambiRampa + ')');
 }
 
@@ -676,11 +696,108 @@ function scenarioSaltoCambi(src) {
     if (partito && env.MIX.act && M.ora() - partito > 60) err.push(Math.abs(scarto(M, A, B, 'rA', 'rB')));
   });
   vero(partito && env.curId === 'rB' && !env.MIX.act, 'salto con il mixer non arrivato');
-  vero(prima <= 2, 'rampa del salto con il mixer: al più 2 gradini (' + prima + ')');
+  vero(prima === 1, 'rampa del salto con il mixer: un gradino solo (' + prima + ')');
   const dopo = A.cambi.slice(prima).filter(c => c[1] !== 1);
-  vero(dopo.length <= 3, 'dissolvenza del salto con il mixer: al più una correzione ogni 2 s (' + JSON.stringify(dopo) + ')');
-  vero(dopo.length >= 1, 'serviva una correzione dei battiti');
-  vero(Math.max.apply(null, err) < 0.16 && Math.max.apply(null, err.slice(-25)) < 0.08, 'battiti agganciati anche con poche correzioni (' + Math.max.apply(null, err) + ', alla fine ' + Math.max.apply(null, err.slice(-25)) + ')');
+  vero(dopo.length === 0, 'dissolvenza del salto con il mixer: il brano che esce non cambia velocità (' + JSON.stringify(dopo) + ')');
+  vero(B.salti.length >= 1 && B.salti.length <= 2, 'serviva uno spostamento del brano nuovo (' + JSON.stringify(B.salti) + ')');
+  vero(Math.max.apply(null, err) < 0.16 && Math.max.apply(null, err.slice(-25)) < 0.08, 'battiti agganciati senza correzioni di velocità (' + Math.max.apply(null, err) + ', alla fine ' + Math.max.apply(null, err.slice(-25)) + ')');
+}
+
+// il ritardo con cui parte il brano nuovo si impara: dal terzo passaggio la partenza è giusta e non si sposta più niente.
+// Anche il ritardo dopo uno spostamento si impara (qui 80 ms), e mai più di 2 spostamenti
+function ritardoImparato(src) {
+  const memoria = {}, giri = [];
+  for (let g = 0; g < 4; g++) {
+    const M = mondo(src, {latenza:60, latenzaSpost:80, memoria}), {env, DECKS} = M, A = DECKS[0], B = DECKS[1];
+    mixerFinto(M);
+    let partito = 0, err = [];
+    M.fai(() => M.F.avanti());
+    M.passa(12, () => {
+      if (!partito && env.curId === 'rB') partito = M.ora();
+      if (partito && env.MIX.act && M.ora() - partito > 1900) err.push(Math.abs(scarto(M, A, B, 'rA', 'rB')));
+    });
+    vero(partito && env.curId === 'rB' && !env.MIX.act, 'passaggio ' + (g + 1) + ' non arrivato');
+    vero(B.salti.length <= 2 && A.cambi.filter(c => c[1] !== 1).length === 1, 'passaggio ' + (g + 1) + ': troppi cambi (' + JSON.stringify(B.salti) + ')');
+    giri.push({salti:B.salti.length, err:Math.max.apply(null, err), rit:JSON.parse(memoria['am-mix-rit'] || '{}')});
+  }
+  const ultimo = giri[giri.length - 1];
+  vero(giri[0].salti >= 1, 'al primo passaggio serviva uno spostamento: ' + JSON.stringify(giri));
+  vero(ultimo.salti === 0 && ultimo.err < 0.05, 'dopo qualche passaggio la partenza deve essere giusta da sola: ' + JSON.stringify(giri));
+  vero(ultimo.rit.p > 0.045 && ultimo.rit.p < 0.07 && ultimo.rit.s > 0.03, 'ritardi imparati: ' + JSON.stringify(ultimo.rit));
+}
+
+// la fine vera del brano: dove la musica finisce davvero (dopo, silenzio o quasi), per non dissolvere sul niente
+function fineVera(src) {
+  const F = carica(src, ['fineUdibile'], [], {});
+  const sr = 11025; let z = 12345;
+  const rumore = () => { z = (z * 1103515245 + 12345) % 2147483648; return z / 2147483648 * 2 - 1; };
+  const pezzo = g => { const x = new Float32Array(sr * 30); for (let i = 0; i < x.length; i++) x[i] = 0.3 * rumore() * g(i / sr); return x; };
+  vicino(F.fineUdibile(pezzo(t => t < 20 ? 1 : 0), sr), 20, 0.06, 'silenzio dopo 20 s');
+  vicino(F.fineUdibile(pezzo(() => 1), sr), 30, 0.06, 'musica fino alla fine: nessun taglio');
+  vicino(F.fineUdibile(pezzo(t => t < 20 ? 1 : Math.pow(10, -3 * (t - 20) / 10)), sr), 20 + 10 * 40 / 60, 0.3, 'sfumata di 60 dB in 10 s: fine a −40 dB');
+  vero(F.fineUdibile(new Float32Array(sr * 30), sr) === null, 'tutto muto: niente');
+  vero(F.fineUdibile(new Float32Array(100), sr) === null, 'troppo corto: niente');
+  // nel mix a fine brano: A finisce a 232 s (poi 8 s di silenzio): la dissolvenza finisce lì, non a 240
+  const M = mondo(src, {finebrano:true, da:240 - 45, brani:[
+    {id:'rA', title:'Brano A', sid:'A', duration:240, bpm:124, b0:0.37, c:2, fine:232},
+    {id:'rB', title:'Brano B', sid:'B', duration:200, bpm:128, b0:0.21, c:2}]}), {env, log, DECKS} = M, A = DECKS[0];
+  let partito = 0, fermo = 0;
+  M.passa(45, () => {
+    if (!partito && env.curId === 'rB') partito = A.currentTime;
+    if (!A.paused && A.getAttribute('src')) fermo = A.currentTime;   // l'ultimo punto in cui suonava
+  });
+  const mix = log.diario.find(x => x.e === 'mix');
+  vero(mix && mix.silenzio === 8, 'nel diario il silenzio saltato: ' + JSON.stringify(mix));
+  vero(partito > 232.5 - 10 * 1.05 - 0.6 && partito < 232.5 - 10 * 0.7, 'la dissolvenza parte prima del silenzio: ' + partito);
+  vero(fermo > 232 && fermo < 233.2, 'il brano che finisce si ferma alla fine vera: ' + fermo);
+}
+
+// ▶︎ che non fa ripartire niente (rientrando nell'app): controllaPartenza prova a sbloccare e, se serve, riavvia l'app
+function partenzaBloccata(src) {
+  const caso = opz => {
+    let t = 0; const timers = [], log = {diario:[], load:[], reload:0, toast:[], resume:0}, memoria = opz.memoria || {};
+    const el = {paused:false, _t:10, readyState:opz.rs != null ? opz.rs : 4, error:null, get currentTime() { return this._t + (opz.va ? t / 1000 : 0); }};
+    let ctxVa = opz.ctxVa !== false;
+    const ctx = opz.ctx ? {state:opz.ctx, get currentTime() { return 100 + (ctxVa && this.state === 'running' ? t / 1000 : 0); },
+      resume() { log.resume++; if (opz.riparte) { this.state = 'running'; ctxVa = true; } return {catch() {}}; }} : null;
+    const env = {
+      au:el, AUX:{}, curId:'rA', RC:{id:null}, MIX:{ctx, act:null, salto:null}, S:{qi:0}, navigator:{onLine:true}, document:{hidden:false},
+      setTimeout:(fn, ms) => { timers.push({id:timers.length + 1, at:t + ms, fn}); return timers.length; },
+      clearTimeout:id => { const x = timers[id - 1]; if (x) x.fatto = true; },
+      Date:{now:() => 1e12 + t + (opz.dopo || 0)},
+      diario:(e, x) => log.diario.push(Object.assign({e}, x || {})), load:(i, play, at) => log.load.push([i, play, Math.round(at)]),
+      ls:{get:(k, d) => k in memoria ? JSON.parse(memoria[k]) : d, set:(k, v) => { memoria[k] = JSON.stringify(v); }},
+      toast:m => log.toast.push(m), saveState() {}, location:{reload() { log.reload++; }}
+    };
+    const F = carica(src, ['controllaPartenza', 'riavviaApp'], ['const PARTENZA = '], env);
+    F.controllaPartenza();
+    if (opz.pausa) el.paused = true;
+    const fine = t + (opz.ms || 6000);
+    for (;;) { const x = timers.filter(y => !y.fatto && y.at <= fine).sort((a, b) => a.at - b.at)[0]; if (!x) break; t = x.at; x.fatto = true; x.fn(); }
+    return {log, memoria, ha:e => log.diario.some(x => x.e === e)};
+  };
+  let r = caso({va:true, ctx:'running'});
+  vero(!r.log.diario.length && !r.log.load.length && !r.log.reload, 'suona: niente da fare ' + JSON.stringify(r.log));
+  r = caso({va:true, ctx:'interrupted'});
+  vero(r.ha('▶︎ bloccato') && r.log.resume === 1 && r.log.reload === 1 && r.ha('riavvio'), 'mixer fermo: si prova, poi riavvio ' + JSON.stringify(r.log));
+  vero(JSON.parse(r.memoria['am-riavvio']).msg === true, 'dopo il riavvio si avvisa');
+  const memoria = r.memoria;
+  r = caso({va:true, ctx:'interrupted', riparte:true});
+  vero(r.ha('mixer ripartito') && !r.log.reload, 'mixer ripartito: niente riavvio ' + JSON.stringify(r.log));
+  r = caso({va:true, ctx:'running', ctxVa:false});
+  vero(r.ha('▶︎ bloccato') && r.log.reload === 1, 'mixer «running» con l\'orologio fermo: riavvio ' + JSON.stringify(r.log));
+  r = caso({va:false, ctx:'running'});
+  vero(JSON.stringify(r.log.load) === '[[0,true,10]]' && r.log.reload === 1, 'brano fermo: ricaricato dallo stesso punto, poi riavvio ' + JSON.stringify(r.log));
+  r = caso({va:false});
+  vero(r.log.load.length === 1 && r.log.reload === 1, 'senza mixer (Mac): brano fermo, ricaricato, poi riavvio ' + JSON.stringify(r.log));
+  r = caso({va:false, rs:1, ctx:'running', ms:30000});
+  vero(r.ha('▶︎ lento') && !r.log.load.length && !r.log.reload, 'rete lenta: si aspetta, niente riavvii ' + JSON.stringify(r.log));
+  r = caso({va:true, ctx:'interrupted', memoria});
+  vero(r.ha('riavvio saltato') && !r.log.reload && r.log.toast.length === 1, 'al più un riavvio ogni 3 minuti ' + JSON.stringify(r.log));
+  r = caso({va:true, ctx:'interrupted', memoria, dopo:200000});
+  vero(r.log.reload === 1, 'dopo 3 minuti si può riavviare di nuovo');
+  r = caso({va:false, ctx:'interrupted', pausa:true});
+  vero(!r.log.diario.length && !r.log.reload, 'messo in pausa subito: niente');
 }
 
 // iOS prima del 27: niente mixer. La versione dallo User-Agent (bloccato a 18_6 da iOS 26) o dalle novità di Safari 27
@@ -765,7 +882,7 @@ function diarioPiuRicco(src) {
   const F = carica(src, ['diario'], [], env);
   for (let i = 0; i < 40; i++) F.diario('v' + i, {i});
   vero(env.DIARIO.length === 30 && env.DIARIO[0].e === 'v10' && env.DIARIO[29].i === 39, 'il diario tiene 30 voci');
-  vero(/diario:DIARIO\.slice\(-15\)\}/.test(src), 'al Mac vanno 15 voci');
+  vero(/diario:DIARIO\.slice\(-30\)\}/.test(src), 'al Mac vanno tutte le 30 voci (le tiene la scatola nera, api/extra/diari)');
   vero(/ctx\.addEventListener\('statechange', \(\) => diario\('mixer'/.test(src), 'una voce a ogni cambio di stato del mixer');
   vero(/document\.addEventListener\('visibilitychange', diarioPagina\)/.test(src) && /auOn\('pause', diarioPausa\)/.test(src) && /setTimeout\(diarioAvvio, 0\)/.test(src), 'voci pagina, pausa e avvio');
   // avvio
