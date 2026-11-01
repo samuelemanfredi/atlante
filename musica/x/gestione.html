@@ -432,6 +432,12 @@ function testiConferma(j, corpo) {
       n(c, 'parole_nessuna') + ' senza tempi · ' + n(c, 'trascritti') + ' trascritti dalla voce · ' + n(c, 'senza_testo') + ' senza testo' +
       (n(c, 'da_allineare') ? ' · ' + n(c, 'da_allineare') + ' da allineare' : '') + (n(c, 'non_allineati') ? ' · ' + n(c, 'non_allineati') + ' non allineabili' : '') + '</p>';
     h += '<p class="small">Whisper: <b>' + esc(w.stato || '') + '</b>' + (w.modello ? ' · modello ' + esc(w.modello) + (w.modello_scaricato ? '' : ' (non ancora scaricato)') : '') + '</p>';
+    // la voce separata dagli strumenti (Demucs) per i brani dove Whisper sente poche parole: se c'è, e se serve
+    const sp = j.separazione || {};
+    if (sp.stato && sp.stato !== 'spenta') h += '<p class="small">Voce separata dalla musica: <b>' + esc(sp.stato) + '</b>' +
+      (sp.provati ? ' · provata su ' + sp.provati + ' brani, meglio su ' + (sp.migliorati || 0) +
+        (sp.guadagno != null ? ' (+' + sp.guadagno + ' punti di parole riconosciute)' : '') +
+        (sp.secondi != null ? ' · ' + sp.secondi + ' s in più a brano' : '') : sp.stato === 'pronta' ? ' · si prova sui brani nuovi o che ascolti, quando Whisper sente meno del ' + (sp.soglia || 60) + '% delle parole' : '') + '</p>';
     // da dove vengono i testi: il file del brano, LRCLIB, NetEase (a tempo), lyrics.ovh (senza tempi), Whisper (trascritti)
     const fonti = [['file', 'dal file'], ['lrclib', 'LRCLIB'], ['netease', 'NetEase'], ['lyricsovh', 'lyrics.ovh'], ['voce', 'dalla voce']]
       .filter(([k]) => n(c, 'fonte_' + k)).map(([k, t]) => t + ' ' + n(c, 'fonte_' + k));
