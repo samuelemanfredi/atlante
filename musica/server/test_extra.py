@@ -3817,6 +3817,20 @@ class TestAscoltatiServer(unittest.TestCase):
     def sett(self, j, n, quale="settimana"):
         return [x["ascolti"] for x in j[quale] if x["brano"] == self.b[n]]
 
+    def test_9_miei_ascolti_di_tutti_i_dispositivi(self):
+        """GET ascoltati/miei: i propri ascolti brano per brano, da tutti i dispositivi (Replay e «I più ascoltati»
+        uguali dappertutto); quelli degli altri no."""
+        pid, v = self.invitato("Dora")
+        _, altro = self.invitato("Elio")
+        self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(2, volte=2))[0], 200)   # dal telefono
+        self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati", self.voci(3, fa=1))[0], 200)      # dall'iPad, ieri
+        self.assertEqual(self.da(altro, "POST", "/api/extra/ascoltati", self.voci(4))[0], 200)
+        st, j = self.da(v, "GET", "/api/extra/ascoltati/miei")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["brani"], {self.b[2]: [2, self.m._asc_giorno(0)], self.b[3]: [1, self.m._asc_giorno(1)]})
+        self.assertEqual(self.da(v, "POST", "/api/extra/ascoltati/miei", {})[0], 403)   # solo leggerli
+        self.samuele("POST", "/api/extra/ascoltati/miei", {}, codice=405)
+
     def test_1_invitati_e_samuele(self):
         tre = [self.invitato(n) for n in ("Anna", "Bruno", "Carla")]
         for _, v in tre:

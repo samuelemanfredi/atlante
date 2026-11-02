@@ -62,7 +62,7 @@ function ambiente() {
   const T = new Map(brani.map(t => [t.id, t]));
   const ritmi = {s1:[120, .8, .7, 1, -8], s2:[121, .8, .7, 1, -20], s4:[60, .5, .2, 1, null]};
   return {
-    T, P:[{id:'p', ids:['a1', 'c2']}], RITMI:{ritmi}, VOLN:{on:true, rif:-14}, MIX:{norm:new Map()},
+    T, P:[{id:'p', ids:['a1', 'c2']}], RITMI:{ritmi}, VOLN:{on:true, rif:-14}, MIX:{norm:new Map()}, MIEI:null,
     low: s => String(s || '').toLowerCase().trim(), primary: t => t.albumArtist || t.artist || '?', canPlay: () => true,
     shuffleArr: a => a.slice(), gemelli: () => new Map(), albArt: t => t.albumArtist || t.artist || '',
     coll: {compare: (a, b) => String(a).localeCompare(String(b))},
@@ -74,7 +74,7 @@ function ambiente() {
 function prove(src, fatte) {
   const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
   const env = ambiente();
-  const F = carica(src, ['genereDi', 'similiA', 'volNorm', 'generi', 'replayDati'], env);
+  const F = carica(src, ['genereDi', 'similiA', 'volNorm', 'generi', 'ascoltiDi', 'replayDati'], env);
 
   /* ---------- brani simili: stesso artista e genere prima, mai «suggerisci meno» né quelli già in coda ---------- */
   let s = F.similiA(['a1'], 4, new Set(['a1']));
@@ -99,6 +99,12 @@ function prove(src, fatte) {
   const R = F.replayDati();
   eq([R.ascolti, R.minuti, R.nArtisti, R.brani.map(t => t.id)], [5, 16, 2, ['d1', 'a1']], 'Replay');
   fatte.push('replay');
+  // con gli ascolti di tutti i dispositivi (dal Mac): contano quelli, mai meno di quelli di qui
+  env.MIEI = {brani:{s2:[4, '2026-11-01'], s1:[1, '2026-10-30']}};
+  const R2 = F.replayDati();
+  eq([R2.ascolti, R2.brani.map(t => t.id), R2.tutti], [9, ['a2', 'd1', 'a1'], true], 'Replay di tutti i dispositivi');
+  env.MIEI = null;
+  fatte.push('replay di tutti i dispositivi');
 
   /* ---------- volume uniforme: i brani forti si abbassano, i deboli restano, senza misura niente ---------- */
   eq([F.volNorm('a1').toFixed(2), F.volNorm('a2'), F.volNorm('b1'), F.volNorm('c2')], ['0.50', 1, 1, 1], 'volume uniforme');

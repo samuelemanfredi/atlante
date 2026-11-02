@@ -9607,6 +9607,7 @@ def _gestione_classifiche(h, metodo, resto, corpo):
 #   POST   ascoltati/condividi {si}       -> {condivido}
 #   DELETE ascoltati                      cancella dal Mac mini i propri ascolti -> {ok, cancellati}
 #   GET    ascoltati/anche/<brano>        -> {brani:[...]}
+#   GET    ascoltati/miei                 -> {brani:{brano:[volte, ultimo giorno]}} i propri, da tutti i dispositivi
 
 ASCOLTATI = None                  # Ascoltati, preparato da main() con avvia_ascoltati
 ASCOLTATI_GIORNI = 730            # al più 2 anni di ascolti
@@ -9874,6 +9875,22 @@ class Ascoltati:
                 self._salva_presto()
             return contati, len(voci) - contati
 
+    def miei(self, pid):
+        """I propri ascolti brano per brano, da tutti i dispositivi dell'account (gli ultimi ASCOLTATI_GIORNI giorni):
+        {brano: [volte, ultimo giorno «AAAA-MM-GG»]}."""
+        out = {}
+        with self.blocco:
+            for g, br in (self.conti.get(pid) or {}).items():
+                for b, n in br.items():
+                    x = out.get(b)
+                    if x is None:
+                        out[b] = [n, g]
+                    else:
+                        x[0] += n
+                        if g > x[1]:
+                            x[1] = g
+        return out
+
     def condividi(self, pid, si):
         with self.blocco:
             if si:
@@ -10085,11 +10102,13 @@ def _ascoltati(h, metodo, resto, corpo):
     if resto == ["condividi"] and metodo == "POST":
         cambia()
         return _json(h, {"condivido": ASCOLTATI.condividi(pid, corpo.get("si") is True)})
+    if resto == ["miei"] and metodo == "GET":   # i propri ascolti di tutti i dispositivi: Replay e «I più ascoltati»
+        return _json(h, {"brani": ASCOLTATI.miei(pid)})
     if len(resto) == 2 and resto[0] == "anche" and metodo == "GET":
         if not ASCOLTATI_ID.match(resto[1]):
             raise ErroreExtra(400, "Brano non valido")
         return _json(h, {"brani": ASCOLTATI.anche(resto[1])})
-    if not resto or resto == ["condividi"] or (len(resto) == 2 and resto[0] == "anche"):
+    if not resto or resto in (["condividi"], ["miei"]) or (len(resto) == 2 and resto[0] == "anche"):
         raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
     raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/ascoltati/%s" % "/".join(resto))
 
@@ -15438,7 +15457,8 @@ def _stessa_origine(h):
 # che ha visto.
 # La stessa playlist creata su due dispositivi (stesso nome, es. le playlist di Apple Music importate sull'iPhone e sul
 # Mac) diventa una sola, con i brani di entrambe: niente doppioni; l'app ne riceve il nuovo id in «alias».
-# «_preferiti» porta i Preferiti dell'account; «_fissati» i Fissati in cima alla Libreria (brani, album, artisti e playlist:
+# «_preferiti» porta i Preferiti dell'account, «_meno» i brani segnati «Suggerisci meno» (la riproduzione automatica e le
+# stazioni non li propongono, su nessun dispositivo); «_fissati» i Fissati in cima alla Libreria (brani, album, artisti e playlist:
 # «fissati» = [{t, k}]). Una playlist può stare in una cartella («cartella», solo il nome: le cartelle sono quelle usate).
 
 LISTE = None                      # Liste, preparato da main()
@@ -15489,7 +15509,7 @@ def _lista_valida(x, ora_ms):
     if not isinstance(ids, list) or len(ids) > LISTA_BRANI_MAX or not all(isinstance(i, str) and ID_BRANO_LISTA.match(i) for i in ids):
         return None
     nome = x.get("name", "")
-    if x["id"] != "_preferiti" and (not isinstance(nome, str) or not nome.strip()):
+    if x["id"] not in ("_preferiti", "_meno") and (not isinstance(nome, str) or not nome.strip()):
         return None
     l.update(ids=list(ids), name=str(nome).strip()[:LISTA_NOME_MAX], created=creata)
     c = x.get("cartella")
@@ -17444,7 +17464,7 @@ PERMESSE_INVITATI = re.compile(
     # Cerca e scarica (i brani vanno in «Da controllare») e Carica nella libreria: ognuno i suoi
     r"|musica(?:/cerca|/ascolta/[^/]+|/[^/]+/annulla)?|caricamenti(?:/[^/]+(?:/file)?)?"
     r"|interfaccia(?:/base|/personale)?)"   # la base pubblicata e il proprio strato personale (non bozza né versioni)
-    r"|extra/ascoltati(?:/condividi|/anche/[^/]+)?"
+    r"|extra/ascoltati(?:/condividi|/miei|/anche/[^/]+)?"
     r"|extra/tematiche(?:/[^/]+){0,2})$")   # playlist di Atlante: anche gli invitati le ascoltano, creano e condividono
 # la guida «Rete e VPN» la vedono anche gli invitati: spiega che a loro Tailscale non serve
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/rete\.html$")
@@ -17509,7 +17529,7 @@ GET interfaccia interfaccia/base
 POST interfaccia/personale
 GET POST DELETE ascoltati
 POST ascoltati/condividi
-GET ascoltati/anche/*
+GET ascoltati/anche/* ascoltati/miei
 GET tematiche tematiche/*
 POST tematiche/ia tematiche/condivise
 DELETE tematiche/condivise/*
