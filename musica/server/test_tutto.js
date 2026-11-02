@@ -114,4 +114,14 @@ function prove(src, fatte) {
   F.scaricaTutto();
   eq(env.coda.length, 1, "sull'iPhone sì");
   fatte.push('coda');
+
+  /* ---------- «è in coda?» delle righe delle liste: l'insieme si rifà a ogni cambio della coda (2/11) ---------- */
+  const E = {DLQ:['a', 'b', 'c'], DLQS:null, DLQK:''};
+  const G = carica(src, ['dlqHa'], E);
+  eq([G.dlqHa('a'), G.dlqHa('z')], [true, false], 'in coda');
+  E.DLQ.push('z'); eq(G.dlqHa('z'), true, 'aggiunto in fondo');
+  E.DLQ.splice(1, 1); eq(G.dlqHa('b'), false, 'tolto in mezzo');
+  E.DLQ.push(E.DLQ.splice(0, 1)[0]); E.DLQ.splice(0, 1); E.DLQ.unshift('q'); eq([G.dlqHa('q'), G.dlqHa('c')], [true, false], 'spostati e cambiati');
+  E.DLQ.length = 0; eq(G.dlqHa('a'), false, 'coda vuota');
+  fatte.push('in coda');
 }
