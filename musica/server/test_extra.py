@@ -8466,6 +8466,171 @@ class TestTestiServer(unittest.TestCase):
         self.s.json("GET", "/api/extra/testi/a/b", codice=404)
 
 
+LRCLIB_NEI_FILE = {
+    "Nuovo Uno": {"id": 21, "trackName": "Nuovo Uno", "artistName": "Anna", "duration": 120.0, "instrumental": False,
+                  "plainLyrics": None,
+                  "syncedLyrics": "[00:01.00]Prima riga\n[00:03.00]Seconda riga\n[00:05.00]\n[00:07.00]Terza è così\n"
+                                  "[00:09.00]Quarta riga\n[00:11.00]Quinta"},
+    "Nuovo Due": {"id": 22, "trackName": "Nuovo Due", "artistName": "Anna", "duration": 130.0, "instrumental": False,
+                  "plainLyrics": "Uno\nDue\n\n\nTre\nQuattro\nCinque", "syncedLyrics": None},
+    "Corto": {"id": 23, "trackName": "Corto", "artistName": "Anna", "duration": 110.0, "instrumental": False,
+              "plainLyrics": "Solo\nDue righe", "syncedLyrics": None},
+    "Gia": {"id": 24, "trackName": "Gia", "artistName": "Anna", "duration": 140.0, "instrumental": False,
+            "plainLyrics": "Altro\ntesto\nda\nLRCLIB\ncinque", "syncedLyrics": None},
+}
+
+
+class FintoLrclibNeiFile(FintoLrclib):
+    """LRCLIB finto per il testo scritto nei file: i brani di LRCLIB_NEI_FILE; «Rotto» risponde 500; gli altri non ci sono."""
+
+    def do_GET(self):
+        u = urlsplit(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        titolo = q.get("track_name", "")
+        if u.path == "/api/get":
+            if titolo == "Rotto":
+                return self.manda(500, {"code": 500, "name": "InternalError"})
+            v = LRCLIB_NEI_FILE.get(titolo)
+            if v and abs(float(q.get("duration") or 0) - v["duration"]) <= 2:
+                return self.manda(200, v)
+            return self.manda(404, {"code": 404, "name": "TrackNotFound", "message": "Failed to find specified track"})
+        self.manda(200 if u.path == "/api/search" else 404, [] if u.path == "/api/search" else {})
+
+
+class TestTestiNeiFile(unittest.TestCase):
+    """api/extra/gestione/testi/nei-file: il testo della musica nuova scritto dentro gli MP3 (USLT). Prima una prova che non
+    tocca niente, poi la scrittura: stessi tag, stesso audio, stessa data; chi ha già il testo, o un testo troppo corto, o
+    nessun testo, resta com'è; LRCLIB che non risponde ferma il lavoro."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_nei_file")
+        cls.base = tempfile.mkdtemp(prefix="atlante-testi-nf-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.p, ora = {}, time.time()
+        for titolo, ms, frame, v, giorni in (
+                ("Nuovo Uno", 120000, b"", 3, 0), ("Nuovo Due", 130000, b"", 4, 1), ("Corto", 110000, b"", 3, 2),
+                ("Senza testo", 100000, b"", 3, 3), ("Gia", 140000, _id3_frame("USLT", uslt("Già nel file")), 3, 4),
+                ("Rotto", 90000, b"", 3, 20), ("Vecchio", 150000, b"", 3, 60)):
+            p = cls.p[titolo] = os.path.join(cls.c["musica"], "Anna - %s.mp3" % titolo)
+            mp3_con_testo(p, titolo, "Anna", "", ms, frame, v=v)
+            os.utime(p, (ora - giorni * 86400, ora - giorni * 86400))
+        FintoLrclibNeiFile.chieste = []
+        cls.web = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FintoLrclibNeiFile)
+        threading.Thread(target=cls.web.serve_forever, daemon=True).start()
+        with unittest.mock.patch.dict(os.environ, {"ATLANTE_LRCLIB": "http://127.0.0.1:%d" % cls.web.server_address[1],
+                                                   "no_proxy": "127.0.0.1,localhost"}):
+            cls.s = Server(cls.base, cls.c).avvia()
+        brani = aspetta(lambda: (lambda b: b if len(b) >= 7 else None)(cls.s.json("GET", "/api/musica/catalogo")["brani"]),
+                        30, 0.2)
+        cls.id = {x["title"]: x["id"] for x in brani or []}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        cls.web.shutdown()
+        cls.web.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    URL = "/api/extra/gestione/testi/nei-file"
+
+    def lavoro(self, corpo):
+        self.s.json("POST", self.URL, corpo)
+        j = aspetta(lambda: (lambda x: x if x["stato"] != "in corso" else None)(self.s.json("GET", self.URL)), 30, 0.1)
+        self.assertTrue(j, "lavoro non finito: %s" % self.s.json("GET", self.URL))
+        return j
+
+    @staticmethod
+    def impronta(p):
+        with open(p, "rb") as f:
+            return _hashlib.sha1(f.read()).hexdigest()
+
+    def audio(self, p):
+        with open(p, "rb") as f:
+            n = 10 + self.m._ss32(f.read(10), 6)
+            f.seek(n)
+            return _hashlib.sha1(f.read()).hexdigest()
+
+    @staticmethod
+    def per_titolo(j):
+        return {x["titolo"]: x for x in j["brani"]}
+
+    def test_1_prova_scrivi_ripeti(self):
+        m, p = self.m, self.p
+        self.assertEqual(self.s.json("GET", self.URL), {"stato": "nessuno"})
+        prima = {t: self.impronta(f) for t, f in p.items()}
+        catalogo = {x["id"]: x["added"] for x in self.s.json("GET", "/api/musica/catalogo")["brani"]}
+        # 1. la prova: si vede cosa si scriverebbe e non si tocca niente (Rotto e Vecchio sono più vecchi di 14 giorni)
+        j = self.lavoro({})
+        self.assertEqual((j["stato"], j["prova"], j["totale"], j["fatti"], j["avviso"]), ("finito", True, 5, 5, ""))
+        self.assertEqual(j["conti"], {"da_scrivere": 2, "saltato": 1, "senza_testo": 1, "gia": 1})
+        e = self.per_titolo(j)
+        self.assertEqual((e["Nuovo Uno"]["esito"], e["Nuovo Uno"]["fonte"], e["Nuovo Uno"]["righe"]), ("da_scrivere", "lrclib", 5))
+        self.assertEqual((e["Nuovo Due"]["esito"], e["Nuovo Due"]["righe"]), ("da_scrivere", 5))
+        self.assertIn("troppo corto", e["Corto"]["motivo"])
+        self.assertEqual(e["Senza testo"]["esito"], "senza_testo")
+        self.assertEqual((e["Gia"]["esito"], e["Gia"]["motivo"]), ("gia", "ha già il testo nel file"))
+        self.assertEqual({t: self.impronta(f) for t, f in p.items()}, prima)   # niente è cambiato
+        # 2. si scrive davvero
+        st0 = {t: os.stat(p[t]) for t in ("Nuovo Uno", "Nuovo Due")}
+        audio0 = {t: self.audio(p[t]) for t in ("Nuovo Uno", "Nuovo Due")}
+        tag0 = {t: m.leggi_tag(p[t]) for t in ("Nuovo Uno", "Nuovo Due")}
+        j = self.lavoro({"prova": False})
+        self.assertEqual((j["stato"], j["prova"], j["fatti"]), ("finito", False, 5))
+        self.assertEqual(j["conti"], {"scritto": 2, "saltato": 1, "senza_testo": 1, "gia": 1})
+        for t, atteso, v in (("Nuovo Uno", ["Prima riga", "Seconda riga", "", "Terza è così", "Quarta riga", "Quinta"], 3),
+                             ("Nuovo Due", ["Uno", "Due", "", "Tre", "Quattro", "Cinque"], 4)):
+            r = m.testi_dal_file(p[t])
+            self.assertEqual((r["fonte"], r["sincronizzato"], [x["testo"] for x in r["righe"]]), ("file", False, atteso), t)
+            self.assertEqual(self.audio(p[t]), audio0[t], t)
+            self.assertEqual(os.stat(p[t]).st_mtime_ns, st0[t].st_mtime_ns, t)   # «aggiunti di recente» non si sposta
+            with open(p[t], "rb") as f:
+                self.assertEqual(f.read(4)[3], v)
+            t1 = m.leggi_tag(p[t])
+            self.assertTrue(all(t1.get(k) == tag0[t].get(k) for k in ("title", "artist", "album", "duration")), t)
+            self.assertFalse(os.path.exists(p[t] + ".testo-tmp"))
+        for t in ("Corto", "Senza testo", "Gia", "Rotto", "Vecchio"):
+            self.assertEqual(self.impronta(p[t]), prima[t], t)
+        # la libreria rilegge i file cambiati: gli stessi id, la stessa data «aggiunto»
+        dopo = aspetta(lambda: (lambda c: c if {x["id"] for x in c} == set(catalogo) else None)(
+            self.s.json("GET", "/api/musica/catalogo")["brani"]), 20, 0.2)
+        self.assertEqual({x["id"]: x["added"] for x in dopo}, catalogo)
+        # il karaoke a tempo di LRCLIB non cambia: il testo semplice nel file non lo sostituisce
+        r = self.s.json("GET", "/api/extra/testi/" + self.id["Nuovo Uno"])
+        self.assertEqual((r["fonte"], r["sincronizzato"]), ("lrclib", True))
+        # 3. rifatto: quello scritto adesso «ha già il testo»
+        j = self.lavoro({"prova": False})
+        self.assertEqual(j["conti"], {"gia": 3, "saltato": 1, "senza_testo": 1})
+        self.assertEqual({t: self.impronta(p[t]) for t in ("Corto", "Senza testo", "Gia")},
+                         {t: prima[t] for t in ("Corto", "Senza testo", "Gia")})
+        # 4. quali brani: gli ultimi N, oppure gli id
+        j = self.lavoro({"ultimi": 2})
+        self.assertEqual((j["totale"], sorted(x["titolo"] for x in j["brani"])), (2, ["Nuovo Due", "Nuovo Uno"]))
+        j = self.lavoro({"ids": [self.id["Vecchio"]]})
+        self.assertEqual((j["totale"], j["brani"][0]["esito"]), (1, "senza_testo"))
+        j = self.lavoro({"giorni": 90})
+        self.assertEqual(j["totale"], 7)
+        # il rapporto resta anche dopo un riavvio del lavoro (file nella cache)
+        self.assertTrue(os.path.exists(os.path.join(self.c["cache"], "testi", "nei-file.json")))
+
+    def test_2_lrclib_giu_ferma_il_lavoro(self):
+        # Rotto (20 giorni) è più nuovo di Vecchio (60): LRCLIB non risponde, e col suo errore ci si ferma subito
+        prima = self.impronta(self.p["Rotto"])
+        j = self.lavoro({"ids": [self.id["Vecchio"], self.id["Rotto"]]})
+        self.assertEqual((j["stato"], j["totale"], j["fatti"]), ("interrotto", 2, 1))
+        self.assertIn("LRCLIB", j["avviso"])
+        self.assertEqual((j["brani"][0]["titolo"], j["brani"][0]["esito"]), ("Rotto", "errore"))
+        self.assertEqual(self.impronta(self.p["Rotto"]), prima)
+        self.assertEqual(self.m.leggi_tag(self.p["Rotto"]).get("title"), "Rotto")
+
+    def test_3_richieste_sbagliate(self):
+        for corpo in ({"prova": "sì"}, {"giorni": 0}, {"giorni": "7"}, {"giorni": 5000}, {"ultimi": True},
+                      {"ultimi": 0}, {"ids": "abc"}, {"ids": [1, 2]}):
+            self.s.json("POST", self.URL, corpo, codice=400)
+        self.s.json("DELETE", self.URL, codice=404)   # come le altre richieste di Gestione → Testi che non esistono
+        self.assertFalse(self.m.PERMESSE_INVITATI.match(self.URL))   # solo Samuele
+
+
 class TestTestiApp(unittest.TestCase):
     """Il testo nel lettore dell'app (riga e parola del momento, tocco su una riga: col mix e col telecomando) gira in
     JavaScriptCore, come test_mix.js: test_testi.js. Senza osascript (non è un Mac) si salta."""

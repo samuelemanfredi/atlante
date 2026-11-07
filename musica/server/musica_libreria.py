@@ -5249,6 +5249,152 @@ def testi_dal_file(percorso):
     return _testi_risposta(semplici, "file", False) if semplici else None
 
 
+# ----- il testo scritto dentro il file (MP3): USLT nei tag ID3 -----
+#
+# Solo MP3 e solo il testo senza tempi (USLT: lo leggono Musica, Finder, l'iPhone e quasi tutti i lettori). Ai tag che il
+# file ha già si aggiunge UN frame: titolo, copertina, frame sconosciuti e audio restano com'erano, byte per byte. Si scrive
+# in un file accanto, si rilegge (tag uguali a prima più il testo, stesso audio) e solo allora prende il posto del
+# vecchio con un solo passaggio (os.replace), con la stessa data di modifica: «aggiunti di recente» non si sposta. Un file
+# che ha già un testo (USLT o SYLT), con tag che non si capiscono del tutto o che cambia mentre si scrive, non si tocca.
+
+TESTI_FILE_MAX = 64 * 1024   # un testo più lungo di così non si scrive nel tag
+_LINGUE3 = {"it": "ita", "en": "eng", "es": "spa", "fr": "fra", "de": "deu", "pt": "por", "nl": "nld", "ru": "rus",
+            "uk": "ukr", "ja": "jpn", "ko": "kor", "zh": "zho", "ar": "ara", "el": "ell", "he": "heb", "hi": "hin",
+            "th": "tha", "pl": "pol", "sv": "swe", "tr": "tur"}
+
+
+class _NonSiScrive(Exception):
+    """Il file non si tocca: motivo (per la Gestione) e se è perché ha già il testo."""
+
+    def __init__(self, motivo, gia=False):
+        super().__init__(motivo)
+        self.motivo, self.gia = motivo, gia
+
+
+def testo_da_righe(righe):
+    """Le righe di una risposta di testi_brano come testo semplice: una riga per riga, una riga vuota dove il brano fa una
+    pausa (non due di fila), niente righe vuote all'inizio e in fondo."""
+    out = []
+    for r in righe or []:
+        x = _spazi(str(r.get("testo") or "")).strip()
+        if x or (out and out[-1]):
+            out.append(x)
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out)
+
+
+def _ss32_scrivi(n):
+    return bytes([(n >> 21) & 127, (n >> 14) & 127, (n >> 7) & 127, n & 127])
+
+
+def _frame_uslt(testo, v, lingua=""):
+    """Il frame USLT (ID3v2.4: UTF-8; ID3v2.3: UTF-16 con BOM, l'unico Unicode che conosce)."""
+    lang = _LINGUE3.get(lingua or "", "XXX").encode("ascii")
+    if v == 4:
+        dati = b"\x03" + lang + b"\x00" + testo.encode("utf-8")
+        dim = _ss32_scrivi(len(dati))
+    else:
+        dati = b"\x01" + lang + b"\xff\xfe\x00\x00" + b"\xff\xfe" + testo.encode("utf-16-le")
+        dim = struct.pack(">I", len(dati))
+    return b"USLT" + dim + b"\x00\x00" + dati
+
+
+def _senza_audio(t):
+    return {k: v for k, v in (t or {"pic": None}).items() if k != "_audio"}
+
+
+def testo_nel_file_mp3(percorso, testo, lingua=""):
+    """Scrive `testo` come USLT nei tag ID3 dell'MP3 `percorso` (vedi sopra). Alza _NonSiScrive se il file non si tocca;
+    OSError se il disco non lascia scrivere."""
+    if not percorso.lower().endswith(".mp3") or os.path.islink(percorso):
+        raise _NonSiScrive("non è un file MP3 normale")
+    testo = str(testo).replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()
+    testo = testo.encode("utf-8", "replace").decode("utf-8")   # un «surrogato» solo non va in nessun tag
+    if not testo:
+        raise _NonSiScrive("testo vuoto")
+    if len(testo.encode("utf-8")) > TESTI_FILE_MAX:
+        raise _NonSiScrive("testo troppo lungo per un tag")
+    st = os.stat(percorso)
+    if not stat.S_ISREG(st.st_mode):
+        raise _NonSiScrive("non è un file MP3 normale")
+    firma, tmp = (st.st_size, st.st_mtime_ns), percorso + ".testo-tmp"
+    try:
+        with open(percorso, "rb") as f:
+            h = f.read(10)
+            if h[:3] == b"ID3":
+                v, fl = h[3], h[5]
+                if len(h) < 10 or v not in (3, 4) or any(x & 0x80 for x in h[6:10]):
+                    raise _NonSiScrive("tag ID3 di una versione che non scrivo: lo lascio com'è")
+                if fl & 0x80 or fl & 0x40 or (v == 4 and fl & 0x10):
+                    raise _NonSiScrive("tag ID3 con unsynchronisation, intestazione estesa o piè di pagina: lo lascio com'è")
+                size = _ss32(h, 6)
+                if 10 + size > st.st_size:
+                    raise _NonSiScrive("tag ID3 più lungo del file")
+                d = f.read(size)
+                p = 0
+                while p + 10 <= len(d):
+                    fid = d[p:p + 4]
+                    sz = _ss32(d, p + 4) if v == 4 else struct.unpack(">I", d[p + 4:p + 8])[0]
+                    if not re.fullmatch(rb"[A-Z0-9]{4}", fid) or sz <= 0 or p + 10 + sz > len(d):
+                        break
+                    if fid in (b"USLT", b"SYLT"):
+                        raise _NonSiScrive("ha già un testo nel file", gia=True)
+                    p += 10 + sz
+                if d[p:].strip(b"\x00"):
+                    raise _NonSiScrive("tag ID3 che non si legge fino in fondo: lo lascio com'è")
+                frames, riempimento, audio_da = d[:p], len(d) - p, 10 + size
+            else:
+                v, fl, frames, riempimento, audio_da = 3, 0, b"", 0, 0
+            f.seek(audio_da)
+            testa = f.read(65540)
+            k = len(testa) - len(testa.lstrip(b"\x00"))
+            if len(testa) < k + 2 or testa[k] != 0xFF or testa[k + 1] & 0xE0 != 0xE0:
+                raise _NonSiScrive("dopo i tag non comincia l'audio di un MP3")
+            nuovo = _frame_uslt(testo, v, lingua)
+            if h[:3] == b"ID3":
+                dati = frames + nuovo + bytes(riempimento - len(nuovo) if riempimento >= len(nuovo) else 1024)
+            else:
+                dati = nuovo
+            intest = b"ID3" + bytes([v, 0, fl]) + _ss32_scrivi(len(dati))
+            f.seek(0)
+            prima = _senza_audio(tag_id3(f))
+            sha = hashlib.sha1()
+            f.seek(audio_da)
+            with open(tmp, "wb") as g:
+                g.write(intest)
+                g.write(dati)
+                while True:
+                    blocco = f.read(1 << 20)
+                    if not blocco:
+                        break
+                    g.write(blocco)
+                    sha.update(blocco)
+                g.flush()
+                os.fsync(g.fileno())
+        # si rilegge il file nuovo: gli stessi tag più il testo, lo stesso audio, la stessa lunghezza
+        audio_nuovo = 10 + len(dati)
+        with open(tmp, "rb") as g:
+            sylt, usl = _testi_id3(g)
+            g.seek(0)
+            dopo = _senza_audio(tag_id3(g))
+            g.seek(audio_nuovo)
+            sha2 = hashlib.sha1()
+            for blocco in iter(lambda: g.read(1 << 20), b""):
+                sha2.update(blocco)
+        if usl != [testo] or sylt or dopo != prima or sha2.digest() != sha.digest() or \
+                os.path.getsize(tmp) != audio_nuovo + st.st_size - audio_da:
+            raise _NonSiScrive("il file riscritto non ha superato il controllo: lascio l'originale")
+        st2 = os.stat(percorso)
+        if (st2.st_size, st2.st_mtime_ns) != firma:
+            raise _NonSiScrive("il file è cambiato mentre lo scrivevo: lo lascio com'è")
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(tmp, percorso)
+    finally:
+        _cancella(tmp)
+
+
 # ----- LRCLIB -----
 
 class _SenzaRimandi(urllib.request.HTTPRedirectHandler):
@@ -7244,6 +7390,7 @@ class Testi:
         self.ora_c = self.ora_a = self.ora_t = ""
         self.id_a = ""
         self.pausa_rete = 0.0
+        self.nf = self._nei_file_leggi()               # il testo scritto dentro i file (MP3): l'ultimo lavoro
         self.pausa_voce, self.motivo_voce = 0.0, ""    # un errore di tutto il Mac: Whisper aspetta per tutti
         self.di_fila = 0                               # brani di fila che Whisper non è riuscito a fare
         self.partiti = set()
@@ -7634,6 +7781,116 @@ class Testi:
             self._scheda(i, v=TESTI_V, f=b.get("_f"), t=t, a=a, s="errore", q=int(time.time()), n=n)
             return
         self._segna(i, b, t, a, r)
+
+    # il testo scritto dentro i file della musica (MP3): prima una prova, poi si scrive (Gestione → Testi e karaoke)
+
+    NEI_FILE_GIORNI = 14        # «musica nuova»: aggiunta negli ultimi 14 giorni, se non si dice altro
+    NEI_FILE_MAX = 5000         # brani al più per volta
+    NEI_FILE_RIGHE_MIN = 4      # un testo con meno righe non è un testo di cui fidarsi per scriverlo nel file
+
+    def _nei_file_leggi(self):
+        d = _leggi_json(os.path.join(self.dir, "nei-file.json"), {})
+        if not isinstance(d, dict) or d.get("stato") not in ("finito", "interrotto", "in corso", "errore"):
+            return {"stato": "nessuno"}
+        if d["stato"] == "in corso":   # il server si è fermato a metà: i brani già fatti restano fatti
+            d["stato"], d["avviso"] = "interrotto", "Il server si è fermato a metà"
+        return d
+
+    def nei_file_stato(self):
+        with self.blocco:
+            return json.loads(json.dumps(self.nf))
+
+    def nei_file_avvia(self, giorni=None, ultimi=None, ids=None, prova=True):
+        """POST gestione/testi/nei-file: sceglie i brani (ids; o gli ultimi N; o aggiunti negli ultimi `giorni`, 14 se non
+        si dice altro) e in un thread cerca il testo di quelli che non ce l'hanno nel file. Con prova niente si scrive: si
+        vede solo cosa si scriverebbe. Lo stato si legge con nei_file_stato."""
+        voci = self._voci()
+        if ids is not None:
+            voluti = set(ids)
+            scelti = [(i, b) for i, b in voci if i in voluti]
+        elif ultimi is not None:
+            scelti = sorted(voci, key=lambda x: -(x[1].get("added") or 0))[:ultimi]
+        else:
+            da = (time.time() - (giorni or self.NEI_FILE_GIORNI) * 86400) * 1000
+            scelti = [(i, b) for i, b in voci if (b.get("added") or 0) >= da]
+        scelti = sorted(scelti, key=lambda x: -(x[1].get("added") or 0))[:self.NEI_FILE_MAX]
+        with self.blocco:
+            if self.nf.get("stato") == "in corso":
+                raise ErroreExtra(409, "C'è già un lavoro dei testi nei file in corso: aspetta che finisca")
+            self.nf = {"stato": "in corso", "prova": bool(prova), "quando": int(time.time()), "totale": len(scelti),
+                       "fatti": 0, "conti": {}, "brani": [], "avviso": ""}
+        threading.Thread(target=self._nei_file_lavora, args=(scelti, bool(prova)), daemon=True).start()
+        return self.nei_file_stato()
+
+    def _nei_file_lavora(self, scelti, prova):
+        corr, scritti = (CORR.tutte() if CORR else {}), 0
+        try:
+            for i, b in scelti:
+                o = self._nei_file_uno(i, b, corr, prova)
+                stop = o.pop("stop", False)
+                scritti += o["esito"] == "scritto"
+                with self.blocco:
+                    self.nf["fatti"] += 1
+                    self.nf["conti"][o["esito"]] = self.nf["conti"].get(o["esito"], 0) + 1
+                    self.nf["brani"].append(o)
+                    if stop:
+                        self.nf["avviso"] = o.get("motivo") or ""
+                if stop:
+                    break
+            with self.blocco:
+                self.nf["stato"] = "interrotto" if self.nf["avviso"] else "finito"
+        except Exception:   # noqa: BLE001 — un baco non deve lasciare il lavoro «in corso» per sempre
+            print("Testi nei file: lavoro non riuscito:\n%s" % traceback.format_exc(), flush=True)
+            with self.blocco:
+                self.nf["stato"], self.nf["avviso"] = "errore", "Errore inatteso: si vede nel registro del server"
+        with self.blocco:
+            self.nf["finito"] = int(time.time())
+            dati = json.loads(json.dumps(self.nf))
+        try:
+            _scrivi_json(os.path.join(self.dir, "nei-file.json"), dati)
+        except OSError as e:
+            print("Testi nei file: rapporto non salvato:", e, flush=True)
+        if scritti and LIB is not None:
+            LIB.rileggi_presto(subito=True)   # i file sono cambiati: la libreria li rilegge (gli id restano gli stessi)
+
+    def _nei_file_uno(self, i, b, corr, prova):
+        """Un brano: {id, titolo, artista, esito, motivo?, fonte?, righe?}; esito: da_scrivere (prova) | scritto | gia (ha
+        già il testo nel file) | senza_testo | saltato | errore. Con «stop» un errore di tutto il sito dei testi."""
+        t, a, al, dur = self._nomi(i, b, corr)
+        p = LIB.percorsi.get(i) if LIB else None
+        o = {"id": i, "titolo": t, "artista": a}
+        if not p or not p.lower().endswith(".mp3"):
+            return dict(o, esito="saltato", motivo="non è un MP3 (per ora si scrivono solo gli MP3)")
+        try:
+            with open(p, "rb") as f:
+                sylt, usl = _testi_id3(f)
+        except (OSError, ValueError, struct.error, IndexError):
+            return dict(o, esito="errore", motivo="il file non si legge (disco scollegato?)")
+        if sylt or usl:
+            return dict(o, esito="gia", motivo="ha già il testo nel file")
+        try:
+            r = testi_brano(t, a, al, dur, p, sfondo=True)
+        except TestiInArrivo:
+            return dict(o, esito="errore", motivo="il sito dei testi non ha ancora risposto")
+        except ErroreExtra as e:   # LRCLIB non risponde: inutile insistere con gli altri brani
+            return dict(o, esito="errore", motivo=e.testo, stop=not isinstance(e, LrclibSoloQuesto))
+        if r.get("stato") != "ok":
+            return dict(o, esito="senza_testo", motivo="strumentale" if r.get("stato") == "strumentale" else
+                        "nessun testo trovato")
+        testo = testo_da_righe(r.get("righe"))
+        righe = sum(1 for x in testo.split("\n") if x.strip())
+        o.update(fonte=r.get("fonte") or "", righe=righe)
+        if righe < self.NEI_FILE_RIGHE_MIN:
+            return dict(o, esito="saltato", motivo="testo troppo corto per fidarsi")
+        if prova:
+            return dict(o, esito="da_scrivere")
+        try:
+            testo_nel_file_mp3(p, testo, lingua_testo(testo))
+        except _NonSiScrive as e:
+            return dict(o, esito="gia" if e.gia else "saltato", motivo=e.motivo)
+        except OSError as e:
+            return dict(o, esito="errore", motivo="il disco non lascia scrivere: %s" % (e.strerror or e))
+        return dict(o, esito="scritto")
 
     # parole dalla voce
 
@@ -8330,6 +8587,24 @@ def _gestione_testi(h, metodo, resto, corpo):
     if resto == ["riprova"] and metodo == "POST":
         t.riprova()
         return _json(h, {"ok": True})
+    if resto == ["nei-file"] and metodo == "GET":
+        return _json(h, t.nei_file_stato())
+    if resto == ["nei-file"] and metodo == "POST":
+        c = corpo if isinstance(corpo, dict) else {}
+        prova = c.get("prova", True)
+        if not isinstance(prova, bool):
+            raise ErroreExtra(400, "prova: vero (si vede solo cosa si scriverebbe) o falso (si scrive)")
+        ids = c.get("ids")
+        if ids is not None and (not isinstance(ids, list) or len(ids) > Testi.NEI_FILE_MAX or
+                                any(not isinstance(x, str) for x in ids)):
+            raise ErroreExtra(400, "ids: l'elenco degli id dei brani (al più %d)" % Testi.NEI_FILE_MAX)
+        numeri = {}
+        for k, massimo in (("giorni", 3650), ("ultimi", Testi.NEI_FILE_MAX)):
+            v = c.get(k)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= massimo):
+                raise ErroreExtra(400, "%s: un numero intero da 1 a %d" % (k, massimo))
+            numeri[k] = v
+        return _json(h, t.nei_file_avvia(numeri["giorni"], numeri["ultimi"], ids, prova))
     raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/testi/%s" % "/".join(resto))
 
 
