@@ -345,8 +345,23 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 @media (min-width:800px) and (min-height:560px){
   .nplhead #nplLargo{display:grid}
   #np.l.largo:not(.q) .npin{max-width:none}
-  #np.l.largo:not(.q) .npin>:not(.npl){width:min(100%,560px);align-self:center}
-  #np.l.largo:not(.q) .npl{width:100%;max-width:1700px;align-self:center}
+  /* i comandi seguono la finestra: barra e tempi su tutta la larghezza, indietro, ▶︎ e avanti grandi al centro, i tasti a sinistra e il volume
+     a destra sulla stessa riga (invece della colonna da iPhone sotto un testo largo) */
+  #np.l.largo:not(.q) .npin{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto auto auto auto auto;column-gap:24px;width:min(100%,1700px)}
+  #np.l.largo:not(.q) .npl{grid-column:1/-1;grid-row:1;width:100%;min-height:0}
+  #np.l.largo:not(.q) .npin{--ml:max(2px,calc(2vw - 6px))}   /* margine dei comandi: sulla stessa linea del testo */
+  #np.l.largo:not(.q) .times,#np.l.largo:not(.q) .npbot,#np.l.largo:not(.q) .vol{margin-inline:var(--ml)}
+  #np.l.largo:not(.q) #seek{grid-column:1/-1;grid-row:2;width:calc(100% - 2 * var(--ml));margin-inline:var(--ml)}
+  #np.l.largo:not(.q) .times{grid-column:1/-1;grid-row:3;font-size:14px}
+  #np.l.largo:not(.q) .ctrls{grid-column:1/-1;grid-row:4;justify-content:center;gap:clamp(24px,5vw,72px);margin:6px 0 8px}
+  #np.l.largo:not(.q) .ctrls .sk{font-size:46px;width:76px;height:76px}
+  #np.l.largo:not(.q) .ctrls .pp{font-size:62px;width:96px;height:96px}
+  #np.l.largo:not(.q) .npdev{grid-column:1/-1;grid-row:5}
+  #np.l.largo:not(.q) .npbot{grid-column:1;grid-row:6;justify-content:flex-start;gap:8px;margin-top:0}
+  #np.l.largo:not(.q) .npbot button{flex:0 1 48px;width:48px;height:40px;font-size:24px}
+  #np.l.largo:not(.q) .vol{grid-column:2;grid-row:6;justify-self:end;align-self:center;width:min(100%,340px)}
+  #np.l.largo .rg::-webkit-slider-runnable-track{height:9px}
+  #np.l.largo .nplhead .cb{width:42px;height:42px;font-size:22px}
   #np.l.largo .nplhead{gap:16px;padding-inline:max(8px,2vw)}
   #np.l.largo .nplhead .art{width:64px;height:64px;border-radius:8px}
   #np.l.largo .nplhead b{font-size:22px}
