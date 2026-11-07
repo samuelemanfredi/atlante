@@ -339,6 +339,23 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 .nplhead span{display:block;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nplhead .cb{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:19px;background:rgba(255,255,255,.14);opacity:.8}
 .nplhead .cb.on{opacity:1;background:rgba(255,255,255,.32)}
+/* karaoke a tutto schermo (Mac, iPad, finestre larghe): il tasto allarga il testo a tutta la finestra, con le parole più grandi,
+   invece della colonna stretta da iPhone; i comandi (barra, ▶︎, volume) restano in una colonna al centro */
+.nplhead #nplLargo{display:none}
+@media (min-width:800px) and (min-height:560px){
+  .nplhead #nplLargo{display:grid}
+  #np.l.largo:not(.q) .npin{max-width:none}
+  #np.l.largo:not(.q) .npin>:not(.npl){width:min(100%,560px);align-self:center}
+  #np.l.largo:not(.q) .npl{width:100%;max-width:1700px;align-self:center}
+  #np.l.largo .nplhead{gap:16px;padding-inline:max(8px,2vw)}
+  #np.l.largo .nplhead .art{width:64px;height:64px;border-radius:8px}
+  #np.l.largo .nplhead b{font-size:22px}
+  #np.l.largo .nplhead span{font-size:17px}
+  #np.l.largo .lyr{padding-inline:max(8px,2vw)}
+  #np.l.largo .lyr .lr{font-size:clamp(40px,4.6vw,96px);padding:.24em 0}
+  #np.l.largo .lyr.piano .lr{font-size:clamp(26px,2.6vw,46px);padding:.1em 0}
+  #np.l.largo .lyr .gap .dots{width:150px}
+}
 .lyr{position:relative;padding:14px 8px 0;overscroll-behavior:contain;-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 7%,#000 80%,transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 7%,#000 80%,transparent 100%)}
 .lyr::after{content:"";display:block;height:58vh}   /* spazio in fondo: anche l'ultima riga sale in alto */
 .lyr .lr{display:block;width:100%;text-align:left;font-size:clamp(26px,7.4vw,34px);line-height:1.18;font-weight:800;letter-spacing:-.015em;color:rgba(255,255,255,.32);padding:10px 0;margin:0;filter:blur(1px);transform:scale(.97);transform-origin:0 50%;transition:color .4s,filter .4s,transform .5s cubic-bezier(.34,1.3,.64,1);overflow-wrap:anywhere;-webkit-tap-highlight-color:transparent}
@@ -6291,7 +6308,7 @@ function tsCambiati(rs) {   // MutationObserver: pagine e righe nuove o tolte, t
    (api/extra/testi) e resta sul telefono (IndexedDB «am-testi») per quando il Mac non risponde; senza tempi si vede il
    testo semplice, senza testo una riga che lo dice. */
 const TESTO = {on:ls.get('am-testo', false), k:'', b:null, j:null, righe:null, riga:-2, primo:true, libero:0, raf:0, visto:0,
-  vis:false, pronto:'', chiesti:new Map(), db:null, trad:'', scelta:ls.get('am-trad', 'auto'), ritardo:ls.get('am-testo-ritardo', null), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false};
+  vis:false, pronto:'', chiesti:new Map(), db:null, trad:'', scelta:ls.get('am-trad', 'auto'), ritardo:ls.get('am-testo-ritardo', null), poll:0, giri:0, avvisato:'', sospeso:'', ritentato:false, largo:ls.get('am-testo-largo', false)};
 const TESTO_ANTICIPO = 0.25;   // la riga si accende un attimo prima della voce: l'occhio arriva in tempo
 const TESTO_PAUSA = 4;         // 4 s o più senza voce (l'introduzione, un assolo): i tre puntini
 const TESTO_VOC = /[aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœаеёиоуыэюяіїєαεηιουωάέήίόύώ]/i;
@@ -6860,6 +6877,12 @@ function testoAvvia() {
 }
 function testoSegna() {
   np.classList.toggle('l', TESTO.on);
+  np.classList.toggle('largo', !!TESTO.largo);
+  const g = $('nplLargo');
+  if (g) {
+    g.classList.toggle('on', !!TESTO.largo); g.innerHTML = ic(TESTO.largo ? 'largoOff' : 'largo');
+    g.setAttribute('aria-label', TESTO.largo ? 'Testo a tutto schermo acceso: tocca per tornare alla colonna' : 'Testo a tutto schermo');
+  }
   const b = $('bTesto');
   b.classList.toggle('on', TESTO.on);
   b.setAttribute('aria-label', TESTO.on ? 'Testo acceso: tocca per tornare alla copertina' : 'Testo: le parole del brano, a tempo con la musica');
@@ -6869,6 +6892,20 @@ function testoCambia() {
   TESTO.on = !TESTO.on; ls.set('am-testo', TESTO.on);
   if (TESTO.on && np.classList.contains('q')) { np.classList.remove('q'); $('bQ').classList.remove('on'); }   // il testo prende il posto della coda
   testoSegna();
+}
+// il testo a tutto schermo: sul Mac (e in ogni finestra larga) prende tutta la finestra con le parole più grandi; dove il browser
+// lo permette entra anche nel tutto schermo vero (senza barre). Esc lo toglie e il testo resta largo; il tasto torna alla colonna.
+function testoLargoCambia() {
+  TESTO.largo = !TESTO.largo; ls.set('am-testo-largo', TESTO.largo);
+  testoSegna();
+  for (const w of $('lyr').querySelectorAll('.w')) w._bordi = null;   // lettere più grandi (o più piccole): rimisurate
+  TESTO.riga = -2; TESTO.primo = true;                               // e la riga cantata si rimette al suo posto
+  try {
+    const el = document.documentElement, rf = el.requestFullscreen || el.webkitRequestFullscreen,
+      fe = document.fullscreenElement || document.webkitFullscreenElement, ex = document.exitFullscreen || document.webkitExitFullscreen;
+    if (TESTO.largo && rf && !fe) { const p = rf.call(el); if (p && p.catch) p.catch(() => {}); }
+    else if (!TESTO.largo && fe && ex) { const p = ex.call(document); if (p && p.catch) p.catch(() => {}); }
+  } catch (e) {}
 }
 // ----- la traduzione sotto ogni riga, nella lingua scelta (la fa il Mac) -----
 function testoTradScegli() {
@@ -6887,6 +6924,8 @@ function testoTradUsa(c) {
 }
 (function testoPrepara() {
   I.testo = '<path fill-rule="evenodd" d="M5 3.5h14A2.5 2.5 0 0 1 21.5 6v9a2.5 2.5 0 0 1-2.5 2.5h-6.9l-4.5 3.5a.8.8 0 0 1-1.3-.63V17.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5zm3.7 4.3c-1.3 0-2.2.9-2.2 2.1 0 1.1.8 1.9 1.8 1.9h.4c-.2.8-.8 1.4-1.6 1.7l.4.9c1.7-.5 2.9-1.9 2.9-3.9 0-1.6-.7-2.7-1.7-2.7zm5.4 0c-1.3 0-2.2.9-2.2 2.1 0 1.1.8 1.9 1.8 1.9h.4c-.2.8-.8 1.4-1.6 1.7l.4.9c1.7-.5 2.9-1.9 2.9-3.9 0-1.6-.7-2.7-1.7-2.7z"/>';
+  I.largo = '<path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm14 0h2v6h-6v-2h4v-4z"/>';       // allarga a tutto schermo
+  I.largoOff = '<path d="M8 4h2v6H4V8h4V4zm6 0h2v4h4v2h-6V4zM4 14h6v6H8v-4H4v-2zm10 0h6v2h-4v4h-2v-6z"/>';   // torna alla colonna
   I.sinc = '<path d="M9 1.5h6v2h-2v1.6a8.5 8.5 0 1 1-2 0V3.5H9zm3 5.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm-1 2.5h2v4.1l2.9 2.9-1.4 1.4-3.5-3.5zM18.6 4.6l1.4-1.4 1.8 1.8-1.4 1.4z"/>';
   I.trad = '<path d="M4 4h9v2H9.9c-.4 2-1.2 3.7-2.3 5.1.9.8 2 1.5 3.2 2l-.8 1.9c-1.4-.6-2.7-1.4-3.7-2.4C5.2 13.6 3.9 14.4 2.4 15l-.8-1.9c1.3-.5 2.4-1.2 3.3-2.1C4 9.9 3.3 8.6 2.9 7.2l1.9-.6c.3 1 .8 2 1.5 2.9.7-1 1.2-2.2 1.5-3.5H4V4zm11.2 5h2.2l4.6 11h-2.3l-1.1-2.8h-4.6L12.9 20h-2.3l4.6-11zm1.1 2.6-1.6 4.1h3.2l-1.6-4.1z"/>';
   const q = $('bQ'), b = document.createElement('button');
@@ -6899,7 +6938,8 @@ function testoTradUsa(c) {
     '<button class="cb" id="nplSinc" data-a="testo-sinc" aria-label="Sincronia del testo con la voce" hidden>' + ic('sinc') + '</button>' +
     '<button class="cb" id="nplVerso" data-a="testo-verso" aria-label="Condividi un verso" hidden>' + ic('share') + '</button>' +
     '<button class="cb" id="nplPron" data-a="testo-pron" aria-label="Pronuncia" aria-pressed="false" hidden>' + ic('pron') + '</button>' +
-    '<button class="cb" id="nplTrad" data-a="testo-trad" aria-label="Traduzione" hidden>' + ic('trad') + '</button></div>' +
+    '<button class="cb" id="nplTrad" data-a="testo-trad" aria-label="Traduzione" hidden>' + ic('trad') + '</button>' +
+    '<button class="cb" id="nplLargo" data-a="testo-largo" aria-label="Testo a tutto schermo">' + ic('largo') + '</button></div>' +
     '<div class="lyrsinc" id="lyrSinc" hidden><button data-a="testo-sinc-p" aria-label="Testo prima: 0,05 secondi">Prima</button>' +
     '<span id="lyrSincT"></span><button data-a="testo-sinc-d" aria-label="Testo dopo: 0,05 secondi">Dopo</button>' +
     '<button data-a="testo-sinc-a" aria-label="Sincronia automatica">Auto</button></div><div class="qlist lyr" id="lyr"></div>' +
@@ -6929,6 +6969,7 @@ function testoTradUsa(c) {
     } else if (a === 'testo-sinc-p') testoSincroniaCambia(-0.05);
     else if (a === 'testo-sinc-d') testoSincroniaCambia(0.05);
     else if (a === 'testo-sinc-a') testoSincroniaCambia(null);
+    else if (a === 'testo-largo') testoLargoCambia();
     else if (a === 'testo-trad') testoTradScegli();
     else if (a === 'testo-pron') testoPronCambia();
     else if (a === 'testo-trad-l') testoTradUsa(x.dataset.v || '');
