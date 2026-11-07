@@ -1635,17 +1635,30 @@ function favBrano() {
   if (RC.id) { const b = RC.dev && RC.dev.stato && RC.dev.stato.brano; return (b && b.sid && T.get('r' + b.sid)) || null; }
   return curId && !EXT.has(curId) ? T.get(curId) || null : null;
 }
+// il brano di passaggio che suona qui (podcast, audiolibro): anche lui si mette tra i Preferiti con la stella
+const favExtBrano = () => !RC.id && curId && EXT.has(curId) ? EXT.get(curId) : null;
 function favTasti() {
-  const t = favBrano(), on = !!(t && t.fav), ext = !RC.id && curId && EXT.has(curId);
+  const t = favBrano(), x = favExtBrano(), on = !!((t && t.fav) || (x && x.fav));
   for (const n of ['npFav', 'nplFav', 'npqFav', 'miniFav']) {
     const b = $(n); if (!b) continue;
     b.innerHTML = ic(on ? 'star' : 'staro'); b.classList.toggle('on', on);
-    b.hidden = n !== 'npFav' && !t && !ext;   // niente stella per un brano che qui non c'è
+    b.hidden = n !== 'npFav' && !t && !x;   // niente stella per un brano che qui non c'è
     b.setAttribute('aria-label', on ? 'Togli dai Preferiti' : 'Aggiungi ai Preferiti');
   }
 }
+// i brani di passaggio preferiti non stanno in libreria: restano a parte, su questo dispositivo (FAVX), con quanto serve
+// per riascoltarli (indirizzo, titolo, copertina)
+function favXCambia(id) {
+  const t = EXT.get(id); if (!t) return;
+  t.fav = !t.fav;
+  if (t.fav) FAVX.set(id, {id, url:t.url, title:t.title, artist:t.artist, album:t.album, cover:t.cover}); else FAVX.delete(id);
+  favxSalva(); favTasti();
+  if (curRoute().v === 'favs') render(true);
+  toast(t.fav ? 'Aggiunto ai Preferiti' : 'Tolto dai Preferiti');
+}
 function favCorrente() {
-  if (!RC.id && curId && EXT.has(curId)) { toast('Si aggiunge ai preferiti dal suo modulo'); return; }
+  const x = favExtBrano();
+  if (x) { favXCambia(x.id); return; }
   const t = favBrano();
   if (!t) { toast(RC.id ? 'Questo brano non è nella libreria del Mac' : 'Niente in riproduzione'); return; }
   t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); favTasti(); favMark(t.id);
@@ -1744,9 +1757,10 @@ const pages = {
     return topBar() + '<h1 class="lt">Sull\'iPhone</h1><p class="dlbar">Questi brani si ascoltano senza connessione e non si riscaricano.</p>' + (tr.length ? pbtns(regList(tr.map(t => t.id), 'Sull\'iPhone')) + trackRows(tr, {label:'Sull\'iPhone'}) + '<p class="foot">' + tr.length + ' brani</p>' : '<div class="empty"><h3>Ancora niente</h3><p>Ascolta un brano o tocca «Scarica» e resterà salvato qui.</p></div>');
   },
   favs() {
-    const tr = songs().filter(t => t.fav);
+    // i brani della libreria e, in fondo, quelli di passaggio messi con la stella (podcast, audiolibri: l'ultimo per primo)
+    const tr = songs().filter(t => t.fav).concat([...FAVX.keys()].reverse().map(id => EXT.get(id)).filter(Boolean));
     return topBar() + '<h1 class="lt">Preferiti</h1>' + (tr.length ? pbtns(regList(tr.map(t => t.id), 'Preferiti')) + trackRows(tr, {label:'Preferiti'}) :
-      '<div class="empty"><div class="big">' + ic('staro') + '</div><h3>Nessun preferito</h3><p>Tocca ' + '•••' + ' accanto a un brano e scegli «Aggiungi ai preferiti».</p></div>');
+      '<div class="empty"><div class="big">' + ic('staro') + '</div><h3>Nessun preferito</h3><p>Tocca la stella nel lettore, o ' + '•••' + ' accanto a un brano e scegli «Aggiungi ai preferiti».</p></div>');
   },
   albums() {
     const al = albums().sort((a, b) => (a.name === UNK_ALB) - (b.name === UNK_ALB) || coll.compare(a.name, b.name));
@@ -3460,6 +3474,14 @@ function closeSheet() { sh.classList.remove('open'); devsAperto = false; devShee
 const head = t => '<div class="shead">' + art(t.cover) + '<div class="tx"><b>' + esc(t.title) + '</b><span>' + esc((t.artist || UNK_ART) + (t.album ? ' · ' + t.album : '')) + '</span></div></div>';
 const cancel = '<div class="grp"><button class="cancel" data-a="closesheet">Annulla</button></div>';
 function trackMenu(id, pl) {
+  const x = !T.has(id) && EXT.get(id);
+  if (x) {   // brano di passaggio tra i Preferiti: niente modifiche né playlist, solo ascolto e stella
+    openSheet('<div class="grp">' + head(x) +
+      '<button data-a="m-next" data-id="' + id + '"><span class="l">Riproduci dopo</span>' + ic('next') + '</button>' +
+      '<button data-a="m-last" data-id="' + id + '"><span class="l">Riproduci per ultimo</span>' + ic('last') + '</button></div>' +
+      '<div class="grp"><button data-a="m-fav" data-id="' + id + '"><span class="l">' + (x.fav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti') + '</span>' + ic(x.fav ? 'star' : 'staro') + '</button></div>' + cancel);
+    return;
+  }
   const t = T.get(id); if (!t) return;
   const alb = albArt(t) + '\u0001' + (t.album || '');
   openSheet('<div class="grp">' + head(t) +
@@ -3607,7 +3629,7 @@ document.addEventListener('click', e => {
     case 'closesheet': closeSheet(); break;
     case 'm-next': closeSheet(); playNext(d.id); break;
     case 'm-last': closeSheet(); playLast(d.id); break;
-    case 'm-fav': { const t = T.get(d.id); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); closeSheet(); updateNow(); favMark(d.id); toast(t.fav ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti'); break; }
+    case 'm-fav': { if (!T.has(d.id) && EXT.has(d.id)) { closeSheet(); favXCambia(d.id); break; } const t = T.get(d.id); t.fav = !t.fav; dbPut('meta', t).catch(() => {}); favCambiati(); closeSheet(); updateNow(); favMark(d.id); toast(t.fav ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti'); break; }
     case 'm-addpl': {
       const id = d.id;
       openSheet('<div class="grp scroll"><div class="smsg"><b>Aggiungi a una playlist</b></div><button class="acc" data-a="m-newpl" data-id="' + id + '"><span class="l">Nuova playlist…</span>' + ic('plus') + '</button>' +
@@ -3782,6 +3804,13 @@ function copieScaricati() {
   return copieInCorso;
 }
 const EXT = new Map();   // brani di passaggio (podcast, audiolibri): non entrano in libreria né in «Brani»
+// quelli messi tra i Preferiti con la stella: si ricordano su questo dispositivo e si ritrovano in «Preferiti»
+const FAVX = new Map();
+for (const f of ls.get('am-fav-x', []) || []) {
+  if (!f || typeof f.id !== 'string' || !f.id.startsWith('x:') || !/^https?:\/\//i.test(f.url || '')) continue;
+  FAVX.set(f.id, f); EXT.set(f.id, {id:f.id, ext:true, url:f.url, title:f.title || 'Senza titolo', artist:f.artist || '', album:f.album || '', cover:f.cover || null, fav:true});
+}
+const favxSalva = () => ls.set('am-fav-x', [...FAVX.values()]);
 const TT = id => T.get(id) || EXT.get(id);
 let xCur = '';
 // modulo chiesto dall'indirizzo dell'app (?x=video&url=… da Condividi e Comandi Rapidi, ?x=chat&c=… dalle notifiche).
@@ -3822,7 +3851,7 @@ function xNotify() { const n = AM.now(); xSubs.forEach(cb => { try { cb(n); } ca
 window.AM = {
   playExternal(items, start, from) {
     if (!items || !items.length) return;
-    const ids = items.map(it => { const id = 'x:' + (it.id || it.url); EXT.set(id, {id, ext:true, url:it.url, title:it.title || 'Senza titolo', artist:it.artist || '', album:it.album || '', cover:it.cover ? 'u:' + it.cover : null}); return id; });
+    const ids = items.map(it => { const id = 'x:' + (it.id || it.url); EXT.set(id, {id, ext:true, url:it.url, title:it.title || 'Senza titolo', artist:it.artist || '', album:it.album || '', cover:it.cover ? 'u:' + it.cover : null, fav:FAVX.has(id)}); return id; });
     errRun = 0; S.orig = ids.slice(); S.queue = ids.slice(); S.shuffle = false; S.from = from || ''; load(Math.max(0, Math.min(start || 0, ids.length - 1)), true);
   },
   toggle() { toggle(); }, next() { avanti(); }, prev() { prev(); },
