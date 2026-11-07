@@ -122,6 +122,7 @@ img{max-width:100%;display:block}
 .morerows{height:1px;grid-column:1/-1}
 .vl{overflow-anchor:none}.vl>*{height:var(--vh,auto)}
 .trk .more{width:36px;height:44px;display:grid;place-items:center;color:var(--fg);font-size:20px;flex:none}
+.trk .more.piu{color:var(--accent);font-size:22px}
 .trk.cur .t1{color:var(--accent)}
 .trk .eq{display:none}
 .trk.cur .eq{display:flex}
@@ -1781,7 +1782,9 @@ function trackRows(tr, opt) {
     const sub = (opt.num ? (t.artist && t.artist !== opt.albumArtist ? esc(t.artist) : '') : esc((t.artist || UNK_ART) + (opt.noAlbum || !t.album ? '' : ' · ' + t.album))) + (opt.extra ? opt.extra(t) : '');
     return '<div class="trk' + (t.id === curId ? ' cur' : '') + (t.remote && !SRV && !srvWait && !saved.has(t.id) ? ' off' : '') + '" data-id="' + t.id + '"><button class="tap" style="display:contents" data-a="play" data-l="' + l + '" data-i="' + i + '">' + lead +
       '</button><div class="rt"><button class="tx" data-a="play" data-l="' + l + '" data-i="' + i + '" style="text-align:left"><span class="t1">' + t1(t) + '</span>' + (sub ? '<span class="t2">' + sub + '</span>' : '') +
-      '</button>' + (t.remote ? '<span class="dl" aria-label="' + (saved.has(t.id) ? 'Sull\'iPhone' : 'Sul Mac') + '">' + dlSign(t.id, q) + '</span>' : '') + '<button class="more" data-a="more" data-id="' + t.id + '"' + (opt.pl ? ' data-pl="' + opt.pl + '"' : '') + ' aria-label="Altre azioni">' + ic('more') + '</button></div></div>';
+      '</button>' + (t.remote ? '<span class="dl" aria-label="' + (saved.has(t.id) ? 'Sull\'iPhone' : 'Sul Mac') + '">' + dlSign(t.id, q) + '</span>' : '') +
+      (opt.piu ? '<button class="more piu" data-a="plsugg" data-k="' + opt.piu + '" data-id="' + t.id + '" aria-label="Aggiungi a «' + esc(opt.label || 'playlist') + '»">' + ic('plus') + '</button>' :
+      '<button class="more" data-a="more" data-id="' + t.id + '"' + (opt.pl ? ' data-pl="' + opt.pl + '"' : '') + ' aria-label="Altre azioni">' + ic('more') + '</button>') + '</div></div>';
   }, true) + '</div>';
 }
 const pbtns = (l) => { const L = lists[l], todo = L ? L.ids.filter(id => { const t = T.get(id); return t && !isSaved(t); }).length : 0;
@@ -1935,6 +1938,64 @@ function opereDi(c) {
   const ordine = (a, b) => coll.compare(a.album || '', b.album || '') || (a.disc || 0) - (b.disc || 0) || (a.track || 0) - (b.track || 0) || coll.compare(a.title || '', b.title || '');
   return [...m.values()].map(x => { x.brani.sort(ordine); x.artista = [...x.artisti].sort((a, b) => b[1] - a[1])[0][0]; return x; }).sort((a, b) => coll.compare(a.nome, b.nome));
 }
+/* ---------- brani consigliati in fondo a una playlist propria ----------
+   Brani della libreria dello stesso genere della playlist (il genere dei suoi brani: quello che ne ha di più e, se pesa
+   almeno un quarto, il secondo) che non ci sono ancora, ognuno con il + per aggiungerlo. Prima quelli di artisti già nella
+   playlist, con ritmo ed energia vicini (misurati dal Mac), anni vicini, i preferiti e i più ascoltati; mai quelli segnati
+   «Suggerisci meno», né doppioni di brani che la playlist ha già, al più 2 per artista. I consigli restano gli stessi
+   finché non si tocca «Altri consigli» (o per 10 minuti): aggiungendone uno gli altri non si rimescolano, entra il successivo. */
+const PLSUGG = new Map();   // id playlist → {t, nomi, ids}
+const PLSUGG_N = 10, PLSUGG_TENUTI = 40;
+function plCandidati(p) {
+  const S0 = plTracks(p).filter(t => !t.ext), conta = new Map(), nome = new Map();
+  for (const t of S0) {
+    const g = genereDi(t); if (!g) continue;
+    conta.set(g, (conta.get(g) || 0) + 1);
+    if (!nome.has(g)) { const o = String(t.genre).split(/[\/;,|]/)[0].trim(); nome.set(g, o.charAt(0).toUpperCase() + o.slice(1)); }
+  }
+  if (!conta.size) return {nomi:[], ids:[]};
+  const ord = [...conta].sort((a, b) => b[1] - a[1]);
+  const gen = new Set(ord.filter((x, i) => i === 0 || x[1] >= S0.length / 4).slice(0, 2).map(x => x[0]));
+  const art = new Set(S0.map(t => low(primary(t)))), gia = new Set(p.ids), gm = gemelli();
+  const rr = S0.map(bpmDi).filter(Boolean), bpm0 = rr.length ? rr.reduce((s, r) => s + r.bpm, 0) / rr.length : 0;
+  const en = rr.filter(r => r.en != null), en0 = en.length ? en.reduce((s, r) => s + r.en, 0) / en.length : null;
+  const anni = S0.map(t => +t.year).filter(Boolean), voti = [];
+  for (const t of T.values()) {
+    if (gia.has(t.id) || t.meno || t.gone || t.ext || !canPlay(t.id)) continue;
+    const g = genereDi(t); if (!g || !gen.has(g)) continue;
+    const gg = gm.get(t.id); if (gg && gg.some(x => gia.has(x))) continue;   // lo stesso brano in un'altra copia: c'è già
+    let s = 0;
+    if (art.has(low(primary(t)))) s += 3;
+    const r = bpmDi(t);
+    if (r && bpm0) { if (Math.abs(Math.log(r.bpm / bpm0)) < 0.08) s += 1; if (en0 != null && r.en != null && Math.abs(r.en - en0) < 0.15) s += 1; }
+    if (t.year && anni.length && Math.min(...anni.map(a => Math.abs(a - t.year))) <= 5) s += 0.5;
+    if (t.fav) s += 1;
+    if (t.plays) s += Math.min(1, t.plays / 10);
+    voti.push([s + Math.random() * 1.5, t]);
+  }
+  voti.sort((a, b) => b[0] - a[0]);
+  const per = new Map(), visti = new Set(), ids = [];
+  for (const [, t] of voti) {
+    const a = low(primary(t)); if ((per.get(a) || 0) >= 2) continue;
+    const gg = gm.get(t.id); if (gg && gg.some(x => visti.has(x))) continue;
+    per.set(a, (per.get(a) || 0) + 1); visti.add(t.id); ids.push(t.id);
+    if (ids.length >= PLSUGG_TENUTI) break;
+  }
+  return {nomi:[...gen].map(g => nome.get(g)), ids};
+}
+function plSuggeriti(p) {
+  let c = PLSUGG.get(p.id);
+  if (!c || Date.now() - c.t > 10 * 60000) { c = Object.assign({t:Date.now()}, plCandidati(p)); PLSUGG.set(p.id, c); }
+  const dentro = new Set(p.ids);
+  return {nomi:c.nomi, tracks:c.ids.filter(id => !dentro.has(id)).map(id => T.get(id)).filter(Boolean).slice(0, PLSUGG_N)};
+}
+function plSuggHtml(p) {
+  const x = plSuggeriti(p); if (!x.tracks.length) return '';
+  return '<div class="sugh"><h2 class="h2">Brani consigliati</h2><div class="foot" style="margin:-6px 0 6px">Dello stesso genere: ' + esc(x.nomi.join(' · ')) + '</div></div>' +
+    trackRows(x.tracks, {label:p.name, piu:p.id, noAlbum:false}) +
+    '<button class="foot" data-a="plsuggn" data-k="' + p.id + '" style="color:var(--accent);text-align:left">Altri consigli</button>';
+}
+
 /* ---------- cartelle di playlist (come in Apple Music) ----------
    Ogni playlist può stare in una cartella (campo «cartella», sincronizzato con il Mac come il resto della playlist): in
    Playlist prima le cartelle, poi le playlist fuori. Dal menu ⋯ della playlist: Sposta in una cartella (anche una nuova);
@@ -2140,6 +2201,7 @@ const pages = {
     // voci della playlist importata che non sono nella libreria: si possono rivedere (e si aggiungono da sole se arrivano)
     const nm = (p.miss || []).length;
     if (nm) h += '<button class="foot" data-a="plmiss" data-k="' + p.id + '" style="color:var(--accent);text-align:left">' + (nm === 1 ? '1 brano della playlist non è' : nm + ' brani della playlist non sono') + ' nella libreria: vedi quali</button>';
+    h += plSuggHtml(p);
     return h;
   },
   pick(r) {
@@ -4332,6 +4394,8 @@ document.addEventListener('click', e => {
     case 'plren': { const p = P.find(x => x.id === d.k); nameSheet('Rinomina playlist', p ? p.name : '', 'renpl', d.k); break; }
     case 'pldel': { const p = P.find(x => x.id === d.k); openSheet('<div class="grp"><div class="smsg"><b>Eliminare «' + esc(p.name) + '»?</b>I brani restano nella libreria.</div><button class="red cancel" data-a="pldel2" data-k="' + d.k + '">Elimina playlist</button></div>' + cancel); break; }
     case 'pldel2': { P = P.filter(x => x.id !== d.k); dbDel('playlists', d.k).catch(() => {}); plTolta(d.k); closeSheet(); back(); toast('Playlist eliminata'); break; }
+    case 'plsugg': { const p = P.find(x => x.id === d.k); if (!p || p.ids.indexOf(d.id) >= 0) break; p.ids.push(d.id); savePl(p); toast('Aggiunto a «' + p.name + '»'); render(true); break; }
+    case 'plsuggn': PLSUGG.delete(d.k); render(true); break;
     case 'pickt': { const p = P.find(x => x.id === d.k); if (!p) break; const i = p.ids.indexOf(d.id); if (i >= 0) p.ids.splice(i, 1); else p.ids.push(d.id); b.classList.toggle('on', i < 0); savePl(p); break; }
     case 'sclear': q = ''; $('sq').value = ''; b.hidden = true; render(true); $('sq').focus(); break;
     case 'srecq': q = d.k; { const i = $('sq'); if (i) i.value = q; const c = document.querySelector('.sclear'); if (c) c.hidden = false; } ricercaAggiungi({t:'q', k:q}); render(true); break;
