@@ -1220,6 +1220,15 @@ function keep(id) {
   DLQ.unshift(id); dlqSalva();
   runDl(); dlMark();
 }
+// i 3 brani dopo quello che suona si scaricano subito sul telefono (anche se «Scarica tutta la musica» è spento): al cambio
+// sono già pronti, senza attese né rete. Si rifà a ogni cambio di brano, di coda e ogni 5 s
+function precarica() {
+  if (!DB || !SRV || RC.id || !curId || Date.now() - ls.get('am-pieno', 0) < 86400000) return;
+  for (const id of S.queue.slice(S.qi + 1, S.qi + 4)) {
+    const t = T.get(id);
+    if (t && t.remote && !sulTel(id) && !TOLTI.has(id) && !noKeep.has(id) && !grabbing.has(id) && dlCur !== id) grab(id);
+  }
+}
 function grab(id) {
   if (!DB || saved.has(id) || grabbing.has(id) || dlCur === id) return;
   grabbing.add(id); dlMark();
@@ -2556,7 +2565,7 @@ async function load(i, play, at) {
   seekOnLoad(at);
   countFor = play ? id : null;   // l'ascolto si conta quando il brano suona davvero (evento «playing»), non qui
   if (play) au.play().catch(() => {});
-  updateNow(); saveState(); if (typeof autoCoda === 'function') autoCoda();
+  updateNow(); saveState(); if (typeof autoCoda === 'function') autoCoda(); if (typeof precarica === 'function') precarica();
 }
 function stop() { loadTok++; xfAbort(); seekOnLoad(0); au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} curId = null; S.queue = []; S.orig = []; S.qi = -1; if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null; updateNow(); saveState(); }
 function playList(ids, start, shuf, from) {
@@ -2781,7 +2790,7 @@ function volNormImposta(el, id) {
 function volNormCambia() { VOLN.on = !VOLN.on; ls.set('am-volnorm', VOLN.on); ALLAU.forEach(el => volNormImposta(el, el._tid)); toast(VOLN.on ? 'Volume uniforme: i brani forti si abbassano un po\'' : 'Volume uniforme spento'); }
 auOn('timeupdate', timerControlla);
 auOn('playing', autoCoda);
-setInterval(() => { timerControlla(); autoCoda(); }, 5000);   // anche dopo un passaggio del mix (non passa da load)
+setInterval(() => { timerControlla(); autoCoda(); precarica(); }, 5000);   // anche dopo un passaggio del mix (non passa da load)
 // riproduzione automatica: una coda (righe) che continua (▶︎ e la freccia che gira); l'∞ è già del mix a tempo
 I.inf = '<path d="M3 5.5h12v2H3zm0 4.5h12v2H3zm0 4.5h7v2H3z"/><path d="M12.5 13.2v7.6l6.3-3.8z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M18.5 4.8a3.6 3.6 0 0 1 .4 6.6"/>';
 I.radio = '<circle cx="12" cy="12" r="2.4"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M8.3 8.3a5.3 5.3 0 0 0 0 7.4M15.7 8.3a5.3 5.3 0 0 1 0 7.4M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/>';
@@ -3963,7 +3972,7 @@ const RIT_PRONTI = [{nome:'Calmo', da:60, a:80, c:'#5e5ce6'}, {nome:'Camminata',
 const RIT_REGOLARE = 0.65;   // «solo ritmo regolare»: la stessa soglia di «Handbike: ritmo costante»
 let RITMI = ls.get('am-ritmi', null), ritT = 0, AMATI = ls.get('am-amati', []), amaT = 0;
 let RITMIEI = ls.get('am-ritmi-miei', []);   // ritmi preferiti salvati: [{nome, sc}]
-const RSC = Object.assign({valori:[], intervalli:[], tol:3, regolare:false, mezzo:true, cursore:128}, ls.get('am-ritmo', {}));
+const RSC = Object.assign({valori:[], intervalli:[], tol:3, regolare:false, mezzo:false, cursore:128}, ls.get('am-ritmo', {}));
 let RIT_CORSO = ls.get('am-ritmo-corso', null);   // la scelta che sta suonando (per il segno ×2 / ÷2 nel lettore)
 async function ritCarica(force) {
   if (!force && Date.now() - ritT < 300000) return;
@@ -3985,13 +3994,11 @@ function bpmDi(t) {
   return g && g.bpm ? {bpm:g.bpm, reg:null, en:null, modo:0} : null;
 }
 const ritObiettivi = sc => sc.valori.length || sc.intervalli.length ? sc : {valori:[sc.cursore], intervalli:[]};
-function ritFattore(bpm, sc) {   // 1 = quel ritmo, 2 = a mezzo tempo (vale il doppio), 0.5 = a doppio tempo, 0 = no
+// 1 = il brano è a quel ritmo, 0 = no. Multipli e sottomultipli non contano più (9/11): un brano a 60 BPM sta nel ritmo
+// 60, non anche in quello a 120 (e viceversa); chi ha salvato un ritmo con «mezzo e doppio tempo» lo ritrova senza
+function ritFattore(bpm, sc) {
   const o = ritObiettivi(sc);
-  for (const f of (sc.mezzo !== false ? [1, 2, 0.5] : [1])) {
-    const v = bpm * f;
-    if (o.valori.some(x => Math.abs(v - x) <= sc.tol) || o.intervalli.some(i => v >= i[0] && v <= i[1])) return f;
-  }
-  return 0;
+  return o.valori.some(x => Math.abs(bpm - x) <= sc.tol) || o.intervalli.some(i => bpm >= i[0] && bpm <= i[1]) ? 1 : 0;
 }
 function ritBrani(sc) {
   const out = [];
@@ -4092,7 +4099,7 @@ function bnCard() {   // in evidenza nella Home
 pages.ritmo = function () {
   ritCarica();
   const sw = (a, on, t) => '<button class="lrow" data-a="' + a + '" role="switch" aria-checked="' + !!on + '"><span class="t">' + t + '</span><span class="sw' + (on ? ' on' : '') + '"></span></button>';
-  let h = topBar() + '<h1 class="lt">Per ritmo</h1><p class="dlbar">Scegli un ritmo: parte subito una riproduzione casuale dei brani con quei BPM. Contano anche il mezzo e il doppio tempo (segno ×2 e ÷2: un brano a 85 vale per 170).</p>';
+  let h = topBar() + '<h1 class="lt">Per ritmo</h1><p class="dlbar">Scegli un ritmo: parte subito una riproduzione casuale dei brani con quei BPM.  Ogni brano sta solo nel suo ritmo: 85 BPM non entra tra i 170.</p>';
   if (!RITMI && SRV) h += '<p class="dlbar">I BPM dei brani li sta misurando il Mac mini: le scelte si riempiono man mano.</p>';
   else if (ritMisura()) h += '<p class="dlbar" id="ritMis">Il Mac mini ha misurato i BPM di ' + RITMI.misurati.toLocaleString('it-IT') + ' brani su ' + RITMI.totale.toLocaleString('it-IT') + ': le scelte si riempiono man mano.</p>';
   h += '<div id="ritNow"></div><h2 class="h2">Pronti</h2><div class="ritg">' +
@@ -4104,7 +4111,7 @@ pages.ritmo = function () {
     '<div class="ritrow"><span>da</span><input type="number" id="ritDa" min="40" max="220" inputmode="numeric" placeholder="150" aria-label="Da BPM"><span>a</span><input type="number" id="ritA" min="40" max="220" inputmode="numeric" placeholder="160" aria-label="A BPM"><button data-a="rit-int">Aggiungi</button></div>' +
     '<div class="chips" id="ritChips"></div>' +
     '<label class="ritl" for="ritTol">Tolleranza ±<b id="ritTolV">' + RSC.tol + '</b> BPM</label><input type="range" class="ritr" id="ritTol" min="1" max="10" step="1" value="' + RSC.tol + '">' +
-    '<div class="lrows">' + sw('rit-reg', RSC.regolare, 'Solo ritmo regolare') + sw('rit-mezzo', RSC.mezzo, 'Anche mezzo e doppio tempo') + '</div>' +
+    '<div class="lrows">' + sw('rit-reg', RSC.regolare, 'Solo ritmo regolare') + '</div>' +
     '<p class="ritconta" id="ritConta"></p>' +
     '<div class="pbtns"><button data-a="rit-suona">' + ic('shuf') + 'Riproduci</button><button data-a="rit-salva">' + ic('plus') + 'Salva ritmo</button></div></div>' +
     '<div id="ritLista"><button class="foot" data-a="rit-lista" style="color:var(--accent)">Mostra i brani</button></div>';
