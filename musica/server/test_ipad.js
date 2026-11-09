@@ -154,7 +154,8 @@ function prove(src, fatte) {
   fatte.push('Libreria dalla barra');
 
   /* ---------- CSS e HTML ---------- */
-  const mq = /@media \(min-width:800px\) and \(min-height:560px\)\{([\s\S]*?)\n\}/.exec(src);
+  // più blocchi con la stessa condizione (il testo largo del Mac ne ha uno suo): vale quello con la barra laterale
+  const mq = [...src.matchAll(/@media \(min-width:800px\) and \(min-height:560px\)\{([\s\S]*?)\n\}/g)].find(m => m[1].indexOf('#side{display:flex') >= 0);
   if (!mq) throw new Error('manca il blocco CSS dell\'iPad (min-width 800px, min-height 560px)');
   ['#tabs{display:none}', '#side{display:flex', '#xp{left:var(--sidew)}', '#mini{left:var(--sidew)'].forEach(r => {
     if (mq[1].indexOf(r) < 0) throw new Error('nel blocco CSS dell\'iPad manca ' + r);
