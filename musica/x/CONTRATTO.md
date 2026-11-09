@@ -227,7 +227,7 @@ Samuele, al più 3 brani a testa e 50 in tutto in coda. La Gestione solo Samuele
 | POST | `pronuncia` `{righe:[testo]}` | `{righe:[in lettere latine]}` — una per riga (al più 300, di al più 300 caratteri): con la trascrizione di macOS (ICU: pinyin con i toni, Hangul, cirillico, greco, arabo, ebraico, devanagari, thai; per il giapponese solo i kana); le righe già in lettere latine tornano uguali; 503 fuori da un Mac |
 | GET | `testi/cerca?q=frase` | ricerca nei testi: `{q, brani:[{id, riga}], indicizzati}` — i brani della libreria con la frase nel testo (al più 30; senza maiuscole, accenti e segni, dall'inizio di una parola; almeno 4 lettere), con la riga dove sta; l'indice si riempie quando un brano si cerca o si ascolta e, con il lavoro sui testi acceso, nei momenti liberi |
 | GET | `testi?titolo=&artista=&album=&durata=[&lingua=xx]` | come sopra, per un brano che non è nella libreria (solo LRCLIB, niente Whisper: l'audio è sul telefono); 400 senza titolo |
-| GET | `gestione/testi` | solo Samuele: `{acceso, con_whisper, totale, conteggi:{cercati, da_cercare, con_testo, strumentali, senza_testo, trascritti, parole_fonte, parole_allineate, parole_stimate, parole_nessuna, da_allineare, non_allineati}, ora:{cerca, allinea, traduce, vivo}, lrclib, whisper:{stato, modello, programma, modello_scaricato}, traduzioni:{motore, in_coda, fatte}}` |
+| GET | `gestione/testi` | solo Samuele: `{acceso, con_whisper, totale, conteggi:{cercati, da_cercare, con_testo, strumentali, senza_testo, trascritti, parole_fonte, parole_allineate, parole_stimate, parole_nessuna, da_allineare, non_allineati}, ora:{cerca, allinea, traduce, vivo}, lrclib, whisper:{stato, modello, programma, modello_scaricato, pausa}, separazione:{stato, programma, soglia, provati, migliorati, non_riusciti, guadagno, secondi}, traduzioni:{motore, in_coda, fatte}}` |
 | POST | `gestione/testi` `{acceso?, whisper?}` | solo Samuele: accende o mette in pausa il lavoro su tutta la libreria (testi di tutti i brani e, con `whisper`, le parole dalla voce); resta così dopo un riavvio; lo stato come sopra; 400 senza `acceso` né `whisper` |
 | POST | `gestione/testi/riprova` | solo Samuele: `{ok:true}`, i lavori fermi per un errore riprovano adesso |
 | GET | `gestione/testi/nei-file` | solo Samuele: l'ultimo lavoro «testo dentro i file»: `{stato:'nessuno'\|'in corso'\|'finito'\|'interrotto'\|'errore', prova, quando, finito?, totale, fatti, avviso, conti:{da_scrivere?, scritto?, gia?, senza_testo?, saltato?, errore?}, brani:[{id, titolo, artista, esito, motivo?, fonte?, righe?}]}` (resta dopo un riavvio) |
@@ -245,3 +245,19 @@ ffmpeg o Whisper che non partono, disco pieno, rete giù) non conta contro i bra
 `whisper-cli` che si ferma da solo su un brano (SIGABRT: con `--dtw` capita, abort in `median_filter`) invece sì: si
 riprova senza DTW (i tempi delle parole dai pezzi) e, se si ferma anche così, quel brano non riesce e Whisper va avanti.
 `ATLANTE_WHISPER=0` spegne Whisper (oppure il percorso di un whisper-cli).
+
+Voce separata dagli strumenti (Demucs): se Whisper riconosce meno del 60% delle parole del testo (`soglia`), Demucs
+(`--two-stems=vocals`, modello `htdemucs`) separa la voce e Whisper la riascolta da sola; vince l'ascolto che riconosce
+più parole. Solo per i brani nuovi (nella libreria da meno di 30 giorni) e per quelli che si ascoltano (testo chiesto
+dall'app nelle ultime 24 ore): un brano già allineato male, o non riuscito, si rifà con la voce sola quando lo si
+ascolta (una volta per file e testo; l'ascolto del brano intero non si ripete). Gli altri brani restano come sono
+(`TESTI_V` non cambia). Uno alla volta, con `nice`, fermabile come Whisper; il brano in WAV a 44,1 kHz e le parti di
+Demucs stanno in `<cache>/testi/tmp/` solo mentre lavora, e solo se sul disco restano almeno 5 GB liberi
+(`ATLANTE_SEPARA_SPAZIO_MIN_GB`). Demucs non si installa da solo: è un ambiente virtuale di Python sul disco Cloud
+(`/Volumes/Cloud/Atlante Musica/Strumenti/demucs/bin/demucs`, il modello in `…/demucs/torch`, `TORCH_HOME`); se manca o
+non riesce si va avanti senza (non è un errore del Mac: niente pausa di Whisper); se non parte, la separazione aspetta 6
+ore (Gestione → Riprova la rimette subito). Ogni brano provato tiene nella scheda `sp: [quota nel brano intero, quota
+nella voce sola o null, secondi di Demucs, secondi di Whisper]`; Gestione ne dice quanti (`provati`, `migliorati`,
+`non_riusciti`), la mediana dei punti di quota guadagnati (`guadagno`) e dei secondi in più per brano (`secondi`).
+`ATLANTE_SEPARA=0` la spegne (oppure il percorso di un demucs); `ATLANTE_SEPARA_MODELLI` (dove sta il modello),
+`ATLANTE_SEPARA_DISPOSITIVO` (`cpu` o `mps`), `ATLANTE_SEPARA_SOTTO` (la soglia, da 0 a 1).
