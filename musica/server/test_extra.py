@@ -4909,7 +4909,7 @@ class TestRegoleAtlante(unittest.TestCase):
     def test_regole_predefinite(self):
         gruppi, nomi, errori = self.m.regole_atlante()
         self.assertEqual(errori, [])
-        self.assertEqual([g["id"] for g in gruppi], ["generi", "umore", "attivita", "ritmo", "epoche", "momenti"])
+        self.assertEqual([g["id"] for g in gruppi], ["generi", "umore", "attivita", "ritmo", "epoche", "momenti", "feste", "focus", "relax-e-chill", "occasioni"])
         conta = {g["id"]: len(g["playlist"]) for g in gruppi}
         self.assertEqual((conta["generi"], conta["umore"], conta["attivita"], conta["ritmo"]), (30, 12, 12, 12))
         self.assertEqual(set(nomi), set(self.m.GENERI))   # i generi del file sono quelli del programma
