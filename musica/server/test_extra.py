@@ -13046,5 +13046,19 @@ class TestAscoltoApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+# ---------- La mia Volkswagen (x/auto.html, auto_vw.py, auto_ponte.py): le prove stanno in test_auto.py e girano qui
+# insieme alle altre, perché l'aggiornamento automatico del Mac mini (aggiorna.sh) lancia solo questo file ----------
+def _prove_auto():
+    spec = importlib.util.spec_from_file_location("test_auto", os.path.join(QUI, "test_auto.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+for _n, _c in list(vars(_prove_auto()).items()):
+    if _n.startswith("TestAuto") and isinstance(_c, type) and issubclass(_c, unittest.TestCase):
+        globals()[_n] = _c
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

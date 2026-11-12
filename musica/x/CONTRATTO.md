@@ -99,6 +99,7 @@ Playlist dell'account: `GET api/extra/liste?dopo=<seq>` e `POST api/extra/liste 
 | `video.html` | accesso ai servizi di streaming; scarica video/audio da qualsiasi sito supportato da yt-dlp sul Mac; elenco scaricati |
 | `live.html` | andare in diretta su social e piattaforme di streaming audio/video: collegamenti, prova fotocamera/microfono, chiavi di trasmissione (solo sul dispositivo) |
 | `naviga.html` | navigatore GPS con musica (comandi del lettore sempre visibili), istruzioni vocali, vignette autostradali con link ufficiali, scheda veicolo da foto e targa |
+| `auto.html` | «La mia Volkswagen», solo Samuele (voce `solo:'proprietario'` in XMODS, e il Mac risponde 403 agli altri): stato dell'auto, apri e chiudi con l'S-PIN, clima, sbrinamento, ricarica, posizione; Diario; Rendimento della batteria secondo la temperatura; Viaggio con le soste di ricarica. Vedi la sua sezione |
 | `benessere.html` | conta calorie (Open Food Facts), «Settimana» (dispendio dal calendario .ics, bilancio dieta e integratori, confronto prezzi), Trainer |
 | `strumenti.html` | ricerca del prezzo migliore, negozi per categoria, risolutore di test (crocette e domande aperte), carte fedeltà e di pagamento, gestore dispositivo |
 | `idee.html` | «Idee»: l'invito a proporre miglioramenti dell'app, il modulo per mandarne una e «Le tue idee» con lo stato (aperto anche agli invitati); le idee di tutti sono in Gestione → Idee |
@@ -245,3 +246,37 @@ ffmpeg o Whisper che non partono, disco pieno, rete giù) non conta contro i bra
 `whisper-cli` che si ferma da solo su un brano (SIGABRT: con `--dtw` capita, abort in `median_filter`) invece sì: si
 riprova senza DTW (i tempi delle parole dai pezzi) e, se si ferma anche così, quel brano non riesce e Whisper va avanti.
 `ATLANTE_WHISPER=0` spegne Whisper (oppure il percorso di un whisper-cli).
+
+## La mia Volkswagen (`auto.html`, solo Samuele)
+Il Mac mini parla con il cloud Volkswagen (lo stesso dell'app Volkswagen) con l'account di Samuele: sull'auto non si
+installa niente. Il collegamento è un processo a parte, `server/auto_ponte.py`, con CarConnectivity
+(github.com/tillsteinbach/CarConnectivity) in un suo ambiente Python che il Mac prepara da solo la prima volta
+(`<cache>/auto/python`); il resto (`server/auto_vw.py`) usa solo la libreria standard. Email in `<cache>/auto/account.json`,
+password nel Portachiavi del Mac (servizio «Atlante - La mia Volkswagen»; senza Portachiavi nello stesso file, 0600);
+l'S-PIN arriva con il singolo comando e non si salva mai. Lettura ogni 5 minuti (più spesso il cloud rallenta l'account).
+Il cloud non dà il tracciato GPS: un viaggio è «ferma in A, poi ferma in B con più chilometri»; la strada mostrata è la
+più probabile (OSRM). Dai viaggi (almeno 5 km e 2% di batteria, senza ricariche in mezzo) il Mac impara due fattori,
+stile di guida e clima, sopra un modello fisico della ID. Buzz (aria, rotolamento, salite, freddo, clima, elettronica,
+musica). Servizi senza chiavi: OSRM, Open-Meteo (quote e meteo), Overpass/OpenStreetMap (colonnine CCS), Nominatim.
+Tutte le rotte: 403 a chi non è Samuele (anche alla rete di casa). Prove: `server/test_auto.py` (girano con test_extra.py).
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `auto/stato` | `{account:{collegato, utente (mascherato), dove:'portachiavi'\|'file', forza_accesso, ponte:{fase:'spento'\|'installazione'\|'avvio'\|'collegato'\|'attesa'\|'errore', messaggio, dal}, bloccato}, veicoli:[{vin, nome, modello, anno, targa, soc, autonomia, km, est, batteria:{min,max}, clima:{stato,target,fine,senza_cavo}, sbrina, porte, porte_aperte, finestrini, ricarica:{stato,tipo,potenza,velocita,fine,obiettivo,spina}, posizione:{lat,lon,dal,nome,indirizzo}\|null, stato, online, aggiornato, letto, comandi:{porte,clima,sbrina}}], lettura, intervallo, ora}` |
+| POST | `auto/account` `{utente, password, forza_accesso}` | lo stato — collega l'account (il ponte parte in un filo); senza utente e password lo stesso account riparte, e con `forza_accesso` cambia solo quell'opzione |
+| DELETE | `auto/account` | lo stato — via email, password e sessione dal Mac |
+| POST | `auto/libreria` | lo stato — riscarica CarConnectivity (se il cloud Volkswagen è cambiato) e riparte |
+| POST | `auto/comando` `{vin, azione:'blocca'\|'sblocca'\|'clima_on'\|'clima_off'\|'sbrina_on'\|'sbrina_off'\|'aggiorna', spin?, temperatura?}` | `{ok, messaggio}` — blocca e sblocca vogliono `spin` (4 cifre); clima_on `temperatura` 16–29,5; aspetta la risposta di Volkswagen (al più 50 s: 504) |
+| GET | `auto/diario?giorni=30[&vin=]` | `{giorni, viaggi:[{id, partenza, arrivo, durata_stimata, da_lat, da_lon, a_lat, a_lon, da_nome, a_nome, km, km_stimati, soc_da, soc_a, kwh, kwh_100, temp, temp_fonte, con_ricarica, valido, minuti, …}], soste:[{id, lat, lon, arrivo, partenza, nome, indirizzo}], ricariche:[{id, inizio, fine, soc_da, soc_a, potenza_max, tipo, nome}], totali:{viaggi, km, ore, kwh_100}}` |
+| POST | `auto/diario/cancella` `{conferma:true}` | `{ok}` — via viaggi, soste, ricariche e letture (i nomi dei posti restano) |
+| GET | `auto/viaggi/<id>/percorso` | `{punti:[[lat,lon]…], km, ricostruito:true, km_registrati}` |
+| POST | `auto/luoghi` `{lat, lon, nome}` | `{ok, nome}` — il nome di un posto (entro 150 m), es. «Casa»; nome vuoto lo toglie |
+| GET | `auto/rendimento[?vin=]` | `{fasce:[{da, a, viaggi, km, kwh_100, km_per_pct, autonomia_100, rendimento_pct, temp_media}], curva:[{t, kwh_100, autonomia_100, rendimento_pct}], calibrazione:{k_guida, k_clima, viaggi, km, errore_pct, tipici}, velocita_tipica, viaggio_tipico_km, capacita_kwh, viaggi_validi, auto}` — rendimento_pct: km rispetto a 20 °C |
+| GET / POST | `auto/impostazioni` | `{auto:{nome, capacita_kwh, massa_kg, carico_kg, cda, crr, rend_motore, rend_recupero, elettronica_kw, musica_kw, pompa_calore, dc_max_kw}, regole:{arrivo_min, arrivo_ideale, toll_min, toll_max, ricarica_max, destinazione_min}, viaggio:{velocita_max, abitacolo_c, musica, ionity_prima, precondiziona}, prezzi:{ionity_IT, ionity_FR, ionity_ES, ionity_altri, altri}}`; POST con i gruppi da cambiare (400 se un valore è fuori misura o le soglie non sono in ordine) |
+| GET | `auto/cerca?q=` | `{risultati:[{nome, lat, lon}]}` (Nominatim, almeno 3 lettere) |
+| POST | `auto/viaggio` `{a:{lat,lon}, da?:{lat,lon}, soc?, partenza?, vin?, opzioni?:{velocita_max, abitacolo_c, carico_kg, musica, ionity_prima, precondiziona}}` | `{km, ore_guida, partenza, arrivo, soc_partenza, soc_arrivo, riuscito, soste:[{nome, operatore, ionity, lat, lon, km, kw, kw_noto, arrivo_soc, partenza_soc, fascia:'ideale'\|'tollerata'\|'fuori', minuti, deviazione_km, ora_arrivo, ora_partenza, paese, prezzo_kwh, costo}], minuti_ricarica, costo, energia:{guida, recupero, clima, elettronica, musica, preriscaldo, precondizionamento, totale}, kwh_100, temperature:{min,max,media}, profilo:[{km, soc, quota, sosta?}], geo:[[lat,lon]…], avvisi, colonnine_viste, regole, calibrazione, velocita_max, musica}` — senza `da` parte da dove è parcheggiata l'auto, senza `soc` con la sua batteria |
+
+Le soste si scelgono con la programmazione dinamica sulle colonnine CCS lungo la strada (al più 3 ogni 10 km, le più
+rapide, Ionity prima): il costo è la fascia d'arrivo (0 all'ideale 33%; 25–33% preferita; 20–25% e 33–45% tollerate solo
+se convengono; sotto il 20% mai), i minuti di ricarica (curva della ID. Buzz, batteria scaldata o fredda), le deviazioni e
+8 punti per ogni sosta; le aree di servizio della carreggiata opposta (in autostrada, a sinistra entro 400 m) si scartano.

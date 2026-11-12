@@ -8669,6 +8669,8 @@ def _alla_fine(segnale, _quadro):
         _ferma_figli()
         if TST is not None:
             TST.chiudi()
+        if AUTO is not None:
+            AUTO.chiudi()   # il ponte con Volkswagen salva la sessione e si chiude
     except Exception:   # noqa: BLE001 — si esce comunque
         pass
     finally:
@@ -16260,6 +16262,8 @@ def _instrada(h, metodo, parti, corpo):
     elif cosa == "playlist" and not resto:   # playlist del Mac (dal disco e dalla vecchia radio): vedi la loro sezione
         solo("GET")
         _json(h, _playlist_mac(h))
+    elif cosa == "auto":   # La mia Volkswagen (x/auto.html): solo Samuele, vedi la sua sezione
+        _auto(h, metodo, resto, corpo)
     else:
         raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/%s" % "/".join(parti))
 
@@ -16306,6 +16310,50 @@ def gestisci_extra(h, metodo=None):
                 pass
         h.close_connection = True
     return True
+
+
+# ----- La mia Volkswagen (x/auto.html): stato dell'auto, apri/chiudi, clima, diario, rendimento, viaggi -----
+# Il codice sta in auto_vw.py, accanto a questo file (il collegamento con il cloud Volkswagen in auto_ponte.py, che gira
+# in un suo ambiente Python): qui solo la porta d'ingresso. Solo Samuele: mai gli invitati né la rete di casa, perché da
+# qui si apre l'auto. Un errore del modulo dell'auto risponde con un errore e non ferma il resto di Atlante.
+AUTO = None
+AUTO_LOCK = threading.Lock()
+
+
+def _auto_modulo():
+    global AUTO
+    with AUTO_LOCK:
+        if AUTO is None:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "atlante_auto_vw", os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_vw.py"))
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            AUTO = m.Auto(os.path.join(_cart("cache"), "auto"))
+        return AUTO
+
+
+def _auto(h, metodo, resto, corpo):
+    """api/extra/auto/…: vedi x/CONTRATTO.md, sezione «La mia Volkswagen»."""
+    if _chi_e(h)["ruolo"] != "proprietario":
+        raise ErroreExtra(403, "Solo per Samuele")
+    try:
+        a = _auto_modulo()
+    except Exception as e:   # noqa: BLE001
+        raise ErroreExtra(500, "Il modulo dell'auto non è pronto: %s" % e)
+    try:
+        codice, dati = a.api(metodo, resto, parse_qs(urlsplit(h.path).query), corpo)
+    except a.Errore as e:
+        raise ErroreExtra(e.codice, e.testo)
+    _json(h, dati, codice)
+
+
+def avvia_auto():
+    """All'avvio del server: se l'account Volkswagen è collegato, il collegamento riparte da solo (in un filo)."""
+    try:
+        _auto_modulo().avvia()
+    except Exception as e:   # noqa: BLE001
+        print("Atlante: modulo dell'auto non pronto: %s" % e, flush=True)
 
 
 # ----- Rete: Tailscale sul Mac mini (Gestione → Rete) -----
@@ -18467,6 +18515,7 @@ def main():
     except OSError as e:
         print("Atlante: chat non pronta: %s" % e, flush=True)
     avvia_classifiche(a.cache, a.classifiche)
+    avvia_auto()   # La mia Volkswagen: il collegamento con l'auto riparte se l'account è collegato
     _tst().riprendi()   # il lavoro sui testi di tutta la libreria riparte solo se Samuele l'ha acceso da Gestione
     signal.signal(signal.SIGTERM, _alla_fine)   # launchctl kickstart -k (aggiornamento): prima si ferma Whisper
     if a.tematiche or a.tematiche_prova > 0:

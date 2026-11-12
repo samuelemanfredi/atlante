@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>La mia Volkswagen</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+.ic{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--fill);font-size:17px}
+.hero{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap}
+.big{font-size:56px;font-weight:700;line-height:1;letter-spacing:-1px}
+.big small{font-size:22px;font-weight:600;color:var(--fg2);margin-left:2px}
+.batt{height:10px;border-radius:5px;background:var(--fill);overflow:hidden;margin:12px 0 4px}
+.batt>i{display:block;height:100%;border-radius:5px;background:var(--ok)}
+.batt.low>i{background:var(--warn)}
+.batt.crit>i{background:var(--bad)}
+.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin:10px 0}
+.kv>div{background:var(--bg2);border-radius:12px;padding:10px 12px;min-width:0}
+.card .kv>div{background:var(--bg)}
+.kv b{display:block;font-size:19px;font-weight:700;overflow-wrap:anywhere}
+.kv span{font-size:13px;color:var(--fg2)}
+.map{height:240px;border-radius:12px;overflow:hidden;margin:10px 0;background:var(--fill);z-index:0}
+.map.small{height:180px}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(.85)}}
+:root[data-theme="dark"] .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(.85)}
+.leaflet-container{font:12px/1.3 var(--font)}
+.step{display:flex;align-items:center;gap:10px;margin:10px 0}
+.step b{min-width:84px;text-align:center;font-size:21px}
+.sw{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0}
+.sw input{width:22px;height:22px;flex:none;accent-color:var(--accent)}
+.giorno{font-size:13px;font-weight:600;color:var(--fg2);margin:18px 4px 6px;text-transform:capitalize}
+.row.multi .tx b,.row.multi .tx span{white-space:normal}
+.list:empty{display:none}
+.sug button{display:block;width:100%;text-align:left;padding:10px 14px;border-bottom:.5px solid var(--sep);font-size:15px}
+.sug button:last-child{border-bottom:0}
+.chart{width:100%;height:auto;display:block;margin:8px 0}
+.chart text{font:11px var(--font);fill:var(--fg2)}
+.tab{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+.tab th,.tab td{padding:7px 4px;text-align:right;border-bottom:.5px solid var(--sep);white-space:nowrap}
+.tab th:first-child,.tab td:first-child{text-align:left}
+.tab th{font-size:12px;color:var(--fg2);font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:420px){.grid2{grid-template-columns:1fr}}
+.nmk{background:none;border:0}
+.nmk b{display:flex;width:26px;height:26px;border-radius:50%;background:#1fae5b;color:#fff;align-items:center;justify-content:center;font:700 13px/1 var(--font);box-shadow:0 1px 4px rgba(0,0,0,.45)}
+.nmk.altra b{background:#0a84ff}
+details summary{cursor:pointer;padding:8px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="seg" id="tabs">
+    <button data-t="auto">Auto</button><button data-t="diario">Diario</button><button data-t="rendimento">Rendimento</button><button data-t="viaggio">Viaggio</button>
+  </div>
+
+  <section id="vAuto">
+    <div id="aTop"><div class="note">Carico…</div></div>
+    <div id="aPos" hidden>
+      <div class="h2">Dove si trova</div>
+      <div id="aPosTxt"></div>
+      <div class="map small" id="mPos"></div>
+      <div class="btns">
+        <a class="btn sm" id="aMappe" target="_blank" rel="noopener">Apri in Mappe</a>
+        <button class="btn sm" id="aNomina">Dai un nome a questo posto</button>
+      </div>
+      <div id="aNomBox" hidden>
+        <div class="field"><label for="aNomIn">Nome del posto (es. Casa)</label><input class="in" id="aNomIn" maxlength="60" autocomplete="off"></div>
+        <div class="btns"><button class="btn pri sm" id="aNomOk">Salva</button><button class="btn sm" id="aNomNo">Annulla</button></div>
+      </div>
+    </div>
+    <div id="aFondo"></div>
+  </section>
+
+  <section id="vDiario" hidden>
+    <div class="seg" id="dGiorni"><button data-g="7">7 giorni</button><button data-g="30">30 giorni</button><button data-g="90">90 giorni</button><button data-g="365">Un anno</button></div>
+    <div class="kv" id="dTot"></div>
+    <div class="map" id="mDia"></div>
+    <div class="small" id="dNota">Tocca un viaggio per vedere la strada; tocca una sosta per darle un nome.</div>
+    <div id="dNomBox" hidden class="card">
+      <div class="field"><label for="dNomIn">Nome del posto (es. Casa, Lavoro)</label><input class="in" id="dNomIn" maxlength="60" autocomplete="off"></div>
+      <div class="btns"><button class="btn pri sm" id="dNomOk">Salva</button><button class="btn sm" id="dNomNo">Annulla</button></div>
+    </div>
+    <div id="dLista"></div>
+  </section>
+
+  <section id="vRend" hidden>
+    <p class="sub">Quanto rende la batteria a ogni temperatura, imparato dai tuoi viaggi: il Mac incrocia il termometro dell'auto con i chilometri e la batteria usata.</p>
+    <div id="rBox"></div>
+  </section>
+
+  <section id="vViaggio" hidden>
+    <p class="sub">Un viaggio calcolato sui tuoi consumi: salite, temperatura, vento e pioggia previsti, clima, musica, stile di guida e le tue regole di ricarica.</p>
+    <div class="field"><label for="pDa">Partenza</label><input class="in" id="pDa" placeholder="Dove si trova l'auto" autocomplete="off" spellcheck="false"><div class="list sug" id="pDaSug"></div></div>
+    <div class="field"><label for="pA">Destinazione</label><input class="in" id="pA" placeholder="Cerca un indirizzo, una città, un posto" autocomplete="off" spellcheck="false"><div class="list sug" id="pASug"></div></div>
+    <div class="grid2">
+      <div class="field"><label for="pQuando">Quando parti (vuoto = adesso)</label><input class="in" id="pQuando" type="datetime-local"></div>
+      <div class="field"><label for="pSoc">Batteria alla partenza (%)</label><input class="in" id="pSoc" type="number" inputmode="numeric" min="1" max="100"></div>
+    </div>
+    <div class="field"><label for="pVel">Velocità massima: <b id="pVelT"></b></label><input id="pVel" type="range" min="80" max="130" step="5" style="width:100%"></div>
+    <div class="field"><label for="pAbit">Abitacolo: <b id="pAbitT"></b></label><input id="pAbit" type="range" min="16" max="26" step="0.5" style="width:100%"></div>
+    <div class="field"><label for="pCar">Carico: persone oltre te e bagagli (kg)</label><input class="in" id="pCar" type="number" inputmode="numeric" min="0" max="1500" step="10"></div>
+    <label class="sw"><span>Musica accesa</span><input type="checkbox" id="pMus"></label>
+    <label class="sw"><span>Preferisci Ionity</span><input type="checkbox" id="pIon"></label>
+    <label class="sw"><span>Scalda la batteria prima della ricarica rapida</span><input type="checkbox" id="pPre"></label>
+    <div class="small" id="pRegole"></div>
+    <div class="btns"><button class="btn pri" id="pCalcola">Calcola il viaggio</button></div>
+    <div id="pRis"></div>
+  </section>
+
+  <section id="vImp" hidden></section>
+</div>
+
+<script src="kit.js"></script>
+<script>
+(function () {
+  'use strict';
+  const {$, esc, toast} = AX;
+  AX.header('La mia Volkswagen', '<button class="btn sm" id="bImp" aria-label="Impostazioni">⚙︎</button>');
+
+  /* ---------- formati ---------- */
+  const nf = (x, d) => x == null || isNaN(x) ? '—' : Number(x).toLocaleString('it-IT', {minimumFractionDigits: d || 0, maximumFractionDigits: d || 0});
+  const ora = s => s ? new Date(s * 1000).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit'}) : '—';
+  const dataBreve = s => new Date(s * 1000).toLocaleDateString('it-IT', {weekday: 'short', day: 'numeric', month: 'short'});
+  const durata = min => { min = Math.max(0, Math.round(min)); const h = Math.floor(min / 60), m = min % 60; return h ? h + ' h ' + String(m).padStart(2, '0') : m + ' min'; };
+  const fa = s => { if (!s) return ''; const d = Date.now() / 1000 - s; if (d < 90) return 'adesso'; if (d < 3600) return Math.round(d / 60) + ' min fa'; if (d < 86400) return Math.round(d / 3600) + ' h fa'; return dataBreve(s); };
+  const kv = (t, v) => '<div><span>' + esc(t) + '</span><b>' + v + '</b></div>';
+  const STATO = {parked: 'Parcheggiata', ignition_on: 'Accesa', driving: 'In marcia', offline: 'Non raggiungibile'};
+  const CLIMA = {off: 'Spento', heating: 'Riscalda', cooling: 'Raffresca', ventilation: 'Ventila'};
+  const RICARICA = {off: 'Non in carica', ready_for_charging: 'Pronta a caricare', charging: 'In carica', conservation: 'Mantenimento', error: 'Errore di ricarica', discharging: 'Sta dando energia (V2L)'};
+  const FASE = {spento: 'fermo', installazione: 'in preparazione', avvio: 'in avvio', collegato: 'attivo', attesa: 'in pausa', errore: 'con un errore'};
+  const FASCIA = {ideale: 'nella tua fascia', tollerata: 'tollerato', fuori: 'fuori fascia'};
+  const ATTESA = {blocca: 'Chiudo l\'auto…', sblocca: 'Apro l\'auto…', clima_on: 'Accendo il clima…', clima_off: 'Spengo il clima…', sbrina_on: 'Accendo lo sbrinamento…', sbrina_off: 'Spengo lo sbrinamento…', aggiorna: 'Chiedo una lettura all\'auto…'};
+
+  /* ---------- mappe (Leaflet solo quando serve) ---------- */
+  let leafletP = null;
+  function leaflet() {
+    if (window.L) return Promise.resolve(window.L);
+    if (!leafletP) leafletP = new Promise((ok, ko) => {
+      const c = document.createElement('link'); c.rel = 'stylesheet'; c.href = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css'; document.head.appendChild(c);
+      const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js';
+      s.onload = () => window.L ? ok(window.L) : ko(new Error('Mappa non disponibile'));
+      s.onerror = () => { leafletP = null; s.remove(); ko(new Error('Mappa non disponibile: controlla la connessione')); };
+      document.head.appendChild(s);
+    });
+    return leafletP;
+  }
+  function nuovaMappa(id) {
+    const m = L.map(id, {zoomControl: false, attributionControl: true});
+    m.attributionControl.setPrefix('');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'}).addTo(m);
+    return m;
+  }
+  const nienteMappa = (id, e) => { $(id).innerHTML = '<div class="note">' + esc(e.message || 'Mappa non disponibile') + '</div>'; };
+
+  /* ---------- schede ---------- */
+  let tab = AX.store.get('auto-tab', 'auto');
+  if (['auto', 'diario', 'rendimento', 'viaggio'].indexOf(tab) < 0) tab = 'auto';
+  const SEZ = {auto: 'vAuto', diario: 'vDiario', rendimento: 'vRend', viaggio: 'vViaggio', imp: 'vImp'};
+  function mostra(t) {
+    tab = t;
+    if (t !== 'imp') AX.store.set('auto-tab', t);
+    for (const k in SEZ) $(SEZ[k]).hidden = k !== t;
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+    if (t === 'auto') { aggiornaStato(true); if (mPos) setTimeout(() => mPos.invalidateSize(), 60); }
+    else if (t === 'diario') caricaDiario();
+    else if (t === 'rendimento') caricaRend();
+    else if (t === 'viaggio') initViaggio();
+  }
+  $('tabs').addEventListener('click', e => { const b = e.target.closest('button[data-t]'); if (b) mostra(b.dataset.t); });
+  $('bImp').addEventListener('click', () => apriImp());
+
+  /* ---------- stato dell'auto ---------- */
+  let S = AX.store.get('auto-ultimo', null), macOk = true, soloSamuele = false, ricollega = false;
+  let pinAperto = null, occupato = false, tPresto = [], tVeloce = 0;
+  let tempClima = +AX.store.get('auto-temp', 21) || 21;
+  async function aggiornaStato(silenzioso) {
+    try {
+      S = await AX.api('auto/stato', {timeout: 15000});
+      macOk = true; soloSamuele = false;
+      AX.store.set('auto-ultimo', S);
+    } catch (e) {
+      if (/Solo per Samuele/.test(e.message)) soloSamuele = true;
+      else { macOk = (await AX.stato(true)).ok; if (!silenzioso && macOk) toast(e.message); }
+    }
+    if (tab === 'auto') disegnaAuto();
+  }
+  function presto() {   // letture ravvicinate dopo un comando
+    tPresto.forEach(clearTimeout);
+    tPresto = [6, 45, 95].map(s => setTimeout(() => aggiornaStato(true), s * 1000));
+  }
+  function inScrittura() {
+    const a = document.activeElement;
+    return pinAperto || ($('vAuto').contains(a) && /^(INPUT|TEXTAREA)$/.test(a.tagName));
+  }
+  function disegnaAuto() {
+    if (inScrittura()) return;   // non cancellare quello che Samuele sta scrivendo (S-PIN, password)
+    let h = '';
+    if (soloSamuele) { $('aTop').innerHTML = '<div class="note">Questo modulo è solo per Samuele: apri Atlante con Tailscale acceso o con la tua password di Atlante.</div>'; $('aPos').hidden = true; $('aFondo').innerHTML = ''; return; }
+    if (!macOk) h += '<div class="note">Il Mac mini non risponde: qui sotto vedi i dati dell\'ultima volta' + (S && S.ora ? ' (' + fa(S.ora) + ')' : '') + '. I comandi tornano quando il Mac risponde.</div>';
+    if (!S) { $('aTop').innerHTML = h || '<div class="note">Carico…</div>'; return; }
+    const acc = S.account || {};
+    if (!acc.collegato || ricollega) {
+      $('aTop').innerHTML = h + formCollega(acc.collegato);
+      $('aPos').hidden = true; $('aFondo').innerHTML = '';
+      return;
+    }
+    h += notaPonte(acc);
+    const vv = S.veicoli || [];
+    if (!vv.length) h += '<div class="note">Nessun dato dall\'auto per ora: la prima lettura arriva qualche minuto dopo il collegamento.</div>';
+    vv.forEach(v => { h += schedaVeicolo(v); });
+    $('aTop').innerHTML = h;
+    $('aFondo').innerHTML = vv.length ? '<div class="btns"><button class="btn" id="bAgg">↻ Aggiorna ora</button></div><p class="small">Il Mac legge l\'auto ogni ' + Math.round((S.intervallo || 300) / 60) + ' minuti (più spesso il cloud Volkswagen rallenta l\'account). Ultima lettura: ' + (S.lettura ? fa(S.lettura) : '—') + '.</p>' : '';
+    posizione(vv.find(v => v.posizione));
+    const f = (acc.ponte || {}).fase;
+    clearTimeout(tVeloce);
+    if (f === 'installazione' || f === 'avvio' || (f === 'collegato' && !vv.length)) tVeloce = setTimeout(() => aggiornaStato(true), 5000);
+  }
+  function formCollega(giaCollegato) {
+    return '<div class="card"><div class="h2" style="margin-top:0">Collega la tua Volkswagen</div>' +
+      '<p class="small">Usa lo stesso account dell\'app Volkswagen. Email e password restano sul tuo Mac mini, nel Portachiavi: l\'auto si legge dal cloud Volkswagen, come fa l\'app. Sull\'auto non si installa niente.</p>' +
+      '<div class="field"><label for="cU">Email del Volkswagen ID</label><input class="in" id="cU" type="email" autocomplete="username" autocapitalize="off" spellcheck="false"></div>' +
+      '<div class="field"><label for="cP">Password</label><input class="in" id="cP" type="password" autocomplete="current-password"></div>' +
+      '<label class="sw"><span class="small">L\'app Volkswagen ha apri e chiudi per la mia auto, ma qui non compare (forza)</span><input type="checkbox" id="cF"></label>' +
+      '<div class="btns"><button class="btn pri" id="cVai">Collega</button>' + (giaCollegato ? '<button class="btn" id="cNo">Annulla</button>' : '') + '</div>' +
+      '<p class="small">La prima volta il Mac prepara il collegamento da solo: 1–3 minuti.</p></div>';
+  }
+  function notaPonte(acc) {
+    const p = acc.ponte || {};
+    if (acc.bloccato) return '<div class="note" style="color:var(--bad)">' + esc(acc.bloccato) + '<div class="btns"><button class="btn sm" id="bRicollega">Ricollega l\'account</button></div></div>';
+    if (p.fase === 'installazione' || p.fase === 'avvio') return '<div class="note">⏳ ' + esc(p.messaggio || 'Preparo il collegamento…') + '</div>';
+    if (p.fase === 'errore' || p.fase === 'attesa') return '<div class="note">⚠️ ' + esc(p.messaggio || 'Collegamento in pausa') + '</div>';
+    if (p.fase === 'collegato' && p.messaggio) return '<div class="note">' + esc(p.messaggio) + '</div>';
+    if (p.fase === 'spento') return '<div class="note">Il collegamento con Volkswagen è fermo.<div class="btns"><button class="btn sm" id="bRiavvia">Riavvia</button></div></div>';
+    return '';
+  }
+  function tempBatteria(b) {
+    if (!b || (b.min == null && b.max == null)) return '—';
+    if (b.min != null && b.max != null && Math.round(b.min) !== Math.round(b.max)) return nf(b.min) + '–' + nf(b.max) + ' °C';
+    return nf(b.min != null ? b.min : b.max) + ' °C';
+  }
+  function schedaVeicolo(v) {
+    const soc = v.soc, cls = soc == null ? '' : soc < 20 ? ' crit' : soc < 33 ? ' low' : '';
+    const st = STATO[v.stato] || (v.online === 'offline' ? 'Non raggiungibile' : '');
+    const r = v.ricarica || {}, c = v.clima || {}, k = v.comandi || {};
+    let h = '<div class="card"><div class="small">' + esc([v.modello, v.anno, v.targa].filter(Boolean).join(' · ')) + '</div>' +
+      '<div class="h2" style="margin:2px 0 10px">' + esc(v.nome) + '</div>' +
+      '<div class="hero"><div class="big">' + nf(soc) + '<small>%</small></div><div><b style="font-size:23px">' + nf(v.autonomia) + ' km</b><div class="small">autonomia secondo l\'auto</div></div></div>' +
+      '<div class="batt' + cls + '"><i style="width:' + Math.max(0, Math.min(100, soc || 0)) + '%"></i></div>' +
+      '<div class="btns" style="margin:8px 0 0">' + (st ? '<span class="pill">' + esc(st) + '</span>' : '') + (r.stato === 'charging' ? '<span class="pill ok">In carica</span>' : '') +
+      '<span class="pill">' + (v.aggiornato ? 'dati dell\'auto ' + fa(v.aggiornato) : 'letto ' + fa(v.letto)) + '</span></div></div>';
+    h += '<div class="kv">' + kv('Fuori', v.est == null ? '—' : nf(v.est, 1) + ' °C') + kv('Batteria', tempBatteria(v.batteria)) + kv('Chilometri', nf(v.km)) + kv('Clima', esc(CLIMA[c.stato] || '—')) + '</div>';
+    // porte
+    const chiusa = v.porte === 'locked', aperta = v.porte === 'unlocked', vin = esc(v.vin);
+    h += '<div class="card"><b>Porte</b><div class="small">' + (chiusa ? '🔒 Chiusa' : aperta ? '🔓 Aperta' : 'Stato non disponibile') + (v.porte_aperte === 'open' ? ' · una porta è aperta' : '') + (v.finestrini === 'open' ? ' · un finestrino è aperto' : '') + '</div>';
+    if (k.porte) {
+      h += '<div class="btns"><button class="btn' + (aperta ? ' pri' : '') + '" data-pin="blocca" data-vin="' + vin + '">🔒 Chiudi</button><button class="btn' + (chiusa ? ' pri' : '') + '" data-pin="sblocca" data-vin="' + vin + '">🔓 Apri</button></div>' +
+        '<div id="pin-' + vin + '" hidden><div class="field"><label for="pinIn-' + vin + '" id="pinLab-' + vin + '">S-PIN</label><input class="in" id="pinIn-' + vin + '" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off"></div>' +
+        '<div class="btns"><button class="btn pri" data-pinok="' + vin + '">Conferma</button><button class="btn" data-pinno="' + vin + '">Annulla</button></div>' +
+        '<div class="small">L\'S-PIN (le 4 cifre dell\'app Volkswagen) va al cloud Volkswagen solo per questo comando: non viene salvato.</div></div>';
+    } else {
+      h += '<div class="small" style="margin-top:6px">Apri e chiudi da remoto non è attivo per quest\'auto nel cloud Volkswagen: si attiva nell\'app Volkswagen (servizio «Lock &amp; Unlock», con Volkswagen Ident e S-PIN). Se lì il lucchetto c\'è già, accendi «Forza apri e chiudi» nelle impostazioni ⚙︎.</div>';
+    }
+    h += '</div>';
+    // clima
+    const on = ['heating', 'cooling', 'ventilation'].indexOf(c.stato) >= 0;
+    h += '<div class="card"><b>Clima</b><div class="small">' + esc(CLIMA[c.stato] || 'Stato non disponibile') + (on && c.fine ? ' fino alle ' + ora(c.fine) : '') + (c.target != null ? ' · impostato a ' + nf(c.target, 1) + ' °C' : '') + '</div>';
+    if (k.clima) {
+      h += '<div class="step"><button class="btn sm" data-temp="-1" aria-label="Meno caldo">−</button><b class="tClima">' + nf(tempClima, 1) + ' °C</b><button class="btn sm" data-temp="1" aria-label="Più caldo">+</button></div>' +
+        '<div class="btns"><button class="btn' + (on ? '' : ' pri') + '" data-cmd="clima_on" data-vin="' + vin + '"><span class="lClima">' + (on ? 'Riavvia a ' : 'Accendi a ') + nf(tempClima, 1) + ' °C</span></button>' +
+        (on ? '<button class="btn pri" data-cmd="clima_off" data-vin="' + vin + '">Spegni</button>' : '') + '</div>';
+      if (c.senza_cavo === false && r.spina !== 'connected') h += '<div class="small">Senza cavo il clima parte solo se nell\'auto è attivo «Clima senza alimentazione esterna».</div>';
+    } else h += '<div class="small" style="margin-top:6px">Il clima da remoto non è disponibile nel cloud Volkswagen per quest\'auto.</div>';
+    if (k.sbrina) h += '<div class="btns"><button class="btn" data-cmd="' + (v.sbrina === 'on' ? 'sbrina_off' : 'sbrina_on') + '" data-vin="' + vin + '">' + (v.sbrina === 'on' ? 'Spegni lo sbrinamento' : '❄︎ Sbrina i vetri') + '</button></div>';
+    h += '</div>';
+    // ricarica
+    if (r.spina === 'connected' || ['charging', 'conservation', 'ready_for_charging', 'error', 'discharging'].indexOf(r.stato) >= 0) {
+      h += '<div class="card"><b>Ricarica</b><div class="small">' + esc(RICARICA[r.stato] || r.stato || '—') + (r.spina === 'connected' ? ' · cavo collegato' : '') + (r.tipo && r.tipo !== 'off' ? ' · ' + esc(String(r.tipo).toUpperCase()) : '') + '</div>' +
+        (r.stato === 'charging' ? '<div class="kv">' + kv('Potenza', nf(r.potenza, 1) + ' kW') + kv('Fine prevista', r.fine ? ora(r.fine) : '—') + kv('Obiettivo', r.obiettivo != null ? nf(r.obiettivo) + '%' : '—') + '</div>' :
+          (r.obiettivo != null ? '<div class="small">Obiettivo di ricarica: ' + nf(r.obiettivo) + '%</div>' : '')) + '</div>';
+    }
+    return h;
+  }
+  let mPos = null, mkPos = null, posNow = null;
+  async function posizione(v) {
+    $('aPos').hidden = !v;
+    if (!v) return;
+    const p = v.posizione, cambiata = !posNow || posNow.lat !== p.lat || posNow.lon !== p.lon || !mPos;
+    posNow = p;
+    $('aPosTxt').innerHTML = '<b>' + esc(p.nome || 'Posizione di parcheggio') + '</b><div class="small">' + (p.indirizzo && p.indirizzo !== p.nome ? esc(p.indirizzo) + ' · ' : '') + (p.dal ? 'parcheggiata ' + fa(p.dal) : '') + '</div>';
+    $('aMappe').href = 'https://maps.apple.com/?ll=' + p.lat + ',' + p.lon + '&q=' + encodeURIComponent(v.nome || 'Auto');
+    try {
+      await leaflet();
+      if (!mPos) { mPos = nuovaMappa('mPos'); mkPos = L.circleMarker([p.lat, p.lon], {radius: 9, color: '#fff', weight: 3, fillColor: '#0a84ff', fillOpacity: 1}).addTo(mPos); }
+      else mkPos.setLatLng([p.lat, p.lon]);
+      if (cambiata) mPos.setView([p.lat, p.lon], 16);   // se no resta dove Samuele l'ha spostata
+      setTimeout(() => mPos.invalidateSize(), 60);
+    } catch (e) { nienteMappa('mPos', e); }
+  }
+  function cambiaTemp(d) {
+    tempClima = Math.max(16, Math.min(29.5, tempClima + d * 0.5));
+    AX.store.set('auto-temp', tempClima);
+    document.querySelectorAll('.tClima').forEach(x => { x.textContent = nf(tempClima, 1) + ' °C'; });
+    document.querySelectorAll('.lClima').forEach(x => { x.textContent = x.textContent.replace(/[\d.,]+ °C$/, nf(tempClima, 1) + ' °C'); });
+  }
+  async function comando(vin, azione, extra) {
+    if (occupato) { toast('Un comando alla volta: aspetta la risposta'); return; }
+    occupato = true;
+    toast(ATTESA[azione] || 'Invio…');
+    try {
+      const j = await AX.api('auto/comando', {method: 'POST', body: Object.assign({vin, azione}, extra || {}), timeout: 75000});
+      toast(j.messaggio || 'Fatto');
+      presto();
+    } catch (e) { toast(e.message); }
+    finally { occupato = false; }
+  }
+  function apriPin(vin, azione) {
+    pinAperto = {vin, azione};
+    $('pin-' + vin).hidden = false;
+    $('pinLab-' + vin).textContent = 'S-PIN per ' + (azione === 'blocca' ? 'chiudere' : 'aprire') + ' l\'auto';
+    $('pinIn-' + vin).value = '';
+    $('pinIn-' + vin).focus();
+  }
+  function chiudiPin(vin) {
+    const box = $('pin-' + vin); if (box) box.hidden = true;
+    const i = $('pinIn-' + vin); if (i) { i.value = ''; i.blur(); }
+    pinAperto = null;
+  }
+  function confermaPin(vin) {
+    const i = $('pinIn-' + vin), spin = (i.value || '').trim();
+    if (!/^\d{4}$/.test(spin)) { toast('Servono le 4 cifre dell\'S-PIN'); i.focus(); return; }
+    const azione = pinAperto ? pinAperto.azione : '';
+    chiudiPin(vin);
+    if (azione) comando(vin, azione, {spin});
+  }
+  async function collega() {
+    const u = $('cU').value.trim(), p = $('cP').value;
+    if (!u || !p) { toast('Scrivi email e password'); return; }
+    $('cVai').disabled = true;
+    try {
+      S = await AX.api('auto/account', {method: 'POST', body: {utente: u, password: p, forza_accesso: $('cF').checked}, timeout: 60000});
+      $('cP').value = ''; $('cP').blur(); $('cU').blur();
+      ricollega = false;
+      toast('Account salvato: il Mac prepara il collegamento');
+    } catch (e) { toast(e.message); }
+    finally { const b = $('cVai'); if (b) b.disabled = false; }
+    disegnaAuto();
+  }
+  async function riavvia(extra) {
+    try { S = await AX.api('auto/account', {method: 'POST', body: extra || {}, timeout: 60000}); toast('Il collegamento riparte'); }
+    catch (e) { toast(e.message); }
+    if (tab === 'auto') disegnaAuto();
+  }
+  $('vAuto').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.pin) apriPin(b.dataset.vin, b.dataset.pin);
+    else if (b.dataset.pinok) confermaPin(b.dataset.pinok);
+    else if (b.dataset.pinno) chiudiPin(b.dataset.pinno);
+    else if (b.dataset.cmd) comando(b.dataset.vin, b.dataset.cmd, b.dataset.cmd === 'clima_on' ? {temperatura: tempClima} : {});
+    else if (b.dataset.temp) cambiaTemp(+b.dataset.temp);
+    else if (b.id === 'bAgg') { const v = (S && S.veicoli || [])[0]; if (v) comando(v.vin, 'aggiorna'); }
+    else if (b.id === 'bRiavvia') riavvia({});
+    else if (b.id === 'bRicollega') { ricollega = true; disegnaAuto(); }
+    else if (b.id === 'cVai') collega();
+    else if (b.id === 'cNo') { ricollega = false; document.activeElement && document.activeElement.blur(); disegnaAuto(); }
+    else if (b.id === 'aNomina') { $('aNomBox').hidden = false; $('aNomIn').value = posNow && posNow.nome && posNow.nome !== posNow.indirizzo ? posNow.nome : ''; $('aNomIn').focus(); }
+    else if (b.id === 'aNomNo') { $('aNomBox').hidden = true; $('aNomIn').blur(); }
+    else if (b.id === 'aNomOk') nomina(posNow, $('aNomIn').value, () => { $('aNomBox').hidden = true; $('aNomIn').blur(); aggiornaStato(true); });
+  });
+  $('vAuto').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    if (e.target.id && e.target.id.indexOf('pinIn-') === 0) confermaPin(e.target.id.slice(6));
+    else if (e.target.id === 'cP') collega();
+  });
+  async function nomina(p, nome, fatto) {
+    if (!p) return;
+    try { await AX.api('auto/luoghi', {method: 'POST', body: {lat: p.lat, lon: p.lon, nome: nome.trim()}}); toast(nome.trim() ? 'Nome salvato' : 'Nome tolto'); if (fatto) fatto(); }
+    catch (e) { toast(e.message); }
+  }
+
+  /* ---------- diario ---------- */
+  let giorni = +AX.store.get('auto-giorni', 30) || 30, D = null, mDia = null, strato = null, linea = null, sostaSel = null;
+  $('dGiorni').addEventListener('click', e => { const b = e.target.closest('button[data-g]'); if (!b) return; giorni = +b.dataset.g; AX.store.set('auto-giorni', giorni); caricaDiario(); });
+  async function caricaDiario() {
+    document.querySelectorAll('#dGiorni button').forEach(b => b.classList.toggle('on', +b.dataset.g === giorni));
+    $('dLista').innerHTML = '<div class="note">Carico il diario…</div>';
+    try { D = await AX.api('auto/diario?giorni=' + giorni, {timeout: 30000}); }
+    catch (e) { $('dLista').innerHTML = '<div class="note">' + esc(e.message) + '</div>'; return; }
+    disegnaDiario();
+  }
+  function giornoDi(s) {
+    const d = new Date(s * 1000), oggi = new Date(), ieri = new Date(Date.now() - 86400000);
+    if (d.toDateString() === oggi.toDateString()) return 'Oggi';
+    if (d.toDateString() === ieri.toDateString()) return 'Ieri';
+    return d.toLocaleDateString('it-IT', {weekday: 'long', day: 'numeric', month: 'long'});
+  }
+  function rigaEvento(e) {
+    const x = e.x;
+    if (e.tipo === 'v') {
+      const det = [nf(x.km, 1) + ' km' + (x.km_stimati ? ' (stimati)' : ''), (x.durata_stimata ? 'circa ' : '') + durata(x.minuti),
+        x.soc_da != null && x.soc_a != null ? nf(x.soc_da) + '% → ' + nf(x.soc_a) + '%' : '', x.kwh_100 != null ? nf(x.kwh_100, 1) + ' kWh/100 km' : '',
+        x.temp != null ? nf(x.temp) + ' °C' : '', x.con_ricarica ? 'con ricarica' : ''].filter(Boolean).join(' · ');
+      return '<button class="row multi" data-viaggio="' + x.id + '"><span class="ic">🚐</span><span class="tx"><b>' + ora(x.partenza) + ' · ' + esc(x.da_nome || '…') + ' → ' + esc(x.a_nome || '…') + '</b><span>' + esc(det) + '</span></span></button>';
+    }
+    if (e.tipo === 's') {
+      const fine = x.partenza ? ora(x.partenza) : 'adesso', min = ((x.partenza || Date.now() / 1000) - x.arrivo) / 60;
+      return '<button class="row multi" data-sosta="' + x.id + '"><span class="ic">🅿️</span><span class="tx"><b>' + esc(x.nome || 'Sosta') + '</b><span>' + ora(x.arrivo) + ' – ' + fine + ' · ' + durata(min) + (x.indirizzo && x.indirizzo !== x.nome ? ' · ' + esc(x.indirizzo) : '') + '</span></span></button>';
+    }
+    const det = [nf(x.soc_da) + '% → ' + nf(x.soc_a) + '%', x.fine ? durata((x.fine - x.inizio) / 60) : 'in corso', x.potenza_max ? 'fino a ' + nf(x.potenza_max) + ' kW' : '', x.tipo && x.tipo !== 'off' ? String(x.tipo).toUpperCase() : ''].filter(Boolean).join(' · ');
+    return '<div class="row multi"><span class="ic">⚡️</span><span class="tx"><b>' + ora(x.inizio) + ' · Ricarica' + (x.nome ? ' · ' + esc(x.nome) : '') + '</b><span>' + esc(det) + '</span></span></div>';
+  }
+  function disegnaDiario() {
+    const t = D.totali;
+    $('dTot').innerHTML = kv('Viaggi', nf(t.viaggi)) + kv('Chilometri', nf(t.km)) + kv('Alla guida', nf(t.ore, 1) + ' h') + kv('Consumo medio', t.kwh_100 == null ? '—' : nf(t.kwh_100, 1) + ' kWh/100 km');
+    const ev = [];
+    D.viaggi.forEach(x => ev.push({t: x.partenza, tipo: 'v', x}));
+    D.soste.forEach(x => ev.push({t: x.arrivo, tipo: 's', x}));
+    D.ricariche.forEach(x => ev.push({t: x.inizio, tipo: 'r', x}));
+    ev.sort((a, b) => b.t - a.t);
+    let h = '', g = '';
+    for (const e of ev) {
+      const gg = giornoDi(e.t);
+      if (gg !== g) { if (g) h += '</div>'; h += '<div class="giorno">' + esc(gg) + '</div><div class="list">'; g = gg; }
+      h += rigaEvento(e);
+    }
+    if (g) h += '</div>';
+    $('dLista').innerHTML = h || '<div class="note">Niente in questo periodo. Il diario si riempie da solo: ogni volta che parcheggi il Mac registra la sosta e il viaggio appena fatto.</div>';
+    mappaDiario();
+  }
+  async function mappaDiario() {
+    try { await leaflet(); } catch (e) { nienteMappa('mDia', e); return; }
+    if (!mDia) mDia = nuovaMappa('mDia');
+    if (strato) strato.remove();
+    if (linea) { linea.remove(); linea = null; }
+    strato = L.layerGroup().addTo(mDia);
+    const pts = [];
+    D.soste.forEach(s => { pts.push([s.lat, s.lon]); L.circleMarker([s.lat, s.lon], {radius: 6, color: '#0a84ff', weight: 2, fillOpacity: .6}).bindTooltip(esc(s.nome || 'Sosta')).addTo(strato); });
+    setTimeout(() => { mDia.invalidateSize(); if (pts.length) mDia.fitBounds(pts, {padding: [24, 24], maxZoom: 15}); else mDia.setView([42.6, 12.5], 5); }, 60);
+  }
+  async function mostraViaggio(id) {
+    const v = D.viaggi.find(x => x.id === id); if (!v) return;
+    toast('Ricostruisco la strada…');
+    try {
+      const g = await AX.api('auto/viaggi/' + id + '/percorso', {timeout: 45000});
+      await leaflet();
+      if (linea) linea.remove();
+      linea = L.polyline(g.punti, {color: '#fa2d48', weight: 5, opacity: .85}).addTo(mDia);
+      mDia.fitBounds(linea.getBounds(), {padding: [24, 24]});
+      $('dNota').textContent = 'Strada più probabile (' + nf(g.km, 1) + ' km): il cloud Volkswagen non trasmette il tracciato GPS, solo dove parcheggi. Il contachilometri dice ' + nf(v.km, 1) + ' km.';
+      $('mDia').scrollIntoView({behavior: 'smooth', block: 'center'});
+    } catch (e) { toast(e.message); }
+  }
+  $('dLista').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.viaggio) mostraViaggio(+b.dataset.viaggio);
+    else if (b.dataset.sosta) {
+      sostaSel = D.soste.find(s => s.id === +b.dataset.sosta);
+      if (!sostaSel) return;
+      $('dNomBox').hidden = false;
+      $('dNomIn').value = sostaSel.nome && sostaSel.nome !== sostaSel.indirizzo ? sostaSel.nome : '';
+      $('dNomIn').focus();
+      if (mDia) mDia.setView([sostaSel.lat, sostaSel.lon], 16);
+    }
+  });
+  $('dNomNo').addEventListener('click', () => { $('dNomBox').hidden = true; });
+  $('dNomOk').addEventListener('click', () => nomina(sostaSel, $('dNomIn').value, () => { $('dNomBox').hidden = true; caricaDiario(); }));
+
+  /* ---------- rendimento secondo la temperatura ---------- */
+  const segno = k => (k >= 1 ? '+' : '−') + nf(Math.abs(k - 1) * 100) + '%';
+  async function caricaRend() {
+    $('rBox').innerHTML = '<div class="note">Calcolo…</div>';
+    let R;
+    try { R = await AX.api('auto/rendimento', {timeout: 30000}); }
+    catch (e) { $('rBox').innerHTML = '<div class="note">' + esc(e.message) + '</div>'; return; }
+    const c = R.calibrazione, at = t => R.curva.find(x => x.t === t);
+    let h = '<div class="card"><b>' + (c.tipici ? 'Per ora: valori tipici della ' + esc(R.auto) : 'Imparato da ' + nf(c.viaggi) + ' viaggi (' + nf(c.km) + ' km)') + '</b>' +
+      '<div class="kv">' + kv('Stile di guida', segno(c.k_guida)) + kv('Clima', segno(c.k_clima)) + kv('Scarto medio', c.errore_pct == null ? '—' : '±' + nf(c.errore_pct) + '%') + '</div>' +
+      '<div class="small">Stile di guida: quanto consumi in marcia rispetto al modello fisico dell\'auto (+ vuol dire di più). Clima: quanto pesa il tuo riscaldamento o la tua aria condizionata rispetto al tipico.' +
+      (c.tipici ? ' Con almeno 5 viaggi da 5 km (senza ricariche in mezzo) i valori diventano i tuoi.' : '') + '</div></div>';
+    const a20 = at(20), a0 = at(0), am5 = at(-5), a30 = at(30);
+    h += '<p>Con il 100% a <b>20 °C</b> fai circa <b>' + nf(a20.autonomia_100) + ' km</b>; a <b>0 °C</b> ' + nf(a0.autonomia_100) + ' km (' + nf(a0.rendimento_pct) + '%), a <b>−5 °C</b> ' + nf(am5.autonomia_100) + ' km (' + nf(am5.rendimento_pct) + '%), a <b>30 °C</b> ' + nf(a30.autonomia_100) + ' km. Calcolato alla tua velocità tipica (' + nf(R.velocita_tipica) + ' km/h) e con viaggi di ' + nf(R.viaggio_tipico_km) + ' km.</p>';
+    h += graficoRend(R);
+    if (R.fasce.length) {
+      h += '<table class="tab"><tr><th>Fuori</th><th>Viaggi</th><th>km</th><th>kWh/100</th><th>km per 1%</th><th>100%</th><th>Resa</th></tr>' +
+        R.fasce.map(f => '<tr><td>' + f.da + '…' + f.a + ' °C</td><td>' + f.viaggi + '</td><td>' + nf(f.km) + '</td><td>' + nf(f.kwh_100, 1) + '</td><td>' + nf(f.km_per_pct, 2) + '</td><td>' + nf(f.autonomia_100) + ' km</td><td>' + nf(f.rendimento_pct) + '%</td></tr>').join('') + '</table>' +
+        '<div class="small">Resa: i km rispetto a quelli che faresti a 20 °C. Il freddo pesa per tre motivi: il riscaldamento, la batteria fredda che rende meno e l\'aria più densa.</div>';
+    } else h += '<div class="note">Ancora nessun viaggio misurato: vedi la curva del modello. I punti arrivano dopo qualche viaggio (almeno 5 km e 2% di batteria, senza ricariche in mezzo).</div>';
+    $('rBox').innerHTML = h;
+  }
+  function graficoRend(R) {
+    const W = 600, H = 290, ml = 40, mr = 12, mt = 12, mb = 40;
+    const ys = R.curva.map(c => c.kwh_100).concat(R.fasce.map(f => f.kwh_100));
+    let y0 = Math.floor(Math.min.apply(null, ys) / 5) * 5, y1 = Math.ceil(Math.max.apply(null, ys) / 5) * 5;
+    if (y1 - y0 < 10) y1 = y0 + 10;
+    const X = t => ml + (Math.max(-10, Math.min(35, t)) + 10) / 45 * (W - ml - mr), Y = k => mt + (y1 - k) / (y1 - y0) * (H - mt - mb);
+    let s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Consumo secondo la temperatura esterna">';
+    for (let k = y0; k <= y1; k += 5) s += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(k) + '" y2="' + Y(k) + '" style="stroke:var(--sep)"/><text x="' + (ml - 6) + '" y="' + (Y(k) + 4) + '" text-anchor="end">' + k + '</text>';
+    for (let t = -10; t <= 35; t += 5) s += '<text x="' + X(t) + '" y="' + (H - mb + 16) + '" text-anchor="middle">' + t + '°</text>';
+    s += '<polyline style="fill:none;stroke:var(--link);stroke-width:2.5" points="' + R.curva.map(c => X(c.t).toFixed(1) + ',' + Y(c.kwh_100).toFixed(1)).join(' ') + '"/>';
+    R.fasce.forEach(f => {
+      const t = f.temp_media != null ? f.temp_media : (f.da + f.a) / 2, r = Math.max(4, Math.min(14, Math.sqrt(f.km) / 2));
+      s += '<circle cx="' + X(t).toFixed(1) + '" cy="' + Y(f.kwh_100).toFixed(1) + '" r="' + r.toFixed(1) + '" style="fill:var(--accent);fill-opacity:.75"><title>' + esc(f.da + '…' + f.a + ' °C: ' + nf(f.kwh_100, 1) + ' kWh/100 km, ' + f.viaggi + ' viaggi') + '</title></circle>';
+    });
+    s += '<text x="' + ml + '" y="' + (H - 6) + '">kWh/100 km · linea: il modello calibrato sui tuoi viaggi · punti: misurati (più grandi = più km)</text>';
+    return s + '</svg>';
+  }
+
+  /* ---------- viaggio ---------- */
+  let IMP = null, P = null, dest = null, orig = null, mVia = null, viaggioPronto = false;
+  async function impostazioni() {
+    if (!IMP) IMP = await AX.api('auto/impostazioni');
+    return IMP;
+  }
+  async function initViaggio() {
+    try { await impostazioni(); } catch (e) { $('pRis').innerHTML = '<div class="note">' + esc(e.message) + '</div>'; return; }
+    const v = (S && S.veicoli || [])[0];
+    if (!viaggioPronto) {
+      viaggioPronto = true;
+      $('pVel').value = IMP.viaggio.velocita_max; $('pAbit').value = IMP.viaggio.abitacolo_c; $('pCar').value = IMP.auto.carico_kg;
+      $('pMus').checked = IMP.viaggio.musica; $('pIon').checked = IMP.viaggio.ionity_prima; $('pPre').checked = IMP.viaggio.precondiziona;
+      $('pSoc').value = v && v.soc != null ? Math.round(v.soc) : 80;
+      etichette();
+    }
+    const r = IMP.regole;
+    $('pRegole').textContent = 'Le tue regole: alla colonnina idealmente al ' + nf(r.arrivo_ideale) + '%, almeno al ' + nf(r.arrivo_min) + '%; se nella fascia giusta non ce n\'è una, va bene tra ' + nf(r.toll_min) + ' e ' + nf(r.toll_max) + '%. Ricarichi fino all\'' + nf(r.ricarica_max) + '%, arrivi a destinazione con almeno il ' + nf(r.destinazione_min) + '%. Si cambiano in ⚙︎.';
+    if (!orig) $('pDa').placeholder = v && v.posizione ? 'Dove si trova l\'auto' + (v.posizione.nome ? ' (' + v.posizione.nome + ')' : '') : 'Cerca il punto di partenza';
+  }
+  function etichette() { $('pVelT').textContent = $('pVel').value + ' km/h'; $('pAbitT').textContent = nf(+$('pAbit').value, 1) + ' °C'; }
+  $('pVel').addEventListener('input', etichette);
+  $('pAbit').addEventListener('input', etichette);
+  function cercaLuogo(input, box, scegli) {
+    let t = 0, n = 0;
+    input.addEventListener('input', () => {
+      clearTimeout(t); scegli(null);
+      const q = input.value.trim();
+      if (q.length < 3) { box.innerHTML = ''; return; }
+      t = setTimeout(async () => {
+        const mio = ++n;
+        try {
+          const j = await AX.api('auto/cerca?q=' + encodeURIComponent(q), {timeout: 20000});
+          if (mio !== n) return;
+          box._r = j.risultati;
+          box.innerHTML = j.risultati.map((r, i) => '<button data-i="' + i + '">' + esc(r.nome) + '</button>').join('') || '<div class="small" style="padding:10px 14px">Nessun risultato</div>';
+        } catch (e) { if (mio === n) box.innerHTML = '<div class="small" style="padding:10px 14px">' + esc(e.message) + '</div>'; }
+      }, 550);
+    });
+    box.addEventListener('click', e => {
+      const b = e.target.closest('button[data-i]'); if (!b || !box._r) return;
+      const r = box._r[+b.dataset.i];
+      input.value = r.nome; box.innerHTML = ''; input.blur(); scegli(r);
+    });
+  }
+  cercaLuogo($('pDa'), $('pDaSug'), r => { orig = r; });
+  cercaLuogo($('pA'), $('pASug'), r => { dest = r; });
+  $('pCalcola').addEventListener('click', calcola);
+  async function calcola() {
+    if (!dest) { toast('Scegli la destinazione dall\'elenco'); $('pA').focus(); return; }
+    if (!orig && $('pDa').value.trim()) { toast('Scegli la partenza dall\'elenco, o lascia vuoto per partire da dove è l\'auto'); return; }
+    const q = $('pQuando').value, v = (S && S.veicoli || [])[0];
+    const corpo = {a: {lat: dest.lat, lon: dest.lon}, da: orig ? {lat: orig.lat, lon: orig.lon} : null, vin: v ? v.vin : null,
+      soc: +$('pSoc').value || null, partenza: q ? new Date(q).getTime() / 1000 : null,
+      opzioni: {velocita_max: +$('pVel').value, abitacolo_c: +$('pAbit').value, carico_kg: +$('pCar').value || 0,
+        musica: $('pMus').checked, ionity_prima: $('pIon').checked, precondiziona: $('pPre').checked}};
+    $('pCalcola').disabled = true;
+    $('pRis').innerHTML = '<div class="note">Calcolo strada, salite, meteo e colonnine… può servire un minuto.</div>';
+    try { P = await AX.api('auto/viaggio', {method: 'POST', body: corpo, timeout: 180000}); disegnaPiano(); }
+    catch (e) { $('pRis').innerHTML = '<div class="note" style="color:var(--bad)">' + esc(e.message) + '</div>'; }
+    finally { $('pCalcola').disabled = false; }
+  }
+  function disegnaPiano() {
+    const p = P, e = p.energia, c = p.calibrazione;
+    let h = '<div class="card"><div class="h2" style="margin-top:0">' + nf(p.km) + ' km · ' + durata(p.ore_guida * 60) + ' di guida</div>' +
+      '<div class="kv">' + kv('Soste', p.soste.length ? p.soste.length + ' · ' + durata(p.minuti_ricarica) : 'nessuna') +
+      kv('Arrivo', ora(p.arrivo) + ' · ' + nf(p.soc_arrivo) + '%') + kv('Consumo', nf(p.kwh_100, 1) + ' kWh/100 km') + kv('Ricariche', p.costo ? '≈ ' + nf(p.costo, 2) + ' €' : '—') + '</div>' +
+      '<div class="small">Fuori ' + nf(p.temperature.min) + '…' + nf(p.temperature.max) + ' °C · al massimo ' + nf(p.velocita_max) + ' km/h · stile di guida e clima ' + (c.tipici ? 'tipici (pochi viaggi registrati)' : 'imparati da ' + nf(c.viaggi) + ' viaggi') + '</div></div>';
+    h += p.avvisi.map(a => '<div class="note">⚠️ ' + esc(a) + '</div>').join('');
+    h += '<div class="map" id="mVia"></div>';
+    h += '<div class="list">' + '<div class="row multi"><span class="ic">🟢</span><span class="tx"><b>Partenza · ' + ora(p.partenza) + '</b><span>con il ' + nf(p.soc_partenza) + '%</span></span></div>';
+    p.soste.forEach((s, i) => {
+      h += '<div class="row multi"><span class="ic" style="background:' + (s.ionity ? '#1fae5b' : '#0a84ff') + ';color:#fff;font-weight:700">' + (i + 1) + '</span><span class="tx"><b>' + esc(s.nome) + (s.operatore && s.operatore !== s.nome ? ' · ' + esc(s.operatore) : '') + '</b><span>' +
+        'km ' + nf(s.km) + ' · arrivi alle ' + ora(s.ora_arrivo) + ' al <strong>' + nf(s.arrivo_soc) + '%</strong> (' + esc(FASCIA[s.fascia] || '') + ') · ricarichi fino al ' + nf(s.partenza_soc) + '% in ' + durata(s.minuti) +
+        ' (' + nf(s.kw) + (s.kw_noto ? '' : '?') + ' kW)' + (s.costo ? ' · ≈ ' + nf(s.costo, 2) + ' €' : '') + (s.deviazione_km ? ' · deviazione ' + nf(s.deviazione_km, 1) + ' km' : '') + '</span></span>' +
+        '<a class="btn sm" href="naviga.html#verso=' + s.lat + ',' + s.lon + '">Naviga</a></div>';
+    });
+    h += '<div class="row multi"><span class="ic">🏁</span><span class="tx"><b>Arrivo · ' + ora(p.arrivo) + '</b><span>con il ' + nf(p.soc_arrivo) + '%</span></span><a class="btn sm" href="naviga.html#verso=' + p.a.lat + ',' + p.a.lon + '">Naviga</a></div></div>';
+    h += '<div class="h2">Batteria lungo la strada</div>' + graficoSoc(p);
+    h += '<div class="h2">Dove va l\'energia</div><div class="kv">' + kv('Guida', nf(e.guida, 1) + ' kWh') + kv('Recupero', nf(e.recupero, 1) + ' kWh') + kv('Clima', nf(e.clima, 1) + ' kWh') +
+      kv('Elettronica', nf(e.elettronica, 1) + ' kWh') + kv('Musica', nf(e.musica, 2) + ' kWh') + (e.preriscaldo ? kv('Abitacolo alla partenza', nf(e.preriscaldo, 1) + ' kWh') : '') +
+      (e.precondizionamento ? kv('Batteria pronta a ricaricare', nf(e.precondizionamento, 1) + ' kWh') : '') + kv('Totale', nf(e.totale, 1) + ' kWh') + '</div>' +
+      '<div class="small">La musica pesa pochissimo (circa 40 W); d\'inverno il clima pesa molto di più. Strade: OSRM; quote e meteo: Open-Meteo; colonnine: OpenStreetMap (controlla sempre che siano attive).</div>';
+    $('pRis').innerHTML = h;
+    mappaPiano();
+  }
+  function graficoSoc(p) {
+    const W = 600, H = 230, ml = 34, mr = 10, mt = 10, mb = 28, r = p.regole, km = Math.max(p.km, 1);
+    const X = k => ml + k / km * (W - ml - mr), Y = s => mt + (100 - Math.max(0, Math.min(100, s))) / 100 * (H - mt - mb);
+    let s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Batteria lungo il percorso">';
+    s += '<rect x="' + ml + '" y="' + Y(r.toll_max) + '" width="' + (W - ml - mr) + '" height="' + (Y(r.toll_min) - Y(r.toll_max)) + '" style="fill:var(--warn);fill-opacity:.12"/>';
+    s += '<rect x="' + ml + '" y="' + Y(r.arrivo_ideale) + '" width="' + (W - ml - mr) + '" height="' + (Y(r.arrivo_min) - Y(r.arrivo_ideale)) + '" style="fill:var(--ok);fill-opacity:.22"/>';
+    for (let v = 0; v <= 100; v += 20) s += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" style="stroke:var(--sep)"/><text x="' + (ml - 5) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '%</text>';
+    const q = p.profilo.map(x => x.quota), qa = Math.min.apply(null, q), qb = Math.max.apply(null, q);
+    if (qb - qa > 50) s += '<polyline style="fill:none;stroke:var(--fg3);stroke-width:1.5" points="' + p.profilo.map(x => X(x.km).toFixed(1) + ',' + (H - mb - (x.quota - qa) / (qb - qa) * (H - mt - mb) * 0.3).toFixed(1)).join(' ') + '"/>';
+    s += '<polyline style="fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round" points="' + p.profilo.map(x => X(x.km).toFixed(1) + ',' + Y(x.soc).toFixed(1)).join(' ') + '"/>';
+    p.soste.forEach(x => { s += '<circle cx="' + X(x.km).toFixed(1) + '" cy="' + Y(x.arrivo_soc).toFixed(1) + '" r="4.5" style="fill:var(--accent)"/>'; });
+    [0, km / 2, km].forEach(k => { s += '<text x="' + X(k) + '" y="' + (H - 8) + '" text-anchor="' + (k === 0 ? 'start' : k === km ? 'end' : 'middle') + '">' + nf(k) + ' km</text>'; });
+    return s + '</svg><div class="small">Verde: la tua fascia ideale (' + nf(r.arrivo_min) + '–' + nf(r.arrivo_ideale) + '%); giallo: la tolleranza (' + nf(r.toll_min) + '–' + nf(r.toll_max) + '%); grigio: le salite.</div>';
+  }
+  async function mappaPiano() {
+    try { await leaflet(); } catch (e) { nienteMappa('mVia', e); return; }
+    if (mVia) { mVia.remove(); mVia = null; }
+    mVia = nuovaMappa('mVia');
+    const l = L.polyline(P.geo, {color: '#0a84ff', weight: 5, opacity: .85}).addTo(mVia);
+    P.soste.forEach((s, i) => L.marker([s.lat, s.lon], {icon: L.divIcon({className: 'nmk' + (s.ionity ? '' : ' altra'), html: '<b>' + (i + 1) + '</b>', iconSize: [26, 26]})}).bindTooltip(esc(s.nome)).addTo(mVia));
+    L.circleMarker([P.da.lat, P.da.lon], {radius: 7, color: '#fff', weight: 3, fillColor: '#34c759', fillOpacity: 1}).addTo(mVia);
+    L.circleMarker([P.a.lat, P.a.lon], {radius: 8, color: '#fff', weight: 3, fillColor: '#fa2d48', fillOpacity: 1}).addTo(mVia);
+    setTimeout(() => { mVia.invalidateSize(); mVia.fitBounds(l.getBounds(), {padding: [20, 20]}); }, 60);
+  }
+
+  /* ---------- impostazioni ---------- */
+  let tScollega = 0, tCancella = 0;
+  async function apriImp() {
+    mostra('imp');
+    $('vImp').innerHTML = '<div class="note">Carico…</div>';
+    try { IMP = await AX.api('auto/impostazioni'); } catch (e) { $('vImp').innerHTML = '<div class="btns"><button class="btn" id="iFine">‹ Torna</button></div><div class="note">' + esc(e.message) + '</div>'; return; }
+    disegnaImp();
+  }
+  function campo(g, k, etichetta, passo, unita) {
+    return '<div class="field"><label for="i-' + g + '-' + k + '">' + esc(etichetta) + (unita ? ' (' + esc(unita) + ')' : '') + '</label><input class="in" type="number" inputmode="decimal" step="' + passo + '" id="i-' + g + '-' + k + '" data-g="' + g + '" data-k="' + k + '" value="' + esc(IMP[g][k]) + '"></div>';
+  }
+  function spunta(g, k, etichetta) {
+    return '<label class="sw"><span>' + esc(etichetta) + '</span><input type="checkbox" data-g="' + g + '" data-k="' + k + '"' + (IMP[g][k] ? ' checked' : '') + '></label>';
+  }
+  function disegnaImp() {
+    const acc = (S && S.account) || {}, r = IMP.regole;
+    let h = '<div class="btns"><button class="btn" id="iFine">‹ Torna</button></div>';
+    h += '<div class="h2">Account Volkswagen</div><div class="card">';
+    if (acc.collegato) {
+      h += '<b>' + esc(acc.utente) + '</b><div class="small">Password nel ' + (acc.dove === 'portachiavi' ? 'Portachiavi del Mac mini' : 'file privato del Mac mini') + ' · collegamento ' + esc(FASE[(acc.ponte || {}).fase] || '—') + '</div>' +
+        '<label class="sw"><span>Forza apri e chiudi (se l\'app Volkswagen ce l\'ha ma qui non compare)</span><input type="checkbox" id="iForza"' + (acc.forza_accesso ? ' checked' : '') + '></label>' +
+        '<div class="btns"><button class="btn sm" id="iLib">Aggiorna la libreria Volkswagen</button><button class="btn sm" id="iRic">Cambia account</button><button class="btn sm" id="iScollega" style="color:var(--bad)">Scollega</button></div>' +
+        '<div class="small">«Aggiorna la libreria» serve se Volkswagen cambia qualcosa nel suo cloud e le letture si fermano.</div>';
+    } else h += 'Non collegato: collega l\'account dalla scheda Auto.';
+    h += '</div><div class="h2">Batteria in viaggio</div><div class="card"><div class="small">Alla colonnina idealmente al ' + nf(r.arrivo_ideale) + '%, almeno al ' + nf(r.arrivo_min) + '%; se nella fascia giusta non c\'è una colonnina va bene tra ' + nf(r.toll_min) + ' e ' + nf(r.toll_max) + '%.</div>' +
+      '<div class="grid2">' + campo('regole', 'arrivo_ideale', 'Arrivo ideale alla colonnina', 1, '%') + campo('regole', 'arrivo_min', 'Arrivo minimo', 1, '%') +
+      campo('regole', 'toll_min', 'Tolleranza: non sotto', 1, '%') + campo('regole', 'toll_max', 'Tolleranza: non sopra', 1, '%') +
+      campo('regole', 'ricarica_max', 'Ricarica fino a', 1, '%') + campo('regole', 'destinazione_min', 'Arrivo a destinazione almeno', 1, '%') + '</div></div>';
+    h += '<div class="h2">Viaggio</div><div class="card">' + campo('viaggio', 'velocita_max', 'Velocità massima', 5, 'km/h') + campo('viaggio', 'abitacolo_c', 'Temperatura dell\'abitacolo', 0.5, '°C') +
+      spunta('viaggio', 'musica', 'Musica accesa') + spunta('viaggio', 'ionity_prima', 'Preferisci Ionity') + spunta('viaggio', 'precondiziona', 'Scalda la batteria prima della ricarica rapida') + '</div>';
+    h += '<div class="h2">L\'auto</div><div class="card"><div class="field"><label for="i-auto-nome">Nome</label><input class="in" id="i-auto-nome" data-g="auto" data-k="nome" data-testo="1" maxlength="80" value="' + esc(IMP.auto.nome) + '"></div>' +
+      campo('auto', 'capacita_kwh', 'Capacità utile della batteria', 0.5, 'kWh') + campo('auto', 'massa_kg', 'Massa con conducente', 10, 'kg') + campo('auto', 'carico_kg', 'Carico abituale', 10, 'kg') +
+      campo('auto', 'dc_max_kw', 'Potenza massima di ricarica rapida', 1, 'kW') + spunta('auto', 'pompa_calore', 'Pompa di calore') +
+      '<details><summary class="small">Valori avanzati del modello</summary>' + campo('auto', 'cda', 'Resistenza dell\'aria CdA', 0.01, 'm²') + campo('auto', 'crr', 'Resistenza al rotolamento', 0.0005, '') +
+      campo('auto', 'rend_motore', 'Rendimento batteria → ruote', 0.01, '') + campo('auto', 'rend_recupero', 'Recupero in discesa', 0.01, '') +
+      campo('auto', 'elettronica_kw', 'Elettronica di bordo', 0.05, 'kW') + campo('auto', 'musica_kw', 'Impianto audio', 0.01, 'kW') + '</details></div>';
+    h += '<div class="h2">Prezzi della ricarica</div><div class="card"><div class="grid2">' + campo('prezzi', 'ionity_IT', 'Ionity in Italia', 0.01, '€/kWh') + campo('prezzi', 'ionity_FR', 'Ionity in Francia', 0.01, '€/kWh') +
+      campo('prezzi', 'ionity_ES', 'Ionity in Spagna', 0.01, '€/kWh') + campo('prezzi', 'ionity_altri', 'Ionity negli altri paesi', 0.01, '€/kWh') + campo('prezzi', 'altri', 'Altre colonnine rapide (stima)', 0.01, '€/kWh') + '</div></div>';
+    h += '<div class="btns"><button class="btn pri" id="iSalva">Salva le impostazioni</button></div>';
+    h += '<div class="h2">Diario</div><div class="card"><div class="small">Viaggi, soste e ricariche restano solo sul Mac mini. I nomi che hai dato ai posti restano anche se cancelli il diario.</div><div class="btns"><button class="btn sm" id="iCanc" style="color:var(--bad)">Cancella il diario</button></div></div>';
+    $('vImp').innerHTML = h;
+  }
+  async function salvaImp() {
+    const nuove = {};
+    $('vImp').querySelectorAll('[data-g][data-k]').forEach(i => {
+      const g = i.dataset.g, k = i.dataset.k;
+      nuove[g] = nuove[g] || {};
+      nuove[g][k] = i.type === 'checkbox' ? i.checked : i.dataset.testo ? i.value : parseFloat(String(i.value).replace(',', '.'));
+    });
+    try { IMP = await AX.api('auto/impostazioni', {method: 'POST', body: nuove}); viaggioPronto = false; toast('Impostazioni salvate'); disegnaImp(); }
+    catch (e) { toast(e.message); }
+  }
+  $('vImp').addEventListener('click', async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'iFine') mostra(tab === 'imp' ? (AX.store.get('auto-tab', 'auto') || 'auto') : tab);
+    else if (b.id === 'iSalva') salvaImp();
+    else if (b.id === 'iLib') { try { S = await AX.api('auto/libreria', {method: 'POST', timeout: 60000}); toast('Aggiorno la libreria: il collegamento riparte da solo'); } catch (x) { toast(x.message); } }
+    else if (b.id === 'iRic') { ricollega = true; mostra('auto'); }
+    else if (b.id === 'iScollega') {
+      if (!tScollega) { b.textContent = 'Tocca di nuovo per scollegare'; tScollega = setTimeout(() => { tScollega = 0; b.textContent = 'Scollega'; }, 4000); return; }
+      clearTimeout(tScollega); tScollega = 0;
+      try { S = await AX.api('auto/account', {method: 'DELETE', timeout: 60000}); toast('Account scollegato: email, password e sessione tolte dal Mac'); disegnaImp(); } catch (x) { toast(x.message); }
+    } else if (b.id === 'iCanc') {
+      if (!tCancella) { b.textContent = 'Tocca di nuovo per cancellare'; tCancella = setTimeout(() => { tCancella = 0; b.textContent = 'Cancella il diario'; }, 4000); return; }
+      clearTimeout(tCancella); tCancella = 0;
+      try { await AX.api('auto/diario/cancella', {method: 'POST', body: {conferma: true}}); toast('Diario cancellato'); b.textContent = 'Cancella il diario'; } catch (x) { toast(x.message); }
+    }
+  });
+  $('vImp').addEventListener('change', async e => {
+    if (e.target.id !== 'iForza') return;
+    try { S = await AX.api('auto/account', {method: 'POST', body: {forza_accesso: e.target.checked}, timeout: 60000}); toast('Il collegamento riparte con la nuova opzione'); }
+    catch (x) { toast(x.message); e.target.checked = !e.target.checked; }
+  });
+
+  /* ---------- avvio ---------- */
+  setInterval(() => { if (!document.hidden && tab === 'auto') aggiornaStato(true); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && tab === 'auto') aggiornaStato(true); });
+  mostra(tab);
+})();
+</script>
+</body>
+</html>

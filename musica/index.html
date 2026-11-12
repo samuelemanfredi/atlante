@@ -4582,6 +4582,8 @@ const XMODS = [
     {k:'video', t:'Video e streaming', d:'Servizi di streaming e download', i:'🎬', c:'#ff3b30'},
     {k:'live', t:'Vai in diretta', d:'Social e piattaforme audio e video', i:'🔴', c:'#e0245e'}]},
   {g:'In viaggio', m:[
+    // solo Samuele (anche il Mac controlla): dalla pagina si apre e si chiude l'auto
+    {k:'auto', t:'La mia Volkswagen', d:'Apri e chiudi, clima, diario, autonomia', i:'🚐', c:'#30b0c7', solo:'proprietario'},
     {k:'naviga', t:'Navigatore', d:'GPS con la tua musica, vignette, veicolo', i:'🧭', c:'#007aff'}]},
   {g:'Per te', m:[
     XIDEE,
@@ -4614,7 +4616,9 @@ const puoInvitare = () => IO.ruolo === 'proprietario' || IO.ruolo === 'invitato'
 const nuoveGestione = () => Object.values(IO.nuove || {}).reduce((a, n) => a + (+n || 0), 0);
 function xmodsVisibili() {
   if (IO.ruolo === 'invitato') return XINVITATI;
-  return (IO.ruolo === 'proprietario' ? [{g:'Condividi', m:[XCONDIVIDI]}, XGESTIONE] : []).concat(XMODS);
+  // una voce con «solo» (La mia Volkswagen: solo Samuele) la vede solo quel ruolo; un gruppo rimasto vuoto non c'è
+  const mods = XMODS.map(g => ({g:g.g, m:g.m.filter(m => !m.solo || m.solo === IO.ruolo)})).filter(g => g.m.length);
+  return (IO.ruolo === 'proprietario' ? [{g:'Condividi', m:[XCONDIVIDI]}, XGESTIONE] : []).concat(mods);
 }
 /* ----- chat cifrata (fase 5a): un riquadro per tutti, anche per gli invitati; la notifica toccata apre la chat ----- */
 const XCHAT = {k:'chat', t:'Chat', d:'Messaggi cifrati da telefono a telefono', i:'💬', c:'#34c759'};
