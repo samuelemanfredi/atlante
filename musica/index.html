@@ -2612,6 +2612,31 @@ function controllaPartenza(passo, attese) {
     riavviaApp('lettore fermo');
   }, PARTENZA.DOPO);
 }
+/* ---------- la musica che si ferma da sola a metà ----------
+   Il lettore dice «suona» ma il tempo non va avanti: la rete è caduta mentre il brano arrivava dal Mac, l'iPhone ha perso
+   il flusso uscendo e rientrando nell'app, il mixer si è fermato. Prima restava muto finché non si toccava qualcosa (12/11).
+   Ogni 2 s (e al ritorno nell'app): se la musica dovrebbe suonare e il tempo è fermo da 8 s (15 s se il brano sta ancora
+   arrivando dalla rete), si riparte dallo stesso punto, dal file sul telefono se c'è; al terzo blocco dello stesso brano
+   si passa al successivo. Mai durante un passaggio del mix (lo segue controllaPassaggio), con la musica in pausa o
+   comandando un altro dispositivo. Ogni passo va nel diario (scatola nera del Mac). */
+const GUARDIA = {t:-1, da:0, id:null, volte:0, FERMO:8000, ARRIVA:15000};
+function guardiaGiro() {
+  const el = au, ora = Date.now();
+  if (!curId || RC.id || el === AUX || el.paused || el.ended || MIX.act || MIX.salto || CH.aperta) { GUARDIA.da = 0; return; }
+  const t = el.currentTime || 0;
+  if (GUARDIA.id !== curId) { GUARDIA.id = curId; GUARDIA.volte = 0; GUARDIA.t = t; GUARDIA.da = ora; return; }
+  if (!GUARDIA.da || Math.abs(t - GUARDIA.t) > 0.2) { GUARDIA.t = t; GUARDIA.da = ora; return; }   // va avanti
+  if (ora - GUARDIA.da < (el.readyState < 3 && navigator.onLine !== false ? GUARDIA.ARRIVA : GUARDIA.FERMO)) return;
+  GUARDIA.da = ora; GUARDIA.volte++;
+  diario('fermo a metà', {t:Math.round(t), rs:el.readyState, rete:el.networkState, err:el.error ? el.error.code : 0, volta:GUARDIA.volte,
+    ctx:MIX.ctx ? MIX.ctx.state : 'no', nascosta:!!document.hidden});
+  if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+  if (GUARDIA.volte >= 3 && S.qi < S.queue.length - 1) { toast('Questo brano non arriva: passo al successivo'); next(false); return; }
+  toast('La musica si era fermata: riparto da qui');
+  load(S.qi, true, t);   // lo stesso brano, dallo stesso punto (dal file sul telefono se intanto è arrivato)
+}
+setInterval(guardiaGiro, 2000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(guardiaGiro, 1500); });
 function riavviaApp(perche) {
   const r = ls.get('am-riavvio', {});
   if (Date.now() - (r.t || 0) < PARTENZA.RIAVVIO) { diario('riavvio saltato', {perche}); toast('L\'audio non riparte: chiudi l\'app (scorri verso l\'alto) e riaprila', true); return; }
@@ -6640,7 +6665,8 @@ function testoAttesa(j, tr, ritentato) {
   if (testoVivo(j)) return 2000;
   if (j.stato === 'in arrivo') return 2500;
   if (tr && tr.stato === 'in corso') return 3000;
-  if (j.allineamento === 'in coda' || j.allineamento === 'in corso') return 15000;
+  if (j.allineamento === 'in corso') return 5000;   // Whisper lo sta allineando adesso (il brano che si ascolta): presto
+  if (j.allineamento === 'in coda') return 15000;
   return j.tardi && !ritentato ? 10000 : 0;
 }
 // il testo che si vede: subito la copia sul telefono, poi quella del Mac (che può avere le parole dalla voce o la
