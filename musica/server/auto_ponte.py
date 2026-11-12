@@ -13,6 +13,8 @@ Protocollo, una riga JSON per messaggio:
                         {"tipo": "stato", "t", "veicoli": [{"vin", "attr": {percorso: [valore, unità, misurato]},
                                                            "comandi": {percorso: disponibile}}]}
                         {"tipo": "errore", "testo", "grave"}   grave: accesso rifiutato (il ponte si chiude)
+                        {"tipo": "errore", "codice": "vw_blocca", ...}   Volkswagen blocca le app non ufficiali
+                                                                          (il ponte si chiude, Atlante riprova più tardi)
                         {"tipo": "risposta", "id", "ok", "errore"?}
 Quando stdin si chiude (Atlante si ferma o si riavvia) il ponte salva la sessione e si chiude. La password resta solo
 in memoria; su disco (token.json, cache.json) c'è solo la sessione di CarConnectivity, come fa l'app ufficiale.
@@ -37,6 +39,11 @@ SVEGLIA = threading.Event()    # una lettura adesso («aggiorna», o poco dopo u
 FINE = threading.Event()
 MIN_TRA_LETTURE = 60           # al più una lettura al minuto: il cloud Volkswagen limita le richieste dell'account
 DOPO_COMANDO = 35              # dopo un comando si rilegge: l'auto lo ha eseguito e il cloud lo sa
+# Dal 27/05/2026 il cloud Volkswagen risponde 403 (Azure Application Gateway) già alla pagina di accesso usata da
+# CarConnectivity, per tutti: issue #107 di CarConnectivity-connector-volkswagen, ancora aperta il 12/11/2026
+VW_BLOCCA = ("Volkswagen da fine maggio 2026 blocca il suo cloud alle app non ufficiali, compresa la libreria usata "
+             "qui: risponde «403» prima ancora di chiedere la password, quindi non dipende dal tuo account. Apri, "
+             "chiudi e clima per ora funzionano solo dall'app Volkswagen.")
 AZIONI = {
     "blocca": ("doors/commands/lock-unlock", "lock"),
     "sblocca": ("doors/commands/lock-unlock", "unlock"),
@@ -234,16 +241,26 @@ def main():
         scrivi({"tipo": "errore", "grave": True, "codice": "libreria",
                 "testo": "La libreria CarConnectivity non è pronta: %s" % testo_breve(e)})
         return 3
-    config = {"carConnectivity": {"log_level": "error", "plugins": [], "connectors": [{
-        "type": "volkswagen", "config": {"username": conf["utente"], "password": conf["password"],
-                                         "interval": intervallo, "max_age": 30,
-                                         "force_enable_access": bool(conf.get("forza_accesso"))}}]}}
+    if conf.get("fonte") == "dati":
+        # il portale EU Data Act di Volkswagen (sola lettura): l'unica via che funziona da fine maggio 2026
+        connettore = {"type": "vw_eu_data_act", "config": {
+            "username": conf["utente"], "password": conf["password"], "interval": intervallo,
+            "country": conf.get("paese") or "IT", "language": conf.get("lingua") or "it",
+            "brand": conf.get("marca") or "VOLKSWAGEN_PASSENGER_CARS"}}
+    else:
+        connettore = {"type": "volkswagen", "config": {
+            "username": conf["utente"], "password": conf["password"], "interval": intervallo, "max_age": 30,
+            "force_enable_access": bool(conf.get("forza_accesso"))}}
+    config = {"carConnectivity": {"log_level": "error", "plugins": [], "connectors": [connettore]}}
     conf["password"] = None
     try:
         cc = cc_mod.CarConnectivity(config=config, tokenstore_file=os.path.join(cartella, "token.json"),
                                     cache_file=os.path.join(cartella, "cache.json"))
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
+        if "Authorization URL could not be fetched" in str(e):
+            scrivi({"tipo": "errore", "grave": False, "codice": "vw_blocca", "testo": VW_BLOCCA})
+            return 5
         scrivi({"tipo": "errore", "grave": isinstance(e, cc_err.AuthenticationError),
                 "testo": "Avvio del collegamento non riuscito: %s" % testo_breve(e)})
         return 4

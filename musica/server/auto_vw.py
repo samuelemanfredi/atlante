@@ -36,7 +36,8 @@ import urllib.request
 
 QUI = os.path.dirname(os.path.abspath(__file__))
 PONTE = os.path.join(QUI, "auto_ponte.py")
-PACCHETTI = ["carconnectivity>=0.11.11", "carconnectivity-connector-volkswagen>=0.10.6"]
+PACCHETTI = ["carconnectivity>=0.11.11", "carconnectivity-connector-volkswagen>=0.10.6",
+             "carconnectivity-connector-vw-eu-data-act>=0.3.4"]
 # CarConnectivity dichiara Python 3.9 ma vuole requests 2.34, che dalla 2.33 gira solo da Python 3.10: con il 3.9 del Mac
 # pip non la installa («No matching distribution found for requests~=2.34.2», 12/11). Se il Python del server è più
 # vecchio, il ponte ne usa uno tutto suo scaricato da uv (di Astral; uv arriva con pip), in <cache>/auto/pythons
@@ -44,6 +45,7 @@ PYTHON_MIN = (3, 10)
 PYTHON_SCARICATO = "3.12"
 UA = "AtlanteAuto/1.0 (+https://github.com/samuelemanfredi/atlante; uso personale)"
 INTERVALLO = 300           # secondi tra due letture del cloud Volkswagen (più spesso il cloud rallenta l'account)
+RIPROVA_VW_BLOCCA = 6 * 3600   # Volkswagen blocca le app non ufficiali (auto_ponte.VW_BLOCCA): si riprova ogni 6 ore
 SERVIZIO_PORTACHIAVI = "Atlante - La mia Volkswagen"
 G = 9.81
 AZIONI = ("blocca", "sblocca", "clima_on", "clima_off", "sbrina_on", "sbrina_off", "aggiorna")
@@ -60,6 +62,14 @@ class ErroreAuto(Exception):
 # ---------------------------------------------------------------------------------------------------------------
 # impostazioni (valori tipici della ID. Buzz Pro 150 kW, batteria da 77 kWh utili; le regole sono quelle di Samuele)
 # ---------------------------------------------------------------------------------------------------------------
+# Da dove Atlante prende i dati dell'auto:
+#   "dati" — il portale EU Data Act di Volkswagen (eu-data-act.drivesomethinggreater.com): sola lettura, un dato ogni
+#            ~15 minuti, senza posizione GPS e senza comandi. È l'unica via che funziona da fine maggio 2026, da quando
+#            Volkswagen blocca il cloud dell'app alle app non ufficiali (vedi auto_ponte.VW_BLOCCA).
+#   "app"  — il cloud dell'app Volkswagen (apri/chiudi, clima): dà i comandi, ma oggi risponde 403 a tutte le app non
+#            ufficiali. Resta qui per il giorno in cui Volkswagen riaprisse: Atlante riprova da solo.
+FONTI = ("dati", "app")
+MARCHE = ("VOLKSWAGEN_PASSENGER_CARS", "VOLKSWAGEN_COMMERCIAL_VEHICLES", "AUDI", "SKODA", "SEAT", "CUPRA", "BENTLEY")
 PREDEFINITE = {
     "auto": {"nome": "ID. Buzz Pro 77 kWh", "capacita_kwh": 77.0, "massa_kg": 2500.0, "carico_kg": 100.0,
              "cda": 0.92, "crr": 0.009, "rend_motore": 0.87, "rend_recupero": 0.62, "elettronica_kw": 0.30,
@@ -69,6 +79,7 @@ PREDEFINITE = {
     "viaggio": {"velocita_max": 110.0, "abitacolo_c": 21.0, "musica": True, "ionity_prima": True,
                 "precondiziona": True},
     "prezzi": {"ionity_IT": 0.47, "ionity_FR": 0.33, "ionity_ES": 0.35, "ionity_altri": 0.47, "altri": 0.65},
+    "collegamento": {"fonte": "dati", "paese": "IT", "lingua": "it", "marca": "VOLKSWAGEN_PASSENGER_CARS"},
 }
 LIMITI = {
     "auto.capacita_kwh": (20, 150), "auto.massa_kg": (800, 4500), "auto.carico_kg": (0, 1500), "auto.cda": (0.3, 2.0),
@@ -87,6 +98,8 @@ ETICHETTE = {
     "regole.toll_max": "tolleranza massima", "regole.ricarica_max": "ricarica massima",
     "regole.destinazione_min": "arrivo a destinazione", "viaggio.velocita_max": "velocità massima",
     "viaggio.abitacolo_c": "temperatura dell'abitacolo",
+    "collegamento.fonte": "fonte dei dati", "collegamento.paese": "paese", "collegamento.lingua": "lingua",
+    "collegamento.marca": "marca",
 }
 
 
@@ -153,7 +166,21 @@ def _unisci(predefinite, salvate):
                     out[gruppo][k] = x
             elif isinstance(base, str):
                 out[gruppo][k] = str(s[k])[:80]
+    _sistema_collegamento(out["collegamento"])
     return out
+
+
+def _sistema_collegamento(c):
+    """fonte solo tra FONTI, marca solo tra MARCHE (se no i valori predefiniti): così il ponte riceve sempre valori buoni."""
+    if c.get("fonte") not in FONTI:
+        c["fonte"] = "dati"
+    if (c.get("marca") or "").upper() not in MARCHE:
+        c["marca"] = "VOLKSWAGEN_PASSENGER_CARS"
+    else:
+        c["marca"] = c["marca"].upper()
+    c["paese"] = (c.get("paese") or "IT").strip()[:5] or "IT"
+    c["lingua"] = (c.get("lingua") or "it").strip()[:5] or "it"
+    return c
 
 
 class Impostazioni:
@@ -194,6 +221,7 @@ class Impostazioni:
                                       "massima ≤ ricarica massima")
             if not r["toll_min"] <= r["destinazione_min"] < r["ricarica_max"]:
                 raise ErroreAuto(400, "L'arrivo a destinazione va tra la tolleranza minima e la ricarica massima")
+            _sistema_collegamento(prova["collegamento"])
             self.dati = prova
             _scrivi_json_privato(self.file, self.dati)
             return _copia(self.dati)
@@ -297,8 +325,9 @@ def _breve(e):
 
 
 class Ponte:
-    def __init__(self, cartella, alla_lettura):
+    def __init__(self, cartella, alla_lettura, collegamento=None):
         self.cartella = cartella
+        self.collegamento = collegamento or (lambda: {"fonte": "app"})
         self.venv = os.path.join(cartella, "python")
         self.strumenti = os.path.join(cartella, "strumenti")   # uv, se serve un Python più nuovo di quello del Mac
         self.registro = os.path.join(cartella, "ponte.log")
@@ -311,6 +340,7 @@ class Ponte:
         self.filo = None
         self.bloccato = ""          # accesso rifiutato: non riparte finché Samuele non ricollega l'account
         self.reinstalla = False
+        self.pausa = 0              # secondi prima di riprovare quando Volkswagen blocca l'accesso (vw_blocca)
         self.stato = {"fase": "spento", "messaggio": "", "dal": time.time()}
 
     def _fase(self, fase, messaggio=""):
@@ -387,16 +417,35 @@ class Ponte:
             cred = None
             if self.subito.is_set() and not self.fermo.is_set():
                 self.subito.clear()
+                self.pausa = 0
                 attesa = 15
                 continue
             if self.fermo.is_set() or self.bloccato:
                 break
+            if self.pausa:            # Volkswagen blocca l'accesso: si riprova tra qualche ora, il messaggio resta
+                pausa, self.pausa = self.pausa, 0
+                if self._aspetta(pausa):
+                    break
+                attesa = 15
+                continue
             if time.time() - inizio > 600:
                 attesa = 15
             self._fase("attesa", "Il collegamento si è fermato: riparto tra %d secondi" % attesa)
             if self.fermo.wait(attesa):
                 break
             attesa = min(attesa * 2, 900)
+
+    def _aspetta(self, secondi):
+        """Aspetta `secondi`. True se intanto Atlante si ferma; si sveglia subito (False) se avvia() porta credenziali
+        nuove o chiede di aggiornare la libreria."""
+        fine = time.time() + secondi
+        while not self.subito.is_set():
+            resta = fine - time.time()
+            if resta <= 0:
+                return False
+            if self.fermo.wait(min(resta, 30)):
+                return True
+        return False
 
     def _run(self, comando, timeout, env=None, cwd=None):
         """Un comando, con l'uscita (stdout e stderr insieme). A parte perché le prove lo sostituiscono."""
@@ -467,7 +516,8 @@ class Ponte:
         if not os.path.exists(py):
             self._crea_ambiente()
         prova = self._run([py, "-I", "-c", "import carconnectivity.carconnectivity, "
-                                            "carconnectivity_connectors.volkswagen.connector"], 180)
+                                            "carconnectivity_connectors.volkswagen.connector, "
+                                            "carconnectivity_connectors.vw_eu_data_act.connector"], 180)
         if prova.returncode != 0 or self.reinstalla:
             self._fase("installazione", "Scarico la libreria per il cloud Volkswagen (CarConnectivity)…")
             pip = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade"]
@@ -502,8 +552,15 @@ class Ponte:
         if fermato:          # fermato proprio mentre partiva: si chiude senza collegarsi
             p.terminate()
         try:
-            prima = {"utente": cred[0], "password": cred[1], "intervallo": INTERVALLO, "forza_accesso": cred[2],
-                     "cartella": self.cartella}
+            col = self.collegamento() or {}
+            fonte = col.get("fonte") if col.get("fonte") in FONTI else "app"
+            # «dati»: il ponte controlla ogni minuto, così prende il dato nuovo appena il portale lo pubblica; il
+            # connettore scarica dal portale solo quando è ora (~15 min) e riprova ogni minuto quando è in ritardo,
+            # quindi controllare spesso non tempesta il portale
+            prima = {"utente": cred[0], "password": cred[1], "forza_accesso": cred[2], "cartella": self.cartella,
+                     "intervallo": 60 if fonte == "dati" else INTERVALLO, "fonte": fonte,
+                     "paese": col.get("paese") or "IT", "lingua": col.get("lingua") or "it",
+                     "marca": col.get("marca") or "VOLKSWAGEN_PASSENGER_CARS"}
             p.stdin.write((json.dumps(prima) + "\n").encode("utf-8"))
             p.stdin.flush()
             prima = None
@@ -540,6 +597,10 @@ class Ponte:
             if m.get("codice") == "libreria":
                 self.reinstalla = True
                 self._fase("errore", testo)
+            elif m.get("codice") == "vw_blocca":
+                self.pausa = RIPROVA_VW_BLOCCA
+                quando = time.strftime("%H:%M", time.localtime(time.time() + RIPROVA_VW_BLOCCA))
+                self._fase("errore", "%s Riprovo da solo alle %s." % (testo, quando))
             elif m.get("grave"):
                 self.bloccato = testo
                 self._fase("errore", testo)
@@ -1777,7 +1838,7 @@ class Auto:
         self.arch = Archivio(os.path.join(self.cartella, "diario.sqlite"))
         self.diario = Diario(self.arch)
         self.srv = servizi or Servizi()
-        self.ponte = Ponte(self.cartella, self._alla_lettura)
+        self.ponte = Ponte(self.cartella, self._alla_lettura, lambda: self.imp.tutte()["collegamento"])
         self.lock = threading.RLock()
         self._file_stato = os.path.join(self.cartella, "stato.json")
         s = _leggi_json(self._file_stato, {})
@@ -1889,9 +1950,11 @@ class Auto:
         with self.lock:
             veicoli = [self._vista(n, miei) for n in self.veicoli.values()]
             lettura = self.lettura
+        col = self.imp.tutte()["collegamento"]
         return {"account": {"collegato": bool(d.get("utente")), "utente": maschera(d.get("utente")),
                             "dove": d.get("dove") or "", "forza_accesso": bool(d.get("forza_accesso")),
-                            "ponte": dict(self.ponte.stato), "bloccato": self.ponte.bloccato},
+                            "ponte": dict(self.ponte.stato), "bloccato": self.ponte.bloccato,
+                            "fonte": col["fonte"], "solo_lettura": col["fonte"] == "dati"},
                 "veicoli": veicoli, "lettura": lettura, "intervallo": INTERVALLO, "ora": time.time()}
 
     def collega(self, corpo):
@@ -1941,6 +2004,8 @@ class Auto:
         azione = str(corpo.get("azione") or "")
         if azione not in AZIONI:
             raise ErroreAuto(400, "Comando sconosciuto")
+        if self.imp.tutte()["collegamento"]["fonte"] == "dati" and azione != "aggiorna":
+            raise ErroreAuto(409, "Il portale dati è in sola lettura: apri, chiudi e clima solo dall'app Volkswagen")
         richiesta = {"azione": azione, "vin": str(corpo.get("vin") or "")}
         if azione in ("blocca", "sblocca"):
             spin = str(corpo.get("spin") or "")
@@ -2115,7 +2180,14 @@ class Auto:
             return 200, self.rendimento_api(q("vin"))
         if cosa == "impostazioni" and not resto:
             solo("GET", "POST")
-            return 200, (self.imp.tutte() if metodo == "GET" else self.imp.aggiorna(corpo))
+            if metodo == "GET":
+                return 200, self.imp.tutte()
+            prima = self.imp.tutte()["collegamento"]
+            dati = self.imp.aggiorna(corpo)
+            if dati["collegamento"] != prima and self.cred.utente():   # cambiata la fonte: riparti con quella nuova
+                self.ponte.ferma()
+                self.ponte.avvia(self.cred.leggi)
+            return 200, dati
         if cosa == "cerca" and not resto:
             solo("GET")
             testo = q("q").strip()

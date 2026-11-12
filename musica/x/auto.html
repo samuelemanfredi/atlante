@@ -201,13 +201,14 @@ details summary{cursor:pointer;padding:8px 0}
     if (!S) { $('aTop').innerHTML = h || '<div class="note">Carico…</div>'; return; }
     const acc = S.account || {};
     if (!acc.collegato || ricollega) {
-      $('aTop').innerHTML = h + formCollega(acc.collegato);
+      $('aTop').innerHTML = h + formCollega(acc);
       $('aPos').hidden = true; $('aFondo').innerHTML = '';
       return;
     }
     h += notaPonte(acc);
+    if (acc.solo_lettura) h += '<div class="note">📊 Dati dal portale EU Data Act: controllo ogni minuto, il portale aggiorna ~ogni 15 min. Apri/chiudi e clima solo dall\'app Volkswagen; la posizione GPS non arriva da questa fonte.</div>';
     const vv = S.veicoli || [];
-    if (!vv.length) h += '<div class="note">Nessun dato dall\'auto per ora: la prima lettura arriva qualche minuto dopo il collegamento.</div>';
+    if (!vv.length) h += '<div class="note">Nessun dato dall\'auto per ora: ' + (acc.solo_lettura ? 'la prima consegna del portale può metterci qualche minuto. Se non arriva, controlla di aver attivato sul portale la «richiesta dati continua».' : 'la prima lettura arriva qualche minuto dopo il collegamento.') + '</div>';
     vv.forEach(v => { h += schedaVeicolo(v); });
     $('aTop').innerHTML = h;
     $('aFondo').innerHTML = vv.length ? '<div class="btns"><button class="btn" id="bAgg">↻ Aggiorna ora</button></div><p class="small">Il Mac legge l\'auto ogni ' + Math.round((S.intervallo || 300) / 60) + ' minuti (più spesso il cloud Volkswagen rallenta l\'account). Ultima lettura: ' + (S.lettura ? fa(S.lettura) : '—') + '.</p>' : '';
@@ -216,14 +217,17 @@ details summary{cursor:pointer;padding:8px 0}
     clearTimeout(tVeloce);
     if (f === 'installazione' || f === 'avvio' || (f === 'collegato' && !vv.length)) tVeloce = setTimeout(() => aggiornaStato(true), 5000);
   }
-  function formCollega(giaCollegato) {
-    return '<div class="card"><div class="h2" style="margin-top:0">Collega la tua Volkswagen</div>' +
-      '<p class="small">Usa lo stesso account dell\'app Volkswagen. Email e password restano sul tuo Mac mini, nel Portachiavi: l\'auto si legge dal cloud Volkswagen, come fa l\'app. Sull\'auto non si installa niente.</p>' +
-      '<div class="field"><label for="cU">Email del Volkswagen ID</label><input class="in" id="cU" type="email" autocomplete="username" autocapitalize="off" spellcheck="false"></div>' +
-      '<div class="field"><label for="cP">Password</label><input class="in" id="cP" type="password" autocomplete="current-password"></div>' +
-      '<label class="sw"><span class="small">L\'app Volkswagen ha apri e chiudi per la mia auto, ma qui non compare (forza)</span><input type="checkbox" id="cF"></label>' +
-      '<div class="btns"><button class="btn pri" id="cVai">Collega</button>' + (giaCollegato ? '<button class="btn" id="cNo">Annulla</button>' : '') + '</div>' +
-      '<p class="small">La prima volta il Mac prepara il collegamento da solo: 1–3 minuti.</p></div>';
+  function formCollega(acc) {
+    const dati = (acc.fonte || 'dati') !== 'app';
+    let h = '<div class="card"><div class="h2" style="margin-top:0">Collega la tua Volkswagen</div>' +
+      '<p class="small">Usa lo stesso account dell\'app Volkswagen. Email e password restano sul tuo Mac mini, nel Portachiavi. Sull\'auto non si installa niente.</p>';
+    if (dati) h += '<div class="note">📊 Batteria, chilometri e temperature arrivano dal <b>portale dati EU Data Act</b> di Volkswagen: Atlante controlla ogni minuto, ma il portale pubblica un dato nuovo circa ogni 15 min; sola lettura, senza posizione GPS. <b>Una volta sola</b>, entra nel portale con lo stesso account e attiva una «richiesta dati continua» a 15 minuti, poi torna qui.<div class="btns"><a class="btn sm" href="https://eu-data-act.drivesomethinggreater.com/" target="_blank" rel="noopener">Apri il portale</a></div><div class="small">Apri/chiudi e clima non passano da qui: dal 05/2026 Volkswagen li blocca alle app non ufficiali, restano nell\'app Volkswagen. La fonte si cambia in ⚙︎.</div></div>';
+    h += '<div class="field"><label for="cU">Email del Volkswagen ID</label><input class="in" id="cU" type="email" autocomplete="username" autocapitalize="off" spellcheck="false"></div>' +
+      '<div class="field"><label for="cP">Password</label><input class="in" id="cP" type="password" autocomplete="current-password"></div>';
+    if (!dati) h += '<label class="sw"><span class="small">L\'app Volkswagen ha apri e chiudi per la mia auto, ma qui non compare (forza)</span><input type="checkbox" id="cF"></label>';
+    h += '<div class="btns"><button class="btn pri" id="cVai">Collega</button>' + (acc.collegato ? '<button class="btn" id="cNo">Annulla</button>' : '') + '</div>' +
+      '<p class="small">La prima volta il Mac prepara il collegamento da solo: 1–3 minuti' + (dati ? ' (se serve, scarica un Python aggiornato: 2–5 min).' : '.') + '</p></div>';
+    return h;
   }
   function notaPonte(acc) {
     const p = acc.ponte || {};
@@ -338,7 +342,7 @@ details summary{cursor:pointer;padding:8px 0}
     if (!u || !p) { toast('Scrivi email e password'); return; }
     $('cVai').disabled = true;
     try {
-      S = await AX.api('auto/account', {method: 'POST', body: {utente: u, password: p, forza_accesso: $('cF').checked}, timeout: 60000});
+      S = await AX.api('auto/account', {method: 'POST', body: {utente: u, password: p, forza_accesso: !!($('cF') && $('cF').checked)}, timeout: 60000});
       $('cP').value = ''; $('cP').blur(); $('cU').blur();
       ricollega = false;
       toast('Account salvato: il Mac prepara il collegamento');
@@ -630,17 +634,31 @@ details summary{cursor:pointer;padding:8px 0}
   function spunta(g, k, etichetta) {
     return '<label class="sw"><span>' + esc(etichetta) + '</span><input type="checkbox" data-g="' + g + '" data-k="' + k + '"' + (IMP[g][k] ? ' checked' : '') + '></label>';
   }
+  function scelta(g, k, etichetta, opzioni) {
+    const v = String(IMP[g][k]);
+    return '<div class="field"><label for="i-' + g + '-' + k + '">' + esc(etichetta) + '</label><select class="in" id="i-' + g + '-' + k + '" data-g="' + g + '" data-k="' + k + '" data-testo="1">' +
+      opzioni.map(o => '<option value="' + esc(o[0]) + '"' + (o[0] === v ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select></div>';
+  }
   function disegnaImp() {
     const acc = (S && S.account) || {}, r = IMP.regole;
     let h = '<div class="btns"><button class="btn" id="iFine">‹ Torna</button></div>';
     h += '<div class="h2">Account Volkswagen</div><div class="card">';
     if (acc.collegato) {
       h += '<b>' + esc(acc.utente) + '</b><div class="small">Password nel ' + (acc.dove === 'portachiavi' ? 'Portachiavi del Mac mini' : 'file privato del Mac mini') + ' · collegamento ' + esc(FASE[(acc.ponte || {}).fase] || '—') + '</div>' +
-        '<label class="sw"><span>Forza apri e chiudi (se l\'app Volkswagen ce l\'ha ma qui non compare)</span><input type="checkbox" id="iForza"' + (acc.forza_accesso ? ' checked' : '') + '></label>' +
+        (acc.fonte === 'app' ? '<label class="sw"><span>Forza apri e chiudi (se l\'app Volkswagen ce l\'ha ma qui non compare)</span><input type="checkbox" id="iForza"' + (acc.forza_accesso ? ' checked' : '') + '></label>' : '') +
         '<div class="btns"><button class="btn sm" id="iLib">Aggiorna la libreria Volkswagen</button><button class="btn sm" id="iRic">Cambia account</button><button class="btn sm" id="iScollega" style="color:var(--bad)">Scollega</button></div>' +
         '<div class="small">«Aggiorna la libreria» serve se Volkswagen cambia qualcosa nel suo cloud e le letture si fermano.</div>';
     } else h += 'Non collegato: collega l\'account dalla scheda Auto.';
-    h += '</div><div class="h2">Batteria in viaggio</div><div class="card"><div class="small">Alla colonnina idealmente al ' + nf(r.arrivo_ideale) + '%, almeno al ' + nf(r.arrivo_min) + '%; se nella fascia giusta non c\'è una colonnina va bene tra ' + nf(r.toll_min) + ' e ' + nf(r.toll_max) + '%.</div>' +
+    h += '</div>';
+    h += '<div class="h2">Da dove arrivano i dati</div><div class="card">' +
+      scelta('collegamento', 'fonte', 'Fonte', [['dati', 'Portale dati EU Data Act (sola lettura, funziona)'], ['app', 'App Volkswagen (apri/chiudi — bloccata da VW dal 05/2026)']]) +
+      '<div class="small">Il portale dà batteria, chilometri e temperature (controllo ogni minuto, aggiorna ~ogni 15), senza GPS e senza comandi. L\'app darebbe apri/chiudi e clima, ma Volkswagen blocca le app non ufficiali: Atlante riprova da solo ogni 6 ore.</div>' +
+      '<details><summary class="small">Portale: paese, lingua, marca</summary>' +
+      '<div class="field"><label for="i-collegamento-paese">Paese</label><input class="in" id="i-collegamento-paese" data-g="collegamento" data-k="paese" data-testo="1" maxlength="5" value="' + esc(IMP.collegamento.paese) + '"></div>' +
+      '<div class="field"><label for="i-collegamento-lingua">Lingua</label><input class="in" id="i-collegamento-lingua" data-g="collegamento" data-k="lingua" data-testo="1" maxlength="5" value="' + esc(IMP.collegamento.lingua) + '"></div>' +
+      scelta('collegamento', 'marca', 'Marca', [['VOLKSWAGEN_PASSENGER_CARS', 'Volkswagen'], ['VOLKSWAGEN_COMMERCIAL_VEHICLES', 'Volkswagen Veicoli Commerciali'], ['AUDI', 'Audi'], ['SKODA', 'Škoda'], ['SEAT', 'SEAT'], ['CUPRA', 'Cupra'], ['BENTLEY', 'Bentley']]) +
+      '<div class="small">La ID. Buzz Pro è «Volkswagen»; se sul portale la tua auto è sotto «Veicoli Commerciali», scegli quella.</div></details></div>';
+    h += '<div class="h2">Batteria in viaggio</div><div class="card"><div class="small">Alla colonnina idealmente al ' + nf(r.arrivo_ideale) + '%, almeno al ' + nf(r.arrivo_min) + '%; se nella fascia giusta non c\'è una colonnina va bene tra ' + nf(r.toll_min) + ' e ' + nf(r.toll_max) + '%.</div>' +
       '<div class="grid2">' + campo('regole', 'arrivo_ideale', 'Arrivo ideale alla colonnina', 1, '%') + campo('regole', 'arrivo_min', 'Arrivo minimo', 1, '%') +
       campo('regole', 'toll_min', 'Tolleranza: non sotto', 1, '%') + campo('regole', 'toll_max', 'Tolleranza: non sopra', 1, '%') +
       campo('regole', 'ricarica_max', 'Ricarica fino a', 1, '%') + campo('regole', 'destinazione_min', 'Arrivo a destinazione almeno', 1, '%') + '</div></div>';

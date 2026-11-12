@@ -499,7 +499,14 @@ class Garage(Oggetto):
         return [f for f in self.figli if isinstance(f, Oggetto)]
 class CarConnectivity:
     def __init__(self, config, tokenstore_file=None, cache_file=None):
-        c = config['carConnectivity']['connectors'][0]['config']
+        import os, json
+        conn = config['carConnectivity']['connectors'][0]
+        if os.environ.get('FINTO_CONFIG'):      # la prova controlla quale connettore e con quali opzioni
+            with open(os.environ['FINTO_CONFIG'], 'w') as f:
+                json.dump(conn, f)
+        c = conn['config']
+        if c['password'] == 'bloccata':     # come Volkswagen dal 27/05/2026: 403 già sulla pagina di accesso
+            raise errors.AuthenticationError('Authorization URL could not be fetched due to WeConnect failure')
         self.giusta = c['password'] == 'giusta'
         self.garage = Garage(Oggetto(None, ''), 'garage')
         v = Oggetto(self.garage, 'WVTEST0000000001')
@@ -547,9 +554,11 @@ class TestAutoPonte(unittest.TestCase):
             self.p.wait()
         shutil.rmtree(self.base, ignore_errors=True)
 
-    def avvia(self, password):
+    def avvia(self, password, **extra):
+        self.config = os.path.join(self.base, "config.json")
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": os.path.join(self.base, "finta"),
-               "FINTO_LOG": self.log, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"}
+               "FINTO_LOG": self.log, "FINTO_CONFIG": self.config, "PYTHONDONTWRITEBYTECODE": "1",
+               "PYTHONIOENCODING": "utf-8"}
         self.err = open(os.path.join(self.base, "ponte.err"), "wb")
         self.p = subprocess.Popen([sys.executable, os.path.join(QUI, "auto_ponte.py")], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=self.err, env=env, cwd=self.base)
@@ -559,8 +568,10 @@ class TestAutoPonte(unittest.TestCase):
             for r in self.p.stdout:
                 self.righe.put(json.loads(r.decode("utf-8")))
         threading.Thread(target=leggi, daemon=True).start()
-        self.manda({"utente": "samuele@example.com", "password": password, "intervallo": 300,
-                    "forza_accesso": False, "cartella": self.base})
+        prima = {"utente": "samuele@example.com", "password": password, "intervallo": 300,
+                 "forza_accesso": False, "cartella": self.base}
+        prima.update(extra)
+        self.manda(prima)
 
     def manda(self, o):
         self.p.stdin.write((json.dumps(o) + "\n").encode("utf-8"))
@@ -616,6 +627,28 @@ class TestAutoPonte(unittest.TestCase):
             {"p": "/garage/WVTEST0000000001/climatization/commands/start-stop",
              "v": {"command": "start", "target_temperature": 21.5, "target_temperature_unit": "°C"}}])
 
+    def test_fonte_app_connettore_volkswagen(self):
+        self.avvia("giusta")
+        self.prossimo("stato")
+        self.chiudi()
+        with open(self.config, encoding="utf-8") as f:
+            conn = json.load(f)
+        self.assertEqual(conn["type"], "volkswagen")
+
+    def test_fonte_dati_connettore_eu_data_act(self):
+        # fonte «dati»: il ponte deve usare il connettore del portale EU Data Act, con paese/lingua/marca
+        self.avvia("giusta", fonte="dati", paese="IT", lingua="it", marca="VOLKSWAGEN_COMMERCIAL_VEHICLES",
+                   intervallo=900)
+        self.prossimo("stato")
+        self.chiudi()
+        with open(self.config, encoding="utf-8") as f:
+            conn = json.load(f)
+        self.assertEqual(conn["type"], "vw_eu_data_act")
+        self.assertEqual(conn["config"]["country"], "IT")
+        self.assertEqual(conn["config"]["language"], "it")
+        self.assertEqual(conn["config"]["brand"], "VOLKSWAGEN_COMMERCIAL_VEHICLES")
+        self.assertNotIn("force_enable_access", conn["config"])   # è solo del connettore dell'app
+
     def test_password_sbagliata(self):
         self.avvia("sbagliata")
         self.prossimo("pronto")
@@ -624,6 +657,61 @@ class TestAutoPonte(unittest.TestCase):
         self.assertIn("email e password", e["testo"])
         self.assertEqual(self.p.wait(20), 0)    # si chiude da solo
         self.err.close()
+
+    def test_volkswagen_blocca_le_app_non_ufficiali(self):
+        # 12/11 sul Mac mini: «Authorization URL could not be fetched due to WeConnect failure» (403 del cloud
+        # Volkswagen per tutti, issue #107 del connettore): non è la password, e non va chiesto di ricollegare
+        self.avvia("bloccata")
+        e = self.prossimo("errore")
+        self.assertFalse(e["grave"])
+        self.assertEqual(e["codice"], "vw_blocca")
+        self.assertIn("app non ufficiali", e["testo"])
+        self.assertEqual(self.p.wait(20), 5)
+        self.err.close()
+
+
+class TestAutoBlocco(unittest.TestCase):
+    """Volkswagen blocca l'accesso delle app non ufficiali: niente «ricollega l'account», il ponte riprova da solo ogni
+    RIPROVA_VW_BLOCCA secondi, e un account ricollegato nel frattempo riparte subito."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-auto-blocco-")
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_si_riprova_tra_qualche_ora(self):
+        attese = []
+
+        class P(AV.Ponte):
+            def _installa(self):
+                pass
+
+            def _esegui(self, cred):
+                self._messaggio({"tipo": "errore", "grave": False, "codice": "vw_blocca", "testo": "VW blocca."})
+                return 5
+
+            def _aspetta(self, secondi):
+                attese.append(secondi)
+                return True               # Atlante si ferma: il filo finisce
+
+        p = P(self.base, lambda m: None)
+        p._vita(lambda: ("samuele@example.com", "x", False))
+        self.assertEqual(attese, [AV.RIPROVA_VW_BLOCCA])
+        self.assertEqual(p.bloccato, "")
+        self.assertEqual(p.stato["fase"], "errore")
+        self.assertIn("VW blocca.", p.stato["messaggio"])
+        self.assertIn("Riprovo da solo alle", p.stato["messaggio"])
+
+    def test_l_attesa_finisce_con_credenziali_nuove_o_alla_chiusura(self):
+        p = AV.Ponte(self.base, lambda m: None)
+        p.subito.set()                    # avvia() con l'account ricollegato
+        t = time.time()
+        self.assertFalse(p._aspetta(3600))
+        self.assertLess(time.time() - t, 2)
+        p.subito.clear()
+        p.fermo.set()                     # Atlante si chiude
+        self.assertTrue(p._aspetta(3600))
 
 
 class PonteFintoInstalla(AV.Ponte):
@@ -815,15 +903,18 @@ class TestAutoApi(unittest.TestCase):
     def test_senza_account(self):
         s = self.api("GET", "stato")
         self.assertEqual((s["account"]["collegato"], s["veicoli"]), (False, []))
+        self.api("POST", "impostazioni", {"collegamento": {"fonte": "app"}})   # comandi: solo sulla fonte «app»
         self.assertIn("non è attivo", self.api("POST", "comando", {"azione": "clima_off"}, codice=503))
         self.assertIn("email", self.api("POST", "account", {"utente": "non-una-email", "password": "x"}, codice=400))
         self.api("GET", "niente", codice=404)
         self.api("POST", "stato", codice=405)
 
     def test_collega_legge_e_comanda(self):
+        self.api("POST", "impostazioni", {"collegamento": {"fonte": "app"}})   # i comandi esistono solo sulla fonte «app»
         s = self.collega()
         self.assertEqual((s["account"]["collegato"], s["account"]["utente"], s["account"]["dove"]),
                          (True, "sa•••@example.com", "file"))
+        self.assertEqual((s["account"]["fonte"], s["account"]["solo_lettura"]), ("app", False))
         file = os.path.join(self.cart, "account.json")
         self.assertEqual(os.stat(file).st_mode & 0o777, 0o600)
         s = aspetta(lambda: (lambda x: x if x["veicoli"] else None)(self.api("GET", "stato")))
@@ -857,11 +948,25 @@ class TestAutoApi(unittest.TestCase):
         self.assertFalse(os.path.exists(file))
 
     def test_password_sbagliata(self):
+        self.api("POST", "impostazioni", {"collegamento": {"fonte": "app"}})
         self.collega("sbagliata")
         s = aspetta(lambda: (lambda x: x if x["account"]["bloccato"] else None)(self.api("GET", "stato")))
         self.assertIsNotNone(s)
         self.assertIn("rifiutato", s["account"]["bloccato"])
         self.assertEqual(s["account"]["ponte"]["fase"], "errore")
+
+    def test_fonte_dati_sola_lettura(self):
+        # fonte «dati» (predefinita): il portale EU Data Act. I comandi sono rifiutati qui: solo dall'app Volkswagen.
+        s = self.api("GET", "stato")
+        self.assertEqual((s["account"]["fonte"], s["account"]["solo_lettura"]), ("dati", True))
+        self.collega()
+        s = aspetta(lambda: (lambda x: x if x["veicoli"] else None)(self.api("GET", "stato")))
+        self.assertIsNotNone(s)
+        vin = s["veicoli"][0]["vin"]
+        self.assertIn("sola lettura", self.api("POST", "comando", {"vin": vin, "azione": "sblocca", "spin": "1234"},
+                                               codice=409))
+        self.assertIn("sola lettura", self.api("POST", "comando", {"vin": vin, "azione": "clima_on"}, codice=409))
+        self.assertTrue(self.api("POST", "comando", {"vin": vin, "azione": "aggiorna"})["ok"])   # «aggiorna» sì
 
     def test_impostazioni(self):
         imp = self.api("GET", "impostazioni")
@@ -874,6 +979,14 @@ class TestAutoApi(unittest.TestCase):
         self.assertEqual((imp["auto"]["pompa_calore"], imp["auto"]["capacita_kwh"], imp["viaggio"]["velocita_max"]),
                          (True, 79, 100))
         self.assertEqual(AV.Impostazioni(os.path.join(self.cart, "impostazioni.json")).tutte()["auto"]["capacita_kwh"], 79)
+        # fonte e marca: solo valori buoni (se no, i predefiniti)
+        self.assertEqual(self.api("GET", "impostazioni")["collegamento"],
+                         {"fonte": "dati", "paese": "IT", "lingua": "it", "marca": "VOLKSWAGEN_PASSENGER_CARS"})
+        c = self.api("POST", "impostazioni", {"collegamento": {"fonte": "boh", "marca": "tesla", "paese": "FR"}})
+        self.assertEqual((c["collegamento"]["fonte"], c["collegamento"]["marca"], c["collegamento"]["paese"]),
+                         ("dati", "VOLKSWAGEN_PASSENGER_CARS", "FR"))
+        c = self.api("POST", "impostazioni", {"collegamento": {"fonte": "app", "marca": "vwn"}})
+        self.assertEqual((c["collegamento"]["fonte"], c["collegamento"]["marca"]), ("app", "VOLKSWAGEN_COMMERCIAL_VEHICLES"))
 
     def test_rendimento_e_viaggio_senza_dati(self):
         r = self.api("GET", "rendimento")

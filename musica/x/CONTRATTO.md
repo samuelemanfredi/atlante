@@ -253,9 +253,19 @@ installa niente. Il collegamento è un processo a parte, `server/auto_ponte.py`,
 (github.com/tillsteinbach/CarConnectivity) in un suo ambiente Python che il Mac prepara da solo la prima volta
 (`<cache>/auto/python`). CarConnectivity vuole Python 3.10 o più nuovo (requests 2.34): se quello del server è più
 vecchio (il 3.9 del Mac), uv lo scarica una volta sola per il ponte (Python 3.12 in `<cache>/auto/pythons`, uv in
-`<cache>/auto/strumenti`); un ambiente fatto con un Python troppo vecchio si rifà da capo. Il resto (`server/auto_vw.py`) usa solo la libreria standard. Email in `<cache>/auto/account.json`,
+`<cache>/auto/strumenti`); un ambiente fatto con un Python troppo vecchio si rifà da capo. Dal 27/05/2026 Volkswagen
+blocca il suo cloud alle app non ufficiali (403 alla pagina di accesso, issue #107 di CarConnectivity-connector-volkswagen,
+aperta al 12/11/2026): la fonte «app» (connettore `volkswagen`, apri/chiudi e clima) lo dice chiaro (`codice: vw_blocca`,
+niente «ricollega l'account») e riprova ogni 6 ore, o subito se l'account si ricollega o si aggiorna la libreria.
+Perciò la fonte predefinita è «dati» (impostazione `collegamento.fonte`): il portale EU Data Act di Volkswagen
+(connettore `vw_eu_data_act`, `eu-data-act.drivesomethinggreater.com`), in sola lettura, un dato ogni ~15 min, senza GPS
+e senza comandi — l'unica via che funziona. Chiede a Samuele di attivare una volta sul portale una «richiesta dati
+continua» a 15 minuti; `collegamento.paese`/`lingua`/`marca` sono i parametri OIDC del portale (marca predefinita
+`VOLKSWAGEN_PASSENGER_CARS`). Cambiare fonte riavvia il ponte; con «dati» i comandi danno 409. Il resto
+(`server/auto_vw.py`) usa solo la libreria standard. Email in `<cache>/auto/account.json`,
 password nel Portachiavi del Mac (servizio «Atlante - La mia Volkswagen»; senza Portachiavi nello stesso file, 0600);
-l'S-PIN arriva con il singolo comando e non si salva mai. Lettura ogni 5 minuti (più spesso il cloud rallenta l'account).
+l'S-PIN arriva con il singolo comando e non si salva mai. Lettura ogni 5 minuti con la fonte «app», ogni 15 con «dati»
+(il portale pubblica un dato ogni ~15 min).
 Il cloud non dà il tracciato GPS: un viaggio è «ferma in A, poi ferma in B con più chilometri»; la strada mostrata è la
 più probabile (OSRM). Dai viaggi (almeno 5 km e 2% di batteria, senza ricariche in mezzo) il Mac impara due fattori,
 stile di guida e clima, sopra un modello fisico della ID. Buzz (aria, rotolamento, salite, freddo, clima, elettronica,
@@ -264,17 +274,17 @@ Tutte le rotte: 403 a chi non è Samuele (anche alla rete di casa). Prove: `serv
 
 | Metodo | Percorso | Risposta |
 |---|---|---|
-| GET | `auto/stato` | `{account:{collegato, utente (mascherato), dove:'portachiavi'\|'file', forza_accesso, ponte:{fase:'spento'\|'installazione'\|'avvio'\|'collegato'\|'attesa'\|'errore', messaggio, dal}, bloccato}, veicoli:[{vin, nome, modello, anno, targa, soc, autonomia, km, est, batteria:{min,max}, clima:{stato,target,fine,senza_cavo}, sbrina, porte, porte_aperte, finestrini, ricarica:{stato,tipo,potenza,velocita,fine,obiettivo,spina}, posizione:{lat,lon,dal,nome,indirizzo}\|null, stato, online, aggiornato, letto, comandi:{porte,clima,sbrina}}], lettura, intervallo, ora}` |
+| GET | `auto/stato` | `{account:{collegato, utente (mascherato), dove:'portachiavi'\|'file', forza_accesso, fonte:'dati'\|'app', solo_lettura, ponte:{fase:'spento'\|'installazione'\|'avvio'\|'collegato'\|'attesa'\|'errore', messaggio, dal}, bloccato}, veicoli:[{vin, nome, modello, anno, targa, soc, autonomia, km, est, batteria:{min,max}, clima:{stato,target,fine,senza_cavo}, sbrina, porte, porte_aperte, finestrini, ricarica:{stato,tipo,potenza,velocita,fine,obiettivo,spina}, posizione:{lat,lon,dal,nome,indirizzo}\|null, stato, online, aggiornato, letto, comandi:{porte,clima,sbrina}}], lettura, intervallo, ora}` |
 | POST | `auto/account` `{utente, password, forza_accesso}` | lo stato — collega l'account (il ponte parte in un filo); senza utente e password lo stesso account riparte, e con `forza_accesso` cambia solo quell'opzione |
 | DELETE | `auto/account` | lo stato — via email, password e sessione dal Mac |
 | POST | `auto/libreria` | lo stato — riscarica CarConnectivity (se il cloud Volkswagen è cambiato) e riparte |
-| POST | `auto/comando` `{vin, azione:'blocca'\|'sblocca'\|'clima_on'\|'clima_off'\|'sbrina_on'\|'sbrina_off'\|'aggiorna', spin?, temperatura?}` | `{ok, messaggio}` — blocca e sblocca vogliono `spin` (4 cifre); clima_on `temperatura` 16–29,5; aspetta la risposta di Volkswagen (al più 50 s: 504) |
+| POST | `auto/comando` `{vin, azione:'blocca'\|'sblocca'\|'clima_on'\|'clima_off'\|'sbrina_on'\|'sbrina_off'\|'aggiorna', spin?, temperatura?}` | `{ok, messaggio}` — blocca e sblocca vogliono `spin` (4 cifre); clima_on `temperatura` 16–29,5; aspetta la risposta di Volkswagen (al più 50 s: 504); con fonte «dati» ogni comando tranne `aggiorna` dà 409 (sola lettura) |
 | GET | `auto/diario?giorni=30[&vin=]` | `{giorni, viaggi:[{id, partenza, arrivo, durata_stimata, da_lat, da_lon, a_lat, a_lon, da_nome, a_nome, km, km_stimati, soc_da, soc_a, kwh, kwh_100, temp, temp_fonte, con_ricarica, valido, minuti, …}], soste:[{id, lat, lon, arrivo, partenza, nome, indirizzo}], ricariche:[{id, inizio, fine, soc_da, soc_a, potenza_max, tipo, nome}], totali:{viaggi, km, ore, kwh_100}}` |
 | POST | `auto/diario/cancella` `{conferma:true}` | `{ok}` — via viaggi, soste, ricariche e letture (i nomi dei posti restano) |
 | GET | `auto/viaggi/<id>/percorso` | `{punti:[[lat,lon]…], km, ricostruito:true, km_registrati}` |
 | POST | `auto/luoghi` `{lat, lon, nome}` | `{ok, nome}` — il nome di un posto (entro 150 m), es. «Casa»; nome vuoto lo toglie |
 | GET | `auto/rendimento[?vin=]` | `{fasce:[{da, a, viaggi, km, kwh_100, km_per_pct, autonomia_100, rendimento_pct, temp_media}], curva:[{t, kwh_100, autonomia_100, rendimento_pct}], calibrazione:{k_guida, k_clima, viaggi, km, errore_pct, tipici}, velocita_tipica, viaggio_tipico_km, capacita_kwh, viaggi_validi, auto}` — rendimento_pct: km rispetto a 20 °C |
-| GET / POST | `auto/impostazioni` | `{auto:{nome, capacita_kwh, massa_kg, carico_kg, cda, crr, rend_motore, rend_recupero, elettronica_kw, musica_kw, pompa_calore, dc_max_kw}, regole:{arrivo_min, arrivo_ideale, toll_min, toll_max, ricarica_max, destinazione_min}, viaggio:{velocita_max, abitacolo_c, musica, ionity_prima, precondiziona}, prezzi:{ionity_IT, ionity_FR, ionity_ES, ionity_altri, altri}}`; POST con i gruppi da cambiare (400 se un valore è fuori misura o le soglie non sono in ordine) |
+| GET / POST | `auto/impostazioni` | `{auto:{nome, capacita_kwh, massa_kg, carico_kg, cda, crr, rend_motore, rend_recupero, elettronica_kw, musica_kw, pompa_calore, dc_max_kw}, regole:{arrivo_min, arrivo_ideale, toll_min, toll_max, ricarica_max, destinazione_min}, viaggio:{velocita_max, abitacolo_c, musica, ionity_prima, precondiziona}, prezzi:{ionity_IT, ionity_FR, ionity_ES, ionity_altri, altri}, collegamento:{fonte:'dati'\|'app', paese, lingua, marca}}`; POST con i gruppi da cambiare (400 se un valore è fuori misura o le soglie non sono in ordine); cambiare `collegamento` riavvia il ponte |
 | GET | `auto/cerca?q=` | `{risultati:[{nome, lat, lon}]}` (Nominatim, almeno 3 lettere) |
 | POST | `auto/viaggio` `{a:{lat,lon}, da?:{lat,lon}, soc?, partenza?, vin?, opzioni?:{velocita_max, abitacolo_c, carico_kg, musica, ionity_prima, precondiziona}}` | `{km, ore_guida, partenza, arrivo, soc_partenza, soc_arrivo, riuscito, soste:[{nome, operatore, ionity, lat, lon, km, kw, kw_noto, arrivo_soc, partenza_soc, fascia:'ideale'\|'tollerata'\|'fuori', minuti, deviazione_km, ora_arrivo, ora_partenza, paese, prezzo_kwh, costo}], minuti_ricarica, costo, energia:{guida, recupero, clima, elettronica, musica, preriscaldo, precondizionamento, totale}, kwh_100, temperature:{min,max,media}, profilo:[{km, soc, quota, sosta?}], geo:[[lat,lon]…], avvisi, colonnine_viste, regole, calibrazione, velocita_max, musica}` — senza `da` parte da dove è parcheggiata l'auto, senza `soc` con la sua batteria |
 
