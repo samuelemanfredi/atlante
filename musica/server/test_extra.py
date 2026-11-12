@@ -4516,6 +4516,11 @@ class TestCaricamenti(ProvaCaricamenti, unittest.TestCase):
         self.assertEqual((c["title"], c["artist"], c["album"]), ("Without Me (Corretto)", "Eminem", "The Eminem Show"))
         self.assertTrue(c["cover"])
         self.assertEqual(self.da(None, "GET", "/api/musica/copertina/" + c["cover"])[2], PNG)
+        # la copia ridotta che chiede l'app (12/11): quando non si può fare (qui niente sips, o un'immagine che sips non
+        # legge), la copertina com'è; una misura che non c'è nella lista è la copertina com'è, senza copie
+        self.assertEqual(self.da(None, "GET", "/api/musica/copertina/%s?lato=640" % c["cover"])[2], PNG)
+        self.assertEqual(self.da(None, "GET", "/api/musica/copertina/%s?lato=999" % c["cover"])[2], PNG)
+        self.assertEqual(self.da(None, "GET", "/api/musica/copertina/%s?lato=abc" % c["cover"])[0], 200)
         with open(orig, "rb") as f:
             self.assertEqual(f.read(), prima)   # il file originale non cambia
         with open(os.path.join(self.c["cache"], "correzioni.json"), encoding="utf-8") as f:
@@ -5359,6 +5364,103 @@ class TestMisuraSenzaFfmpeg(unittest.TestCase):
         with unittest.mock.patch.object(self.m, "_programma", prog):
             r = self.m.misura_audio(p, 90)
         self.assertAlmostEqual(r["bpm"], 120, delta=1.5)
+
+
+FINTO_SIPS = r"""
+import json, os, sys
+a = sys.argv[1:]
+with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "sips.log"), "a") as f:
+    f.write(json.dumps(a) + "\n")
+if os.environ.get("SIPS_ROTTO"):
+    sys.exit(1)
+orig, out = a[a.index("--out") - 1], a[a.index("--out") + 1]
+with open(orig, "rb") as f:
+    dati = f.read()
+with open(out, "wb") as f:
+    f.write(b"\xff\xd8RIDOTTA-" + a[a.index("-Z") + 1].encode() + b"-" + dati + bytes(100))
+"""
+
+
+class TestCopertineRidotte(unittest.TestCase):
+    """Le copertine piccole per l'app (12/11): sull'iPhone le copertine grandi (3000x3000, 36 MB l'una da aperte) mentre
+    scaricava facevano chiudere la pagina a Safari («Si è verificato ripetutamente un errore»). Il Mac ne fa una copia
+    ridotta con sips, una volta sola, e la rifà se la copertina cambia."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_copertine")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-copertine-")
+        self.sips = os.path.join(self.base, "sips")
+        _scrivi_programma(self.sips, FINTO_SIPS)
+        self.orig = os.path.join(self.base, "abc123.png")
+        with open(self.orig, "wb") as f:
+            f.write(b"COPERTINA")
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def riduci(self, lato, programma="sips", **amb):
+        prog = lambda n: self.sips if n == programma else None   # noqa: E731
+        with unittest.mock.patch.object(self.m, "_programma", prog), unittest.mock.patch.dict(os.environ, amb):
+            return self.m._copertina_ridotta(self.orig, lato)
+
+    def chiamate(self):
+        try:
+            with open(os.path.join(self.base, "sips.log")) as f:
+                return [json.loads(r) for r in f]
+        except OSError:
+            return []
+
+    def test_fatta_una_volta(self):
+        r = self.riduci(640)
+        self.assertEqual(r, os.path.join(self.base, "ridotte", "640", "abc123.jpg"))
+        with open(r, "rb") as f:
+            self.assertTrue(f.read().startswith(b"\xff\xd8RIDOTTA-640-COPERTINA"))
+        self.assertEqual(self.chiamate()[0][:7], ["-Z", "640", "-s", "format", "jpeg", "-s", "formatOptions"])
+        self.assertEqual(self.riduci(640), r)
+        self.assertEqual(len(self.chiamate()), 1)   # la seconda volta c'è già
+        self.assertEqual([n for n in os.listdir(os.path.dirname(r))], ["abc123.jpg"])   # nessun file a metà
+
+    def test_rifatta_se_la_copertina_cambia(self):
+        r = self.riduci(320)
+        with open(self.orig, "wb") as f:
+            f.write(b"NUOVA")
+        os.utime(self.orig, (time.time() + 60, time.time() + 60))
+        self.assertEqual(self.riduci(320), r)
+        with open(r, "rb") as f:
+            self.assertIn(b"NUOVA", f.read())
+        self.assertEqual(len(self.chiamate()), 2)
+
+    def test_quando_non_si_puo(self):
+        self.assertIsNone(self.riduci(500))   # misura non prevista: niente copie a caso sul disco
+        self.assertIsNone(self.riduci(640, programma="niente"))   # sips manca (non è un Mac)
+        self.assertIsNone(self.riduci(640, SIPS_ROTTO="1"))   # sips non riesce: la copertina com'è
+        self.assertEqual(os.listdir(os.path.join(self.base, "ridotte", "640")), [])
+        self.assertFalse(os.path.exists(os.path.join(self.base, "ridotte", "500")))
+
+    @unittest.skipUnless(sys.platform == "darwin" and os.path.exists("/usr/bin/sips"), "solo sul Mac")
+    def test_sips_vero_del_mac(self):
+        import zlib
+        w, h = 900, 700   # un PNG vero (grigio), più grande della copia
+        righe = b"".join(b"\x00" + bytes([128]) * w for _ in range(h))
+        def pezzo(t, d):
+            return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+        with open(self.orig, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + pezzo(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
+                    + pezzo(b"IDAT", zlib.compress(righe)) + pezzo(b"IEND", b""))
+        prog = lambda n: shutil.which(n, path=self.m._percorso_programmi())   # noqa: E731
+        with unittest.mock.patch.object(self.m, "_programma", prog):
+            r = self.m._copertina_ridotta(self.orig, 320)
+        self.assertTrue(r)
+        with open(r, "rb") as f:
+            self.assertEqual(f.read(2), b"\xff\xd8")   # un JPEG
+        out = subprocess.run(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", r], capture_output=True,
+                             text=True).stdout
+        lati = dict(re.findall(r"pixel(Width|Height): (\d+)", out))
+        self.assertEqual(lati.get("Width"), "320", out)
+        self.assertIn(lati.get("Height"), ("248", "249"), out)   # 700 x 320/900, arrotondato da sips
 
 
 class TestLottiInsieme(unittest.TestCase):

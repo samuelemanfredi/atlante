@@ -822,6 +822,48 @@ INDIRIZZO = ""   # indirizzo https fisso dell'app (facoltativo): l'app lo propon
 PREFISSO = re.compile(r"^(?:.*/)?api/musica/(catalogo|file|copertina|aggiorna|pezzo)(?:/([^/]+))?$")
 
 
+# Copertine ridotte: l'app le chiede con ?lato=640. Le originali (dai tag dei file) arrivano a 3000 pixel e più: su
+# iPhone ognuna decompressa pesa decine di MB e tante insieme (una griglia di album, i download di tutta la musica) fanno
+# chiudere la pagina a iOS («Si è verificato ripetutamente un errore», 12/11). La copia si fa una volta con sips (c'è su
+# ogni Mac) in <cache>/copertine/ridotte/<lato>/ e si tiene; senza sips, o se non riesce, si manda l'originale.
+COPERTINA_LATI = (160, 320, 640)
+_COPERTINE_BLOCCO = threading.BoundedSemaphore(2)   # al più due sips insieme (una griglia ne chiede tante)
+
+
+def _copertina_ridotta(originale, lato):
+    """Il percorso della copia ridotta (JPEG, lato massimo `lato`) della copertina, fatta se manca; None se non si può."""
+    if lato not in COPERTINA_LATI:
+        return None
+    cart = os.path.join(os.path.dirname(originale), "ridotte", str(lato))
+    dest = os.path.join(cart, os.path.splitext(os.path.basename(originale))[0] + ".jpg")
+    def pronta():   # la copia c'è ed è più nuova della copertina (una copertina cambiata la rifà)
+        try:
+            return os.path.isfile(dest) and os.path.getmtime(dest) >= os.path.getmtime(originale)
+        except OSError:
+            return False
+    if pronta():
+        return dest
+    sips = _programma("sips")
+    if not sips:
+        return None
+    with _COPERTINE_BLOCCO:
+        if pronta():   # fatta intanto da un'altra richiesta
+            return dest
+        try:
+            os.makedirs(cart, exist_ok=True)
+            tmp = dest + ".%d.tmp.jpg" % threading.get_ident()
+            r = subprocess.run([sips, "-Z", str(lato), "-s", "format", "jpeg", "-s", "formatOptions", "82", originale,
+                                "--out", tmp], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30, env=_ambiente())
+            if r.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) < 100:
+                _cancella(tmp)
+                return None
+            os.replace(tmp, dest)
+            return dest
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+
 def _invia_file(h, percorso, tipo, intestazioni=None):
     dim = os.path.getsize(percorso)
     inizio, fine, parziale = 0, dim - 1, False
@@ -1038,7 +1080,15 @@ def gestisci(h):
             if not nome or not os.path.isfile(p):
                 _json(h, {"errore": "Copertina non trovata"}, 404)
             else:
-                _invia_file(h, p, mimetypes.guess_type(p)[0] or "image/jpeg")
+                try:   # ?lato=640: una copia ridotta (l'app non deve decomprimere copertine da 3000 pixel)
+                    lato = int((parse_qs(urlsplit(h.path).query).get("lato") or ["0"])[0])
+                except ValueError:
+                    lato = 0
+                r = _copertina_ridotta(p, lato) if lato else None
+                if r:
+                    _invia_file(h, r, "image/jpeg")
+                else:
+                    _invia_file(h, p, mimetypes.guess_type(p)[0] or "image/jpeg")
     except (BrokenPipeError, ConnectionResetError):
         h.close_connection = True
     except Exception as e:   # noqa: BLE001  (es. disco che sparisce durante «Aggiorna»): l'app riceve comunque una risposta
