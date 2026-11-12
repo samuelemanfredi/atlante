@@ -193,7 +193,7 @@ function prove(app, modulo, fatte, errori) {
     eq(G('u:http://esempio.it/c.jpg'), 'http://esempio.it/c.jpg', 'coverUrl: http');
     eq(G('u:blob:https://mac.esempio/123'), 'blob:https://mac.esempio/123', 'coverUrl: blob:');
     eq(G('k1'), 'blob:https://mac.esempio/1', 'coverUrl: copertina salvata qui');
-    eq(G('s:a b.jpg'), 'api/musica/copertina/a%20b.jpg', 'coverUrl: copertina del Mac');
+    eq(G('s:a b.jpg'), 'api/musica/copertina/a%20b.jpg?lato=640', 'coverUrl: copertina del Mac, ridotta (12/11)');
     fatte.push('coverUrl');
 
     const a1 = F.art('u:https://x.esempio/a.jpg" onerror="alert(1)');

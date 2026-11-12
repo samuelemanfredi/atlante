@@ -831,13 +831,15 @@ function duration(blob) {
   });
 }
 async function makeCover(blob, key) {   // key: chiave già nota (copertine del Mac: lo SHA-1 dei dati)
+  let bmp = null, cv = null, sm = null;
   try {
-    const bmp = await createImageBitmap(blob);
+    bmp = await createImageBitmap(blob);
     const m = 640, k = Math.min(1, m / Math.max(bmp.width, bmp.height));
     const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
-    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    cv = document.createElement('canvas'); cv.width = w; cv.height = h;
     const x = cv.getContext('2d'); x.drawImage(bmp, 0, 0, w, h);
-    const sm = document.createElement('canvas'); sm.width = sm.height = 24;
+    try { bmp.close(); } catch (e) {} bmp = null;   // l'immagine intera decompressa: via subito (decine di MB)
+    sm = document.createElement('canvas'); sm.width = sm.height = 24;
     const y = sm.getContext('2d', {willReadFrequently:true}); y.drawImage(cv, 0, 0, 24, 24);
     const px = y.getImageData(0, 0, 24, 24).data;
     const out = await new Promise(r2 => cv.toBlob(r2, 'image/jpeg', 0.86));
@@ -846,6 +848,10 @@ async function makeCover(blob, key) {   // key: chiave già nota (copertine del 
     for (let i = 0; i < px.length; i++) { h1 ^= px[i]; h1 = Math.imul(h1, 16777619); h2 = (Math.imul(h2, 33) + px[i]) | 0; }
     return {key:key || 'c' + (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36) + w.toString(36) + h.toString(36), blob:out || blob, color:avgColor(px)};
   } catch (e) { return null; }
+  finally {   // la memoria delle tele e dell'immagine torna subito al sistema (sull'iPhone non aspetta il garbage collector)
+    if (bmp) try { bmp.close(); } catch (e) {}
+    for (const c of [cv, sm]) if (c) { c.width = 0; c.height = 0; }
+  }
 }
 // colore medio di una copertina (pesato sui colori vivi): dà la tinta allo sfondo del lettore
 function avgColor(px) {
@@ -892,7 +898,7 @@ async function importFiles(list) {
 
 /* ---------- libreria del Mac (disco di backup) e brani salvati sull'iPhone ---------- */
 // Se l'app è aperta dal Mac, la libreria arriva da api/musica/ (server/musica_libreria.py): catalogo,
-// file/<id>, copertina/<chiave>, aggiorna. Indirizzi relativi alla pagina: vanno bene anche sotto /musica/.
+// file/<id>, copertina/<chiave> (?lato=640: la copia ridotta), aggiorna. Indirizzi relativi alla pagina: vanno bene anche sotto /musica/.
 // Ogni brano ascoltato o scaricato col tasto finisce nell'archivio del telefono (IndexedDB) e non si riscarica più.
 const API = 'api/musica/';
 const NOMAC = 'Il Mac non risponde: puoi ascoltare solo i brani già sull\'iPhone';
@@ -1060,7 +1066,16 @@ async function rescan() {   // tasto «Aggiorna»: il Mac rilegge subito il disc
   rescanning = false;
   render(true); runDl(); toast(msg);
 }
-async function keepCover(t) {   // la copertina del Mac resta sul telefono insieme al brano
+// una copertina alla volta, e una sola volta per album: prima ogni brano scaricato ne faceva partire una, anche dello stesso
+// album, e tante insieme decompresse riempivano la memoria dell'iPhone mentre si scaricava tutta la musica (12/11)
+const COPC = {coda:Promise.resolve(), in:new Set()};
+function keepCover(t) {
+  if (!t.cover || !t.cover.startsWith('s:') || !SRV || COPC.in.has(t.cover)) return Promise.resolve();
+  const k = t.cover; COPC.in.add(k);
+  COPC.coda = COPC.coda.then(() => keepCoverUna(t)).catch(() => {}).then(() => { COPC.in.delete(k); });
+  return COPC.coda;
+}
+async function keepCoverUna(t) {   // la copertina del Mac resta sul telefono insieme al brano
   if (!t.cover || !t.cover.startsWith('s:') || !SRV) return;
   const old = t.cover, key = 'm' + old.slice(2).replace(/\.\w+$/, '');   // la chiave del Mac è già lo SHA-1 dell'immagine
   try {
@@ -1660,7 +1675,9 @@ const plTracks = p => p.ids.map(id => T.get(id)).filter(Boolean);
 // copertine arrivate da fuori («u:»: moduli, altri dispositivi, feed dei podcast): solo http, https e blob:; javascript:,
 // data: e gli altri schemi diventano «nessuna copertina» (e in HTML vanno comunque protette con esc)
 const copertinaSicura = u => { u = String(u == null ? '' : u).trim(); return /^(?:https?:\/\/|blob:)/i.test(u) ? u : ''; };
-const coverUrl = k => k && k.startsWith('u:') ? copertinaSicura(k.slice(2)) : k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) : '');
+// le copertine del Mac ridotte a 640 pixel (?lato=640): le originali arrivano a 3000 e più, e decompresse a decine in una
+// griglia facevano chiudere la pagina all'iPhone («Si è verificato ripetutamente un errore», 12/11)
+const coverUrl = k => k && k.startsWith('u:') ? copertinaSicura(k.slice(2)) : k && C.get(k) ? C.get(k).url : (k && k.startsWith('s:') && SRV ? API + 'copertina/' + encodeURIComponent(k.slice(2)) + '?lato=640' : '');
 
 /* ---------- grande libreria (50 000 brani e più) ---------- */
 // Con decine di migliaia di brani ordinare tutto con il Collator costa (50 ms sul Mac, di più sull'iPhone) e lo facevano
@@ -3331,6 +3348,19 @@ function diarioAvvio() {
     mixer:!NEEDS_MIXER ? '' : IOS_PRIMA_27 ? 'no: iOS prima del 27' : ls.get('am-mix-noweb', false) ? 'no: spento' : 'sì'});
 }
 setTimeout(diarioAvvio, 0);   // dopo tutto lo script (diario usa cose definite più avanti)
+// chiusure improvvise: iOS che chiude la pagina (memoria finita: «Si è verificato ripetutamente un errore»). Ogni 10 s
+// l'app scrive che è viva; uscendo normalmente lo cancella. Se all'apertura il segno c'è ancora, la volta prima è stata
+// chiusa di colpo: va nel diario (scatola nera del Mac) con il brano, i download e da quanto era aperta
+(function () {
+  const v = ls.get('am-viva', null);
+  if (v && Date.now() - v.t < 6 * 3600e3) setTimeout(() => diario('chiusa di colpo', v), 0);
+  const avvio = Date.now();
+  const segna = () => ls.set('am-viva', {t:Date.now(), aperta:Math.round((Date.now() - avvio) / 60000), brano:(TT(curId) || {}).title || '',
+    suona:!au.paused, coda:DLQ.length, scaricati:saved.size, copertine:C.size, nascosta:!!document.hidden});
+  setInterval(segna, 10000);
+  addEventListener('pagehide', () => { try { localStorage.removeItem('am-viva'); } catch (e) {} });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') segna(); });
+})();
 // com'è il brano nuovo quando parte il mix: pagina nascosta, mixer, quanto è caricato, da dove arriva, lettore sbloccato
 function mixInfo(el, P) {
   let buf = 0; try { const b = el.buffered; for (let i = 0; i < b.length; i++) buf += b.end(i) - b.start(i); } catch (e) {}
