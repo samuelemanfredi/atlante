@@ -251,7 +251,9 @@ riprova senza DTW (i tempi delle parole dai pezzi) e, se si ferma anche così, q
 Il Mac mini parla con il cloud Volkswagen (lo stesso dell'app Volkswagen) con l'account di Samuele: sull'auto non si
 installa niente. Il collegamento è un processo a parte, `server/auto_ponte.py`, con CarConnectivity
 (github.com/tillsteinbach/CarConnectivity) in un suo ambiente Python che il Mac prepara da solo la prima volta
-(`<cache>/auto/python`); il resto (`server/auto_vw.py`) usa solo la libreria standard. Email in `<cache>/auto/account.json`,
+(`<cache>/auto/python`). CarConnectivity vuole Python 3.10 o più nuovo (requests 2.34): se quello del server è più
+vecchio (il 3.9 del Mac), uv lo scarica una volta sola per il ponte (Python 3.12 in `<cache>/auto/pythons`, uv in
+`<cache>/auto/strumenti`); un ambiente fatto con un Python troppo vecchio si rifà da capo. Il resto (`server/auto_vw.py`) usa solo la libreria standard. Email in `<cache>/auto/account.json`,
 password nel Portachiavi del Mac (servizio «Atlante - La mia Volkswagen»; senza Portachiavi nello stesso file, 0600);
 l'S-PIN arriva con il singolo comando e non si salva mai. Lettura ogni 5 minuti (più spesso il cloud rallenta l'account).
 Il cloud non dà il tracciato GPS: un viaggio è «ferma in A, poi ferma in B con più chilometri»; la strada mostrata è la

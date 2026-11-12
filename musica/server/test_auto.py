@@ -626,6 +626,122 @@ class TestAutoPonte(unittest.TestCase):
         self.err.close()
 
 
+class PonteFintoInstalla(AV.Ponte):
+    """Il ponte con comandi finti per la preparazione: niente rete, niente pip. Un Python è un file con una versione.
+    Come il Mac mini il 12/11: il Python del server è il 3.9 e CarConnectivity vuole requests 2.34 (solo da 3.10)."""
+
+    def __init__(self, cartella, server, rotto=()):
+        super().__init__(cartella, lambda m: None)
+        self.comandi = []                          # (comando, env)
+        self.versioni = {sys.executable: server}   # percorso del Python → versione
+        self.con_libreria = set()                  # i Python con CarConnectivity installata
+        self.rotto = set(rotto)                    # i passi che non riescono: "uv", "scarica"
+
+    def python_finto(self, py, versione):
+        os.makedirs(os.path.dirname(py), exist_ok=True)
+        open(py, "w").close()
+        self.versioni[py] = versione
+
+    def _run(self, comando, timeout, env=None, cwd=None):
+        c = list(comando)
+        self.comandi.append((c, env))
+
+        def fatto(codice=0, testo=""):
+            return subprocess.CompletedProcess(c, codice, stdout=testo.encode("utf-8"))
+
+        py = c[0]
+        if py != sys.executable and not os.path.exists(py):
+            raise FileNotFoundError(py)
+        if c[1:3] == ["-I", "-c"]:
+            if "version_info" in c[3]:
+                v = self.versioni.get(py)
+                return fatto(0, "%d.%d\n" % v) if v else fatto(1, "rotto")
+            return fatto(0 if py in self.con_libreria else 1)          # la prova dell'import
+        if c[1:3] == ["-m", "venv"]:
+            self.python_finto(os.path.join(c[3], "bin", "python3"), self.versioni[py])
+            return fatto()
+        if c[1:4] == ["-m", "pip", "install"]:
+            if c[-1] == "pip":
+                return fatto()
+            if c[-1] == "uv":
+                if "uv" in self.rotto:
+                    return fatto(1, "ERROR: niente uv")
+                open(os.path.join(os.path.dirname(py), "uv"), "w").close()
+                return fatto()
+            if self.versioni[py] < (3, 10):
+                return fatto(1, "2.32.5) ERROR: No matching distribution found for requests~=2.34.2")
+            self.con_libreria.add(py)
+            return fatto()
+        if os.path.basename(py) == "uv" and c[1] == "venv":
+            if "scarica" in self.rotto:
+                return fatto(1, "error: download failed")
+            versione = tuple(int(x) for x in c[c.index("--python") + 1].split("."))
+            self.python_finto(os.path.join(c[-1], "bin", "python3"), versione)
+            return fatto()
+        raise AssertionError("comando inatteso: %r" % c)
+
+
+class TestAutoInstalla(unittest.TestCase):
+    """La preparazione del ponte (Ponte._installa) con comandi finti. Il 12/11 sul Mac mini il collegamento non partiva:
+    l'ambiente era fatto con il Python 3.9 del Mac e pip diceva «No matching distribution found for requests~=2.34.2»."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="atlante-auto-installa-")
+        self.ambiente = unittest.mock.patch.dict(os.environ)
+        self.ambiente.start()
+        for k in ("ATLANTE_AUTO_PYTHON", "ATLANTE_AUTO_INSTALLA"):
+            os.environ.pop(k, None)
+        self.venv = os.path.join(self.base, "python")
+        self.py = os.path.join(self.venv, "bin", "python3")
+
+    def tearDown(self):
+        self.ambiente.stop()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_python_del_mac_vecchio_ne_scarica_uno_nuovo(self):
+        p = PonteFintoInstalla(self.base, (3, 9))
+        p._installa()
+        self.assertEqual(p.versioni[self.py], (3, 12))
+        self.assertIn(self.py, p.con_libreria)
+        uv = [(c, env) for c, env in p.comandi if os.path.basename(c[0]) == "uv"]
+        self.assertEqual([c[1:] for c, _ in uv], [["venv", "--seed", "--python", AV.PYTHON_SCARICATO, self.venv]])
+        env = uv[0][1]
+        self.assertTrue(env["UV_PYTHON_INSTALL_DIR"].startswith(self.base))   # il Python scaricato resta in <cache>/auto
+        self.assertTrue(env["UV_CACHE_DIR"].startswith(self.base))
+        self.assertNotIn([sys.executable, "-m", "venv", self.venv], [c for c, _ in p.comandi])
+
+    def test_ambiente_fatto_col_python_vecchio_si_rifa(self):
+        p = PonteFintoInstalla(self.base, (3, 9))
+        p.python_finto(self.py, (3, 9))       # com'era sul Mac mini: l'ambiente del 3.9, dove la libreria non entra
+        open(os.path.join(self.venv, "pyvenv.cfg"), "w").close()
+        p._installa()
+        self.assertEqual(p.versioni[self.py], (3, 12))
+        self.assertIn(self.py, p.con_libreria)
+        self.assertFalse(os.path.exists(os.path.join(self.venv, "pyvenv.cfg")))   # rifatto da capo
+
+    def test_python_del_server_nuovo_basta_lui(self):
+        p = PonteFintoInstalla(self.base, (3, 12))
+        p._installa()
+        fatti = [c for c, _ in p.comandi]
+        self.assertIn([sys.executable, "-m", "venv", self.venv], fatti)
+        self.assertFalse([c for c in fatti if os.path.basename(c[0]) == "uv" or c[-1] == "uv"])
+        self.assertIn(self.py, p.con_libreria)
+
+    def test_ambiente_pronto_non_tocca_niente(self):
+        p = PonteFintoInstalla(self.base, (3, 9))
+        p.python_finto(self.py, (3, 12))
+        p.con_libreria.add(self.py)
+        p._installa()
+        self.assertEqual([c[:3] for c, _ in p.comandi], [[self.py, "-I", "-c"]] * 2)   # versione e prova dell'import
+
+    def test_download_non_riuscito_dice_cosa(self):
+        p = PonteFintoInstalla(self.base, (3, 9), rotto=("scarica",))
+        with self.assertRaises(RuntimeError) as e:
+            p._installa()
+        self.assertIn("Python " + AV.PYTHON_SCARICATO, str(e.exception))
+        self.assertIn("download failed", str(e.exception))
+
+
 FINTO_PONTE = r'''
 import json, os, sys, time
 conf = json.loads(sys.stdin.readline())

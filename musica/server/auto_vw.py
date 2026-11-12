@@ -2,8 +2,9 @@
 """La mia Volkswagen: il modulo auto di Atlante (pagina x/auto.html, API sotto api/extra/auto/, solo Samuele).
 
 - Collega l'account Volkswagen (lo stesso dell'app Volkswagen) con un processo a parte, auto_ponte.py, che usa
-  CarConnectivity in un suo ambiente Python (<cache>/auto/python, preparato qui da solo la prima volta). Sull'auto
-  non si installa niente: si parla con il cloud Volkswagen, come fa l'app ufficiale.
+  CarConnectivity in un suo ambiente Python (<cache>/auto/python, preparato qui da solo la prima volta; se il Python
+  del server è più vecchio del 3.10, con un Python 3.12 scaricato da uv). Sull'auto non si installa niente: si parla
+  con il cloud Volkswagen, come fa l'app ufficiale.
 - Ogni 5 minuti legge batteria, autonomia, chilometri, temperature, clima, porte, ricarica e posizione di parcheggio.
   Comandi: apri e chiudi (con l'S-PIN, chiesto ogni volta e mai salvato), clima, sbrinamento.
 - Diario (SQLite): soste, viaggi ricavati da contachilometri e posizione, ricariche. Il cloud non dà il tracciato GPS:
@@ -24,6 +25,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -35,6 +37,11 @@ import urllib.request
 QUI = os.path.dirname(os.path.abspath(__file__))
 PONTE = os.path.join(QUI, "auto_ponte.py")
 PACCHETTI = ["carconnectivity>=0.11.11", "carconnectivity-connector-volkswagen>=0.10.6"]
+# CarConnectivity dichiara Python 3.9 ma vuole requests 2.34, che dalla 2.33 gira solo da Python 3.10: con il 3.9 del Mac
+# pip non la installa («No matching distribution found for requests~=2.34.2», 12/11). Se il Python del server è più
+# vecchio, il ponte ne usa uno tutto suo scaricato da uv (di Astral; uv arriva con pip), in <cache>/auto/pythons
+PYTHON_MIN = (3, 10)
+PYTHON_SCARICATO = "3.12"
 UA = "AtlanteAuto/1.0 (+https://github.com/samuelemanfredi/atlante; uso personale)"
 INTERVALLO = 300           # secondi tra due letture del cloud Volkswagen (più spesso il cloud rallenta l'account)
 SERVIZIO_PORTACHIAVI = "Atlante - La mia Volkswagen"
@@ -293,6 +300,7 @@ class Ponte:
     def __init__(self, cartella, alla_lettura):
         self.cartella = cartella
         self.venv = os.path.join(cartella, "python")
+        self.strumenti = os.path.join(cartella, "strumenti")   # uv, se serve un Python più nuovo di quello del Mac
         self.registro = os.path.join(cartella, "ponte.log")
         self.alla_lettura = alla_lettura
         self.lock = threading.Lock()
@@ -390,27 +398,81 @@ class Ponte:
                 break
             attesa = min(attesa * 2, 900)
 
+    def _run(self, comando, timeout, env=None, cwd=None):
+        """Un comando, con l'uscita (stdout e stderr insieme). A parte perché le prove lo sostituiscono."""
+        return subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, env=env,
+                              cwd=cwd)
+
+    def _passo(self, comando, timeout, errore, env=None):
+        r = self._run(comando, timeout, env=env, cwd=self.cartella)
+        if r.returncode != 0:
+            raise RuntimeError("%s: %s" % (errore, r.stdout.decode("utf-8", "replace").strip()[-300:]))
+        return r
+
+    def _versione(self, py):
+        """(3, 12) per il Python in `py`; None se non c'è o non parte."""
+        try:
+            r = self._run([py, "-I", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], 60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        m = re.search(r"^(\d+)\.(\d+)\s*$", r.stdout.decode("utf-8", "replace"), re.M) if r.returncode == 0 else None
+        return (int(m.group(1)), int(m.group(2))) if m else None
+
+    def _uv(self):
+        """uv (di Astral: scarica i Python), in un piccolo ambiente suo fatto con il Python del server."""
+        uv = os.path.join(self.strumenti, "bin", "uv")
+        if os.path.exists(uv):
+            return uv
+        shutil.rmtree(self.strumenti, ignore_errors=True)
+        self._passo([sys.executable, "-m", "venv", self.strumenti], 600, "Ambiente per uv non creato")
+        pip = [os.path.join(self.strumenti, "bin", "python3"), "-m", "pip", "install", "--disable-pip-version-check",
+               "--no-input", "--upgrade"]
+        self._run(pip + ["pip"], 600, cwd=self.cartella)     # il pip del Python 3.9 del Mac è vecchio: prima lui
+        self._passo(pip + ["uv"], 900, "uv non installato")
+        if not os.path.exists(uv):
+            raise RuntimeError("uv non installato: manca %s" % uv)
+        return uv
+
+    def _env_uv(self):
+        env = dict(os.environ)
+        env.update({"UV_PYTHON_INSTALL_DIR": os.path.join(self.cartella, "pythons"),
+                    "UV_CACHE_DIR": os.path.join(self.cartella, "uv-cache"), "UV_NO_CONFIG": "1"})
+        return env
+
+    def _crea_ambiente(self):
+        """L'ambiente Python del ponte (<cache>/auto/python), da capo: con il Python del server se è almeno PYTHON_MIN,
+        se no con un Python PYTHON_SCARICATO che uv scarica una volta sola in <cache>/auto/pythons."""
+        os.makedirs(self.cartella, exist_ok=True)
+        shutil.rmtree(self.venv, ignore_errors=True)
+        if (self._versione(sys.executable) or (0, 0)) >= PYTHON_MIN:
+            self._fase("installazione", "Preparo il collegamento con Volkswagen: una volta sola, 1–3 minuti")
+            self._passo([sys.executable, "-m", "venv", self.venv], 600, "Ambiente Python non creato")
+        else:
+            self._fase("installazione", "Il Python del Mac è troppo vecchio per la libreria Volkswagen: ne scarico uno "
+                                        "nuovo solo per lei (una volta sola, 2–5 minuti)")
+            self._passo([self._uv(), "venv", "--seed", "--python", PYTHON_SCARICATO, self.venv], 900,
+                        "Python %s non scaricato" % PYTHON_SCARICATO, env=self._env_uv())
+        v = self._versione(self._python())
+        if (v or (0, 0)) < PYTHON_MIN:
+            raise RuntimeError("L'ambiente Python nuovo non parte (%s)" % ("%d.%d" % v if v else "nessuna versione"))
+
     def _installa(self):
         if os.environ.get("ATLANTE_AUTO_INSTALLA", "1") == "0" or os.environ.get("ATLANTE_AUTO_PYTHON"):
             return
         py = self._python()
+        # un ambiente fatto con un Python troppo vecchio (il 3.9 del Mac, 12/11) o rotto (il suo Python non c'è più)
+        # si rifà da capo
+        if os.path.lexists(self.venv) and (self._versione(py) or (0, 0)) < PYTHON_MIN:
+            shutil.rmtree(self.venv, ignore_errors=True)
         if not os.path.exists(py):
-            self._fase("installazione", "Preparo il collegamento con Volkswagen: una volta sola, 1–3 minuti")
-            r = subprocess.run([sys.executable, "-m", "venv", self.venv], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, timeout=600)
-            if r.returncode != 0:
-                raise RuntimeError(r.stdout.decode("utf-8", "replace")[-300:])
-        prova = subprocess.run([py, "-I", "-c", "import carconnectivity.carconnectivity, "
-                                                "carconnectivity_connectors.volkswagen.connector"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+            self._crea_ambiente()
+        prova = self._run([py, "-I", "-c", "import carconnectivity.carconnectivity, "
+                                            "carconnectivity_connectors.volkswagen.connector"], 180)
         if prova.returncode != 0 or self.reinstalla:
             self._fase("installazione", "Scarico la libreria per il cloud Volkswagen (CarConnectivity)…")
-            subprocess.run([py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade", "pip"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
-            r = subprocess.run([py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade"]
-                               + PACCHETTI, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1800)
-            if r.returncode != 0:
-                raise RuntimeError(r.stdout.decode("utf-8", "replace").strip()[-300:])
+            pip = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade"]
+            self._run(pip + ["pip"], 600, cwd=self.cartella)
+            self._passo(pip + PACCHETTI, 1800, "Libreria Volkswagen non installata")
             self.reinstalla = False
 
     def _ruota_registro(self):
