@@ -9556,6 +9556,35 @@ class TestTagliVivo(unittest.TestCase):
                 w.writeframes(bytes(64000))
             self.m.tagli_vivo(p)
 
+    def test_righe_spostate_sulla_voce(self):
+        """Un testo LRC di un'altra versione del brano (righe 3 s prima della voce, o un po' più veloce): le righe si
+        spostano sulla voce prima di abbinare le parole, che altrimenti non si troverebbero vicino alla loro riga."""
+        frasi = ["sole alto sopra il mare", "vento caldo nella sera", "passi lenti sulla via", "luce tenue alla finestra",
+                 "voci lontane dal porto", "notte chiara senza fine"]
+        lrc = [8.0, 14.0, 20.0, 26.0, 32.0, 38.0]
+
+        def righe():
+            return [{"t": t, "f": None, "x": x, "p": [[None, None, w] for w in self.m._pezzi(x)]} for t, x in zip(lrc, frasi)]
+
+        def sentite(f):
+            out = []
+            for t, x in zip(lrc, frasi):
+                for k, w in enumerate(x.split()):
+                    out.append((round(f(t) + 0.35 * k, 3), None, w))
+            return out
+        r = righe()
+        self.assertEqual(self.m.correggi_tempi_righe(r, sentite(lambda t: t + 3.0)), (1.0, 3.0))
+        self.assertEqual([x["t"] for x in r], [11.0, 17.0, 23.0, 29.0, 35.0, 41.0])
+        self.assertGreater(self.m.allinea_parole(r, sentite(lambda t: t + 3.0), True), 0.9)
+        r = righe()   # un po' più lento e spostato: 1,02 × t + 1
+        a, b = self.m.correggi_tempi_righe(r, sentite(lambda t: 1.02 * t + 1))
+        self.assertAlmostEqual(a, 1.02, places=3)
+        self.assertAlmostEqual(b, 1.0, places=2)
+        r = righe()   # già a tempo: niente da spostare
+        self.assertIsNone(self.m.correggi_tempi_righe(r, sentite(lambda t: t + 0.1)))
+        self.assertEqual([x["t"] for x in r], lrc)
+        self.assertIsNone(self.m.correggi_tempi_righe(righe(), sentite(lambda t: t)[:5]))   # troppo poco sentito
+
     def test_parole_di_un_pezzo(self):
         tok = lambda t, w: {"text": " " + w, "offsets": {"from": int(t * 1000), "to": int(t * 1000) + 300},   # noqa: E731
                             "p": 0.9, "t_dtw": int(t * 100)}
@@ -9685,13 +9714,19 @@ class TestKaraokeDalVivo(unittest.TestCase):
         j, _ = self.fino_a("Silenzio", 0, lambda x: x.get("allineamento") == "fatto")
         self.assertEqual(j["stato"], "strumentale")
 
-    def test_3_con_un_testo_niente_whisper(self):
-        n = len(self.chiamate())
+    def test_3_con_un_testo_lo_allinea_subito(self):
+        """Un brano con un testo a tempo ma le parole solo stimate: ascoltandolo Whisper lo allinea subito alla voce
+        (anche con il lavoro su tutta la libreria in pausa), una volta sola."""
         j = self.leggi("Canzone sincronizzata", 12.5)
-        self.assertEqual((j["stato"], j["fonte"], j["parole_da"]), ("ok", "lrclib", "stima"))
-        self.assertNotIn("allineamento", j)
+        self.assertEqual((j["stato"], j["fonte"]), ("ok", "lrclib"))
+        self.assertNotIn("dal_vivo", j)
+        j, visti = self.fino_a("Canzone sincronizzata", 12.5, lambda x: x.get("parole_da") == "voce")
+        self.assertIn("in corso", [x.get("allineamento") for x in visti])
+        self.assertEqual([w["t"] for w in j["righe"][0]["parole"]], [10.4, 10.8, 11.3, 11.9, 12.4, 12.8])
+        n = len(self.chiamate())
         time.sleep(0.5)
-        self.assertEqual(len(self.chiamate()), n)
+        self.assertEqual(self.leggi("Canzone sincronizzata", 20)["parole_da"], "voce")
+        self.assertEqual(len(self.chiamate()), n)   # fatto: non si rifà
 
     def test_4_senza_posizione_o_whisper_escluso(self):
         n = len(self.chiamate())
@@ -12875,6 +12910,22 @@ class TestLrclibSoloQuesto(unittest.TestCase):
             with self.assertRaises(self.m.ErroreExtra) as e:
                 self.m._lrclib_cerca("IV. Recitativo. Ach, schmelze doch", "Bach Collegium", "", 120)
             self.assertNotIsInstance(e.exception, self.m.LrclibSoloQuesto)   # LRCLIB giù davvero: pausa per tutti
+
+
+class TestGuardiaApp(unittest.TestCase):
+    """Il guardiano della riproduzione nell'app (la musica che si ferma da sola a metà): test_guardia.js in
+    JavaScriptCore. Senza osascript (non è un Mac) si salta."""
+
+    def test_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_guardia.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
 class TestAscoltoApp(unittest.TestCase):

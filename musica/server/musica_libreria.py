@@ -6413,6 +6413,44 @@ def allinea_parole(righe, sentite, a_tempo):
     return usate / float(n)
 
 
+def correggi_tempi_righe(righe, sentite):
+    """Le righe a tempo di un testo (LRC) spostate sulla voce sentita da Whisper: un testo di un'altra versione del brano
+    (introduzione più lunga, edit radio, un'altra velocità) ha tutte le righe avanti o indietro, e allora allinea_parole,
+    che cerca ogni parola solo vicino alla sua riga, non le trova e il karaoke resta fuori tempo. Si allinea prima tutto
+    il testo senza guardare i tempi, poi si prende l'inizio di ogni riga sentita (la sua prima parola) e si stima
+    tempo_vero = a × tempo_riga + b (spostamento e, entro il 3%, velocità), scartando gli abbinamenti lontani.
+    Con almeno 4 righe sentite e uno spostamento di almeno 0,3 s le righe si correggono. -> (a, b) o None."""
+    import copy
+    prova = copy.deepcopy(righe)
+    for r in prova:
+        r["t"], r["f"] = None, None
+    if allinea_parole(prova, sentite, False) < 0.2:
+        return None
+    coppie = [(r["t"], q["p"][0][0]) for r, q in zip(righe, prova)
+              if r.get("t") is not None and q.get("p") and q["p"][0][0] is not None]
+    if len(coppie) < 4:
+        return None
+    diff = sorted(v - t for t, v in coppie)
+    med = diff[len(diff) // 2]
+    buone = [(t, v) for t, v in coppie if abs(v - t - med) < 2.0]   # i ritornelli abbinati alla ripetizione sbagliata no
+    if len(buone) < 4 or len(buone) < len(coppie) * 0.5:
+        return None
+    n = float(len(buone))
+    mt, mv = sum(t for t, _ in buone) / n, sum(v for _, v in buone) / n
+    var = sum((t - mt) ** 2 for t, _ in buone)
+    a = sum((t - mt) * (v - mv) for t, v in buone) / var if var > 0 else 1.0
+    if abs(a - 1) > 0.03:   # più del 3% non è la stessa canzone a un'altra velocità: solo lo spostamento
+        a = 1.0
+    b = mv - a * mt
+    if max(abs(a * t + b - t) for t, _ in buone) < 0.3:
+        return None
+    for r in righe:
+        for k in ("t", "f"):
+            if r.get(k) is not None:
+                r[k] = round(max(0.0, a * r[k] + b), 3)
+    return round(a, 4), round(b, 3)
+
+
 def tempi_righe_libere(righe):
     """Testo senza tempi allineato alla voce: le righe senza nessuna parola sentita prendono il tempo tra quelle vicine,
     in proporzione alle sillabe; prima della prima e dopo l'ultima, al passo del canto."""
@@ -7894,7 +7932,7 @@ class Testi:
 
     # parole dalla voce
 
-    def allinea(self, i, b):
+    def allinea(self, i, b, fermo=None, priorita=TESTI_NICE):
         """Whisper ascolta il brano: le parole del testo prendono il tempo in cui vengono cantate; senza testo lo
         trascrive dalla voce. In pausa (da Gestione) si ferma a metà e il brano resta in coda. Un errore di tutto il Mac
         (disco, ffmpeg, rete, Whisper che non parte, tre brani di fila) non conta contro il brano: Whisper aspetta.
@@ -7931,16 +7969,20 @@ class Testi:
             os.makedirs(self.tmp, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="voce-", dir=self.tmp) as tmp:
                 wav = os.path.join(tmp, "voce.wav")
-                _wav16k(p, wav, self._fermo_sfondo)
+                _wav16k(p, wav, fermo or self._fermo_sfondo, priorita)
                 if r.get("stato") == "ok":
                     testi = _testi_della_risposta(r)
                     lingua = lingua_testo(" ".join(testi))
-                    j = self.whisper.trascrivi(wav, lingua, " ".join(testi)[:400])
+                    j = self.whisper.trascrivi(wav, lingua, " ".join(testi)[:400], priorita=priorita)
                     sentite = [(x, f, w) for x, f, w, _p in parole_sentite(j, self.whisper.anticipo)]
                     a_tempo = bool(r.get("sincronizzato"))
                     nuove = [{"t": x.get("t") if a_tempo else None, "f": x.get("fine") if a_tempo else None,
                               "x": x.get("testo") or "", "p": [[None, None, w] for w in _pezzi(x.get("testo"))]}
                              for x in r["righe"]]
+                    if a_tempo:   # testo di un'altra versione del brano: le righe sulla voce, prima delle parole
+                        corr = correggi_tempi_righe(nuove, sentite)
+                        if corr:
+                            print("Testi: %s: righe spostate sulla voce (×%s %+.2f s)" % (self.ora_a, corr[0], corr[1]), flush=True)
                     quota = allinea_parole(nuove, sentite, a_tempo)
                     self.di_fila = 0
                     if not self._stesso(i, it0, f0):
@@ -7956,7 +7998,7 @@ class Testi:
                                          "righe": nuove})
                     self._scheda(i, al="fatto", alq=ora, qa=round(quota, 2), vo="parole")
                 else:   # nessun testo da nessuna parte: lo trascrive Whisper dalla voce
-                    j = self.whisper.trascrivi(wav, "", "")
+                    j = self.whisper.trascrivi(wav, "", "", priorita=priorita)
                     righe = righe_da_voce(j, self.whisper.anticipo)
                     self.di_fila = 0
                     if not self._stesso(i, it0, f0):
@@ -8033,7 +8075,19 @@ class Testi:
         if v and v.get("wav"):
             shutil.rmtree(os.path.dirname(v["wav"]), ignore_errors=True)
 
-    def _vivo_chiedi(self, i, b, p, nomi, r, pos):
+    def _allinea_serve(self, i, b, r):
+        """Il testo a tempo del brano che si ascolta va allineato alla voce adesso: Whisper non l'ha mai fatto per questo
+        file e questo testo, o ci ha provato e può riprovare; e Whisper non aspetta per un errore di tutto il Mac."""
+        if time.time() < self.pausa_voce:
+            return False
+        s = self.schede.get(i) or {}
+        if s.get("v") != TESTI_V or s.get("f") != b.get("_f") or s.get("it") != self._impronta_di(r):
+            return True
+        al = s.get("al") or ""
+        return al in ("", "attesa") or (al == "errore" and s.get("aln", 0) < WHISPER_ERRORI and
+                                        time.time() - s.get("alq", 0) > VIVO_RIPROVA)
+
+    def _vivo_chiedi(self, i, b, p, nomi, r, pos, tipo="trascrivi"):
         """Il brano che si ascolta adesso (pos: dove si è, in secondi): Whisper lo trascrive subito, cominciando da lì e
         da quanto ha già fatto (brani/<id>.vivo.json)."""
         ora = time.time()
@@ -8044,7 +8098,8 @@ class Testi:
                 v = None
             if v is None:
                 v = {"f": b.get("_f"), "b": b, "p": p, "nomi": nomi, "r": r, "tagli": None, "pezzi": {}, "lingua": "",
-                     "ora": None, "wav": None, "errore": "", "eq": 0, "fase": "in coda", "quando": ora, "pos": pos}
+                     "ora": None, "wav": None, "errore": "", "eq": 0, "fase": "in coda", "quando": ora, "pos": pos,
+                     "tipo": tipo}
                 d = _leggi_json(self._file_vivo(i), None)
                 tg = d.get("tagli") if isinstance(d, dict) else None
                 if d and d.get("v") == TESTI_V and d.get("f") == v["f"] and isinstance(d.get("pezzi"), dict) and \
@@ -8103,6 +8158,8 @@ class Testi:
             return
         t, a = v["nomi"][:2]
         self.ora_v = " — ".join(x for x in (t, a) if x)
+        if v.get("tipo") == "allinea":
+            return self._vivo_allinea(i, v)
         d = self.dati(i)
         if d and d.get("fonte") == "voce" and d.get("f") == v["f"]:   # fatto intanto dal lavoro su tutta la libreria
             with self.blocco:
@@ -8166,6 +8223,28 @@ class Testi:
             self._vivo_errore(i, e)
         finally:
             v["ora"] = None
+
+    def _vivo_allinea(self, i, v):
+        """Il brano che si ascolta ha un testo a tempo ma non le parole dalla voce: Whisper lo allinea subito, tutto il
+        brano (come il lavoro su tutta la libreria, che può essere in pausa). Fatto o no, il brano esce dal lavoro dal
+        vivo: la scheda dice se riprovare (_allinea_serve)."""
+        b, t, a = v["b"], v["nomi"][0], v["nomi"][1]
+        v["fase"] = "preparo Whisper"
+        if not self.whisper.prepara():
+            w = self.whisper
+            return self._vivo_errore(i, "Whisper escluso da Gestione" if self._fermo_dal_vivo() else
+                                     "Whisper non è pronto sul Mac: " + (w.errore or w.stato or "?"))
+        s = self.schede.get(i) or {}
+        if s.get("v") != TESTI_V or s.get("f") != b.get("_f") or s.get("it") != self._impronta_di(v["r"]):
+            self._segna(i, b, t, a, v["r"])   # la scheda di questo testo: allinea la usa per sapere se è ancora quello
+        v["fase"] = "allineo"
+        try:
+            self.allinea(i, b, self._fermo_dal_vivo, VIVO_NICE)
+        finally:
+            with self.blocco:
+                if self.vivi.get(i) is v:
+                    self._vivo_via(i)
+            self.salva(True)
 
     def _vivo_fine(self, i, v):
         """Tutti i pezzi trascritti: il testo del brano intero (o strumentale), come lo fa il lavoro su tutta la
@@ -8435,6 +8514,9 @@ class Testi:
             return {"stato": "in arrivo"}
         voce = self._voce(i, b, r)
         self.indicizza(i, b.get("_f"), r, voce)
+        if pos is not None and not voce and r.get("stato") == "ok" and self._serve_voce(r) and \
+                self._allinea_serve(i, b, r) and self._vivo_serve(i, b, p):
+            self._vivo_chiedi(i, b, p, (t, a, al, dur), r, pos, tipo="allinea")
         if not voce and r.get("stato") == "nessuno":
             if pos is not None and self._vivo_serve(i, b, p):
                 v = self._vivo_chiedi(i, b, p, (t, a, al, dur), r, pos)
@@ -8457,6 +8539,10 @@ class Testi:
                 self._metti_prima(self.subito_a, i, self.sveglia_a)
         o = self._risposta(r, dur, voce)
         al = self._allineamento(i, r, voce)
+        with self.blocco:
+            vv = self.vivi.get(i)
+        if not voce and vv and vv.get("tipo") == "allinea" and not vv.get("errore"):
+            al = "in corso"   # Whisper lo sta allineando adesso, perché lo si ascolta
         if al:
             o["allineamento"] = al
         if lingua:
