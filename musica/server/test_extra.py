@@ -4774,13 +4774,25 @@ class TestLibreriaAppModulo(unittest.TestCase):
         class H:
             def __init__(self, command):
                 self.command = command
-        ok = "/api/extra/libreria-app/invio/" + "a" * 32
-        self.assertTrue(self.m._libapp_invio_libero(H("POST"), ok))
-        self.assertTrue(self.m._libapp_invio_libero(H("POST"), "/musica" + ok))
-        for metodo, p in (("GET", ok), ("DELETE", ok), ("POST", ok + "/x"), ("POST", "/api/extra/libreria-app/invio/a"),
-                          ("POST", "/api/extra/libreria-app/codice"), ("POST", "/api/extra/api/extra/libreria-app/invio/" + "a" * 32),
-                          ("POST", "/api/extra/liste"), ("POST", "/api/musica/catalogo")):
-            self.assertFalse(self.m._libapp_invio_libero(H(metodo), p), (metodo, p))
+        d = tempfile.mkdtemp(prefix="atlante-libapp-v-")
+        try:
+            L = self.m.LibreriaApp(d)
+            c, _ = L.codice("p", "dev12345", "iPhone", "iphone")
+            ok = "/api/extra/libreria-app/invio/" + c
+            with unittest.mock.patch.object(self.m, "LIBAPP", L):
+                self.assertIs(self.m._libapp_invio_libero(H("POST"), ok), True)
+                self.assertIs(self.m._libapp_invio_libero(H("POST"), "/musica" + ok), True)
+                # quella rotta con un codice che non c'è o è scaduto: no (e il corpo non si legge)
+                self.assertIs(self.m._libapp_invio_libero(H("POST"), "/api/extra/libreria-app/invio/" + "a" * 32), False)
+                L.codici[c]["scade"] = time.time() - 1
+                self.assertIs(self.m._libapp_invio_libero(H("POST"), ok), False)
+                L.codici[c]["scade"] = time.time() + 60
+                for metodo, p in (("GET", ok), ("DELETE", ok), ("POST", ok + "/x"), ("POST", "/api/extra/libreria-app/invio/a"),
+                                  ("POST", "/api/extra/libreria-app/codice"), ("POST", "/api/extra/api/extra/libreria-app/invio/" + c),
+                                  ("POST", "/api/extra/liste"), ("POST", "/api/musica/catalogo")):
+                    self.assertIsNone(self.m._libapp_invio_libero(H(metodo), p), (metodo, p))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_firma_che_manca(self):
         d = tempfile.mkdtemp(prefix="atlante-libapp-f-")

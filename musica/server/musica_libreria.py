@@ -3337,6 +3337,11 @@ class LibreriaApp:
                 del L[min(L, key=lambda k: L[k].get("ricevuta", 0) if isinstance(L[k], dict) else 0)]
             _scrivi_json(self._file(conto), {"librerie": L})
 
+    def valido(self, codice):
+        with self.blocco:
+            v = self.codici.get(codice)
+            return bool(v and v["scade"] > time.time())
+
     def ricevi(self, codice, testo):
         with self.blocco:
             v = self.codici.get(codice)
@@ -3374,13 +3379,16 @@ class LibreriaApp:
 
 
 def _libapp_invio_libero(h, p):
-    """La richiesta con cui il comando rapido manda la libreria: entra senza biscotto, la sua chiave è il codice
-    (controllato da LibreriaApp.ricevi). Solo POST e solo quella rotta, decisa come la decide l'instradamento."""
+    """La richiesta con cui il comando rapido manda la libreria: entra senza biscotto, la sua chiave è il codice. Solo
+    POST e solo quella rotta, decisa come la decide l'instradamento. None: non è quella rotta; False: lo è, ma il codice
+    non c'è o è scaduto (si risponde subito, senza leggere il corpo); True: entra."""
     if h.command != "POST":
-        return False
+        return None
     m = EXTRA.match(p)
     parti = _parti_extra(m) if m else None
-    return bool(parti and len(parti) == 3 and parti[:2] == ["libreria-app", "invio"] and CODICE_LIBAPP.match(parti[2]))
+    if not (parti and len(parti) == 3 and parti[:2] == ["libreria-app", "invio"] and CODICE_LIBAPP.match(parti[2])):
+        return None
+    return LIBAPP is not None and LIBAPP.valido(parti[2])
 
 
 # --- il comando rapido «Libreria per Atlante» (plist di Comandi Rapidi), firmato dal Mac ---
@@ -18254,9 +18262,14 @@ def controlla_accesso(h):
         return True
     if entrato or libero:
         return False
-    if _libapp_invio_libero(h, p):   # il comando rapido che manda la libreria: la chiave è il codice nell'indirizzo
+    invio = _libapp_invio_libero(h, p)   # il comando rapido che manda la libreria: la chiave è il codice nell'indirizzo
+    if invio:
         h._chi = {"ruolo": "codice", "persona": None, "chiave": None}
         return False
+    if invio is False:
+        h.close_connection = True   # corpo non letto
+        _risposta_testo(h, "⚠️ Codice scaduto: apri Atlante Musica e tocca di nuovo «Leggi la libreria di Musica»", 403)
+        return True
     if h.command not in ("GET", "HEAD"):
         h.close_connection = True   # corpo non letto
     elif h.headers.get("Sec-Fetch-Mode") == "navigate" or p.endswith("/") or p.endswith(".html"):
