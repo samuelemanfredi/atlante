@@ -382,6 +382,9 @@ class Server:
         # il lavoro sui BPM e sui generi è acceso di serie: nelle prove solo dove una prova lo chiede (--tematiche),
         # così nessun server di prova chiede niente al MusicBrainz vero
         env.setdefault("ATLANTE_TEMATICHE", "0")
+        # anche la pulizia audio è accesa di serie: nelle prove mai (cambierebbe i brani finti delle altre prove); le sue
+        # prove stanno in test_pulizia.py
+        env.setdefault("ATLANTE_PULIZIA", "0")
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         for k, v in self.ambiente.items():
@@ -8751,6 +8754,36 @@ class TestTestiApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+class TestPuliziaServer(unittest.TestCase):
+    """Gestione → Pulizia audio dal server: spenta nelle prove (ATLANTE_PULIZIA=0), lo stato si legge e le richieste
+    sbagliate non toccano niente. Il lavoro vero (con ffmpeg) è provato in test_pulizia.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = tempfile.mkdtemp(prefix="atlante-pulizia-srv-")
+        cls.c = prepara_cartelle(cls.base)
+        cls.s = Server(cls.base, cls.c).avvia()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.ferma()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def test_stato_e_richieste(self):
+        j = self.s.json("GET", "/api/extra/gestione/pulizia-audio")
+        self.assertIs(j["acceso"], False)
+        self.assertEqual(j["obiettivo"], -14.0)
+        self.assertEqual(j["conti"]["migliorati"], 0)
+        for corpo in ({}, {"acceso": "si"}):
+            self.s.json("POST", "/api/extra/gestione/pulizia-audio", corpo, codice=400)
+        self.s.json("POST", "/api/extra/gestione/pulizia-audio/ripristina", {"id": "zz"}, codice=400)
+        self.s.json("POST", "/api/extra/gestione/pulizia-audio/ripristina", {"id": "0123456789abcdef"}, codice=409)
+        self.s.json("POST", "/api/extra/gestione/pulizia-audio/ripristina-tutto", {}, codice=400)
+        self.s.json("GET", "/api/extra/gestione/pulizia-audio/altro", codice=404)
+        self.assertEqual(self.s.json("POST", "/api/extra/gestione/pulizia-audio/riprova", {}), {"ok": True})
+        self.assertIs(self.s.json("GET", "/api/extra/gestione/pulizia-audio")["acceso"], False)   # sempre spenta
+
+
 class TestStessoMac(unittest.TestCase):
     """L'app aperta sul Mac mini stesso (la musica è già sul suo disco): api/extra/io lo dice, così l'app non si copia
     tutta la libreria sul disco interno (il 27/10 lo ha riempito in pochi minuti). Gli indirizzi del Mac li legge il
@@ -13057,6 +13090,21 @@ def _prove_auto():
 
 for _n, _c in list(vars(_prove_auto()).items()):
     if _n.startswith("TestAuto") and isinstance(_c, type) and issubclass(_c, unittest.TestCase):
+        globals()[_n] = _c
+
+
+# ---------- Pulizia audio (pulizia_audio.py): le prove stanno in test_pulizia.py e girano qui, per lo stesso motivo:
+# se non passano la versione nuova non si installa e nessun brano della libreria si tocca ----------
+def _prove_pulizia():
+    spec = importlib.util.spec_from_file_location("test_pulizia", os.path.join(QUI, "test_pulizia.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+for _n, _c in list(vars(_prove_pulizia()).items()):
+    if _n.startswith("TestPulizia") and _n != "TestPuliziaServer" and isinstance(_c, type) and \
+            issubclass(_c, unittest.TestCase):
         globals()[_n] = _c
 
 

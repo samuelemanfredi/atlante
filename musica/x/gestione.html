@@ -98,6 +98,9 @@ details.rimp summary{color:var(--link);cursor:pointer}
   <h2 class="h2" id="testi">Testi e karaoke</h2>
   <p class="small">Il testo del brano che suona c'è sempre: il Mac lo prende dal file del brano o da LRCLIB quando lo ascolti. Qui si accende il lavoro su tutta la libreria: il testo di ogni brano e, con Whisper, ogni parola al tempo in cui viene cantata (i brani senza testo li trascrive dalla voce). Lavora un brano alla volta, a bassa priorità, e lo metti in pausa quando vuoi. La traduzione la fa l'IA del Mac se c'è, se no MyMemory.</p>
   <div id="ts"><p class="small">Un momento…</p></div>
+  <h2 class="h2" id="pulizia">Pulizia audio</h2>
+  <p class="small">Il Mac mini ascolta ogni brano del disco della musica e porta tutti allo stesso volume (−14 LUFS, come Spotify), toglie i picchi che distorcono, lo scostamento DC e i rombi sotto i 15 Hz e, nei file senza perdita, ricostruisce i picchi tagliati. Gli MP3 cambiano volume senza ricodifica: nessuna perdita di qualità e si torna indietro al bit. Gli altri formati si ricodificano e l'originale resta, identico, nella cartella nascosta «.atlante-originali». Ogni file nuovo passa un controllo (durata, volume, tag e copertina) prima di prendere il posto del vecchio; i brani già giusti non si toccano. Un brano alla volta, a bassa priorità.</p>
+  <div id="pa"><p class="small">Un momento…</p></div>
   <h2 class="h2">Ascolti in Atlante</h2>
   <p class="small">Le stesse classifiche che vedono tutti: di una persona si vede solo quello che ha scelto di condividere.</p>
   <div class="list" id="alist"></div>
@@ -456,6 +459,90 @@ function testiConferma(j, corpo) {
   }
   leggi();
   setInterval(() => { if (document.visibilityState === 'visible' && !conferma && !occupato) leggi(); }, 15000);
+})();
+</script>
+<script>
+// ----- Gestione → Pulizia audio (api/extra/gestione/pulizia-audio) -----
+// Acceso di serie: il Mac mini pulisce un brano alla volta. Qui si mette in pausa, si vede cosa ha fatto e si torna
+// all'originale di un brano (o di tutti: due tocchi, perché sono tanti file).
+(function () {
+  const {$, esc, toast, api} = AX;
+  let j = null, occupato = false, chiedi = '';   // chiedi: id del brano (o '*' per tutti) che aspetta il sì
+  const num = x => typeof x === 'number' ? x.toLocaleString('it-IT', {maximumFractionDigits:1}) : '–';
+  const db = x => typeof x === 'number' ? (x > 0 ? '+' : x < 0 ? '−' : '') + Math.abs(x).toLocaleString('it-IT', {minimumFractionDigits:1, maximumFractionDigits:1}) + ' dB' : '';
+  function quando(t) {
+    const d = new Date(t * 1000), oggi = new Date();
+    const hm = d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+    const giorni = Math.floor((new Date(oggi.toDateString()) - new Date(d.toDateString())) / 86400000);
+    return giorni <= 0 ? 'oggi alle ' + hm : giorni === 1 ? 'ieri alle ' + hm : d.toLocaleDateString('it-IT');
+  }
+  async function leggi() {
+    try { j = await api('gestione/pulizia-audio'); }
+    catch (e) { $('pa').innerHTML = '<p class="small">Non riesco a leggere lo stato: ' + esc(e.message) + '</p>'; return; }
+    disegna();
+  }
+  async function manda(percorso, corpo, testo) {
+    occupato = true; chiedi = ''; disegna();
+    try {
+      const r = await api('gestione/pulizia-audio' + percorso, {method:'POST', body:corpo});
+      if (r && r.conti) j = r;
+      toast(testo);
+      if (!(r && r.conti)) await leggi();
+    } catch (e) { toast(e.message); }
+    occupato = false; disegna();
+  }
+  function riga(x) {
+    let stato = '';
+    if (x.e === 'migliorato') {
+      const p = x.prima || {}, d = x.dopo || {};
+      stato = (x.modo === 'guadagno' ? db(x.g) + ' senza ricodifica' : 'ricodificato' + (x.g ? ' · ' + db(x.g) : '')) +
+        (typeof p.i === 'number' && typeof d.i === 'number' ? ' · ' + num(p.i) + ' → ' + num(d.i) + ' LUFS' : '');
+    } else if (x.e === 'ripristinato') stato = 'tornato all\'originale';
+    else stato = 'non riuscito: ' + (x.motivo || '');
+    const motivi = (x.m || []).join(' · ');
+    let h = '<div class="row"><span class="tx"><b>' + esc(x.t || 'Brano') + (x.a ? ' — ' + esc(x.a) : '') + '</b><span>' + esc(stato) + '</span>' +
+      (motivi ? '<span>' + esc(motivi) + '</span>' : '') + '<span>' + esc(quando(x.q)) + '</span></span>';
+    if (x.e === 'migliorato') h += chiedi === x.id ?
+      '<button class="btn sm danger" data-pasi="' + esc(x.id) + '">Ripristina</button><button class="btn sm" data-pano>No</button>' :
+      '<button class="btn sm" data-parip="' + esc(x.id) + '"' + (occupato ? ' disabled' : '') + '>Originale</button>';
+    return h + '</div>';
+  }
+  function disegna() {
+    if (!j) return;
+    const c = j.conti || {};
+    let h = '<div class="card"><div class="orow"><div class="tx"><b>Pulizia di tutta la libreria</b><span>' +
+      (j.acceso ? 'Accesa: un brano alla volta, dopo tutto il resto. Spegnila per metterla in pausa.' : 'In pausa: nessun brano viene toccato.') + '</span></div>' +
+      '<input type="checkbox" class="sw" id="paAcceso" aria-label="Pulizia di tutta la libreria"' + (j.acceso ? ' checked' : '') + (occupato ? ' disabled' : '') + '></div>';
+    if (!j.ffmpeg) h += '<div class="rerr">Sul Mac mini manca ffmpeg: si installa con <b>brew install ffmpeg</b>.</div>';
+    if (j.pausa) h += '<div class="rerr">In pausa per un momento: ' + esc(j.pausa) + '</div>';
+    h += '<div class="numeri" style="margin-top:14px"><div><b>' + num(c.migliorati) + '</b><span>migliorati</span></div>' +
+      '<div><b>' + num((c.buoni || 0) + (c.gia_puliti || 0)) + '</b><span>già giusti</span></div>' +
+      '<div><b>' + num(j.da_fare) + '</b><span>da ascoltare</span></div></div>';
+    h += '<p class="small">' + num(j.totale) + ' brani sul disco della musica' + (c.saltati ? ' · ' + num(c.saltati) + ' saltati (formati che non tocco)' : '') +
+      (c.errori ? ' · ' + num(c.errori) + ' non riusciti' : '') + (c.ripristinati ? ' · ' + num(c.ripristinati) + ' tornati all\'originale' : '') +
+      (j.da_fare ? ' · da ascoltare ' + num(j.da_fare_gb) + ' GB' : '') + '</p>';
+    if (j.spazio_libero_gb != null) h += '<p class="small">Disco della musica: ' + num(j.spazio_libero_gb) + ' GB liberi (la pulizia si ferma sotto i ' + num(j.spazio_min_gb) + ' GB: gli originali dei file ricodificati occupano spazio).</p>';
+    if (j.ora) h += '<p class="small">Adesso: «' + esc(j.ora) + '»</p>';
+    const r = j.ripristino;
+    if (r) h += '<p class="small">Ritorno agli originali: ' + (r.stato === 'in corso' ? 'in corso, ' : 'finito, ') + num(r.fatti) + ' su ' + num(r.totale) + (r.errori ? ' · ' + num(r.errori) + ' non riusciti (' + esc(r.ultimo_errore || '') + ')' : '') + '</p>';
+    if (chiedi === '*') h += '<div class="rconf"><p style="margin:0 0 8px">Tutti i ' + num(c.migliorati) + ' brani puliti tornano com\'erano e la pulizia si spegne. Procedo?</p>' +
+      '<div class="btns" style="margin:0"><button class="btn sm danger" data-pasi="*">Tutti all\'originale</button><button class="btn sm" data-pano>Annulla</button></div></div>';
+    h += '<div class="btns"><button class="btn sm" id="paRiprova"' + (occupato ? ' disabled' : '') + '>Riprova adesso</button>' +
+      (c.migliorati && chiedi !== '*' && !(r && r.stato === 'in corso') ? '<button class="btn sm" id="paTutti"' + (occupato ? ' disabled' : '') + '>Tutti all\'originale…</button>' : '') + '</div></div>';
+    const ultimi = j.ultimi || [];
+    if (ultimi.length) h += '<p class="small" style="margin:16px 4px 0">Ultimi brani cambiati</p><div class="list">' + ultimi.map(riga).join('') + '</div>';
+    $('pa').innerHTML = h;
+    $('paAcceso').onchange = e => manda('', {acceso:e.target.checked}, e.target.checked ? 'Pulizia accesa' : 'Pulizia in pausa');
+    $('paRiprova').onclick = () => manda('/riprova', {}, 'Riprovo adesso');
+    if ($('paTutti')) $('paTutti').onclick = () => { chiedi = '*'; disegna(); };
+    document.querySelectorAll('[data-parip]').forEach(b => b.onclick = () => { chiedi = b.dataset.parip; disegna(); });
+    document.querySelectorAll('[data-pano]').forEach(b => b.onclick = () => { chiedi = ''; disegna(); });
+    document.querySelectorAll('[data-pasi]').forEach(b => b.onclick = () => b.dataset.pasi === '*' ?
+      manda('/ripristina-tutto', {conferma:true}, 'Torno agli originali di tutti i brani') :
+      manda('/ripristina', {id:b.dataset.pasi}, 'Brano tornato all\'originale'));
+  }
+  leggi();
+  setInterval(() => { if (document.visibilityState === 'visible' && !chiedi && !occupato) leggi(); }, 15000);
 })();
 </script>
 <script>
