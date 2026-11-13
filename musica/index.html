@@ -2620,7 +2620,11 @@ function markCur() {
 }
 
 /* ---------- riproduzione ---------- */
-function saveState() { const c = codaDaSalvare(); ls.set('am-play', {queue:c.queue, orig:c.orig, qi:c.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:au.currentTime || 0}); }
+// la posizione voluta: quella a cui il brano sta per tornare (ricaricato e non ancora pronto, il lettore dice 0), se c'è;
+// se no quella di adesso. La usano il salvataggio e chi ricarica il brano (guardia, controllo di ▶︎), così un brano
+// ricaricato due volte di fila non riparte dall'inizio (13/11)
+function posVoluta(el) { el = el || au; return el === au && seekH && seekOnLoad.at ? seekOnLoad.at : el.currentTime || 0; }
+function saveState() { const c = codaDaSalvare(); ls.set('am-play', {queue:c.queue, orig:c.orig, qi:c.qi, shuffle:S.shuffle, repeat:S.repeat, from:S.from, t:posVoluta()}); }
 async function getFile(id) {
   if (memFiles.has(id)) return memFiles.get(id);
   try { const f = await dbGet('files', id); if (f) return f; } catch (e) {}
@@ -2633,8 +2637,8 @@ async function getFile(id) {
 let seekH = null;
 function seekOnLoad(at) {
   if (seekH) au.removeEventListener('loadedmetadata', seekH);
-  seekH = null; if (!at) return;
-  const h = seekH = () => { au.removeEventListener('loadedmetadata', h); if (seekH === h) seekH = null; try { au.currentTime = at; } catch (e) {} };
+  seekH = null; seekOnLoad.at = at || 0; if (!at) return;
+  const h = seekH = () => { au.removeEventListener('loadedmetadata', h); if (seekH === h) { seekH = null; seekOnLoad.at = 0; } try { au.currentTime = at; } catch (e) {} };
   au.addEventListener('loadedmetadata', h);
 }
 let loadTok = 0, keptFor = null;
@@ -2690,7 +2694,10 @@ function riprendi(fuori) {
   const el = au, pos = el.currentTime || 0;
   suonaVoluta = Date.now();
   if (el.ended) { diario('▶︎ su un brano finito: avanti'); next(false); return; }
-  if (!el.getAttribute('src') || el.error) { diario('▶︎ su un lettore vuoto: ricarico', {err:el.error ? el.error.code : 0}); load(S.qi, true, pos); return; }
+  if (!el.getAttribute('src') || el.error) {   // ricaricato, e poi lo stesso controllo che parta davvero (13/11)
+    diario('▶︎ su un lettore vuoto: ricarico', {err:el.error ? el.error.code : 0});
+    const pr = load(S.qi, true, pos); if (pr && pr.then) pr.then(() => controllaPartenza()); return;
+  }
   const pr = el.play();
   if (pr && pr.catch) pr.catch(e => {
     diario('▶︎ rifiutato', {err:(e && e.name) || String(e), fuori:!!fuori});
@@ -2708,7 +2715,7 @@ function riprendi(fuori) {
 const PARTENZA = {DOPO:2500, ATTESE:6, RIAVVIO:180000};
 function controllaPartenza(passo, attese) {
   const el = au, id = curId; if (!el || !id || el === AUX || RC.id) return;
-  const t0 = el.currentTime || 0, c0 = MIX.ctx ? MIX.ctx.currentTime : 0;
+  const t0 = (typeof posVoluta === 'function' ? posVoluta(el) : el.currentTime) || 0, c0 = MIX.ctx ? MIX.ctx.currentTime : 0;
   passo = passo || 1; attese = attese || 0;
   clearTimeout(controllaPartenza.tm);
   controllaPartenza.tm = setTimeout(() => {
@@ -2719,7 +2726,22 @@ function controllaPartenza(passo, attese) {
     const orologio = !MIX.ctx || MIX.ctx.currentTime - c0 > 0.5;   // il mixer «running» con l'orologio fermo: muto anche lui
     if (va && (!ctx || ctx === 'running') && orologio) return;   // suona davvero
     if (!el.error && el.readyState < 3 && (!ctx || ctx === 'running')) {   // sta ancora arrivando: si aspetta
-      if (attese < PARTENZA.ATTESE) controllaPartenza(passo, attese + 1); else diario('▶︎ lento', {rs:el.readyState, rete:navigator.onLine});
+      if (attese < PARTENZA.ATTESE) { controllaPartenza(passo, attese + 1); return; }
+      // 15 s e non arriva. Dalla rete lenta si aspetta (lo segue la guardia, e se il Mac sparisce aspettaMac); ma se il brano
+      // è già sul telefono, o se il Mac risponde subito, la rete non c'entra: il lettore dell'iPhone è incastrato e serve
+      // quello che prima si faceva a mano chiudendo e riaprendo l'app (13/11): ricaricare il brano, poi riavviare l'app
+      const tt = typeof TT === 'function' ? TT(id) : null, locale = !tt || !tt.remote || (typeof sulTel === 'function' && sulTel(id));
+      const incastrato = () => {
+        diario('▶︎ incastrato', {passo, rs:el.readyState, locale});
+        if (passo === 1) { load(S.qi, true, (typeof posVoluta === 'function' ? posVoluta(el) : el.currentTime) || t0); controllaPartenza(2); return; }
+        riavviaApp('lettore incastrato');
+      };
+      if (locale) { incastrato(); return; }
+      if (typeof streamWhy !== 'function') { diario('▶︎ lento', {rs:el.readyState, rete:navigator.onLine}); return; }
+      streamWhy(tt).then(perche => {
+        if (el !== au || id !== curId || el.readyState >= 3 || !(suonaVoluta > pausaVoluta)) return;
+        if (perche === 'ok') incastrato(); else diario('▶︎ lento', {rs:el.readyState, rete:navigator.onLine, mac:perche});
+      });
       return;
     }
     diario('▶︎ bloccato', {passo, va, ctx:ctx || 'no', orologio, rs:el.readyState, err:el.error ? el.error.code : 0, nascosta:!!document.hidden});
@@ -2729,7 +2751,7 @@ function controllaPartenza(passo, attese) {
       setTimeout(() => { if (MIX.ctx.state === 'running' && MIX.ctx.currentTime - c1 > 0.3) diario('mixer ripartito'); else riavviaApp('mixer fermo (' + MIX.ctx.state + ')'); }, 1200);
       return;
     }
-    if (passo === 1) { load(S.qi, true, el.currentTime || t0); controllaPartenza(2); return; }   // lo stesso brano, dallo stesso punto
+    if (passo === 1) { load(S.qi, true, (typeof posVoluta === 'function' ? posVoluta(el) : el.currentTime) || t0); controllaPartenza(2); return; }   // lo stesso brano, dallo stesso punto
     riavviaApp('lettore fermo');
   }, PARTENZA.DOPO);
 }
@@ -2761,7 +2783,11 @@ function guardiaGiro() {
   const t = el.currentTime || 0, fermo = el.paused || el.ended;
   if (MACATT.da && SRV) macTornato();   // il Mac è tornato (anche ritrovato da un altro giro): si riparte da qui
   if (GUARDIA.id !== curId) { GUARDIA.id = curId; GUARDIA.volte = 0; GUARDIA.t = t; GUARDIA.da = ora; return; }
-  if (!fermo && Math.abs(t - GUARDIA.t) > 0.2) { GUARDIA.t = t; GUARDIA.da = ora; GUARDIA.volte = 0; MACATT.da = 0; MACATT.saltato = false; return; }   // va avanti
+  if (!fermo && Math.abs(t - GUARDIA.t) > 0.2) {   // va avanti
+    GUARDIA.t = t; GUARDIA.da = ora; GUARDIA.volte = 0; MACATT.da = 0; MACATT.saltato = false;
+    mixerMuto(el, ora);
+    return;
+  }
   if (serveIlMac()) { aspettaMac(el, t); return; }   // il brano che serve è solo sul Mac e il Mac non risponde: si aspetta, non si conta
   if (!GUARDIA.da) { GUARDIA.t = t; GUARDIA.da = ora; return; }
   const limite = fermo ? GUARDIA.PARTE : el.readyState < 3 && navigator.onLine !== false ? GUARDIA.ARRIVA : GUARDIA.FERMO;
@@ -2770,9 +2796,10 @@ function guardiaGiro() {
   diario(el.ended ? 'finito e mai ripartito' : el.paused ? 'fermo senza pausa' : 'fermo a metà', {t:Math.round(t), rs:el.readyState,
     rete:el.networkState, err:el.error ? el.error.code : 0, volta:GUARDIA.volte, ctx:MIX.ctx ? MIX.ctx.state : 'no', nascosta:!!document.hidden});
   if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
-  if (GUARDIA.volte > 4) {   // niente è servito: si aspetta ▶︎ (riprendi), che ricarica il brano
+  if (GUARDIA.volte > 4) {   // niente è servito: l'app si riavvia da sola, come chiuderla e riaprirla (13/11)
     pausaVoluta = Date.now(); el.pause(); updateNow();
-    toast('La musica non riparte da sola: tocca ▶︎', true); return;
+    if (typeof riavviaApp === 'function') riavviaApp('la musica non ripartiva', true); else toast('La musica non riparte da sola: tocca ▶︎', true);
+    return;
   }
   if (el.ended) { next(true); return; }   // il brano è finito ma il successivo non è mai partito
   if (GUARDIA.volte === 4 && S.qi < S.queue.length - 1) { toast('Questo brano non parte: passo al successivo'); next(false); return; }
@@ -2786,7 +2813,7 @@ function guardiaGiro() {
     au = altro;
   }
   toast('La musica si era fermata: riparto da qui');
-  load(S.qi, true, el.ended ? 0 : t);   // lo stesso brano, dallo stesso punto (dal file sul telefono se intanto è arrivato)
+  load(S.qi, true, el.ended ? 0 : posVoluta(el) || t);   // lo stesso brano, dallo stesso punto (dal file sul telefono se intanto è arrivato)
 }
 setInterval(guardiaGiro, 2000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(guardiaGiro, 1500); });
@@ -2797,6 +2824,23 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
    richiede il catalogo al Mac e, appena risponde, si riparte dallo stesso punto. Dopo 30 s, se in coda c'è un brano già
    sul telefono, intanto suona quello. Ci si ferma solo dopo 10 minuti senza Mac. */
 const MACATT = {da:0, prova:0, inCorso:false, saltato:false, OGNI:4000, SALTA:30000, MAX:10 * 60000};
+/* MUSICA MUTA: sull'iPhone (da iOS 27) tutto passa dal mixer. Se il mixer si ferma (una chiamata, Siri, un'altra app
+   che prende l'audio) il brano può «andare avanti» senza che si senta niente: per la guardia era tutto a posto e si
+   ripartiva solo chiudendo e riaprendo l'app (13/11). Ora, mentre il brano va avanti, si guarda anche il mixer: deve
+   essere «running» e il suo orologio deve avanzare. Se no: lo si fa ripartire; se dopo 3 giri (6 s) è ancora fermo,
+   l'app si riavvia da sola allo stesso punto. */
+function mixerMuto(el, ora) {
+  const ctx = MIX.ctx;
+  if (!ctx || !MIX.gains || !MIX.gains.has(el)) { GUARDIA.muto = 0; return; }
+  const c = ctx.currentTime, prima = GUARDIA.mc, quando = GUARDIA.mt;
+  GUARDIA.mc = c; GUARDIA.mt = ora;
+  const passato = quando ? (ora - quando) / 1000 : 0;
+  const fermo = ctx.state !== 'running' || (passato >= 1 && prima != null && c - prima < passato * 0.3);
+  if (!fermo) { if (GUARDIA.muto) diario('mixer ripartito'); GUARDIA.muto = 0; return; }
+  GUARDIA.muto = (GUARDIA.muto || 0) + 1;
+  if (GUARDIA.muto === 1) { diario('muto: mixer fermo', {stato:ctx.state, nascosta:!!document.hidden}); ctx.resume().catch(() => {}); return; }
+  if (GUARDIA.muto >= 3) { GUARDIA.muto = 0; riavviaApp('mixer fermo mentre suona', true); }
+}
 function serveIlMac() {
   if (SRV || srvWait) return false;
   const id = au.ended ? S.queue[S.qi + 1] : curId, t = id && TT(id);
@@ -2825,16 +2869,16 @@ function macTornato() {
   render(true); runDl();
   if (!curId || !(suonaVoluta > pausaVoluta) || RC.id) return;
   if (au.ended) { next(false); return; }
-  if (au.paused || au.readyState < 3) { toast('Il Mac è tornato: riparto'); load(S.qi, true, au.currentTime || 0); }
+  if (au.paused || au.readyState < 3) { toast('Il Mac è tornato: riparto'); load(S.qi, true, posVoluta()); }
 }
 // il Mac non risponde e la musica non lo aspetta (o la pagina è solo aperta): ogni 15 s si riprova, così i brani del
 // Mac tornano ascoltabili da soli (prima solo riaprendo l'app o cambiando rete)
 setInterval(() => { if (!SRV && !srvWait && !MACATT.da && (document.visibilityState === 'visible' || suonaVoluta > pausaVoluta)) reconnect(true); }, 15000);
-function riavviaApp(perche) {
+function riavviaApp(perche, suonava) {
   const r = ls.get('am-riavvio', {});
   if (Date.now() - (r.t || 0) < PARTENZA.RIAVVIO) { diario('riavvio saltato', {perche}); toast('L\'audio non riparte: chiudi l\'app (scorri verso l\'alto) e riaprila', true); return; }
   diario('riavvio', {perche}); saveState();
-  ls.set('am-riavvio', {t:Date.now(), msg:true, perche});
+  ls.set('am-riavvio', {t:Date.now(), msg:true, perche, suonava:suonava !== false});
   toast('L\'audio era bloccato: riavvio l\'app…', true);
   setTimeout(() => location.reload(), 800);
 }
@@ -6575,7 +6619,8 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   srvWait = false;
   controllaVersione();   // la versione di adesso: da qui in poi si aggiorna da sola
   if (ls.get('am-aggiornata', 0)) { ls.set('am-aggiornata', 0); setTimeout(() => toast('Atlante aggiornato all\'ultima versione'), 1500); }
-  { const r = ls.get('am-riavvio', {}); if (r.msg) { ls.set('am-riavvio', Object.assign(r, {msg:false})); diario('dopo il riavvio', {perche:r.perche}); setTimeout(() => toast('Audio sbloccato: tocca ▶︎ per riprendere da dove eri', true), 1500); } }
+  const dopoRiavvio = ls.get('am-riavvio', {});
+  if (dopoRiavvio.msg) { ls.set('am-riavvio', Object.assign({}, dopoRiavvio, {msg:false})); diario('dopo il riavvio', {perche:dopoRiavvio.perche}); }
   // brano del Mac toccato durante il collegamento, ma il Mac non ha risposto: lo si dice (e si passa a uno salvato) invece del silenzio
   if (!SRV && curId && !au.paused && au.readyState < 3) {
     const t = T.get(curId);
@@ -6590,6 +6635,16 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
     if (S.queue.length) { const k = S.queue.indexOf(was), i = k >= 0 ? k : Math.min(Math.max(0, S.qi), S.queue.length - 1); await load(i, false, k >= 0 ? ps.t || 0 : 0); }
   }
   updateNow();
+  // dopo un riavvio fatto dall'app (audio incastrato): si prova a ripartire da soli dallo stesso punto. L'iPhone di solito
+  // vuole un tocco: allora lo si chiede
+  if (dopoRiavvio.msg) {
+    const chiedi = () => setTimeout(() => toast('Audio sbloccato: tocca ▶︎ per riprendere da dove eri', true), 300);
+    if (dopoRiavvio.suonava && curId && au.paused) {
+      suonaVoluta = Date.now();
+      const pr = au.play();
+      if (pr && pr.then) pr.then(() => diario('ripartito da solo dopo il riavvio'), () => { pausaVoluta = Date.now(); chiedi(); });
+    } else chiedi();
+  }
   devInvia(true); devAscolta();
   // nessuna musica qui e un altro dispositivo suona: il lettore mostra quello (si comanda subito, come Spotify)
   if (SRV && au.paused && !curId) devElenco().then(L => { const p = L.find(x => x.stato.suona && x.stato.brano); if (p && !RC.id && au.paused && !curId) rcEntra(p.id, true, 'avvio'); });

@@ -57,12 +57,14 @@ function ambiente() {
     S: {qi:3, queue:['a', 'b', 'c', 'b1', 'd']}, navigator: {onLine:true}, document: {hidden:false},
     suonaVoluta: 99000, pausaVoluta: 0, AUX: {nome:'aux'},
     GUARDIA: {t:-1, da:0, id:null, volte:0, FERMO:8000, ARRIVA:15000, PARTE:5000, MIXMAX:15000, SALTOMAX:25000},
+    seekH: null, seekOnLoad: {at:0},   // nessun brano che sta tornando a un punto
     MACATT: null, SRV: true, srvWait: false, sulMac: new Set(), sulTelefono: new Set(), macTorna: false, richieste: 0,
   };
   env.TT = id => (id ? {id, remote:env.sulMac.has(id)} : null);
   env.sulTel = id => env.sulTelefono.has(id);
   env.loadServer = () => ({then(si) { env.richieste++; if (env.macTorna) env.SRV = true; si(!!env.macTorna); }});
   env.render = () => {}; env.runDl = () => {};
+  env.riavvii = []; env.riavviaApp = (perche, suonava) => { env.riavvii.push([perche, suonava]); };
   const lettore = nome => ({nome, paused:false, ended:false, currentTime:42, readyState:4, networkState:1, error:null, _sbloccato:true,
     getAttribute: () => 'blob:x', removeAttribute() {}, load() {}, pause() { this.paused = true; },
     play() { env.suonati++; return {catch() {}}; }});
@@ -86,7 +88,7 @@ function prove(src, fatte) {
   const mm = /\nconst MACATT = (\{[^\n]*\});/.exec(src);
   if (!mm) throw new Error("nell'app manca MACATT");
   const nuovo = f => { env = ambiente(); env.MACATT = new Function('return ' + mm[1])(); if (f) f(env);
-    F = carica(src, ['guardiaGiro', 'serveIlMac', 'aspettaMac', 'macTornato'], env); };
+    F = carica(src, ['guardiaGiro', 'serveIlMac', 'aspettaMac', 'macTornato', 'mixerMuto', 'posVoluta'], env); };
   const giri = (n, passo) => { for (let k = 0; k < n; k++) { env.ora += passo || 2000; env.perf += passo || 2000; F.guardiaGiro(); } };
 
   /* ---------- il tempo va avanti: niente ---------- */
@@ -112,7 +114,7 @@ function prove(src, fatte) {
   giri(3);
   eq(env.avanti, [false], 'quarto passo: il brano dopo');
   giri(3);
-  eq([env.au.paused, env.pausaVoluta > 0, env.avvisi[env.avvisi.length - 1]], [true, true, 'La musica non riparte da sola: tocca ▶︎'], 'quinto: si aspetta ▶︎');
+  eq([env.au.paused, env.pausaVoluta > 0, env.riavvii], [true, true, [['la musica non ripartiva', true]]], 'quinto: l\'app si riavvia da sola (come chiuderla e riaprirla)');
   giri(6);
   eq(env.avanti.length, 1, 'dopo, fermo davvero: niente altro');
   fatte.push('passaggio non riuscito');
@@ -175,6 +177,36 @@ function prove(src, fatte) {
   eq([env.pausaVoluta > 0, env.avvisi[env.avvisi.length - 1]], [true, 'Il Mac non risponde da 10 minuti: tocca ▶︎ quando torna'], '10 minuti: ci si ferma');
   eq(env.carichi.length + env.avanti.length, 0, 'senza saltare brani');
   fatte.push('10 minuti senza Mac');
+
+  /* ---------- il brano va avanti ma il mixer dell'iPhone è fermo: musica muta. Lo si fa ripartire, poi riavvio ---------- */
+  const mixer = (stato, va) => e => {
+    let c = 50, gira = va;
+    e.MIX.gains = new Map([[e.DECKS[0], {}]]);
+    e.MIX.ctx = {state:stato, resumes:0, get currentTime() { return gira ? c + e.ora / 1000 : c; },
+      resume() { this.resumes++; if (e.riparte) { this.state = 'running'; gira = true; } return {catch() {}}; }};
+  };
+  const avanti = n => { for (let k = 0; k < n; k++) { env.au.currentTime += 2; env.ora += 2000; F.guardiaGiro(); } };
+  nuovo(mixer('running', true)); avanti(10);
+  eq([env.riavvii, env.MIX.ctx.resumes], [[], 0], 'mixer che va: niente');
+  nuovo(mixer('interrupted', false)); avanti(2);
+  eq([env.MIX.ctx.resumes, env.riavvii.length], [1, 0], 'mixer interrotto: prima lo si fa ripartire');
+  avanti(2);
+  eq(env.riavvii, [['mixer fermo mentre suona', true]], 'ancora fermo: l\'app si riavvia');
+  nuovo(mixer('running', false)); avanti(5);   // il primo giro conosce il brano, il secondo l'orologio, poi tre giri fermi
+  eq(env.riavvii.length, 1, 'mixer «running» con l\'orologio fermo: muto anche lui');
+  nuovo(e => { mixer('interrupted', false)(e); e.riparte = true; }); avanti(6);
+  eq([env.MIX.ctx.resumes, env.riavvii.length, env.diari.indexOf('mixer ripartito') >= 0], [1, 0, true], 'ripartito: niente riavvio');
+  nuovo(e => { mixer('interrupted', false)(e); e.MIX.gains = new Map(); }); avanti(6);
+  eq(env.riavvii.length, 0, 'lettore fuori dal mixer (radio, Mac): non conta');
+  fatte.push('mixer muto');
+
+  /* ---------- ricaricato due volte di fila: torna sempre al punto voluto, non all'inizio ---------- */
+  nuovo(); giri(5);
+  eq(env.carichi, [['A', 3, true, 42]], 'prima volta: dal punto dove era');
+  env.au.currentTime = 0; env.seekH = () => {}; env.seekOnLoad.at = 42;   // ricaricato, non ancora pronto: il lettore dice 0
+  giri(6);   // il salto da 42 a 0 conta come movimento, poi di nuovo 8 s fermo
+  eq(env.carichi[1], ['A', 3, true, 42], 'seconda volta: ancora da 42, non da 0');
+  fatte.push('punto voluto');
 
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);
