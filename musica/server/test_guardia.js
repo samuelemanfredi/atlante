@@ -4,7 +4,9 @@
 //
 // La funzione si prende dall'app così com'è e si prova con un lettore finto: quando dovrebbe suonare ma il tempo non va
 // avanti, riparte dallo stesso punto; al terzo blocco dello stesso brano passa al successivo; in pausa, durante un
-// passaggio del mix o con il tempo che avanza non fa niente. Scrive «OK …» o «PROVA FALLITA: …».
+// passaggio del mix o con il tempo che avanza non fa niente. Se il brano che serve è solo sul Mac e il Mac non risponde
+// (13/11: l'aggiornamento automatico che riavvia il server), aspetta il Mac senza contare tentativi e riparte da lì
+// appena torna. Scrive «OK …» o «PROVA FALLITA: …».
 ObjC.import('Foundation');
 
 function run(argv) {
@@ -55,7 +57,12 @@ function ambiente() {
     S: {qi:3, queue:['a', 'b', 'c', 'b1', 'd']}, navigator: {onLine:true}, document: {hidden:false},
     suonaVoluta: 99000, pausaVoluta: 0, AUX: {nome:'aux'},
     GUARDIA: {t:-1, da:0, id:null, volte:0, FERMO:8000, ARRIVA:15000, PARTE:5000, MIXMAX:15000, SALTOMAX:25000},
+    MACATT: null, SRV: true, srvWait: false, sulMac: new Set(), sulTelefono: new Set(), macTorna: false, richieste: 0,
   };
+  env.TT = id => (id ? {id, remote:env.sulMac.has(id)} : null);
+  env.sulTel = id => env.sulTelefono.has(id);
+  env.loadServer = () => ({then(si) { env.richieste++; if (env.macTorna) env.SRV = true; si(!!env.macTorna); }});
+  env.render = () => {}; env.runDl = () => {};
   const lettore = nome => ({nome, paused:false, ended:false, currentTime:42, readyState:4, networkState:1, error:null, _sbloccato:true,
     getAttribute: () => 'blob:x', removeAttribute() {}, load() {}, pause() { this.paused = true; },
     play() { env.suonati++; return {catch() {}}; }});
@@ -75,7 +82,11 @@ function ambiente() {
 function prove(src, fatte) {
   const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
   let env, F;
-  const nuovo = f => { env = ambiente(); if (f) f(env); F = carica(src, ['guardiaGiro'], env); };
+  // MACATT com'è nell'app (i tempi dell'attesa del Mac)
+  const mm = /\nconst MACATT = (\{[^\n]*\});/.exec(src);
+  if (!mm) throw new Error("nell'app manca MACATT");
+  const nuovo = f => { env = ambiente(); env.MACATT = new Function('return ' + mm[1])(); if (f) f(env);
+    F = carica(src, ['guardiaGiro', 'serveIlMac', 'aspettaMac', 'macTornato'], env); };
   const giri = (n, passo) => { for (let k = 0; k < n; k++) { env.ora += passo || 2000; env.perf += passo || 2000; F.guardiaGiro(); } };
 
   /* ---------- il tempo va avanti: niente ---------- */
@@ -129,6 +140,41 @@ function prove(src, fatte) {
   giri(4);
   eq(env.suonati, 1, 'e la musica riparte');
   fatte.push('mix a metà');
+
+  /* ---------- il Mac si riavvia (aggiornamento) al cambio brano: si aspetta, niente tentativi; torna: riparte da lì ---------- */
+  const macSparito = e => { e.SRV = false; e.sulMac = new Set(['a', 'b', 'c', 'b1', 'd']); e.au.paused = true; e.au.currentTime = 42; };
+  nuovo(macSparito);
+  giri(25);   // 50 s senza Mac
+  eq([env.carichi.length, env.avanti.length, env.pausaVoluta], [0, 0, 0], 'Mac sparito: niente tentativi, niente brani saltati, nessuna resa');
+  eq(env.avvisi, ['Il Mac non risponde: la musica riprende da qui appena torna'], 'un avviso solo');
+  if (env.richieste < 10) throw new Error('il Mac si richiede ogni 4 s: solo ' + env.richieste + ' volte in 50 s');
+  env.macTorna = true; giri(3);
+  eq(env.carichi, [['A', 3, true, 42]], 'il Mac torna: lo stesso brano, dallo stesso punto');
+  eq(env.diari.filter(d => /Mac/.test(d)), ['aspetto il Mac', 'Mac tornato: riparto'], 'nel diario');
+  fatte.push('Mac che si riavvia');
+
+  /* ---------- il brano finito e il successivo è solo sul Mac: quando torna, il successivo ---------- */
+  nuovo(e => { macSparito(e); e.au.ended = true; });
+  giri(10);
+  eq(env.avanti, [], 'finito, Mac sparito: si aspetta');
+  env.macTorna = true; giri(2);
+  eq(env.avanti, [false], 'il Mac torna: il brano dopo');
+  fatte.push('Mac sparito a fine brano');
+
+  /* ---------- Mac assente più di 30 s e in coda un brano già sul telefono: intanto quello ---------- */
+  nuovo(e => { macSparito(e); e.sulTelefono = new Set(['d']); });
+  giri(14);
+  eq(env.carichi, [], 'prima dei 30 s si aspetta il Mac');
+  giri(4);
+  eq(env.carichi, [['A', 4, true, undefined]], 'poi il brano già sul telefono');
+  fatte.push('intanto un brano sul telefono');
+
+  /* ---------- 10 minuti senza Mac: ci si ferma (una volta) ---------- */
+  nuovo(macSparito);
+  giri(305);
+  eq([env.pausaVoluta > 0, env.avvisi[env.avvisi.length - 1]], [true, 'Il Mac non risponde da 10 minuti: tocca ▶︎ quando torna'], '10 minuti: ci si ferma');
+  eq(env.carichi.length + env.avanti.length, 0, 'senza saltare brani');
+  fatte.push('10 minuti senza Mac');
 
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);

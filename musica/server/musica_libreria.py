@@ -3118,6 +3118,14 @@ class Dispositivi:
                     del self.d[v]
             return self._prendi(x, ora)
 
+    def suonano(self):
+        """Quanti dispositivi (di tutti) stanno suonando, o vogliono suonare e aspettano (il Mac che torna, un brano che
+        arriva): aggiorna.sh non riavvia il server finché è più di zero (13/11)."""
+        ora = time.time()
+        with self.cond:
+            return sum(1 for x in self.d.values() if self._vivo(x, ora)
+                       and ((x.get("stato") or {}).get("suona") is True or (x.get("stato") or {}).get("vuole") is True))
+
     def chi_suona(self, di="p", tipo=""):
         """Il dispositivo della persona con il brano che sta ascoltando adesso (★ dalla schermata di blocco): prima uno
         che suona, poi uno del tipo chiesto (il comando rapido dell'iPhone dice «iphone»), poi quello sentito per
@@ -16577,6 +16585,11 @@ def _instrada(h, metodo, parti, corpo):
             _risposta_testo(h, r["testo"])
         else:
             _json(h, r)
+    elif cosa == "suona" and not resto:   # per aggiorna.sh: c'è musica che suona? (allora il server non si riavvia)
+        solo("GET")
+        if _chi_e(h)["ruolo"] not in ("proprietario", "casa"):
+            raise ErroreExtra(403, "Solo per Samuele")
+        _json(h, {"suonano": DISP.suonano()})
     elif cosa == "libreria-app":   # la libreria di Musica dell'iPhone (comando rapido), del Mac, delle altre app
         _libreria_app(h, metodo, resto, corpo)
     elif cosa == "preferito" and resto == ["comando-rapido"]:   # il comando rapido firmato, preparato dal Mac
@@ -16714,6 +16727,46 @@ def _auto(h, metodo, resto, corpo):
     except a.Errore as e:
         raise ErroreExtra(e.codice, e.testo)
     _json(h, dati, codice)
+
+
+# ----- aggiorna.sh, lo script che installa le versioni nuove sul Mac mini -----
+# Il LaunchAgent lancia ~/Atlante/aggiorna.sh, una copia a parte: cambiare server/aggiorna.sh nel repo non bastava. Il
+# server, all'avvio, mette al suo posto la versione nuova (13/11: aspettare che nessuno ascolti prima di riavviare il
+# server). Solo se quella installata è proprio aggiorna.sh di Atlante e più vecchia (riga «# aggiorna-versione: N»), se
+# la nuova supera `bash -n` e mai tornando indietro; la vecchia resta in aggiorna.sh.precedente.
+AGGIORNA_TESTA = "# Aggiornamento da remoto di Atlante Musica sul Mac mini."
+_AGGIORNA_VER = re.compile(r"^# aggiorna-versione: (\d+)$", re.M)
+
+
+def _installa_aggiorna(sorgente, dest):
+    """True se ha installato `sorgente` al posto di `dest` (vedi sopra)."""
+    try:
+        with open(sorgente, encoding="utf-8") as f:
+            nuovo = f.read()
+        with open(dest, encoding="utf-8") as f:
+            vecchio = f.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if nuovo == vecchio or AGGIORNA_TESTA not in vecchio.split("\n", 3)[1:3] or AGGIORNA_TESTA not in nuovo.split("\n", 3)[1:3]:
+        return False
+    ver = lambda t: int(_AGGIORNA_VER.search(t).group(1)) if _AGGIORNA_VER.search(t) else 1   # noqa: E731
+    if ver(nuovo) <= ver(vecchio):
+        return False
+    bash = "/bin/bash" if os.path.exists("/bin/bash") else shutil.which("bash")
+    try:
+        if not bash or subprocess.run([bash, "-n", sorgente], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, timeout=30).returncode != 0:
+            return False
+        shutil.copy2(dest, dest + ".precedente")
+        tmp = dest + ".nuovo"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(nuovo)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, dest)   # un aggiorna.sh che sta girando continua con la sua copia (bash tiene aperto il file vecchio)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    print("Atlante: aggiorna.sh aggiornato alla versione %d" % ver(nuovo), flush=True)
+    return True
 
 
 def avvia_auto():
@@ -18898,6 +18951,9 @@ def main():
         print("Atlante: chat non pronta: %s" % e, flush=True)
     avvia_classifiche(a.cache, a.classifiche)
     avvia_auto()   # La mia Volkswagen: il collegamento con l'auto riparte se l'account è collegato
+    if sys.platform == "darwin" and os.environ.get("ATLANTE_AGGIORNA_INSTALLA", "1") != "0":
+        _installa_aggiorna(os.path.join(os.path.dirname(os.path.abspath(__file__)), "aggiorna.sh"),
+                           os.path.expanduser("~/Atlante/aggiorna.sh"))
     _tst().riprendi()   # il lavoro sui testi di tutta la libreria riparte solo se Samuele l'ha acceso da Gestione
     signal.signal(signal.SIGTERM, _alla_fine)   # launchctl kickstart -k (aggiornamento): prima si ferma Whisper
     if a.tematiche or a.tematiche_prova > 0:

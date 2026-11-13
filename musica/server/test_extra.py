@@ -382,6 +382,8 @@ class Server:
         # il lavoro sui BPM e sui generi è acceso di serie: nelle prove solo dove una prova lo chiede (--tematiche),
         # così nessun server di prova chiede niente al MusicBrainz vero
         env.setdefault("ATLANTE_TEMATICHE", "0")
+        # i server di prova non toccano ~/Atlante/aggiorna.sh del Mac (le prove girano prima di installare la versione)
+        env.setdefault("ATLANTE_AGGIORNA_INSTALLA", "0")
         if self.c.get("youtubei"):
             env["ATLANTE_YOUTUBEI"] = self.c["youtubei"]
         for k, v in self.ambiente.items():
@@ -4740,6 +4742,82 @@ class TestLibreriaApp(ProvaCaricamenti, unittest.TestCase):
         finally:
             os.remove(segno)
         self.j(None, "DELETE", "/api/extra/libreria-app/mac-musica")
+
+
+class TestAggiornaSenzaFermareLaMusica(ProvaCaricamenti, unittest.TestCase):
+    """13/11: l'aggiornamento automatico riavviava il server mentre la musica suonava e la musica si fermava. Il server
+    dice quanti dispositivi suonano (o vogliono suonare e aspettano il Mac): aggiorna.sh aspetta finché sono zero, al
+    più 6 ore; il server stesso mette la versione nuova di aggiorna.sh al posto di ~/Atlante/aggiorna.sh."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.prepara("atlante-suona-")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.chiudi()
+
+    def stato(self, biscotto, id_, stato):
+        self.j(biscotto, "POST", "/api/extra/dispositivi/%s/stato" % id_, {"nome": "iPhone", "tipo": "iphone", "stato": stato})
+
+    def test_1_chi_suona(self):
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 0})
+        self.stato(None, "iphone-suona-0001", {"suona": True})
+        self.stato(None, "mac-fermo-000001", {"suona": False})
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 1})
+        _, anna = self.invitato("Anna")   # conta anche la musica degli invitati (il server è lo stesso)
+        self.stato(anna, "iphone-anna-0001", {"suona": False, "vuole": True})   # ferma, ma aspetta il Mac
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 2})
+        self.stato(None, "iphone-suona-0001", {"suona": False, "vuole": False})
+        self.stato(anna, "iphone-anna-0001", {"suona": "sì", "vuole": 1})   # solo true conta
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 0})
+        self.j(anna, "GET", "/api/extra/suona", codice=403)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/api/extra/suona", intest=FUNNEL)[0], 401)
+
+    def test_2_aggiorna_sh(self):
+        with open(os.path.join(QUI, "aggiorna.sh"), encoding="utf-8") as f:
+            sh = f.read()
+        self.assertEqual(subprocess.run(["bash", "-n", os.path.join(QUI, "aggiorna.sh")]).returncode, 0)
+        self.assertGreaterEqual(int(re.search(r"^# aggiorna-versione: (\d+)$", sh, re.M).group(1)), 2)
+        # prima delle prove e subito prima di installare; mai dopo aver cambiato i file dell'app
+        self.assertEqual(sh.count("musica_in_corso && exit 0"), 2)
+        self.assertLess(sh.rindex("musica_in_corso && exit 0"), sh.index('rsync -a --delete --exclude VERSIONE.txt'))
+        self.assertIn("api/extra/suona", sh)
+
+    def test_3_installa_aggiorna(self):
+        m, d = self.m, tempfile.mkdtemp(prefix="atlante-agg-")
+        try:
+            testa = "#!/bin/bash\n" + m.AGGIORNA_TESTA + "\n"
+            dest, nuovo = os.path.join(d, "aggiorna.sh"), os.path.join(d, "nuovo.sh")
+
+            def scrivi(p, testo):
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(testo)
+
+            def leggi(p):
+                with open(p, encoding="utf-8") as f:
+                    return f.read()
+            vecchio = testa + "echo vecchio\n"
+            scrivi(dest, vecchio)
+            scrivi(nuovo, testa + "# aggiorna-versione: 2\necho nuovo\n")
+            self.assertTrue(m._installa_aggiorna(nuovo, dest))
+            self.assertIn("echo nuovo", leggi(dest))
+            self.assertEqual(leggi(dest + ".precedente"), vecchio)
+            self.assertTrue(os.access(dest, os.X_OK))
+            self.assertFalse(m._installa_aggiorna(nuovo, dest))   # già quella
+            scrivi(nuovo, testa + "# aggiorna-versione: 1\necho indietro\n")
+            self.assertFalse(m._installa_aggiorna(nuovo, dest))   # mai indietro
+            scrivi(nuovo, testa + "# aggiorna-versione: 3\nif then fi (\n")
+            self.assertFalse(m._installa_aggiorna(nuovo, dest))   # bash -n non passa: resta quello che c'è
+            scrivi(dest, "#!/bin/bash\n# un altro script\n")
+            scrivi(nuovo, testa + "# aggiorna-versione: 3\necho ok\n")
+            self.assertFalse(m._installa_aggiorna(nuovo, dest))   # non è aggiorna.sh di Atlante: non si tocca
+            self.assertFalse(m._installa_aggiorna(nuovo, os.path.join(d, "manca.sh")))
+            # quello vero del repo sopra quello di prima (senza versione): sì
+            scrivi(dest, vecchio)
+            self.assertTrue(m._installa_aggiorna(os.path.join(QUI, "aggiorna.sh"), dest))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestLibreriaAppModulo(unittest.TestCase):
