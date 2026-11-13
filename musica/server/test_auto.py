@@ -985,7 +985,8 @@ class TestAutoApi(unittest.TestCase):
         c = self.api("POST", "impostazioni", {"collegamento": {"fonte": "boh", "marca": "tesla", "paese": "FR"}})
         self.assertEqual((c["collegamento"]["fonte"], c["collegamento"]["marca"], c["collegamento"]["paese"]),
                          ("dati", "VOLKSWAGEN_PASSENGER_CARS", "FR"))
-        c = self.api("POST", "impostazioni", {"collegamento": {"fonte": "app", "marca": "vwn"}})
+        # una marca dell'elenco anche scritta in minuscolo (l'app manda sempre il nome intero, come in MARCHE)
+        c = self.api("POST", "impostazioni", {"collegamento": {"fonte": "app", "marca": "volkswagen_commercial_vehicles"}})
         self.assertEqual((c["collegamento"]["fonte"], c["collegamento"]["marca"]), ("app", "VOLKSWAGEN_COMMERCIAL_VEHICLES"))
 
     def test_rendimento_e_viaggio_senza_dati(self):
