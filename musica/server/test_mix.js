@@ -762,6 +762,10 @@ function partenzaBloccata(src) {
       resume() { log.resume++; if (opz.riparte) { this.state = 'running'; ctxVa = true; } return {catch() {}}; }} : null;
     const env = {
       au:el, AUX:{}, curId:'rA', RC:{id:null}, MIX:{ctx, act:null, salto:null}, S:{qi:0}, navigator:{onLine:true}, document:{hidden:false},
+      suonaVoluta:2, pausaVoluta:opz.pausa ? 3 : 1,   // messo in pausa: la pausa è dopo il ▶︎
+      // il brano: sul telefono (locale) o solo sul Mac; streamWhy: come risponde il Mac (subito, in questa prova)
+      TT:id => ({id, remote:!opz.locale}), sulTel:() => !!opz.locale,
+      streamWhy:() => ({then(f) { log.mac = (log.mac || 0) + 1; f(opz.mac || 'mac'); }}),
       setTimeout:(fn, ms) => { timers.push({id:timers.length + 1, at:t + ms, fn}); return timers.length; },
       clearTimeout:id => { const x = timers[id - 1]; if (x) x.fatto = true; },
       Date:{now:() => 1e12 + t + (opz.dopo || 0)},
@@ -791,7 +795,14 @@ function partenzaBloccata(src) {
   r = caso({va:false});
   vero(r.log.load.length === 1 && r.log.reload === 1, 'senza mixer (Mac): brano fermo, ricaricato, poi riavvio ' + JSON.stringify(r.log));
   r = caso({va:false, rs:1, ctx:'running', ms:30000});
-  vero(r.ha('▶︎ lento') && !r.log.load.length && !r.log.reload, 'rete lenta: si aspetta, niente riavvii ' + JSON.stringify(r.log));
+  vero(r.ha('▶︎ lento') && !r.log.load.length && !r.log.reload && r.log.mac === 1, 'rete lenta (il Mac non risponde): si aspetta, niente riavvii ' + JSON.stringify(r.log));
+  // 13/11: «sta arrivando» per 15 s ma il Mac risponde subito, o il brano è già sul telefono: il lettore è incastrato.
+  // Prima si aspettava per sempre e si ripartiva solo chiudendo e riaprendo l'app; ora: ricaricato, poi riavvio
+  r = caso({va:false, rs:1, ctx:'running', ms:60000, mac:'ok'});
+  vero(r.ha('▶︎ incastrato') && JSON.stringify(r.log.load) === '[[0,true,10]]' && r.log.reload === 1, 'Mac che risponde ma il brano non arriva: ricaricato, poi riavvio ' + JSON.stringify(r.log));
+  r = caso({va:false, rs:1, ctx:'running', ms:60000, locale:true});
+  vero(r.ha('▶︎ incastrato') && r.log.load.length === 1 && r.log.reload === 1 && !r.log.mac, 'brano sul telefono che non parte: ricaricato, poi riavvio (senza chiedere al Mac) ' + JSON.stringify(r.log));
+  vero(JSON.parse(r.memoria['am-riavvio']).suonava === true, 'il riavvio ricorda che la musica era voluta');
   r = caso({va:true, ctx:'interrupted', memoria});
   vero(r.ha('riavvio saltato') && !r.log.reload && r.log.toast.length === 1, 'al più un riavvio ogni 3 minuti ' + JSON.stringify(r.log));
   r = caso({va:true, ctx:'interrupted', memoria, dopo:200000});
