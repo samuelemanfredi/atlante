@@ -50,6 +50,12 @@ regole delle playlist sono in playlist-atlante.json; le proprie modifiche in <ca
 Testi e karaoke (api/extra/testi, vedi x/CONTRATTO.md): il testo a tempo del brano che suona, dal file o da LRCLIB.
 Il lavoro su tutta la libreria (i testi di tutti i brani e, con Whisper, le parole a tempo dalla voce) parte solo da
 Gestione → Testi e karaoke, a bassa priorità e un brano alla volta; da lì si mette anche in pausa.
+
+Pulizia audio (pulizia_audio.py, Gestione → Pulizia audio): tutti i brani del disco principale a -14 LUFS con i picchi
+sotto -1 dBTP, senza DC né rombi sotto i 15 Hz e con i picchi tagliati ricostruiti. Gli MP3 cambiano volume senza
+ricodifica (global_gain, come mp3gain: si disfa al bit); gli altri si ricodificano nello stesso formato e l'originale
+resta in «.atlante-originali». Acceso di serie (ATLANTE_PULIZIA=0 lo spegne alla prima accensione); si ferma sotto i
+100 GB liberi (ATLANTE_PULIZIA_SPAZIO_MIN_GB).
 """
 import argparse
 import array
@@ -3453,6 +3459,8 @@ def _gestione(h, metodo, resto, corpo):
         return _rete(h, metodo, resto[1:], corpo)
     if resto[:1] == ["testi"]:   # Gestione → Testi e karaoke
         return _gestione_testi(h, metodo, resto[1:], corpo)
+    if resto[:1] == ["pulizia-audio"]:   # Gestione → Pulizia audio
+        return _gestione_pulizia(h, metodo, resto[1:], corpo)
     if resto == ["persone"] and metodo == "GET":
         el, mio = PERS.elenco(), _chi_e(h)["chiave"]
         for x in el["persone"]:
@@ -8669,6 +8677,8 @@ def _alla_fine(segnale, _quadro):
         _ferma_figli()
         if TST is not None:
             TST.chiudi()
+        if PULIZIA is not None:
+            PULIZIA.chiudi()   # il registro della pulizia audio sul disco (ffmpeg l'ha già fermato _ferma_figli)
         if AUTO is not None:
             AUTO.chiudi()   # il ponte con Volkswagen salva la sessione e si chiude
     except Exception:   # noqa: BLE001 — si esce comunque
@@ -16356,6 +16366,163 @@ def avvia_auto():
         print("Atlante: modulo dell'auto non pronto: %s" % e, flush=True)
 
 
+# ----- Pulizia audio (Gestione → Pulizia audio) -----
+# Tutti i brani del disco principale allo stesso volume e puliti, senza perdere niente: il codice sta in
+# pulizia_audio.py, accanto a questo file (lì il perché di ogni scelta); qui il collegamento con libreria, testi,
+# videoclip e playlist di Atlante. Acceso di serie la prima volta (ATLANTE_PULIZIA=0 lo lascia spento), poi vale
+# l'interruttore in Gestione. Un brano alla volta, ffmpeg a bassa priorità con _esegui_piano (in pausa si ferma, con
+# SIGTERM anche). Il disco di backup non si tocca: il suo rsync prende i file puliti e l'archivio degli originali.
+# Dopo ogni file cambiato la firma (dimensione:data) è nuova: il brano tiene il suo id, testi, parole di Whisper e
+# videoclip passano alla firma nuova (il tempo del brano non è cambiato: niente da rifare), le playlist di Atlante
+# rimisurano il volume (serve al «volume uniforme» dell'app) e l'iPhone riscarica la sua copia (cambia «added»).
+PULIZIA = None
+_PULIZIA_BLOCCO = threading.Lock()
+_PULIZIA_MOD = []
+
+
+def _pulizia_modulo():
+    with _PULIZIA_BLOCCO:
+        if not _PULIZIA_MOD:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "atlante_pulizia_audio", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pulizia_audio.py"))
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            _PULIZIA_MOD.append(m)
+        return _PULIZIA_MOD[0]
+
+
+def _pulizia_brani():
+    """[(id, voce, percorso, cartella)] dei brani della libreria sul disco principale (non quelli serviti dal backup né
+    quelli tolti da Samuele)."""
+    if LIB is None:
+        return []
+    via = TOLTI.ids() if TOLTI else set()
+    with LIB.blocco:
+        voci = [(i, b, LIB.percorsi.get(i)) for i, b in LIB.brani.items() if i not in via]
+    radici = list(LIB.cartelle)
+    out = []
+    for i, b, p in voci:
+        r = next((x for x in radici if p and _dentro(p, x)), None)
+        if r:
+            out.append((i, b, p, r))
+    return out
+
+
+def _pulizia_esegui(args, tempo, fermo):
+    m = _pulizia_modulo()
+    try:
+        return _esegui_piano(args, tempo, fermo=fermo)
+    except Pausa:
+        raise m.Fermato()
+    except ErroreMac as e:   # anche ErroreSegnale: fermato dal sistema, non colpa del brano
+        raise m.ErroreMacchina(str(e))
+    except ErroreTesti as e:
+        raise m.ErroreBrano(str(e))
+
+
+def _firma_testi(i, vecchia, nuova):
+    """Scheda, parole di Whisper e indice dei testi del brano i passano dalla firma vecchia alla nuova (solo quelli che
+    erano della vecchia: un lavoro rifatto nel frattempo resta suo)."""
+    t = _tst()
+    with t.blocco:
+        s = t.schede.get(i)
+        if s and s.get("f") == vecchia:
+            t.schede[i] = dict(s, f=nuova)
+            t._sporco = True
+        x = t.indice.get(i)
+        if x and x[0] == vecchia:
+            t.indice[i] = (nuova,) + tuple(x[1:])
+            t._indice_sporco = True
+    d = t.dati(i)
+    if d and d.get("f") == vecchia:
+        d["f"] = nuova
+        t._salva_dati(i, d)
+    t.salva()
+
+
+def _firma_clip(percorso, vecchia, nuova):
+    """Il videoclip allineato con il file vecchio vale anche per quello nuovo (stessi tempi)."""
+    if CLIP is None:
+        return
+    nome = os.path.basename(percorso)
+    vid = CLIP.leggi_piano().get(nome)
+    s = CLIP._scheda(vid) if vid else None
+    if not s or s.get("nome") != nome or s.get("firma") != vecchia:
+        return
+    s["firma"] = nuova
+    _scrivi_json(os.path.join(CLIP.dir, vid + ".json"), s)
+    with CLIP.blocco:
+        CLIP._pronti = None
+
+
+def _pulizia_sostituito(i, percorso, vecchia, nuova):
+    """Dopo un file pulito o ripristinato: il catalogo lo rilegge subito (stesso id), il resto passa alla firma nuova."""
+    if LIB is not None and not _aggiungi_brano(LIB, percorso):
+        LIB.rileggi_presto(subito=True)
+    if vecchia != nuova:
+        for fn, args in ((_firma_testi, (i, vecchia, nuova)), (_firma_clip, (percorso, vecchia, nuova))):
+            try:
+                fn(*args)
+            except Exception as e:   # noqa: BLE001 — al peggio quel lavoro si rifà
+                print("Pulizia audio: firma di %s non spostata (%s): %s" % (os.path.basename(percorso), fn.__name__, e),
+                      flush=True)
+    if TEM is not None:
+        TEM.sveglia.set()   # il volume del brano è cambiato: le playlist di Atlante lo rimisurano
+
+
+def avvia_pulizia():
+    """All'avvio del server: il lavoro riparte se è acceso (la prima volta acceso, se non c'è ATLANTE_PULIZIA=0)."""
+    global PULIZIA
+    try:
+        m = _pulizia_modulo()
+        with _PULIZIA_BLOCCO:
+            if PULIZIA is None:
+                PULIZIA = m.Pulizia(
+                    os.path.join(_cart("cache"), "pulizia-audio"), _pulizia_brani, sostituito=_pulizia_sostituito,
+                    leggi_tag=leggi_tag, esegui=_pulizia_esegui, programma=_programma,
+                    acceso_di_serie=os.environ.get("ATLANTE_PULIZIA", "1") != "0",
+                    spazio_min=_numero_ambiente("ATLANTE_PULIZIA_SPAZIO_MIN_GB", m.SPAZIO_MIN / 1024 ** 3) * 1024 ** 3,
+                    pronta=lambda: LIB is not None and LIB.letture > 0,
+                    occupato=lambda i: TST is not None and TST.id_a == i)
+        PULIZIA.avvia()
+    except Exception as e:   # noqa: BLE001 — la pulizia non deve fermare il resto di Atlante
+        print("Atlante: pulizia audio non pronta: %s" % e, flush=True)
+
+
+def _gestione_pulizia(h, metodo, resto, corpo):
+    """Gestione → Pulizia audio: GET a che punto è; POST {acceso} accende o mette in pausa; riprova; ripristina {id}
+    (un brano torna com'era); ripristina-tutto {conferma: true}."""
+    if PULIZIA is None:
+        raise ErroreExtra(503, "La pulizia audio non è pronta sul Mac (il motivo è nel registro del server)")
+    m, c = _pulizia_modulo(), corpo if isinstance(corpo, dict) else {}
+    if not resto and metodo == "GET":
+        return _json(h, PULIZIA.stato())
+    if not resto and metodo == "POST":
+        if not isinstance(c.get("acceso"), bool):
+            raise ErroreExtra(400, "Serve acceso, vero o falso")
+        PULIZIA.imposta(c["acceso"])
+        return _json(h, PULIZIA.stato())
+    if resto == ["riprova"] and metodo == "POST":
+        PULIZIA.riprova()
+        return _json(h, {"ok": True})
+    if resto in (["ripristina"], ["ripristina-tutto"]) and metodo == "POST":
+        if resto == ["ripristina"] and not (isinstance(c.get("id"), str) and ASCOLTATI_ID.match(c["id"])):
+            raise ErroreExtra(400, "Serve l'id del brano")
+        if resto == ["ripristina-tutto"] and c.get("conferma") is not True:
+            raise ErroreExtra(400, "Serve conferma: vero (tutti i brani puliti tornano com'erano)")
+        try:
+            if resto == ["ripristina"]:
+                return _json(h, PULIZIA.ripristina(c["id"]))
+            PULIZIA.ripristina_tutti()
+            return _json(h, PULIZIA.stato())
+        except m.ErroreBrano as e:
+            raise ErroreExtra(409, str(e))
+        except OSError as e:
+            raise ErroreExtra(503, "Il disco non lascia scrivere: %s" % (e.strerror or e))
+    raise ErroreExtra(404, "Richiesta sconosciuta: api/extra/gestione/pulizia-audio/%s" % "/".join(resto))
+
+
 # ----- Rete: Tailscale sul Mac mini (Gestione → Rete) -----
 #
 # Un'app web non può accendere né cambiare il VPN del telefono (iPhone e Android non lo permettono): da qui Samuele
@@ -18521,6 +18688,7 @@ def main():
     if a.tematiche or a.tematiche_prova > 0:
         _tem().prova = max(0, a.tematiche_prova)
         _tem().avvia()
+    avvia_pulizia()   # pulizia audio di tutta la libreria (dopo i testi: ffmpeg nella stessa lista dei programmi pesanti)
     if a.clip_piano:
         CLIP = Videoclip(os.path.abspath(os.path.expanduser(a.clip_piano)), os.path.abspath(os.path.expanduser(a.clip_dir)),
                          auto=a.clip_auto, prima=os.path.abspath(os.path.expanduser(a.clip_prima)) if a.clip_prima else "")

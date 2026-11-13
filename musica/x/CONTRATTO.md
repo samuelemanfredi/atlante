@@ -247,6 +247,40 @@ ffmpeg o Whisper che non partono, disco pieno, rete giù) non conta contro i bra
 riprova senza DTW (i tempi delle parole dai pezzi) e, se si ferma anche così, quel brano non riesce e Whisper va avanti.
 `ATLANTE_WHISPER=0` spegne Whisper (oppure il percorso di un whisper-cli).
 
+## Pulizia audio (Gestione → Pulizia audio, solo Samuele)
+
+Il codice sta in `server/pulizia_audio.py` (lì il perché di ogni scelta). Il Mac mini ascolta ogni brano del disco
+principale con ffmpeg (ebur128 e astats) e lo porta a −14 LUFS con i picchi sotto −1 dBTP (−1,5 prima di una codifica
+con perdita), mai più di +10 dB; toglie lo scostamento DC e i rombi sotto i 15 Hz e nei file senza perdita ricostruisce
+i picchi tagliati (adeclip). I brani già giusti (entro 1 LU, 2 per ricodificare un AAC) non si toccano.
+- **MP3**: il volume cambia senza ricodifica, spostando il `global_gain` di ogni granulo (passi da 1,5 dB, come mp3gain):
+  stessa qualità, stessa durata, stessi tag. Il passo indietro si prova prima di scrivere; l'undo sta nel registro e in
+  `.atlante-originali/guadagni.jsonl` nella cartella della musica. Un MP3 con DC forte (≥ 0,01) o che non si legge
+  frame per frame si ricodifica (LAME V0) con i tag dell'originale byte per byte, meno ReplayGain/MP3Gain/iTunNORM.
+- **FLAC, ALAC, AAC** (`.flac`, `.m4a`, `.mp4`): ricodifica nello stesso formato (FLAC livello 8, ALAC, AAC 256 kbps
+  con AudioToolbox se c'è), con dither a 16 bit, tag e copertina copiati. Gli altri formati (OGG, Opus, WAV, AIFF,
+  audiolibri `.m4b`) si saltano.
+- L'originale di ogni file ricodificato resta identico in `.atlante-originali/<stesso percorso>` (collegamento sullo
+  stesso disco, o copia controllata); mai sopra un originale che c'è già.
+- Prima di sostituire: si decodifica senza errori in più, stessa durata (al campione per il guadagno MP3, 0,1 s per le
+  ricodifiche), volume e picchi come previsto, stessi tag e copertina. Se no il brano resta com'è (`errore`, si riprova
+  il giorno dopo, al più 3 volte). La sostituzione è un `os.replace` dal file nascosto `.<nome>.pulizia-tmp` accanto,
+  con la data di prima più un secondo: la libreria lo rilegge con lo stesso id, l'iPhone ne riscarica la copia
+  (`added` cambia), «Aggiunti di recente» resta in ordine. Testi, parole di Whisper e videoclip passano alla firma
+  nuova; le playlist di Atlante rimisurano il volume (`db` di `tematiche/ritmi`, per il «volume uniforme»).
+- Un brano alla volta, ffmpeg con `nice` 15; in pausa e con SIGTERM si ferma subito. Si ferma sotto i 100 GB liberi
+  sul disco della musica (`ATLANTE_PULIZIA_SPAZIO_MIN_GB`) e se il disco non c'è. Acceso di serie alla prima
+  accensione (`ATLANTE_PULIZIA=0` lo lascia spento), poi vale l'interruttore. In `<cache>/pulizia-audio/`:
+  `lavoro.json` (acceso) e `registro.json` (per id: esito, misure prima e dopo, modo, guadagno, firme, undo).
+
+| Metodo | Percorso | Risposta |
+|---|---|---|
+| GET | `gestione/pulizia-audio` | `{acceso, lavora, ora, pausa, conti:{migliorati, buoni, saltati, errori, gia_puliti, ripristinati}, da_fare, totale, da_fare_gb, spazio_libero_gb, spazio_min_gb, obiettivo, ffmpeg, ultimi:[{id, t, a, e:'migliorato'\|'errore'\|'ripristinato', modo:'guadagno'\|'ricodifica', g, m:[motivi], motivo, prima:{i,tp,lra,dc}, dopo, q}], ripristino:{stato, totale, fatti, errori, ultimo_errore}\|null}` |
+| POST | `gestione/pulizia-audio` `{acceso}` | accende o mette in pausa (resta così dopo un riavvio); lo stato come sopra; 400 senza `acceso` vero o falso |
+| POST | `gestione/pulizia-audio/riprova` | `{ok:true}`: i brani non riusciti si riprovano subito, una pausa per un errore del Mac finisce |
+| POST | `gestione/pulizia-audio/ripristina` `{id}` | `{ok, firma}`: il brano torna all'originale (dall'archivio, o il guadagno MP3 disfatto al bit) e non si pulisce più; 409 se non si può (niente da ripristinare, audio cambiato dopo, lo sta pulendo adesso) |
+| POST | `gestione/pulizia-audio/ripristina-tutto` `{conferma:true}` | lo stato: tutti i brani puliti tornano all'originale in sottofondo (`ripristino`) e la pulizia si spegne; 409 se è già in corso |
+
 ## La mia Volkswagen (`auto.html`, solo Samuele)
 Il Mac mini parla con il cloud Volkswagen (lo stesso dell'app Volkswagen) con l'account di Samuele: sull'auto non si
 installa niente. Il collegamento è un processo a parte, `server/auto_ponte.py`, con CarConnectivity
