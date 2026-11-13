@@ -73,6 +73,7 @@ import mimetypes
 import operator
 import os
 import platform
+import plistlib
 import queue
 import re
 import secrets
@@ -3240,6 +3241,364 @@ def _preferito_ora(h, corpo):
     return {"ok": True, "preferito": dopo, "prima": prima,
             "brano": {"id": id_brano, "titolo": b.get("titolo", ""), "artista": b.get("artista", ""), "album": b.get("album", "")},
             "dispositivo": {"id": did, "nome": nome, "tipo": tipo_disp}, "testo": testo}
+
+
+# ----- la libreria delle app del dispositivo: Musica dell'iPhone, del Mac, e le altre app -----
+#
+# Da ricordare: «LA PAGINA NON VEDE, IL COMANDO RAPIDO SÌ».
+# Safari non può leggere la libreria di Musica dell'iPhone; un comando rapido sì (Trova brani musicali). L'app chiede al
+# Mac un codice (vale LIBAPP_CODICE_DURATA, per l'account di chi lo chiede) e apre il comando rapido «Libreria per Atlante»
+# passandogli l'indirizzo d'invio con il codice. Il comando rapido manda al Mac una riga per brano, «titolo⇥artista⇥album».
+# Il codice nell'indirizzo è la sua chiave: così funziona anche da Internet (Funnel), dove al comando rapido mancherebbe
+# il biscotto dell'app. Poi l'app riprende l'elenco, trova i brani che Atlante ha già (li mette in una playlist) e lascia
+# gli altri da cercare con «Cerca e scarica». Il comando rapido lo prepara e lo firma il Mac (shortcuts sign).
+#
+#   POST   libreria-app/codice {id, nome, tipo}  → {codice, invio, scade, comando}   (un account: Samuele o un invitato)
+#   POST   libreria-app/invio/<codice>   testo, una riga per brano «titolo⇥artista⇥album» → testo per il comando rapido
+#   GET    libreria-app                  → {librerie:[{id, nome, tipo, ricevuta, n}], comando}
+#   GET    libreria-app/<id>             → {id, nome, tipo, ricevuta, brani:[[titolo, artista, album]]}
+#   DELETE libreria-app/<id>
+#   GET    libreria-app/comando-rapido   il comando rapido firmato
+#   POST   libreria-app/mac              la libreria di Musica del Mac stesso (osascript): solo Samuele
+
+LIBAPP = None                     # LibreriaApp, preparata da main()
+LIBAPP_CODICE_DURATA = 30 * 60
+LIBAPP_CODICI_MAX = 50            # codici aperti in tutto
+LIBAPP_BRANI_MAX = 50000
+LIBAPP_CORPO_MAX = 8 * 1024 * 1024   # 50 000 righe da 160 caratteri
+LIBAPP_DISP_MAX = 8               # librerie ricordate per account (una per dispositivo)
+LIBAPP_CAMPO_MAX = 300
+LIBAPP_NOME_MAX = 60
+LIBAPP_COMANDO = "Libreria per Atlante"
+LIBAPP_MAC = "mac-musica"         # l'id della libreria di Musica del Mac stesso
+ID_LIBAPP = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+CODICE_LIBAPP = re.compile(r"^[A-Za-z0-9_-]{24,64}$")
+_CONTROLLO = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _libapp_righe(testo):
+    """Le righe arrivate dal comando rapido (o da Musica del Mac): [[titolo, artista, album]], senza doppioni e righe
+    vuote, al più LIBAPP_BRANI_MAX."""
+    out, visti = [], set()
+    for r in testo.splitlines():
+        c = [" ".join(_CONTROLLO.sub("", x).split())[:LIBAPP_CAMPO_MAX] for x in r.split("\t")]
+        if not c or not c[0]:
+            continue
+        b = (c + ["", ""])[:3]
+        k = tuple(x.casefold() for x in b)
+        if k in visti:
+            continue
+        visti.add(k)
+        out.append(b)
+        if len(out) >= LIBAPP_BRANI_MAX:
+            break
+    return out
+
+
+def _libapp_testo(dati):
+    if dati[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return dati.decode("utf-16", "replace")
+    return dati.decode("utf-8", "replace").lstrip("﻿")
+
+
+class LibreriaApp:
+    """Le librerie delle app arrivate dai dispositivi, una per dispositivo, nell'account di chi le manda
+    (<cache>/libreria-app/<account>.json), e i codici d'invio aperti (solo in memoria)."""
+
+    def __init__(self, cartella):
+        self.cartella = cartella
+        self.blocco = threading.Lock()
+        self.codici = {}
+
+    def _file(self, conto):
+        return os.path.join(self.cartella, conto + ".json")
+
+    def _librerie(self, conto):
+        d = _leggi_json(self._file(conto), {})
+        L = d.get("librerie")
+        return L if isinstance(L, dict) else {}
+
+    def codice(self, conto, id_, nome, tipo):
+        ora = time.time()
+        with self.blocco:
+            for k in [k for k, v in self.codici.items() if v["scade"] <= ora]:
+                del self.codici[k]
+            while len(self.codici) >= LIBAPP_CODICI_MAX:
+                del self.codici[min(self.codici, key=lambda k: self.codici[k]["scade"])]
+            c = secrets.token_urlsafe(24)
+            self.codici[c] = {"conto": conto, "id": id_, "nome": nome, "tipo": tipo, "scade": ora + LIBAPP_CODICE_DURATA}
+            return c, self.codici[c]["scade"]
+
+    def salva(self, conto, id_, nome, tipo, brani):
+        with self.blocco:
+            L = self._librerie(conto)
+            L[id_] = {"nome": nome, "tipo": tipo, "ricevuta": int(time.time() * 1000), "brani": brani}
+            while len(L) > LIBAPP_DISP_MAX:
+                del L[min(L, key=lambda k: L[k].get("ricevuta", 0) if isinstance(L[k], dict) else 0)]
+            _scrivi_json(self._file(conto), {"librerie": L})
+
+    def valido(self, codice):
+        with self.blocco:
+            v = self.codici.get(codice)
+            return bool(v and v["scade"] > time.time())
+
+    def ricevi(self, codice, testo):
+        with self.blocco:
+            v = self.codici.get(codice)
+            if not v or v["scade"] <= time.time():
+                raise ErroreExtra(403, "Codice scaduto: apri Atlante Musica e tocca di nuovo «Leggi la libreria di Musica»")
+            v = dict(v)
+        brani = _libapp_righe(testo)
+        if not brani:
+            raise ErroreExtra(400, "Nessun brano: la libreria di Musica è vuota, o il comando rapido non ha potuto leggerla")
+        self.salva(v["conto"], v["id"], v["nome"], v["tipo"], brani)
+        return v, len(brani)
+
+    def elenco(self, conto):
+        with self.blocco:
+            L = self._librerie(conto)
+        return sorted(({"id": k, "nome": v.get("nome", ""), "tipo": v.get("tipo", ""), "ricevuta": v.get("ricevuta", 0),
+                        "n": len(v.get("brani") or [])} for k, v in L.items() if isinstance(v, dict)),
+                      key=lambda x: -x["ricevuta"])
+
+    def una(self, conto, id_):
+        with self.blocco:
+            v = self._librerie(conto).get(id_)
+        if not isinstance(v, dict):
+            raise ErroreExtra(404, "Libreria non trovata")
+        return {"id": id_, "nome": v.get("nome", ""), "tipo": v.get("tipo", ""), "ricevuta": v.get("ricevuta", 0),
+                "brani": v.get("brani") or []}
+
+    def togli(self, conto, id_):
+        with self.blocco:
+            L = self._librerie(conto)
+            if id_ not in L:
+                raise ErroreExtra(404, "Libreria non trovata")
+            del L[id_]
+            _scrivi_json(self._file(conto), {"librerie": L})
+
+
+def _libapp_invio_libero(h, p):
+    """La richiesta con cui il comando rapido manda la libreria: entra senza biscotto, la sua chiave è il codice. Solo
+    POST e solo quella rotta, decisa come la decide l'instradamento. None: non è quella rotta; False: lo è, ma il codice
+    non c'è o è scaduto (si risponde subito, senza leggere il corpo); True: entra."""
+    if h.command != "POST":
+        return None
+    m = EXTRA.match(p)
+    parti = _parti_extra(m) if m else None
+    if not (parti and len(parti) == 3 and parti[:2] == ["libreria-app", "invio"] and CODICE_LIBAPP.match(parti[2])):
+        return None
+    return LIBAPP is not None and LIBAPP.valido(parti[2])
+
+
+# --- il comando rapido «Libreria per Atlante» (plist di Comandi Rapidi), firmato dal Mac ---
+def _cr_uuid(nome):   # sempre gli stessi: lo stesso comando rapido ha gli stessi byte (e la firma si rifà solo se cambia)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "atlante-libreria/" + nome)).upper()
+
+
+def _cr_uscita(azione, nome):
+    return {"Value": {"OutputUUID": _cr_uuid(azione), "OutputName": nome, "Type": "ActionOutput"},
+            "WFSerializationType": "WFTextTokenAttachment"}
+
+
+def _cr_testo(testo, variabili):
+    """Un testo con variabili: ogni ￼ è la variabile successiva di `variabili`."""
+    pos = [i for i, c in enumerate(testo) if c == "￼"]
+    return {"Value": {"string": testo, "attachmentsByRange": {"{%d, 1}" % i: v for i, v in zip(pos, variabili)}},
+            "WFSerializationType": "WFTextTokenString"}
+
+
+def _cr_azione(ident, uid, **parametri):
+    d = {"UUID": _cr_uuid(uid)}
+    d.update(parametri)
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions." + ident, "WFWorkflowActionParameters": d}
+
+
+def _libapp_plist():
+    """Il comando rapido: 1. l'indirizzo d'invio è il suo ingresso (l'app glielo passa; senza ingresso: gli appunti,
+    dove l'app lo copia); 2. Trova brani musicali (tutta la libreria); 3. per ognuno titolo, artista e album in una riga;
+    4. le righe vanno al Mac (POST, il testo come corpo); 5. mostra la risposta del Mac."""
+    dettaglio = lambda uid, prop: _cr_azione(   # noqa: E731
+        "properties.music", uid, WFContentItemPropertyName=prop,
+        WFInput={"Value": {"Type": "Variable", "VariableName": "Repeat Item"}, "WFSerializationType": "WFTextTokenAttachment"})
+    gruppo = _cr_uuid("ripeti-gruppo")
+    azioni = [
+        _cr_azione("comment", "nota", WFCommentActionText="Atlante Musica: legge titolo, artista e album dei brani della "
+                   "libreria di Musica e li manda al Mac di Atlante (all'indirizzo che l'app passa a questo comando rapido)."),
+        _cr_azione("url", "indirizzo", **{"WFURLActionURL": _cr_testo("￼", [{"Type": "ExtensionInput"}])}),
+        _cr_azione("filter.music", "trova", WFContentItemFilter={
+            "Value": {"WFActionParameterFilterPrefix": 1, "WFContentPredicateBoundedDate": False,
+                      "WFActionParameterFilterTemplates": []},
+            "WFSerializationType": "WFContentPredicateTableTemplate"}),
+        _cr_azione("repeat.each", "ripeti", GroupingIdentifier=gruppo, WFControlFlowMode=0,
+                   WFInput=_cr_uscita("trova", "Music")),
+        dettaglio("titolo", "Title"),
+        dettaglio("artista", "Artist"),
+        dettaglio("album", "Album"),
+        _cr_azione("gettext", "riga", WFTextActionText=_cr_testo("￼\t￼\t￼", [
+            dict(_cr_uscita("titolo", "Title")["Value"]), dict(_cr_uscita("artista", "Artist")["Value"]),
+            dict(_cr_uscita("album", "Album")["Value"])])),
+        _cr_azione("repeat.each", "ripeti-fine", GroupingIdentifier=gruppo, WFControlFlowMode=2),
+        _cr_azione("text.combine", "righe", WFTextSeparator="New Lines", text=_cr_uscita("ripeti-fine", "Repeat Results")),
+        _cr_azione("downloadurl", "invia", Advanced=True, ShowHeaders=True, WFHTTPMethod="POST", WFHTTPBodyType="File",
+                   WFURL=_cr_uscita("indirizzo", "URL"), WFRequestVariable=_cr_uscita("righe", "Combined Text"),
+                   WFFormValues={"Value": {"WFDictionaryFieldValueItems": []}, "WFSerializationType": "WFDictionaryFieldValue"},
+                   WFHTTPHeaders={"Value": {"WFDictionaryFieldValueItems": [{
+                       "WFItemType": 0, "WFKey": _cr_testo("Content-Type", []),
+                       "WFValue": _cr_testo("text/plain; charset=utf-8", [])}]},
+                       "WFSerializationType": "WFDictionaryFieldValue"}),
+        _cr_azione("showresult", "risposta", Text=_cr_testo("￼", [dict(_cr_uscita("invia", "Contents of URL")["Value"])])),
+    ]
+    return {
+        "WFWorkflowActions": azioni,
+        "WFWorkflowClientVersion": "2302.0.4",
+        "WFWorkflowMinimumClientVersion": 900,
+        "WFWorkflowMinimumClientVersionString": "900",
+        "WFWorkflowIcon": {"WFWorkflowIconStartColor": 4282071867, "WFWorkflowIconGlyphNumber": 59477},
+        "WFWorkflowInputContentItemClasses": ["WFStringContentItem", "WFURLContentItem"],
+        "WFWorkflowNoInputBehavior": {"Name": "WFWorkflowNoInputBehaviorGetClipboard", "Parameters": {}},
+        "WFWorkflowHasShortcutInputVariables": True,
+        "WFWorkflowOutputContentItemClasses": [],
+        "WFWorkflowHasOutputFallback": False,
+        "WFWorkflowImportQuestions": [],
+        "WFWorkflowTypes": [],
+        "WFQuickActionSurfaces": [],
+    }
+
+
+_LIBAPP_FIRMA = threading.Lock()
+
+
+def _libapp_comando_firmato():
+    """Il percorso del comando rapido firmato (<cache>/comandi-rapidi/), fatto se manca: `shortcuts sign` vuole il Mac
+    con macOS 12 o dopo e l'Apple ID; la firma «anyone» lo fa aprire su ogni iPhone."""
+    dati = plistlib.dumps(_libapp_plist(), fmt=plistlib.FMT_BINARY, sort_keys=True)
+    cart = os.path.join(_cart("cache"), "comandi-rapidi")
+    dest = os.path.join(cart, "libreria-%s.shortcut" % hashlib.sha1(dati).hexdigest()[:12])
+    if os.path.isfile(dest):
+        return dest
+    prog = _programma("shortcuts")
+    if not prog:
+        raise ErroreExtra(503, "Su questo Mac manca «shortcuts» (serve macOS 12 o dopo): crea il comando rapido a mano")
+    with _LIBAPP_FIRMA:
+        if os.path.isfile(dest):
+            return dest
+        os.makedirs(cart, exist_ok=True)
+        grezzo, tmp = dest + ".da-firmare", dest + ".%d.tmp" % threading.get_ident()
+        try:
+            with open(grezzo, "wb") as f:
+                f.write(dati)
+            r = subprocess.run([prog, "sign", "--mode", "anyone", "--input", grezzo, "--output", tmp],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
+                               env=_ambiente())
+            if r.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) < 100:
+                perche = (r.stderr or r.stdout or b"").decode("utf-8", "replace").strip().splitlines()
+                raise ErroreExtra(503, "Il Mac non è riuscito a firmare il comando rapido%s: crealo a mano" % (
+                    " (" + perche[-1][:200] + ")" if perche else ""))
+            os.replace(tmp, dest)
+            return dest
+        except (OSError, subprocess.SubprocessError) as e:
+            raise ErroreExtra(503, "Il Mac non è riuscito a firmare il comando rapido (%s): crealo a mano" % e)
+        finally:
+            _cancella(tmp)
+            _cancella(grezzo)
+
+
+# --- la libreria di Musica del Mac stesso: la legge osascript (la prima volta macOS chiede il permesso) ---
+LIBAPP_JXA = """function run() {
+  var t = Application('Music').libraryPlaylists[0].tracks;
+  return JSON.stringify([t.name(), t.artist(), t.album()]);
+}"""
+
+
+def _libapp_mac():
+    prog = _programma("osascript")
+    if not prog:
+        raise ErroreExtra(503, "Qui non c'è Musica del Mac (osascript manca)")
+    try:
+        r = subprocess.run([prog, "-l", "JavaScript", "-e", LIBAPP_JXA], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180, env=_ambiente())
+    except subprocess.TimeoutExpired:
+        raise ErroreExtra(504, "Musica del Mac non ha risposto in tempo: riprova")
+    except OSError as e:
+        raise ErroreExtra(503, "Musica del Mac non si legge: %s" % e)
+    err = r.stderr.decode("utf-8", "replace")
+    if r.returncode != 0:
+        if "-1743" in err or "Not authorized" in err or "autorizzat" in err:
+            raise ErroreExtra(403, "Il Mac chiede il permesso: in Impostazioni di Sistema › Privacy e sicurezza › "
+                                   "Automazione consenti ad Atlante di usare «Musica», poi riprova")
+        raise ErroreExtra(502, "Musica del Mac non si legge: %s" % (err.strip().splitlines() or ["errore"])[-1][:200])
+    try:
+        nomi, artisti, album = json.loads(r.stdout.decode("utf-8", "replace"))
+        righe = "\n".join("%s\t%s\t%s" % (n or "", a or "", al or "") for n, a, al in zip(nomi, artisti, album))
+    except (ValueError, TypeError):
+        raise ErroreExtra(502, "Musica del Mac ha risposto in un modo che non capisco")
+    return _libapp_righe(righe)
+
+
+def _libreria_app(h, metodo, resto, corpo):
+    """Le rotte libreria-app (vedi sopra)."""
+    def solo(*metodi):
+        if metodo not in metodi:
+            raise ErroreExtra(405, "Metodo %s non permesso qui" % metodo)
+    if LIBAPP is None:
+        raise ErroreExtra(503, "Libreria delle app non disponibile")
+    if len(resto) == 2 and resto[0] == "invio":   # dal comando rapido: risponde sempre con un testo da mostrare
+        solo("POST")
+        try:
+            v, n = LIBAPP.ricevi(resto[1], _libapp_testo(getattr(h, "_grezzo", b"") or b""))
+        except ErroreExtra as e:
+            _risposta_testo(h, "⚠️ " + e.testo, e.codice)
+            return
+        _risposta_testo(h, "✓ Libreria di Musica letta: %d bran%s inviat%s ad Atlante. Torna in Atlante Musica: lì vedi "
+                           "quali ci sono già e cerchi gli altri." % (n, "o" if n == 1 else "i", "o" if n == 1 else "i"))
+        return
+    conto = _conto_liste(h)   # un account (Samuele o un invitato): le librerie stanno lì
+    if resto == ["codice"]:
+        solo("POST")
+        id_ = corpo.get("id")
+        if not isinstance(id_, str) or not ID_LIBAPP.match(id_) or id_ == LIBAPP_MAC:
+            raise ErroreExtra(400, "Dispositivo non valido")
+        nome = " ".join(str(corpo.get("nome") or "").split())[:LIBAPP_NOME_MAX] or "Dispositivo"
+        tipo = corpo.get("tipo") if corpo.get("tipo") in TIPI_DISP else ""
+        c, scade = LIBAPP.codice(conto, id_, nome, tipo)
+        _json(h, {"codice": c, "invio": "api/extra/libreria-app/invio/" + c, "scade": int(scade * 1000),
+                  "comando": LIBAPP_COMANDO})
+    elif resto == ["comando-rapido"]:
+        solo("GET")
+        p = _libapp_comando_firmato()
+        with open(p, "rb") as f:
+            dati = f.read()
+        h._musica_risposto = True
+        h.send_response(200)
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Content-Disposition", 'attachment; filename="%s.shortcut"' % LIBAPP_COMANDO)
+        h.send_header("Content-Length", str(len(dati)))
+        h.send_header("Cache-Control", "no-store")
+        h.end_headers()
+        if h.command != "HEAD":
+            h.wfile.write(dati)
+    elif resto == ["mac"]:
+        solo("POST")
+        if _chi_e(h)["ruolo"] != "proprietario":
+            raise ErroreExtra(403, "Solo per Samuele")
+        brani = _libapp_mac()
+        if not brani:
+            raise ErroreExtra(404, "La libreria di Musica del Mac è vuota")
+        LIBAPP.salva(conto, LIBAPP_MAC, "Mac mini", "mac", brani)
+        _json(h, {"ok": True, "id": LIBAPP_MAC, "n": len(brani)})
+    elif not resto:
+        solo("GET")
+        _json(h, {"librerie": LIBAPP.elenco(conto), "comando": LIBAPP_COMANDO})
+    elif len(resto) == 1 and ID_LIBAPP.match(resto[0]):
+        solo("GET", "DELETE")
+        if metodo == "GET":
+            _json(h, LIBAPP.una(conto, resto[0]))
+        else:
+            LIBAPP.togli(conto, resto[0])
+            _json(h, {"ok": True})
+    else:
+        raise ErroreExtra(404, "Richiesta sconosciuta")
 
 
 # ----- scatola nera: il diario audio di ogni dispositivo, sul disco -----
@@ -15829,7 +16188,14 @@ def _corpo_permesso(h, metodo, parti):
         return MAX_CORPO
     if metodo == "POST" and parti == ["audiolibro"] and _chi_e(h)["ruolo"] in ("proprietario", "casa"):
         return MAX_CORPO
+    if metodo == "POST" and _corpo_testo(parti):
+        return LIBAPP_CORPO_MAX
     return MAX_JSON
+
+
+def _corpo_testo(parti):
+    """Le rotte il cui corpo è testo e non JSON: le righe della libreria mandate dal comando rapido."""
+    return len(parti) == 3 and parti[:2] == ["libreria-app", "invio"]
 
 
 def _da_json(dati):
@@ -16211,6 +16577,8 @@ def _instrada(h, metodo, parti, corpo):
             _risposta_testo(h, r["testo"])
         else:
             _json(h, r)
+    elif cosa == "libreria-app":   # la libreria di Musica dell'iPhone (comando rapido), del Mac, delle altre app
+        _libreria_app(h, metodo, resto, corpo)
     elif cosa == "preferito" and resto == ["comando-rapido"]:   # il comando rapido firmato, preparato dal Mac
         solo("GET")
         if _chi_e(h)["ruolo"] != "proprietario":
@@ -16291,7 +16659,7 @@ def gestisci_extra(h, metodo=None):
         if metodo in ("POST", "DELETE", "PUT", "PATCH") and not _stessa_origine(h):
             raise ErroreExtra(403, "Richiesta da un altro sito: rifiutata")
         h._grezzo = dati   # PUT: i byte di un pezzo di file o di una copertina; POST: i pezzi cifrati della chat
-        corpo = _da_json(dati) if metodo == "POST" and not _byte_grezzi(h) else {}
+        corpo = _da_json(dati) if metodo == "POST" and not _byte_grezzi(h) and not _corpo_testo(parti) else {}
         _instrada(h, metodo, parti, corpo)
     except ErroreExtra as e:
         if not h._musica_risposto:
@@ -17894,6 +18262,14 @@ def controlla_accesso(h):
         return True
     if entrato or libero:
         return False
+    invio = _libapp_invio_libero(h, p)   # il comando rapido che manda la libreria: la chiave è il codice nell'indirizzo
+    if invio:
+        h._chi = {"ruolo": "codice", "persona": None, "chiave": None}
+        return False
+    if invio is False:
+        h.close_connection = True   # corpo non letto
+        _risposta_testo(h, "⚠️ Codice scaduto: apri Atlante Musica e tocca di nuovo «Leggi la libreria di Musica»", 403)
+        return True
     if h.command not in ("GET", "HEAD"):
         h.close_connection = True   # corpo non letto
     elif h.headers.get("Sec-Fetch-Mode") == "navigate" or p.endswith("/") or p.endswith(".html"):
@@ -17934,6 +18310,8 @@ PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/(?:canta|trasc
 # la chat (fase 5a): la pagina, la cifratura, il QR del codice di sicurezza e le sue rotte
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/(?:chat\.html|chat-cifra\.js|qrcode\.js)$"
                                r"|^(?:/.*)?/api/extra/chat(?:/[^/]+){1,4}$")
+# la libreria di Musica del loro iPhone (comando rapido): ognuno nel suo account
+PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^(?:/.*)?/api/extra/libreria-app(?:/[^/]+){0,2}$")
 # le chiamate (fasi 5b e 5c): la pagina e il centralino
 PERMESSE_INVITATI = re.compile(PERMESSE_INVITATI.pattern + r"|^/x/chiamate\.html$"
                                r"|^(?:/.*)?/api/extra/chiamate(?:/[^/]+){0,2}$")
@@ -18000,6 +18378,9 @@ POST chat/allegati chat/allegati/*/* chat/blocchi chat/push
 DELETE chat/conversazioni/*/membri/* chat/blocchi/* chat/push/*
 GET chiamate/persone chiamate/ice chiamate/attendi
 POST chiamate chiamate/*/*
+GET libreria-app libreria-app/*
+POST libreria-app/codice libreria-app/invio/*
+DELETE libreria-app/*
 """
 ROTTE_INVITATI = frozenset((m, tuple(r.split("/"))) for riga in _ROTTE_INVITATI.strip().splitlines()
                            for m in riga.split() if m.isupper() for r in riga.split() if not r.isupper())
@@ -18397,7 +18778,7 @@ def _imposta_password(file):
 
 def main():
     global ACC, CLIP, PERS, PROPRIETARI, PUBBLICO
-    global IDEE, CL_SPAZIO_MIN, LISTE
+    global IDEE, CL_SPAZIO_MIN, LISTE, LIBAPP
     ap = argparse.ArgumentParser(description="Serve la musica di una o più cartelle all'app Atlante Musica.")
     ap.add_argument("cartelle", nargs="*", help="cartelle con la musica, per esempio /Volumes/Backup/Musica")
     ap.add_argument("--porta", type=int, default=8790)
@@ -18481,6 +18862,7 @@ def main():
     PERS = Persone(os.path.join(os.path.expanduser(a.cache), "persone.json"))
     IDEE = Idee(os.path.join(os.path.expanduser(a.cache), "idee.json"))
     LISTE = Liste(os.path.join(os.path.expanduser(a.cache), "liste"))   # playlist di ogni account
+    LIBAPP = LibreriaApp(os.path.join(os.path.expanduser(a.cache), "libreria-app"))   # librerie delle app dei dispositivi
     avvia_ascoltati(a.cache)   # brani ascoltati: classifiche e consigli tra le persone
     # login Tailscale di Samuele: dalla rete Tailscale solo loro sono Samuele (vuoto: tutta la rete, come prima)
     PROPRIETARI = {x.strip().lower() for x in os.environ.get("ATLANTE_PROPRIETARI", "").split(",") if x.strip()}

@@ -572,7 +572,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 <div id="toast" role="status"></div>
 <div id="drop" hidden>Rilascia qui i file audio</div>
 <input type="file" id="fileIn" multiple accept="audio/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.oga,.opus,.aif,.aiff,.alac,.webm" hidden>
-<input type="file" id="plIn" multiple accept=".txt,.m3u,.m3u8,.xml,text/plain,text/xml" hidden>
+<input type="file" id="plIn" multiple accept=".txt,.m3u,.m3u8,.xml,.csv,text/plain,text/xml,text/csv" hidden>
 <input type="file" id="dirIn" multiple webkitdirectory hidden>
 <audio id="au" preload="auto" x-webkit-airplay="allow"></audio>
 <audio id="au2" preload="auto" x-webkit-airplay="allow"></audio>
@@ -1492,7 +1492,8 @@ const fold = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u030
 const low = s => fold(s).replace(/[\u2018\u2019`\u00b4]/g, '\'').replace(/\s+/g, ' ').trim();
 // titolo semplificato: via le parentesi con feat./with/remaster/live/… (una parentesi alla volta, parole intere), le code
 // « - 2011 Remaster», « - Live…», « - Radio Edit» (stile Spotify), «feat. X» senza parentesi fino alla fine, e la punteggiatura
-const nrm = s => fold(s).replace(/\s*[\(\[][^\)\]]*\b(feat|ft|featuring|with|remaster\w*|version\w*|live|edit)\b[^\)\]]*[\)\]]/g, '')
+const nrm = s => fold(s).replace(/\s*[\(\[]\s*(explicit|clean)(\s+version)?\s*[\)\]]/g, '')   // «(Explicit)» di Spotify e YouTube Music
+  .replace(/\s*[\(\[][^\)\]]*\b(feat|ft|featuring|with|remaster\w*|version\w*|live|edit)\b[^\)\]]*[\)\]]/g, '')
   .replace(/\s+-\s+[^-]*\b(remaster\w*|version\w*|live|edit)\b[^-]*$/, '').replace(/\s+(feat|ft|featuring)\b.*$/, '')
   .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 const STOPA = new Set(['the', 'and', 'e', 'feat', 'ft', 'featuring', 'with', 'vs', 'x']);
@@ -1584,6 +1585,68 @@ function parseTXT(txt, name) {
   if (ti < 0) return [];
   return [{name, items:rows.slice(1).map(r => ({title:r[ti], artist:ai >= 0 ? r[ai] : ''}))}];
 }
+// CSV esportati da altre app: Spotify (Exportify: «Track Name», «Artist Name(s)», «Album Name»), TuneMyMusic per YouTube
+// Music, Amazon, Deezer e Tidal («Track name», «Artist name», «Album», «Playlist name»: più playlist in un file), Soundiiz…
+function csvRighe(txt) {
+  const prima = txt.split(/\r?\n/, 1)[0] || '';
+  const sep = [',', ';', '\t'].map(d => [d, prima.split(d).length]).sort((x, y) => y[1] - x[1])[0][0];
+  const rows = []; let row = [], f = '', q = false, dentro = false;
+  for (let i = 0; i < txt.length; i++) {
+    const c = txt[i];
+    if (q) { if (c === '"') { if (txt[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; continue; }
+    if (c === '"' && !dentro) { q = true; dentro = true; continue; }
+    if (c === sep) { row.push(f); f = ''; dentro = false; continue; }
+    if (c === '\n' || c === '\r') { if (c === '\r' && txt[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; dentro = false; continue; }
+    f += c; dentro = true;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows;
+}
+function parseCSV(txt, name) {
+  const rows = csvRighe(String(txt || '').replace(/^﻿/, '')).filter(r => r.some(x => x.trim()));
+  if (rows.length < 2) return [];
+  const h = rows[0].map(x => x.trim().toLowerCase());
+  const col = nomi => h.findIndex(x => nomi.indexOf(x) >= 0);
+  const ti = col(['track name', 'track title', 'track', 'title', 'song', 'song name', 'song title', 'name', 'titolo', 'brano', 'nome']);
+  const ai = col(['artist name(s)', 'artist name', 'artist names', 'artist', 'artists', 'artista', 'artisti', 'track artist']);
+  const al = col(['album name', 'album', 'album title']), pi = col(['playlist name', 'playlist']);
+  if (ti < 0) return [];
+  const per = new Map();
+  for (const r of rows.slice(1)) {
+    const title = (r[ti] || '').trim(); if (!title) continue;
+    const art = ai >= 0 ? (r[ai] || '').trim() : '', primo = art.split(/\s*,\s*/)[0];
+    const it = {title, artist:art, album:al >= 0 ? (r[al] || '').trim() : ''};
+    if (primo && primo !== art) it.alt = [{title, artist:primo}];   // «Artista 1, Artista 2»: anche solo il primo
+    const k = pi >= 0 && (r[pi] || '').trim() || name;
+    if (!per.has(k)) per.set(k, []);
+    per.get(k).push(it);
+  }
+  return [...per].map(([n, items]) => ({name:n, items}));
+}
+// un elenco qualsiasi (incollato, o un .txt che non è quello di Musica): una riga per brano, «Titolo - Artista» o
+// «Artista - Titolo» (si provano tutti e due), anche numerate o con un trattino davanti; i link si saltano
+function parseElenco(txt, name) {
+  txt = String(txt || '').replace(/^﻿/, '');
+  const prima = txt.split(/\r?\n/, 1)[0] || '';
+  if (/\t/.test(prima)) { const r = parseTXT(txt, name); if (r.length && r[0].items.length) return r; }
+  if (/[,;]/.test(prima)) { const r = parseCSV(txt, name); if (r.length) return r; }
+  const items = [];
+  for (const l0 of txt.split(/\r\n|\r|\n/)) {
+    const l = l0.replace(/^\s*(?:\d+\s*[.)\-:]\s*|[-•*·–]\s+)/, '').trim();
+    if (!l || /^https?:\/\//i.test(l)) continue;
+    const tab = l.split('\t').map(x => x.trim()).filter(Boolean);
+    if (tab.length > 1) { items.push({title:tab[0], artist:tab[1]}); continue; }
+    const tries = [];
+    for (const sep of [' - ', ' – ', ' — ']) {
+      for (let i = l.indexOf(sep); i > 0; i = l.indexOf(sep, i + 1)) {
+        tries.push({title:l.slice(0, i).trim(), artist:l.slice(i + sep.length).trim()}, {title:l.slice(i + sep.length).trim(), artist:l.slice(0, i).trim()});
+      }
+    }
+    tries.push({title:l, artist:''});
+    items.push(Object.assign({alt:tries.slice(1)}, tries[0]));
+  }
+  return items.length ? [{name, items}] : [];
+}
 function parseM3U(txt, name) {
   const items = []; let ext = null;
   const dec = s => { try { return decodeURIComponent(s); } catch (e) { return s; } };   // «100% Pure Love.mp3» non è un URI
@@ -1612,39 +1675,53 @@ function parseM3U(txt, name) {
   return [{name, items}];
 }
 async function importPlaylists(list) {
-  const match = matcher(), touched = new Set(), bad = [];
-  let made = 0, found = 0, miss = 0;
+  const pls = [], bad = [];
   for (const f of Array.from(list)) {
     try {
       const txt = await readText(f), base = f.name.replace(/\.[^.]+$/, '');
-      const pls = /<plist/.test(txt.slice(0, 2000)) ? parseLibXML(txt) : /^#EXTM3U|\.(m3u8?)$/i.test(txt.slice(0, 8) + f.name) ? parseM3U(txt, base) : parseTXT(txt, base);
-      for (const pl of pls) {
-        // le voci non trovate restano nella playlist (p.miss) e si cercano di nuovo quando il catalogo del Mac cambia
-        const ids = [], lost = []; let prev = '';
-        for (const it of pl.items) {
-          const id = matchItem(match, it);
-          if (!id) lost.push(Object.assign({title:it.title || '', artist:it.artist || '', after:prev}, it.alt && it.alt.length ? {alt:it.alt} : {}));
-          else if (ids.indexOf(id) < 0) { ids.push(id); prev = id; }
-        }
-        // la stessa playlist importata di nuovo si aggiorna: dall'XML la si riconosce dal suo identificativo,
-        // dagli altri file dal nome (anche se prima era arrivata da un XML). Due playlist diverse dello stesso file non si fondono mai.
-        const free = x => x.apple && !touched.has(x.id);
-        let p = pl.appleId ? P.find(x => free(x) && x.appleId === pl.appleId) : null;
-        if (p) p.name = pl.name;   // stesso identificativo = stessa playlist, anche se in Musica è stata rinominata
-        else p = P.find(x => free(x) && x.name === pl.name && (!x.appleId || !pl.appleId));
-        if (p) p.ids = ids; else { p = {id:uid(), name:pl.name, ids, created:Date.now() + made, apple:true}; P.push(p); }
-        if (pl.appleId) p.appleId = pl.appleId;
-        p.miss = lost;
-        touched.add(p.id); await savePl(p); made++; found += ids.length; miss += lost.length;
-      }
+      const r = /<plist/.test(txt.slice(0, 2000)) ? parseLibXML(txt) : /^#EXTM3U|\.(m3u8?)$/i.test(txt.slice(0, 8) + f.name) ? parseM3U(txt, base)
+        : /\.csv$/i.test(f.name) ? parseCSV(txt, base) : parseTXT(txt, base);
+      // un file che non è di Musica: un CSV esportato da un'altra app (Spotify con Exportify, TuneMyMusic…) o un elenco
+      const ok = r.filter(pl => pl.items.length);
+      if (ok.length) pls.push(...ok); else { const e = parseElenco(txt, base); if (e.length) pls.push(...e); else bad.push(f.name); }
     } catch (e) { bad.push(f.name); }
   }
+  const st = await importaListe(pls);
   render(true);
-  const parts = [], why = miss ? waitWhy() : '';
-  if (made) parts.push(made + (made === 1 ? ' playlist importata' : ' playlist importate'), found === 1 ? '1 brano trovato' : found + ' brani trovati');
-  if (made && miss) parts.push(why ? miss + ' non ancora trovati: ' + why : miss + ' non in libreria');   // l'elenco è in fondo alla playlist
+  const parts = [], why = st.miss ? waitWhy() : '';
+  if (st.made) parts.push(st.made + (st.made === 1 ? ' playlist importata' : ' playlist importate'), st.found === 1 ? '1 brano trovato' : st.found + ' brani trovati');
+  if (st.made && st.miss) parts.push(why ? st.miss + ' non ancora trovati: ' + why : st.miss + ' non in libreria');   // l'elenco è in fondo alla playlist
   if (bad.length) parts.push('Non riesco a leggere ' + bad.join(', '));
-  toast(parts.join(' · ') || 'Nessuna playlist nel file', !!(miss || bad.length));   // il riepilogo resta a schermo più a lungo
+  toast(parts.join(' · ') || 'Nessuna playlist nel file', !!(st.miss || bad.length));   // il riepilogo resta a schermo più a lungo
+  return st;
+}
+// le playlist lette (da un file, dalla libreria di un'app, da un elenco incollato) nella libreria: i brani trovati in
+// Atlante nella playlist, gli altri in p.miss (si vedono in fondo, si cercano, e arrivano da soli quando ci sono)
+async function importaListe(pls) {
+  const match = matcher(), touched = new Set(), liste = [];
+  let made = 0, found = 0, miss = 0;
+  for (const pl of pls) {
+    try {
+      // le voci non trovate restano nella playlist (p.miss) e si cercano di nuovo quando il catalogo del Mac cambia
+      const ids = [], lost = []; let prev = '';
+      for (const it of pl.items) {
+        const id = matchItem(match, it);
+        if (!id) lost.push(Object.assign({title:it.title || '', artist:it.artist || '', after:prev}, it.alt && it.alt.length ? {alt:it.alt} : {}));
+        else if (ids.indexOf(id) < 0) { ids.push(id); prev = id; }
+      }
+      // la stessa playlist importata di nuovo si aggiorna: dall'XML la si riconosce dal suo identificativo,
+      // dagli altri file dal nome (anche se prima era arrivata da un XML). Due playlist diverse dello stesso file non si fondono mai.
+      const free = x => x.apple && !touched.has(x.id);
+      let p = pl.appleId ? P.find(x => free(x) && x.appleId === pl.appleId) : null;
+      if (p) p.name = pl.name;   // stesso identificativo = stessa playlist, anche se in Musica è stata rinominata
+      else p = P.find(x => free(x) && x.name === pl.name && (!x.appleId || !pl.appleId));
+      if (p) p.ids = ids; else { p = {id:uid(), name:pl.name, ids, created:Date.now() + made, apple:true}; P.push(p); }
+      if (pl.appleId) p.appleId = pl.appleId;
+      p.miss = lost;
+      touched.add(p.id); await savePl(p); made++; found += ids.length; miss += lost.length; liste.push(p);
+    } catch (e) { /* una playlist che non si salva non ferma le altre */ }
+  }
+  return {made, found, miss, liste};
 }
 
 /* ---------- raggruppamenti ---------- */
@@ -2181,6 +2258,7 @@ const pages = {
     let h = topBar() + '<h1 class="lt">Playlist</h1><div>';
     h += '<button class="trk" data-a="newpl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:24px">' + ic('plus') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Nuova playlist…</span></span></span></button>';
     h += '<button class="trk" data-a="impl"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('down') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Importa da Apple Music…</span><span class="t2">File esportato da Musica sul Mac</span></span></span></button>';
+    h += '<button class="trk" data-a="libapp"><span class="art" style="background:var(--fill);color:var(--accent);display:grid;place-items:center;font-size:22px">' + ic('songs') + '</span><span class="rt"><span class="tx"><span class="t1" style="color:var(--accent)">Dalle app del dispositivo…</span><span class="t2">Musica dell\'iPhone, Spotify e altre: cosa c\'è già in Atlante</span></span></span></button>';
     h += cartelle().map(cartRiga).join('') + P.filter(p => !p.cartella).map(plRiga).join('');
     h += mplRighe();   // dopo le proprie, quelle del Mac (dal disco e dalla vecchia radio)
     return h + '</div>';
@@ -2226,7 +2304,7 @@ const pages = {
     h += trackRows(tr, {label:p.name, pl:p.id});
     // voci della playlist importata che non sono nella libreria: si possono rivedere (e si aggiungono da sole se arrivano)
     const nm = (p.miss || []).length;
-    if (nm) h += '<button class="foot" data-a="plmiss" data-k="' + p.id + '" style="color:var(--accent);text-align:left">' + (nm === 1 ? '1 brano della playlist non è' : nm + ' brani della playlist non sono') + ' nella libreria: vedi quali</button>';
+    if (nm) h += '<button class="foot" data-a="plmiss" data-k="' + p.id + '" style="color:var(--accent);text-align:left">' + (nm === 1 ? '1 brano della playlist non è' : nm + ' brani della playlist non sono') + ' in Atlante: vedi quali e cercali</button>';
     h += plSuggHtml(p);
     return h;
   },
@@ -2288,7 +2366,9 @@ function searchResults() {
   const n = q.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (!n) {
     const rec = albums().sort((a, b) => b.added - a.added).slice(0, 8);
-    return ricercheHtml() + '<h2 class="h2" style="margin-top:12px">Sfoglia</h2><div class="lrows">' + ['playlists:plist:Playlist', 'artists:person:Artisti', 'albums:album:Album', 'songs:songs:Brani'].map(s => { const [v, i, t] = s.split(':'); return '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(i) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>'; }).join('') + '</div>' +
+    return ricercheHtml() + '<h2 class="h2" style="margin-top:12px">Sfoglia</h2><div class="lrows">' + ['playlists:plist:Playlist', 'artists:person:Artisti', 'albums:album:Album', 'songs:songs:Brani'].map(s => { const [v, i, t] = s.split(':'); return '<button class="lrow" data-a="go" data-v="' + v + '"><span class="ic">' + ic(i) + '</span><span class="t">' + t + '</span><span class="chev">' + ic('chevR') + '</span></button>'; }).join('') +
+      // i titoli della libreria delle altre app (Musica dell'iPhone, Spotify…) cercati in Atlante
+      '<button class="lrow" data-a="libapp"><span class="ic">' + ic('songs') + '</span><span class="t">Dalle app del dispositivo</span><span class="chev">' + ic('chevR') + '</span></button></div>' +
       '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + rec.map(tile).join('') + '</div>';
   }
   const words = n.split(/\s+/);
@@ -2845,6 +2925,131 @@ async function bloccoComando() {
 function bloccoCopia() {
   const u = bloccoUrl();
   (navigator.clipboard ? navigator.clipboard.writeText(u) : Promise.reject(new Error('appunti'))).then(() => toast('Indirizzo copiato'), () => toast(u));
+}
+
+/* DALLE APP DEL DISPOSITIVO — «LA PAGINA NON VEDE, IL COMANDO RAPIDO SÌ». Safari non può leggere la libreria di Musica
+   dell'iPhone; il comando rapido «Libreria per Atlante» sì (lo prepara e lo firma il Mac). Quando si tocca «Leggi»
+   l'app ha già chiesto al Mac un codice (vale 30 minuti) e apre il comando rapido con l'indirizzo d'invio (anche negli
+   appunti, se il comando rapido parte senza): il comando rapido manda al Mac titolo, artista e album di ogni brano.
+   Intanto l'app guarda se la libreria è arrivata (anche dopo una ricarica: am-libapp-attesa), poi la mette in una
+   playlist «Libreria di Musica · <dispositivo>»: i brani che Atlante ha già, e in fondo quelli da cercare (Cerca e
+   scarica). Per Spotify e le altre app: un CSV esportato (Exportify, TuneMyMusic) o un elenco incollato. */
+const LIBAPP = {codice:null, giro:0, aperta:false};
+const libAppNome = l => 'Libreria di Musica · ' + (l.nome || 'dispositivo');
+async function libAppJson(u, opt) {
+  const r = await fetchT(XAPI + u, opt || {cache:'no-store'}, 12000);
+  let j = {}; try { j = await r.json(); } catch (e) { /* niente */ }
+  if (!r.ok) throw new Error(j.errore || (r.status === 401 ? 'Serve la password di Atlante' : 'Il Mac non risponde'));
+  return j;
+}
+function libAppCodice() {   // chiesto prima del tocco: così «Leggi» apre il comando rapido subito (Safari lo vuole nel tocco)
+  return libAppJson('libreria-app/codice', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:DEV.id, nome:DEV.nome, tipo:DEV.tipo})}).then(c => { c.preso = Date.now(); LIBAPP.codice = c; return c; });
+}
+function libAppScheda() {
+  const mac = IO.ruolo === 'proprietario' && (IO.stessoMac || DEV.tipo === 'mac');
+  const qui = DEV.tipo === 'iphone' ? 'iPhone' : DEV.tipo === 'ipad' ? 'iPad' : DEV.tipo === 'mac' ? 'Mac' : 'dispositivo';
+  openSheet('<div class="grp scroll"><div class="smsg"><b>Dalle app del dispositivo</b>Atlante legge i titoli della libreria delle tue app musicali: quelli che ha già li trovi in una playlist, gli altri li cerchi e li scarichi da lì.</div>' +
+    (isIOS || DEV.tipo === 'mac' ? '<div class="smsg" style="text-align:left"><b>Musica (Apple Music) su questo ' + qui + '</b>La legge il comando rapido «Libreria per Atlante»: aggiungilo una volta, poi tocca «Leggi». Con tanti brani ci vuole qualche minuto; la prima volta Comandi Rapidi chiede il permesso di leggere la libreria e di collegarsi al Mac.</div>' +
+      '<button data-a="libapp-cr"><span class="l">Aggiungi il comando rapido</span>' + ic('plus') + '</button>' +
+      '<button data-a="libapp-leggi"><span class="l">Leggi la libreria di Musica</span>' + ic('songs') + '</button>' : '') +
+    (mac ? '<button data-a="libapp-mac"><span class="l">Leggi la libreria di Musica del Mac mini</span>' + ic('lib') + '</button>' : '') +
+    '<div class="smsg" style="text-align:left"><b>Spotify, YouTube Music, Amazon Music, Deezer, Tidal</b>Esporta la libreria in un file CSV (Spotify: exportify.net; le altre app: tunemymusic.com) e aprilo qui, oppure copia un elenco «Titolo – Artista» e incollalo.</div>' +
+    '<button data-a="impl"><span class="l">Apri un file (CSV, TXT, M3U, XML)</span>' + ic('file') + '</button>' +
+    '<button data-a="libapp-incolla"><span class="l">Incolla un elenco</span>' + ic('list') + '</button>' +
+    '<div id="libappL"></div>' +
+    (isIOS || DEV.tipo === 'mac' ? '<div class="smsg" style="text-align:left"><b>Se il comando rapido non si aggiunge</b>In Comandi Rapidi crea «Libreria per Atlante» con: Trova brani musicali › Ripeti con ogni elemento: Testo «Titolo, tab, Artista, tab, Album» (i dettagli dell\'elemento) › Fine › Combina testo con A capo › Ottieni contenuto dell\'URL: l\'URL è «Input comando rapido», metodo POST, corpo File con il testo combinato › Mostra risultato.</div>' : '') +
+    '</div>' + cancel);
+  libAppElenco();
+  if (isIOS || DEV.tipo === 'mac') libAppCodice().catch(() => {});
+}
+async function libAppElenco() {   // le librerie già lette (di tutti i dispositivi dell'account): un tocco le rimette nella playlist
+  const box = $('libappL'); if (!box) return;
+  let L = [];
+  try { L = (await libAppJson('libreria-app')).librerie || []; } catch (e) { return; }
+  const b = $('libappL'); if (!b || !L.length) return;
+  const quando = ms => new Date(ms).toLocaleDateString('it-IT', {day:'numeric', month:'short'});
+  b.innerHTML = '<div class="smsg" style="text-align:left"><b>Librerie lette</b>Tocca per rifare la playlist con i brani arrivati intanto.</div>' +
+    L.map(l => '<button data-a="libapp-apri" data-k="' + esc(l.id) + '"><span class="l dv"><b>' + esc(libAppNome(l)) + '</b><small>' + l.n + (l.n === 1 ? ' brano' : ' brani') + ' · letta il ' + quando(l.ricevuta) + '</small></span>' + ic('chevR') + '</button>').join('');
+}
+async function libAppComando() {   // il comando rapido firmato dal Mac: Safari lo passa a Comandi Rapidi
+  const u = new URL(XAPI + 'libreria-app/comando-rapido', location.href).href;
+  toast('Preparo il comando rapido…');
+  try {
+    const r = await fetchT(u, {method:'HEAD', cache:'no-store'}, 200000);   // la prima volta il Mac lo firma (anche un minuto)
+    if (!r.ok) {
+      let e = ''; try { e = (await (await fetchT(u, {cache:'no-store'}, 20000)).json()).errore; } catch (x) { /* niente */ }
+      toast(e || 'Il comando rapido non è pronto sul Mac: crealo a mano (le istruzioni sono qui sotto)', true); return;
+    }
+  } catch (e) { toast('Il Mac non risponde', true); return; }
+  ls.set('am-libapp-cr', Date.now());
+  if (!window.open(u, '_blank')) location.href = u;
+}
+function libAppLeggi() {
+  const vai = c => {
+    const url = new URL(c.invio, location.href).href;
+    try { if (navigator.clipboard) navigator.clipboard.writeText(url).catch(() => {}); } catch (e) { /* niente */ }
+    const att = {id:DEV.id, da:Date.now(), fino:c.scade};
+    ls.set('am-libapp-attesa', att); LIBAPP.codice = null;
+    closeSheet();
+    toast('Comandi Rapidi legge la libreria di Musica e la manda al Mac: poi torna qui', true);
+    libAppGuarda();
+    location.href = 'shortcuts://run-shortcut?name=' + encodeURIComponent(c.comando || 'Libreria per Atlante') + '&input=text&text=' + encodeURIComponent(url);
+  };
+  const c = LIBAPP.codice;
+  if (c && Date.now() - c.preso < 20 * 60000) { vai(c); return; }
+  libAppCodice().then(vai, e => toast(e.message, true));
+}
+function libAppGuarda() {   // la libreria è arrivata? (ogni 4 s mentre l'app è a schermo, fino alla scadenza del codice)
+  clearTimeout(LIBAPP.giro);
+  const att = ls.get('am-libapp-attesa', null);
+  if (!att || Date.now() > att.fino) { if (att) ls.set('am-libapp-attesa', null); return; }
+  if (document.hidden) return;   // si riprende quando si torna nell'app (visibilitychange)
+  libAppJson('libreria-app').then(j => {
+    const l = (j.librerie || []).find(x => x.id === att.id && x.ricevuta >= att.da - 5000);
+    if (!l) { LIBAPP.giro = setTimeout(libAppGuarda, 4000); return; }
+    ls.set('am-libapp-attesa', null);
+    libAppImporta(l.id);
+  }, () => { LIBAPP.giro = setTimeout(libAppGuarda, 8000); });
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && ls.get('am-libapp-attesa', null)) libAppGuarda(); });
+setTimeout(() => { if (ls.get('am-libapp-attesa', null)) libAppGuarda(); }, 3000);   // l'app ricaricata mentre aspettava
+async function libAppImporta(id) {
+  let l;
+  try { l = await libAppJson('libreria-app/' + encodeURIComponent(id)); } catch (e) { toast(e.message, true); return; }
+  const items = (l.brani || []).map(b => ({title:b[0] || '', artist:b[1] || '', album:b[2] || ''}));
+  const st = await importaListe([{name:libAppNome(l), items, appleId:'libapp:' + l.id}]);
+  render(true);
+  const p = st.liste[0]; if (!p) { toast('La playlist non si è salvata', true); return; }
+  closeSheet();
+  toast(libAppRiepilogo(items.length, st.found, st.miss), true);
+  go('playlist', p.id);
+}
+function libAppRiepilogo(n, found, miss) {
+  const why = miss ? waitWhy() : '';
+  return n + (n === 1 ? ' brano letto' : ' brani letti') + ': ' + (found === 1 ? '1 è' : found + ' sono') + ' in Atlante' +
+    (miss ? ', ' + (miss === 1 ? '1 da cercare' : miss + ' da cercare') + (why ? ' (' + why + ')' : ' (in fondo alla playlist)') : '');
+}
+async function libAppMac() {
+  toast('Leggo la libreria di Musica del Mac…');
+  try {
+    const r = await libAppJson('libreria-app/mac', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    await libAppImporta(r.id);
+  } catch (e) { toast(e.message, true); }
+}
+function libAppIncolla() {
+  openSheet('<div class="grp scroll"><form class="sform" data-f="libinc"><label for="libincT">Un brano per riga: «Titolo – Artista»</label>' +
+    '<textarea id="libincT" name="t" rows="10" placeholder="Bohemian Rhapsody – Queen&#10;Vita spericolata – Vasco Rossi" autocomplete="off" autocapitalize="off" spellcheck="false" style="min-height:200px"></textarea>' +
+    '<label for="libincN">Nome della playlist</label><input id="libincN" name="n" value="Dalle mie app" autocomplete="off">' +
+    '<div class="row2"><button type="button" data-a="closesheet">Annulla</button><button class="pri" type="submit">Cerca in Atlante</button></div></form></div>');
+}
+async function libAppIncollato(testo, nome) {
+  const pls = parseElenco(testo, (nome || '').trim() || 'Dalle mie app');
+  if (!pls.length) { toast('Nessun brano nell\'elenco', true); return; }
+  const n = pls.reduce((x, pl) => x + pl.items.length, 0), st = await importaListe(pls);
+  render(true); closeSheet();
+  toast(libAppRiepilogo(n, st.found, st.miss), true);
+  if (st.liste.length === 1) go('playlist', st.liste[0].id);
 }
 
 /* TIMER DI SPEGNIMENTO: la musica si ferma tra 15–90 minuti o alla fine del brano (si controlla a ogni avanzamento del
@@ -4333,6 +4538,19 @@ function trackMenu(id, pl) {
     (pl || !t.remote ? '<div class="grp">' + (pl ? '<button class="red" data-a="m-unpl" data-k="' + pl + '" data-id="' + id + '"><span class="l">Rimuovi dalla playlist</span>' + ic('close') + '</button>' : '') +
     (t.remote ? '' : '<button class="red" data-a="m-del" data-id="' + id + '"><span class="l">Elimina dalla libreria</span>' + ic('trash') + '</button>') + '</div>' : '') + cancel);
 }
+// i brani di una playlist importata che non sono in Atlante: con la lente si cercano in «Cerca e scarica» (al più 300 righe)
+function missRighe(miss, q) {
+  const f = low(q || ''), L = (f ? miss.filter(m => low(m.title + ' ' + (m.artist || '')).indexOf(f) >= 0) : miss), V = L.slice(0, 300);
+  const cerca = xmodsVisibili().some(g => g.m.some(m => m.k === 'cerca'));
+  return V.map(m => '<div class="smsg" style="display:flex;align-items:center;gap:10px;text-align:left;padding-block:8px"><span style="flex:1;min-width:0"><b style="font-weight:500">' + esc(m.title || '(senza titolo)') + '</b>' + esc(m.artist || '') + '</span>' +
+    (cerca ? '<button data-a="misscerca" data-q="' + esc(((m.title || '') + ' ' + (m.artist || '')).trim()) + '" aria-label="Cerca «' + esc(m.title || '') + '»" style="width:36px;height:36px;border-radius:50%;background:var(--fill);color:var(--accent);display:grid;place-items:center;flex:none">' + ic('search') + '</button>' : '') + '</div>').join('') +
+    (L.length > V.length ? '<div class="smsg">…e altri ' + (L.length - V.length) + ': scrivi qui sopra per trovarli</div>' : '') + (!L.length ? '<div class="smsg">Nessun brano con queste parole</div>' : '');
+}
+document.addEventListener('input', e => {
+  if (e.target.id !== 'missq') return;
+  const p = P.find(x => x.id === e.target.dataset.k), box = $('missL'); if (!p || !box) return;
+  box.innerHTML = missRighe(p.miss || [], e.target.value);
+});
 function addSheet() {
   // in cima la ricerca su internet: apre il modulo «Cerca e scarica» (x/cerca.html) con la ricerca già fatta
   openSheet('<div class="grp"><form class="sform" data-f="cercaweb"><label for="cw">Cerca musica su internet</label>' +
@@ -4340,7 +4558,8 @@ function addSheet() {
     '<div class="nota">YouTube Music, YouTube e link da altri siti: i brani scaricati entrano nella libreria del Mac.</div></form></div>' +
     '<div class="grp"><div class="smsg"><b>Aggiungi musica</b>I file vengono copiati in questa app e restano su questo dispositivo.</div>' +
     '<button class="acc" data-a="pickfiles"><span class="l">Scegli file audio</span>' + ic('file') + '</button>' +
-    '<button class="acc" data-a="impl"><span class="l">Importa playlist di Apple Music</span>' + ic('plist') + '</button>' + (isIOS ? '' : '<button class="acc" data-a="pickdir"><span class="l">Scegli una cartella</span>' + ic('folder') + '</button>') + '</div>' +
+    '<button class="acc" data-a="impl"><span class="l">Importa playlist di Apple Music</span>' + ic('plist') + '</button>' +
+    '<button class="acc" data-a="libapp"><span class="l">Dalle app del dispositivo</span>' + ic('songs') + '</button>' + (isIOS ? '' : '<button class="acc" data-a="pickdir"><span class="l">Scegli una cartella</span>' + ic('folder') + '</button>') + '</div>' +
     // sul Mac, per tutti: i brani di chi non è Samuele passano da «Da controllare», i film chiedono prima il suo sì
     '<div class="grp"><div class="smsg"><b>Carica sul Mac</b>' + (IO.ruolo === 'proprietario' ? 'I brani entrano nella libreria di tutti, i film nel Cloud.' : 'Samuele li controlla prima di metterli nella libreria di tutti.') + '</div>' +
     '<button class="acc" data-a="caricax"><span class="l">Carica nella libreria</span>' + ic('file') + '</button>' +
@@ -4437,6 +4656,13 @@ document.addEventListener('click', e => {
     case 'm-timer': timerScheda(); break;
     case 'm-blocco': bloccoScheda(); break;
     case 'blocco-cr': bloccoComando(); break;
+    case 'libapp': libAppScheda(); break;
+    case 'libapp-cr': libAppComando(); break;
+    case 'libapp-leggi': libAppLeggi(); break;
+    case 'libapp-mac': closeSheet(); libAppMac(); break;
+    case 'libapp-incolla': libAppIncolla(); break;
+    case 'libapp-apri': libAppImporta(d.k); break;
+    case 'misscerca': closeSheet(); openX('cerca', '?q=' + encodeURIComponent(d.q || '')); break;
     case 'blocco-copia': bloccoCopia(); break;
     case 'timer': timerImposta(d.v); break;
     case 'volnorm': closeSheet(); volNormCambia(); break;
@@ -4505,10 +4731,10 @@ document.addEventListener('click', e => {
     case 'cartvia2': closeSheet(); cartellaRinomina(d.k, '').then(() => { back(); toast('Cartella tolta: le playlist sono in Playlist'); }); break;
     case 'plmiss': {
       const p = P.find(x => x.id === d.k); if (!p || !(p.miss || []).length) break;
-      const why = waitWhy(), L = p.miss.slice(0, 300);
-      openSheet('<div class="grp scroll"><div class="smsg"><b>Non nella libreria</b>' + (why ? 'Per ora: ' + esc(why) + '.' : 'Questi brani della playlist di Musica non sono sul disco di backup né su questo dispositivo. Se li aggiungi, compaiono da soli nella playlist.') + '</div>' +
-        L.map(m => '<div class="smsg" style="text-align:left;padding-block:8px"><b style="font-weight:500">' + esc(m.title || '(senza titolo)') + '</b>' + esc(m.artist || '') + '</div>').join('') +
-        (p.miss.length > L.length ? '<div class="smsg">…e altri ' + (p.miss.length - L.length) + '</div>' : '') + '</div>' + cancel);
+      const why = waitWhy();
+      openSheet('<div class="grp scroll"><div class="smsg"><b>Non ancora in Atlante</b>' + (why ? 'Per ora: ' + esc(why) + '.' : 'Questi brani non sono ancora in Atlante. Tocca la lente per cercarli e scaricarli: quando arrivano compaiono da soli nella playlist.') + '</div>' +
+        (p.miss.length > 20 ? '<div class="sform" style="padding-block:8px"><input id="missq" type="search" placeholder="Filtra ' + p.miss.length + ' brani" autocomplete="off" autocapitalize="off" spellcheck="false" data-k="' + esc(p.id) + '"></div>' : '') +
+        '<div id="missL">' + missRighe(p.miss, '') + '</div></div>' + cancel);
       break;
     }
     case 'plren': { const p = P.find(x => x.id === d.k); nameSheet('Rinomina playlist', p ? p.name : '', 'renpl', d.k); break; }
@@ -4530,6 +4756,7 @@ document.addEventListener('click', e => {
 document.addEventListener('submit', async e => {
   const f = e.target.closest('form[data-f]'); if (!f) return; e.preventDefault();
   const kind = f.dataset.f, k = f.dataset.k;
+  if (kind === 'libinc') { libAppIncollato($('libincT').value || '', $('libincN').value || ''); return; }
   if (kind === 'cercaweb') { const v = ($('cw').value || '').trim(); closeSheet(); openX('cerca', v ? '?q=' + encodeURIComponent(v) : ''); return; }
   if (kind === 'edit') {
     const t = T.get(k); if (!t) return closeSheet();
