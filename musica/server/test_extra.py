@@ -4576,6 +4576,225 @@ class TestCaricamenti(ProvaCaricamenti, unittest.TestCase):
         self.assertEqual(self.miei(v)["oggi"]["limite"], 1024 ** 3)
 
 
+FINTO_SHORTCUTS = r"""
+import json, os, sys
+a = sys.argv[1:]
+with open(os.path.join(os.environ["FINTO_DIR"], "shortcuts.log"), "a") as f:
+    f.write(json.dumps(a) + "\n")
+if os.path.exists(os.path.join(os.environ["FINTO_DIR"], "shortcuts-rotto")):
+    sys.stderr.write("Error: You need to be signed in to iCloud\n")
+    sys.exit(1)
+with open(a[a.index("--input") + 1], "rb") as f:
+    dati = f.read()
+with open(a[a.index("--output") + 1], "wb") as f:
+    f.write(b"FIRMATO" + dati)
+"""
+
+FINTO_OSASCRIPT_MUSICA = r"""
+import json, os, sys
+if os.path.exists(os.path.join(os.environ["FINTO_DIR"], "musica-negata")):
+    sys.stderr.write("execution error: Not authorized to send Apple events to Music. (-1743)\n")
+    sys.exit(1)
+print(json.dumps([["Without Me", "Bohemian Rhapsody", "Without Me", ""], ["Eminem", "Queen", "Eminem", "X"],
+                  ["The Eminem Show", "A Night at the Opera", "The Eminem Show", ""]]))
+"""
+
+
+class TestLibreriaApp(ProvaCaricamenti, unittest.TestCase):
+    """La libreria delle app del dispositivo (13/11): il comando rapido «Libreria per Atlante» manda al Mac titolo, artista
+    e album dei brani di Musica dell'iPhone, anche da Internet senza biscotto (la chiave è il codice chiesto dall'app);
+    ognuno nel suo account; il Mac prepara e firma il comando rapido; legge anche la libreria di Musica del Mac."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.prepara("atlante-libapp-")
+        _scrivi_programma(os.path.join(cls.c["bin"], "shortcuts"), FINTO_SHORTCUTS)
+        _scrivi_programma(os.path.join(cls.c["bin"], "osascript"), FINTO_OSASCRIPT_MUSICA)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.chiudi()
+
+    def codice(self, biscotto=None, id_="iphone-abc12345", nome="iPhone di Samuele"):
+        return self.j(biscotto, "POST", "/api/extra/libreria-app/codice", {"id": id_, "nome": nome, "tipo": "iphone"})
+
+    def invia(self, invio, testo, intest=None):
+        """Come il comando rapido da Internet: niente biscotto, niente Origin, il testo come corpo."""
+        h = dict(FUNNEL, **{"Content-Type": "text/plain; charset=utf-8"})
+        h.update(intest or {})
+        return richiesta(self.s.porta, "POST", "/" + invio, testo.encode("utf-8"), intest=h)
+
+    def test_1_dal_comando_rapido(self):
+        c = self.codice()
+        self.assertTrue(c["invio"].startswith("api/extra/libreria-app/invio/"))
+        self.assertEqual(c["comando"], "Libreria per Atlante")
+        testo = ("Without Me\tEminem\tThe Eminem Show\n\nBohemian Rhapsody\tQueen\tA Night at the Opera\r\n"
+                 "Without Me\tEminem\tThe Eminem Show\n  Senza artista  \n\tsolo artista\n")
+        st, h, b = self.invia(c["invio"], testo)
+        self.assertEqual(st, 200, b)
+        self.assertTrue(h["Content-Type"].startswith("text/plain"))
+        self.assertIn("✓ Libreria di Musica letta: 3 brani", b.decode("utf-8"))
+        L = self.j(None, "GET", "/api/extra/libreria-app")["librerie"]
+        self.assertEqual([(x["id"], x["nome"], x["tipo"], x["n"]) for x in L], [("iphone-abc12345", "iPhone di Samuele", "iphone", 3)])
+        una = self.j(None, "GET", "/api/extra/libreria-app/iphone-abc12345")
+        self.assertEqual(una["brani"], [["Without Me", "Eminem", "The Eminem Show"],
+                                        ["Bohemian Rhapsody", "Queen", "A Night at the Opera"], ["Senza artista", "", ""]])
+        # di nuovo con lo stesso codice (il comando rapido rifatto): la libreria si aggiorna, non si somma
+        self.assertEqual(self.invia(c["invio"], "Imagine\tJohn Lennon\t")[0], 200)
+        self.assertEqual(self.j(None, "GET", "/api/extra/libreria-app/iphone-abc12345")["brani"], [["Imagine", "John Lennon", ""]])
+        # in UTF-16 (con il BOM) e con caratteri di controllo
+        st, _, b = richiesta(self.s.porta, "POST", "/" + c["invio"], "﻿Ciao\x07\tArtista\u0000".encode("utf-16-le"),
+                             intest=dict(FUNNEL, **{"Content-Type": "text/plain"}))
+        self.assertEqual(st, 200, b)
+        self.assertEqual(self.j(None, "GET", "/api/extra/libreria-app/iphone-abc12345")["brani"], [["Ciao", "Artista", ""]])
+        self.j(None, "DELETE", "/api/extra/libreria-app/iphone-abc12345")
+        self.assertEqual(self.j(None, "GET", "/api/extra/libreria-app")["librerie"], [])
+        self.j(None, "GET", "/api/extra/libreria-app/iphone-abc12345", codice=404)
+
+    def test_2_senza_codice_non_si_entra(self):
+        falso = "api/extra/libreria-app/invio/" + "A" * 32
+        st, _, b = self.invia(falso, "Brano\tArtista")
+        self.assertEqual(st, 403)
+        self.assertIn("⚠️ Codice scaduto", b.decode("utf-8"))
+        # un codice troppo corto, un GET, un'altra rotta, un indirizzo con un pezzo in più: la password, come sempre
+        self.assertEqual(self.invia("api/extra/libreria-app/invio/corto", "x")[0], 401)
+        self.assertEqual(self.invia("api/extra/libreria-app/invio/%s/x" % ("A" * 32), "x")[0], 401)
+        self.assertEqual(self.invia("api/extra/libreria-app/codice", "{}")[0], 401)
+        self.assertEqual(self.invia("api/extra/liste", "{}")[0], 401)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/" + falso, intest=FUNNEL)[0], 401)
+        self.assertEqual(richiesta(self.s.porta, "GET", "/api/extra/libreria-app", intest=FUNNEL)[0], 401)
+        # vuoto: non cancella la libreria che c'è
+        c = self.codice(id_="ipad-vuoto123")
+        self.assertEqual(self.invia(c["invio"], "Uno\tA")[0], 200)
+        st, _, b = self.invia(c["invio"], "\n \n")
+        self.assertEqual(st, 400)
+        self.assertIn("Nessun brano", b.decode("utf-8"))
+        self.assertEqual(self.j(None, "GET", "/api/extra/libreria-app/ipad-vuoto123")["brani"], [["Uno", "A", ""]])
+        # dati del dispositivo non validi
+        self.j(None, "POST", "/api/extra/libreria-app/codice", {"id": "../x"}, codice=400)
+        self.j(None, "POST", "/api/extra/libreria-app/codice", {"id": "mac-musica"}, codice=400)
+        self.j(None, "DELETE", "/api/extra/libreria-app/ipad-vuoto123")
+
+    def test_3_ognuno_la_sua(self):
+        _, anna = self.invitato("Anna")
+        c = self.codice(anna, id_="iphone-anna1234", nome="iPhone di Anna")
+        self.assertEqual(self.invia(c["invio"], "Vita spericolata\tVasco Rossi\tBollicine")[0], 200)
+        self.assertEqual([x["id"] for x in self.j(anna, "GET", "/api/extra/libreria-app")["librerie"]], ["iphone-anna1234"])
+        self.assertNotIn("iphone-anna1234", [x["id"] for x in self.j(None, "GET", "/api/extra/libreria-app")["librerie"]])
+        self.j(None, "GET", "/api/extra/libreria-app/iphone-anna1234", codice=404)
+        self.j(anna, "POST", "/api/extra/libreria-app/mac", {}, codice=403)   # Musica del Mac: solo Samuele
+        self.assertEqual(self.da(anna, "GET", "/api/extra/libreria-app/comando-rapido")[0], 200)
+        self.j(anna, "DELETE", "/api/extra/libreria-app/iphone-anna1234")
+
+    def test_4_comando_rapido_firmato(self):
+        log = os.path.join(self.c["finto"], "shortcuts.log")
+
+        def firme():
+            try:
+                with open(log) as f:
+                    return [json.loads(r) for r in f]
+            except OSError:
+                return []
+        st, h, b = self.da(None, "GET", "/api/extra/libreria-app/comando-rapido")
+        self.assertEqual(st, 200, b[:200])
+        self.assertIn('filename="Libreria per Atlante.shortcut"', h["Content-Disposition"])
+        self.assertTrue(b.startswith(b"FIRMATO"))
+        import plistlib
+        cr = plistlib.loads(b[7:])
+        az = cr["WFWorkflowActions"]
+        ids = [x["WFWorkflowActionIdentifier"].replace("is.workflow.actions.", "") for x in az]
+        self.assertEqual(ids, ["comment", "url", "filter.music", "repeat.each", "properties.music", "properties.music",
+                               "properties.music", "gettext", "repeat.each", "text.combine", "downloadurl", "showresult"])
+        P = [x["WFWorkflowActionParameters"] for x in az]
+        uuid_di = {i: p["UUID"] for i, p in enumerate(P)}
+        self.assertEqual(len(set(uuid_di.values())), len(P))   # ogni azione il suo UUID
+        self.assertEqual(P[1]["WFURLActionURL"]["Value"]["attachmentsByRange"]["{0, 1}"], {"Type": "ExtensionInput"})
+        self.assertEqual(P[3]["WFInput"]["Value"]["OutputUUID"], uuid_di[2])   # ripeti con ogni brano trovato
+        self.assertEqual([P[3]["GroupingIdentifier"], P[3]["WFControlFlowMode"], P[8]["WFControlFlowMode"]],
+                         [P[8]["GroupingIdentifier"], 0, 2])
+        self.assertEqual([p["WFContentItemPropertyName"] for p in P[4:7]], ["Title", "Artist", "Album"])
+        riga = P[7]["WFTextActionText"]["Value"]
+        self.assertEqual(riga["string"], "￼\t￼\t￼")
+        self.assertEqual([riga["attachmentsByRange"][k]["OutputUUID"] for k in ("{0, 1}", "{2, 1}", "{4, 1}")],
+                         [uuid_di[4], uuid_di[5], uuid_di[6]])
+        self.assertEqual((P[9]["text"]["Value"]["OutputUUID"], P[9]["WFTextSeparator"]), (uuid_di[8], "New Lines"))
+        self.assertEqual((P[10]["WFHTTPMethod"], P[10]["WFHTTPBodyType"]), ("POST", "File"))
+        self.assertEqual(P[10]["WFURL"]["Value"]["OutputUUID"], uuid_di[1])
+        self.assertEqual(P[10]["WFRequestVariable"]["Value"]["OutputUUID"], uuid_di[9])
+        self.assertEqual(P[11]["Text"]["Value"]["attachmentsByRange"]["{0, 1}"]["OutputUUID"], uuid_di[10])
+        self.assertEqual(cr["WFWorkflowNoInputBehavior"]["Name"], "WFWorkflowNoInputBehaviorGetClipboard")
+        self.assertEqual([x[:3] for x in firme()], [["sign", "--mode", "anyone"]])   # firmato una volta sola
+        self.assertEqual(self.da(None, "GET", "/api/extra/libreria-app/comando-rapido")[2], b)
+        self.assertEqual(len(firme()), 1)
+
+    def test_5_musica_del_mac(self):
+        r = self.j(None, "POST", "/api/extra/libreria-app/mac", {})
+        self.assertEqual((r["id"], r["n"]), ("mac-musica", 2))
+        una = self.j(None, "GET", "/api/extra/libreria-app/mac-musica")
+        self.assertEqual((una["nome"], una["brani"]), ("Mac mini", [["Without Me", "Eminem", "The Eminem Show"],
+                                                                    ["Bohemian Rhapsody", "Queen", "A Night at the Opera"]]))
+        segno = os.path.join(self.c["finto"], "musica-negata")
+        open(segno, "w").close()
+        try:
+            self.assertIn("Automazione", self.j(None, "POST", "/api/extra/libreria-app/mac", {}, codice=403)["errore"])
+        finally:
+            os.remove(segno)
+        self.j(None, "DELETE", "/api/extra/libreria-app/mac-musica")
+
+
+class TestLibreriaAppModulo(unittest.TestCase):
+    """Le parti della libreria delle app senza server: righe, codici scaduti, varco senza biscotto, firma che manca."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_libapp")
+
+    def test_righe(self):
+        r = self.m._libapp_righe("A\tB\tC\tD\n\x01x\x02\t y  z \n\n\tsolo\nA\tB\tC\na\tb\tc\n" + "T" * 400)
+        self.assertEqual(r, [["A", "B", "C"], ["x", "y z", ""], ["T" * 300, "", ""]])   # «a b c» è un doppione
+        self.assertEqual(len(self.m._libapp_righe("\n".join("t%d" % i for i in range(60000)))), 50000)
+
+    def test_codice_scaduto(self):
+        d = tempfile.mkdtemp(prefix="atlante-libapp-m-")
+        try:
+            L = self.m.LibreriaApp(d)
+            c, _ = L.codice("p", "dev12345", "iPhone", "iphone")
+            L.codici[c]["scade"] = time.time() - 1
+            with self.assertRaises(self.m.ErroreExtra) as e:
+                L.ricevi(c, "a\tb")
+            self.assertEqual(e.exception.codice, 403)
+            for i in range(12):   # al più LIBAPP_DISP_MAX librerie per account: escono le più vecchie
+                L.salva("p", "d%d" % i, "D%d" % i, "", [["t", "", ""]])
+                time.sleep(0.002)
+            self.assertEqual(sorted(x["id"] for x in L.elenco("p")), sorted("d%d" % i for i in range(4, 12)))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_varco(self):
+        class H:
+            def __init__(self, command):
+                self.command = command
+        ok = "/api/extra/libreria-app/invio/" + "a" * 32
+        self.assertTrue(self.m._libapp_invio_libero(H("POST"), ok))
+        self.assertTrue(self.m._libapp_invio_libero(H("POST"), "/musica" + ok))
+        for metodo, p in (("GET", ok), ("DELETE", ok), ("POST", ok + "/x"), ("POST", "/api/extra/libreria-app/invio/a"),
+                          ("POST", "/api/extra/libreria-app/codice"), ("POST", "/api/extra/api/extra/libreria-app/invio/" + "a" * 32),
+                          ("POST", "/api/extra/liste"), ("POST", "/api/musica/catalogo")):
+            self.assertFalse(self.m._libapp_invio_libero(H(metodo), p), (metodo, p))
+
+    def test_firma_che_manca(self):
+        d = tempfile.mkdtemp(prefix="atlante-libapp-f-")
+        try:
+            with unittest.mock.patch.object(self.m, "_programma", lambda n: None), \
+                    unittest.mock.patch.dict(self.m.CONF, {"cache": d}):
+                with self.assertRaises(self.m.ErroreExtra) as e:
+                    self.m._libapp_comando_firmato()
+            self.assertEqual(e.exception.codice, 503)
+            self.assertIn("a mano", e.exception.testo)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class TestCaricamentiLimiti(ProvaCaricamenti, unittest.TestCase):
     """Limite giornaliero per persona (qui piccolissimo) e disco quasi pieno."""
     OPZIONI = ["--spazio-min-gb", "0", "--limite-giorno-gb", "0.0001"]   # circa 107 KB al giorno
@@ -12545,6 +12764,23 @@ class TestTitoliScorrono(unittest.TestCase):
         if not osa:
             self.skipTest("osascript non c'è: non è un Mac")
         js, app = os.path.join(QUI, "test_titoli.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
+class TestLibreriaAppApp(unittest.TestCase):
+    """«Dalle app del dispositivo» nell'app (13/11): i CSV di Spotify (Exportify) e TuneMyMusic, gli elenchi incollati,
+    i brani trovati in Atlante nella playlist e gli altri da cercare (con la lente di Cerca e scarica). Gira in
+    JavaScriptCore come test_titoli.js: test_libapp.js. Senza osascript (non è un Mac) si salta."""
+
+    def test_libreria_app(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_libapp.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
         r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
         if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
