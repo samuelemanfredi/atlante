@@ -1095,21 +1095,39 @@ function askPersist() {   // i brani salvati non devono sparire quando il telefo
 }
 // scarica un brano del Mac nell'archivio del telefono: 'ok', 'net' (Mac non raggiungibile), 'disk' (il Mac risponde ma il file
 // non c'è: disco scollegato o brano cancellato), 'full' (spazio esaurito), 'wait' (ora non è nel catalogo; resta in coda)
-async function fetchTrack(id) {
+// UNO ALLA VOLTA (14/11): la coda di «Scarica tutta la musica» e i 3 brani dopo quello che suona scaricavano insieme,
+// ognuno tutto in memoria prima di finire nell'archivio: 4 brani grandi = +186 MB misurati, e iOS chiudeva la pagina.
+// I file oltre DL_MAX non si salvano sul telefono: si ascoltano dal Mac.
+const DL_MAX = 120e6;
+let DLCATENA = Promise.resolve();
+function fetchTrack(id) {
+  const p = DLCATENA.then(() => fetchTrackUno(id));
+  DLCATENA = p.catch(() => {});
+  return p;
+}
+async function fetchTrackUno(id) {
   if (sulTel(id)) return 'ok';   // anche un suo doppione già salvato: non si scarica due volte
   const t = T.get(id); if (!t) return 'wait'; if (!t.remote) return 'ok';
+  if (t.size > DL_MAX) return 'grande';
+  const c = new AbortController(); let tm = setTimeout(() => c.abort(), 20000);
   try {
     // no-store: il salvataggio non passa dalla cache HTTP, così non blocca né rallenta lo streaming dello stesso brano
-    // (Chrome fa aspettare il lettore finché una richiesta allo stesso indirizzo non ha finito di scrivere in cache)
-    const r = await fetchT(API + 'file/' + encodeURIComponent(t.sid), {cache:'no-store'}, 20000);
+    // (Chrome fa aspettare il lettore finché una richiesta allo stesso indirizzo non ha finito di scrivere in cache).
+    // fetch diretto, non fetchT: il suo flusso fatto in JavaScript passava ogni pezzo dalla memoria della pagina
+    const r = await fetch(API + 'file/' + encodeURIComponent(t.sid), {cache:'no-store', signal:c.signal});
+    clearTimeout(tm);
     if (r.status === 404) return 'disk';
     if (!r.ok) return 'net';
+    const n = +(r.headers.get('content-length') || 0);
+    if (n > DL_MAX) { try { c.abort(); } catch (e) {} return 'grande'; }
+    tm = setTimeout(() => c.abort(), 60000 + (n || t.size || 0) / 50);   // al più come a 50 KB/s, e almeno un minuto
     const b = await r.blob();
+    clearTimeout(tm);
     askPersist();
     await dbPut('files', b, id); saved.add(id); keepCover(t);
     if (!t.duration) duration(b).then(d => { if (d > 0) { t.duration = d; dbPut('meta', t).catch(() => {}); } });
     return 'ok';
-  } catch (e) { return e && e.name === 'QuotaExceededError' ? 'full' : 'net'; }
+  } catch (e) { clearTimeout(tm); return e && e.name === 'QuotaExceededError' ? 'full' : 'net'; }
 }
 // doppioni: lo stesso brano due volte nella libreria (due dischi, due cartelle, un album e una raccolta, un file importato
 // che c'è anche sul Mac). Stesso titolo, parentesi comprese («(Live)» e «(8D Audio)» restano brani diversi), stessi artisti,
@@ -1175,7 +1193,7 @@ function scaricaTutto() {
   if (IO.stessoMac && !tuttoScelto()) return;   // sul Mac mini stesso (saputo dall'ultima volta) nemmeno in attesa del Mac
   const q = new Set(DLQ), inPl = new Set(); P.forEach(p => p.ids.forEach(x => inPl.add(x)));
   for (const x of AUTO) if (!q.has(x)) AUTO.delete(x);
-  const tr = [...T.values()].filter(t => t.remote && !saved.has(t.id) && !TOLTI.has(t.id) && !q.has(t.id) && dlCur !== t.id && !grabbing.has(t.id));
+  const tr = [...T.values()].filter(t => t.remote && !saved.has(t.id) && !TOLTI.has(t.id) && !q.has(t.id) && dlCur !== t.id && !grabbing.has(t.id) && !(t.size > DL_MAX));
   if (!tr.length) { ls.set('am-auto', [...AUTO]); return; }
   const rank = t => t.fav ? 0 : inPl.has(t.id) ? 1 : t.plays ? 2 : 3;
   tr.sort((a, b) => rank(a) - rank(b) || (b.plays || 0) - (a.plays || 0) || coll.compare(a.albumArtist || a.artist, b.albumArtist || b.artist) ||
@@ -1241,7 +1259,7 @@ function precarica() {
   if (!DB || !SRV || RC.id || !curId || Date.now() - ls.get('am-pieno', 0) < 86400000) return;
   for (const id of S.queue.slice(S.qi + 1, S.qi + 4)) {
     const t = T.get(id);
-    if (t && t.remote && !sulTel(id) && !TOLTI.has(id) && !noKeep.has(id) && !grabbing.has(id) && dlCur !== id) grab(id);
+    if (t && t.remote && !sulTel(id) && !TOLTI.has(id) && !noKeep.has(id) && !grabbing.has(id) && dlCur !== id && !(t.size > DL_MAX)) grab(id);
   }
 }
 function grab(id) {
@@ -1250,7 +1268,7 @@ function grab(id) {
   fetchTrack(id).then(r => {
     grabbing.delete(id);
     // riuscito, o spazio esaurito: esce dalla coda. Altrimenti (Mac o disco non raggiungibili) ci resta e ci riprova la coda
-    if (r === 'ok' || r === 'full') { const k = DLQ.indexOf(id); if (k >= 0) { DLQ.splice(k, 1); dlqSalva(); } }
+    if (r === 'ok' || r === 'full' || r === 'grande') { const k = DLQ.indexOf(id); if (k >= 0) { DLQ.splice(k, 1); dlqSalva(); } }
     if (r === 'full') { ls.set('am-pieno', Date.now()); toast('Spazio esaurito sull\'iPhone: il brano non resta salvato'); }
     dlMark(); runDl();
   });
@@ -1274,7 +1292,7 @@ async function runDl() {
     const r = await fetchTrack(id);
     dlCur = null;
     const k = DLQ.indexOf(id);
-    if (r === 'ok') { if (k >= 0) DLQ.splice(k, 1); fails = 0; dlDisk = false; }
+    if (r === 'ok' || r === 'grande') { if (k >= 0) DLQ.splice(k, 1); fails = 0; dlDisk = false; }
     else if (r === 'full') { DLQ.length = 0; ls.set('am-pieno', Date.now()); toast('Spazio esaurito sull\'iPhone: download fermati'); }
     else if (r === 'net' || r === 'disk') {
       if (k >= 0) DLQ.push(DLQ.splice(k, 1)[0]);
@@ -3776,6 +3794,30 @@ async function decodeMono(buf) {   // file intero dall'iPhone → mono a 11025 H
   for (let i = 0; i < n; i++) { let s2 = 0; for (const d of cs) s2 += d[2 * i] + d[2 * i + 1]; x[i] = s2 / (2 * cs.length); }
   return {x, sr:ab.sampleRate / 2, dur:ab.duration};
 }
+// SENZA MAC: solo il pezzo che serve del file sul telefono, mai il brano intero (14/11). Si ritaglia la parte di file che
+// corrisponde ai secondi voluti (byte proporzionali alla durata, con 3 s di margine) e si decodifica solo quella: va per
+// gli MP3 (si risincronizzano da qualsiasi punto) e per l'inizio di quasi tutti i formati; dove non si decodifica (la fine
+// di un M4A o di un FLAC) niente griglia: resta la dissolvenza normale. Un pezzo alla volta.
+const PEZZOL = {coda:Promise.resolve(), MAXDUR:6 * 3600};
+function pezzoLocale(f, t, part) {
+  const fai = () => {
+    const dur = t.duration || 0;
+    if (!(dur > 0) || dur > PEZZOL.MAXDUR) return null;
+    const {da, lung} = gridPezzo(part, dur), bps = f.size / dur, m = 3;
+    const a = Math.max(0, Math.floor((da - m) * bps)), b = Math.min(f.size, Math.ceil((da + lung + m) * bps));
+    if (b - a > 12e6) return null;   // al più 12 MB di file per 36 s: oltre è un formato senza compressione enorme
+    return f.slice(a, b).arrayBuffer().then(decodeMono).then(d => {
+      if (!d || !d.x.length) return null;
+      // il pezzo decodificato comincia (circa) a a/bps secondi: si prendono i secondi voluti, senza il margine
+      const inizio = a / bps, x0 = Math.max(0, Math.floor((da - inizio) * d.sr)), x1 = Math.min(d.x.length, x0 + Math.floor(lung * d.sr));
+      if (x1 - x0 < d.sr * 5) return null;
+      return {x:d.x.slice(x0, x1), sr:d.sr, da, lung};
+    }, () => null);
+  };
+  const p = PEZZOL.coda.then(fai, fai);
+  PEZZOL.coda = p.catch(() => null);
+  return p;
+}
 // griglia dei battiti di un pezzo del brano: part 'i' = primi 30 s, 'f' = ultimi 30 s, un numero = 20 s da quel punto
 // (mix al salto: questi non restano in memoria, ogni salto cade in un punto diverso). b0 è in secondi del brano.
 function gridPezzo(part, dur) { return typeof part === 'number' ? {da:Math.max(0, part), lung:20} : {da:part === 'i' ? 0 : Math.max(0, (dur || 0) - 30), lung:30}; }
@@ -3786,13 +3828,15 @@ function grid(id, part) {
   const pr = (async () => {
     const t = T.get(id); if (!t) return null;
     let seg = null, da = 0, lung = 30;
-    const f = await getFile(id);
+    // 14/11: prima un brano sul telefono si leggeva e si decodificava TUTTO (fino a 60 MB di file, centinaia di MB di audio),
+    // due brani insieme a ogni passaggio: +400 MB misurati, e iOS chiudeva la pagina («Si è verificato ripetutamente un
+    // errore»). Ora: dal Mac il pezzo di 30 s già pronto (anche se il brano è sul telefono); senza Mac solo il pezzo del file
+    const f = t.remote && SRV && t.sid ? null : await getFile(id);
     if (f) {
-      if (f.size > 60e6) return null;
-      const d = await decodeMono(await f.arrayBuffer());
-      ({da, lung} = gridPezzo(part, d.dur));
-      const a = Math.floor(da * d.sr), b = Math.min(d.x.length, Math.floor((da + lung) * d.sr));
-      seg = {x:d.x.subarray(a, b), sr:d.sr};
+      const p = await pezzoLocale(f, t, part);
+      if (!p) return null;
+      ({da, lung} = p);
+      seg = {x:p.x, sr:p.sr};
     } else if (t.remote && SRV && t.sid) {
       const dur = t.duration || 0; if (part === 'f' && !dur) return null;
       ({da, lung} = gridPezzo(part, dur));

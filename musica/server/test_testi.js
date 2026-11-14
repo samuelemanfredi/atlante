@@ -15,6 +15,7 @@ function run(argv) {
     proveTraduzione(leggi(argv[0] || '../index.html'), fatte);
     proveSincronia(leggi(argv[0] || '../index.html'), fatte);
     if (argv[1]) proveGestione(leggi(argv[1]), fatte);   // la pagina Gestione (x/gestione.html), se data
+    proveTelefono(leggi((argv[0] || '../index.html').replace(/index\.html$/, 'x/canta.js')), fatte);
     return 'OK ' + fatte.length + ' prove: ' + fatte.join(', ');
   } catch (e) {
     return 'PROVA FALLITA: ' + ((e && e.message) || e) + (fatte.length ? ' (dopo: ' + fatte.join(', ') + ')' : '');
@@ -312,4 +313,23 @@ function proveSincronia(src, fatte) {
   E.RC = {id:'x', dev:{}}; eq(T.testoTempo(), 42, 'altro dispositivo: la sua posizione');
   if (!/data-a="testo-sinc"/.test(src) || !/am-testo-ritardo/.test(src)) throw new Error('manca la regolazione della sincronia (per dispositivo)');
   fatte.push('sincronia');
+}
+
+// 14/11: sull'iPhone e sull'iPad niente Whisper dentro l'app (modello, motore e brano decodificato: centinaia di MB, e iOS
+// chiudeva la pagina). Il testo lo trascrive il Mac mini dal vivo. Sul Mac e sui computer resta.
+function proveTelefono(canta, fatte) {
+  const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
+  const src = canta.replace('window.telScegli = function (j) {', '\nfunction telScegli(j) {');
+  const prova = ios => {
+    const avviati = [];
+    const env = {isIOS:ios, TESTO:{b:{k:'k1'}}, RC:{id:null}, curId:'r1', T:new Map([['r1', {id:'r1'}]]),
+      TEL:{testi:new Map(), lavoro:null, errore:'', scarico:''}, telInizia:(b, id) => avviati.push(id), telFerma:() => {}};
+    const F = carica(src, ['telScegli'], ['const senzaTesto = '], env);
+    return {r:F.telScegli({stato:'nessuno'}), avviati};
+  };
+  let x = prova(true);
+  eq([x.r, x.avviati], [{stato:'nessuno'}, []], 'iPhone: senza testo dal Mac, niente Whisper sul telefono');
+  x = prova(false);
+  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'Mac e computer: il testo trascritto qui resta');
+  fatte.push('niente Whisper sull\'iPhone');
 }
