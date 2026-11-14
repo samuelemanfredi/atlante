@@ -298,16 +298,29 @@ window.telScegli = function (j) {
   if (j && j.allineamento === 'dal vivo') { telFerma(b.k); return j; }   // lo scrive il Mac mini, adesso: il telefono non serve
   if (j && j.stato === 'ok' && !senzaTesto(j)) { telFerma(b.k); return j; }   // c'è il testo (dal file, da LRCLIB o da Whisper sul Mac)
   if (!senzaTesto(j) && !(j && j.stato === 'errore')) return j;   // in arrivo, strumentale, vuoto: si aspetta il Mac
-  // iPhone e iPad: niente Whisper dentro l'app (14/11). Modello, motore e brano intero decodificato sono centinaia di MB
-  // nella stessa pagina che suona e mixa: iOS la chiudeva («Si è verificato ripetutamente un errore»). Il testo lo
-  // trascrive il Mac mini, dal vivo, mentre il brano suona.
-  if (typeof isIOS !== 'undefined' && isIOS) return j;
   const mio = TEL.testi.get(b.k);
   if (!TEL.lavoro || TEL.lavoro.k !== b.k) telInizia(b, id);
   if (mio && mio.righe.length) return mio;
   return {stato:'trascrivo', nota:TEL.errore || TEL.scarico || 'Il testo non c\'è nel file né su LRCLIB: lo ascolto qui, mentre suona'};
 };
 function telFerma(k) { if (TEL.lavoro && TEL.lavoro.k === k) TEL.lavoro.fermo = true; }
+// WHISPER SOLO CON L'APP DAVANTI (14/11): il testo serve a chi lo guarda, e in secondo piano iOS è più severo con la
+// memoria. Appena l'app va in secondo piano il programma si chiude (il modello resta scaricato: riparte in pochi secondi
+// quando si torna); il lavoro aspetta e riprende dal pezzo dove era arrivato.
+function telChiudi(perche) {
+  if (!TEL.w) return;
+  try { TEL.w.terminate(); } catch (e) {}
+  TEL.w = null;
+  for (const a of (TEL.attese || new Map()).values()) a.ko(new Error(perche || 'Whisper chiuso'));
+  if (TEL.attese) TEL.attese.clear();
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) telChiudi('app in secondo piano'); });
+function telDavanti(lav) {
+  return new Promise(ok => {
+    const guarda = () => { if (lav.fermo || !document.hidden) ok(); else setTimeout(guarda, 1000); };
+    guarda();
+  });
+}
 function telMostra(k) {   // il testo del telefono aggiornato: si vede se è ancora il brano di adesso
   if (TESTO.k !== k) return;
   const j = TEL.testi.get(k);
@@ -335,22 +348,51 @@ function telWorker() {
   return TEL.w;
 }
 const telChiedi = (msg, trasferisci) => new Promise((ok, ko) => { const w = telWorker(), n = ++TEL.n; TEL.attese.set(n, {ok, ko}); w.postMessage(Object.assign({n}, msg), trasferisci || []); });
-async function telAudio(id) {   // il brano a 16 kHz, mono: dal telefono se c'è (anche un doppione), se no dal Mac
+/* L'AUDIO A PEZZI (14/11): prima il brano si decodificava tutto in una volta (con il modello di Whisper, centinaia di MB
+   nella pagina che suona: iOS la chiudeva). Ora si decodifica solo il pezzo di 25 s che Whisper sta per ascoltare: la
+   parte di file che corrisponde a quei secondi (byte proporzionali alla durata, con 2 s di margine). Va per gli MP3 e
+   per l'inizio di ogni brano; dove un pezzo a metà non si decodifica (M4A, FLAC), e solo se il file è piccolo (al più
+   TEL_INTERO_MAX), si decodifica tutto una volta e si tiene a 16 kHz mono. */
+const TEL_INTERO_MAX = 15e6;
+const OAC16 = () => new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 16000, 16000);
+const monoDi = ab => {
+  if (ab.numberOfChannels === 1) return ab.getChannelData(0);
+  const x = new Float32Array(ab.length);
+  for (let c = 0; c < ab.numberOfChannels; c++) { const d = ab.getChannelData(c); for (let i = 0; i < x.length; i++) x[i] += d[i] / ab.numberOfChannels; }
+  return x;
+};
+async function telSorgente(id) {   // {durata, pezzo(da, lung) → Float32Array a 16 kHz}: dal telefono (anche un doppione), se no dal Mac
   let f = await getFile(id);
+  const t = T.get(id);
   if (!f) {
-    const t = T.get(id);
     if (!t || !t.remote || !SRV) throw new Error('il brano non è sul telefono e il Mac non risponde');
     const r = await fetch(API + 'file/' + encodeURIComponent(t.sid), {cache:'no-store'});
     if (!r.ok) throw new Error('il Mac non dà il brano');
     f = await r.blob();
   }
-  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  const ab = await new OAC(1, 16000, 16000).decodeAudioData(await f.arrayBuffer());
-  if (ab.duration > 900) throw new Error('brano troppo lungo (oltre 15 minuti)');
-  if (ab.numberOfChannels === 1) return ab.getChannelData(0);
-  const x = new Float32Array(ab.length);
-  for (let c = 0; c < ab.numberOfChannels; c++) { const d = ab.getChannelData(c); for (let i = 0; i < x.length; i++) x[i] += d[i] / ab.numberOfChannels; }
-  return x;
+  let durata = (t && t.duration) || 0, intero = null;
+  const tuttoUnaVolta = async () => {
+    if (intero) return intero;
+    if (f.size > TEL_INTERO_MAX) throw new Error('questo formato si legge solo intero, e il brano è troppo grande per il telefono');
+    intero = monoDi(await OAC16().decodeAudioData(await f.arrayBuffer()));
+    durata = intero.length / 16000;
+    return intero;
+  };
+  if (!(durata > 0)) await tuttoUnaVolta();
+  if (durata > 900) throw new Error('brano troppo lungo (oltre 15 minuti)');
+  const pezzo = async (da, lung) => {
+    if (intero) return intero.slice(Math.floor(da * 16000), Math.min(intero.length, Math.floor((da + lung) * 16000)));
+    const bps = f.size / durata, m = 2;
+    const a = Math.max(0, Math.floor((da - m) * bps)), b = Math.min(f.size, Math.ceil((da + lung + m) * bps));
+    try {
+      const x = monoDi(await OAC16().decodeAudioData(await f.slice(a, b).arrayBuffer()));
+      const x0 = Math.max(0, Math.floor((da - a / bps) * 16000)), x1 = Math.min(x.length, x0 + Math.floor(lung * 16000));
+      if (x1 - x0 >= 16000) return x.slice(x0, x1);
+    } catch (e) { /* un pezzo a metà di un M4A o di un FLAC: sotto, intero se il file è piccolo */ }
+    const y = await tuttoUnaVolta();
+    return y.slice(Math.floor(da * 16000), Math.min(y.length, Math.floor((da + lung) * 16000)));
+  };
+  return {durata:() => durata, pezzo};
 }
 async function telInizia(b, id) {
   const k = b.k;
@@ -365,9 +407,9 @@ async function telInizia(b, id) {
       TEL.testi.set(k, j); telMostra(k);
       if (c.tel.completo) return;   // già tutto trascritto
     }
-    const x = await telAudio(id);
+    const sorgente = await telSorgente(id);
     if (lav.fermo) return;
-    lav.durata = x.length / 16000;
+    lav.durata = sorgente.durata();
     // l'ordine: prima il pezzo che suona adesso, poi i successivi, poi quelli già passati
     const tutti = []; for (let da = 0; da === 0 || da + (TEL_FINESTRA - TEL_PASSO) < lav.durata; da += TEL_PASSO) tutti.push(da);
     const ora = TESTO.k === k ? testoTempo() : 0, i0 = Math.max(0, tutti.findIndex(da => da + TEL_PASSO > ora));
@@ -375,8 +417,12 @@ async function telInizia(b, id) {
     for (const da of ordine) {
       if (lav.fermo) return;
       if (lav.pezzi.has(da)) continue;
-      const pezzo = x.slice(Math.floor(da * 16000), Math.min(x.length, Math.floor((da + TEL_FINESTRA) * 16000)));
-      const r = await telChiedi({tipo:'pezzo', audio:pezzo, lingua:lav.lingua}, [pezzo.buffer]);
+      await telDavanti(lav);   // con l'app in secondo piano si aspetta (e Whisper è chiuso: la musica ha tutta la memoria)
+      if (lav.fermo) return;
+      const pezzo = await sorgente.pezzo(da, TEL_FINESTRA);
+      let r;
+      try { r = await telChiedi({tipo:'pezzo', audio:pezzo, lingua:lav.lingua}, [pezzo.buffer]); }
+      catch (e) { if (document.hidden || /secondo piano/.test((e && e.message) || '')) { ordine.push(da); continue; } throw e; }
       if (!lav.lingua && r.parole.length >= 3) lav.lingua = r.lingua;   // la lingua dal primo pezzo con la voce
       lav.pezzi.set(da, telPulisci(r.parole).map(p => ({t:p.t + da, fine:p.fine + da, testo:p.testo})));
       const j = telJ(lav);
