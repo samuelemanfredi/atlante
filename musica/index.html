@@ -2807,6 +2807,7 @@ function guardiaGiro() {
     return;
   }
   if (serveIlMac()) { aspettaMac(el, t); return; }   // il brano che serve è solo sul Mac e il Mac non risponde: si aspetta, non si conta
+  if (INTERR.da && el.paused && !el.ended) { riprendiDopoInterruzione(el); return; }   // l'iPhone ha interrotto l'audio: si aspetta che finisca
   if (!GUARDIA.da) { GUARDIA.t = t; GUARDIA.da = ora; return; }
   const limite = fermo ? GUARDIA.PARTE : el.readyState < 3 && navigator.onLine !== false ? GUARDIA.ARRIVA : GUARDIA.FERMO;
   if (ora - GUARDIA.da < limite) return;
@@ -2814,7 +2815,11 @@ function guardiaGiro() {
   diario(el.ended ? 'finito e mai ripartito' : el.paused ? 'fermo senza pausa' : 'fermo a metà', {t:Math.round(t), rs:el.readyState,
     rete:el.networkState, err:el.error ? el.error.code : 0, volta:GUARDIA.volte, ctx:MIX.ctx ? MIX.ctx.state : 'no', nascosta:!!document.hidden});
   if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
-  if (GUARDIA.volte > 4) {   // niente è servito: l'app si riavvia da sola, come chiuderla e riaprirla (13/11)
+  if (GUARDIA.volte > 4) {
+    // in secondo piano non ci si ferma mai (14/11): una pagina ricaricata lì non può ripartire senza un tocco. Si ricomincia
+    // dai passi gentili (play, ricarica dallo stesso punto, l'altro lettore, il brano dopo), all'infinito
+    if (document.hidden) { diario('niente è servito, in secondo piano: riprovo'); GUARDIA.volte = 1; return; }
+    // davanti agli occhi: l'app si riavvia da sola, come chiuderla e riaprirla (13/11)
     pausaVoluta = Date.now(); el.pause(); updateNow();
     if (typeof riavviaApp === 'function') riavviaApp('la musica non ripartiva', true); else toast('La musica non riparte da sola: tocca ▶︎', true);
     return;
@@ -2856,7 +2861,10 @@ function mixerMuto(el, ora) {
   const fermo = ctx.state !== 'running' || (passato >= 1 && prima != null && c - prima < passato * 0.3);
   if (!fermo) { if (GUARDIA.muto) diario('mixer ripartito'); GUARDIA.muto = 0; return; }
   GUARDIA.muto = (GUARDIA.muto || 0) + 1;
-  if (GUARDIA.muto === 1) { diario('muto: mixer fermo', {stato:ctx.state, nascosta:!!document.hidden}); ctx.resume().catch(() => {}); return; }
+  if (GUARDIA.muto === 1) diario('muto: mixer fermo', {stato:ctx.state, nascosta:!!document.hidden});
+  ctx.resume().catch(() => {});
+  // un'interruzione (un'altra app ha l'audio) finisce da sola; in secondo piano un riavvio fermerebbe la musica (14/11)
+  if (ctx.state === 'interrupted' || sessioneInterrotta() || document.hidden) return;
   if (GUARDIA.muto >= 3) { GUARDIA.muto = 0; riavviaApp('mixer fermo mentre suona', true); }
 }
 function serveIlMac() {
@@ -2893,6 +2901,7 @@ function macTornato() {
 // Mac tornano ascoltabili da soli (prima solo riaprendo l'app o cambiando rete)
 setInterval(() => { if (!SRV && !srvWait && !MACATT.da && (document.visibilityState === 'visible' || suonaVoluta > pausaVoluta)) reconnect(true); }, 15000);
 function riavviaApp(perche, suonava) {
+  if (document.hidden) { diario('riavvio non fatto: app in secondo piano', {perche}); return; }   // lì ricaricare fermerebbe tutto
   const r = ls.get('am-riavvio', {});
   if (Date.now() - (r.t || 0) < PARTENZA.RIAVVIO) { diario('riavvio saltato', {perche}); toast('L\'audio non riparte: chiudi l\'app (scorri verso l\'alto) e riaprila', true); return; }
   diario('riavvio', {perche}); saveState();
@@ -3696,12 +3705,37 @@ function diarioPausa() {
     piano:MIX.plan ? MIX.plan.st : '', prep:MIX.plan && MIX.prepT ? Date.now() - MIX.prepT : undefined, salto:!!MIX.salto, dissolvenza:!!MIX.act});
 }
 auOn('pause', diarioPausa);
-// una pausa del sistema a metà brano (cuffie staccate, un'interruzione) vale come voluta: la musica non riparte da sola
-// dall'altoparlante. Quella all'inizio di un brano o in un passaggio invece è un passaggio non riuscito: ci pensa il guardiano
+/* L'IPHONE INTERROMPE L'AUDIO (14/11): un'altra app che prende l'audio (la dettatura mentre si scrive un messaggio, Siri,
+   una chiamata, un video, una notifica). Prima una pausa così, a metà brano, valeva come voluta e la musica non ripartiva
+   più. Ora le pause vere sono solo quelle chieste (il tasto, la schermata di blocco, i tasti delle cuffie: segnano
+   pausaVoluta); le altre sono interruzioni: la guardia aspetta che finiscano, senza contare tentativi, e riparte dallo
+   stesso punto (riprendiDopoInterruzione). Solo le cuffie staccate (cambio di uscita audio appena prima) fermano davvero,
+   come in Musica. Quella all'inizio di un brano o in un passaggio è un passaggio non riuscito: ci pensa la guardia. */
+const INTERR = {da:0, uscita:0, prova:0, MAX:30 * 60000, OGNI:3000};
+const sessioneInterrotta = () => { try { return (navigator.audioSession && navigator.audioSession.state === 'interrupted') || (!!MIX.ctx && MIX.ctx.state === 'interrupted'); } catch (e) { return false; } };
+try { if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', () => { INTERR.uscita = Date.now(); }); } catch (e) {}
 auOn('pause', () => {
   if (Date.now() - pausaVoluta < 1000 || au.ended || MIX.act || MIX.salto) return;
-  if ((au.currentTime || 0) > 3 && Date.now() - caricatoT > 5000) pausaVoluta = Date.now();
+  if ((au.currentTime || 0) <= 3 || Date.now() - caricatoT <= 5000) return;
+  if (Date.now() - INTERR.uscita < 3000) { pausaVoluta = Date.now(); diario('cuffie staccate: pausa'); return; }
+  if (!INTERR.da) { INTERR.da = Date.now(); diario('interruzione: riparto appena finisce', {nascosta:!!document.hidden, sessione:sessioneInterrotta()}); }
 });
+auOn('playing', () => { INTERR.da = 0; });
+function riprendiDopoInterruzione(el) {
+  const ora = Date.now();
+  GUARDIA.da = ora;   // l'attesa non è un tentativo fallito
+  if (ora - INTERR.da > INTERR.MAX) { INTERR.da = 0; pausaVoluta = ora; updateNow(); diario('interruzione di oltre 30 minuti: mi fermo'); return; }
+  if (sessioneInterrotta() || ora - INTERR.prova < INTERR.OGNI) return;   // l'altra app ha ancora l'audio: si aspetta
+  INTERR.prova = ora;
+  if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+  const da = INTERR.da, pr = el.play();
+  if (pr && pr.then) pr.then(() => { if (INTERR.da === da || !INTERR.da) diario('ripartito dopo l\'interruzione', {s:Math.round((Date.now() - da) / 1000)}); INTERR.da = 0; },
+    e => diario('ripartenza dopo l\'interruzione rifiutata', {err:(e && e.name) || String(e)}));
+}
+// l'interruzione finisce (la sessione audio torna attiva, il mixer riparte, si torna nell'app): si riprova subito
+const interruzioneFinita = () => { if (INTERR.da && au.paused && suonaVoluta > pausaVoluta) { INTERR.prova = 0; riprendiDopoInterruzione(au); } };
+try { if (navigator.audioSession) navigator.audioSession.addEventListener('statechange', interruzioneFinita); } catch (e) {}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(interruzioneFinita, 300); });
 function diarioPagina() { diario('pagina', {nascosta:!!document.hidden, suona:!au.paused}); }   // schermo bloccato o app in secondo piano
 document.addEventListener('visibilitychange', diarioPagina);
 function setMix(on) {
@@ -7119,6 +7153,35 @@ function testoChiedi(b, lingua) {   // il testo dal Mac (una richiesta alla volt
   p.then(j => { if (riprova || testoInCorso(j)) setTimeout(() => { if (TESTO.chiesti.get(k) === p) TESTO.chiesti.delete(k); }, riprova && !presto ? 30000 : 0); });
   return p;
 }
+// i testi dei 2 brani dopo quello che suona, presi dal Mac in anticipo e tenuti sul telefono (14/11): se poi il Mac non si
+// trova, il testo c'è lo stesso. Uno alla volta, ogni 30 s, solo quelli che il telefono non ha ancora
+function testoDi(t) {   // come testoBrano, per un brano qualsiasi della libreria
+  if (!t || t.ext) return null;
+  const b = {sid:inLib(t) ? t.sid : '', titolo:t.title || '', artista:t.artist || '', album:t.album || '', durata:t.duration || 0, cover:t.cover};
+  const d = Math.round(b.durata || 0);
+  if (b.sid) { b.url = XAPI + 'testi/' + encodeURIComponent(b.sid); b.k = 's:' + b.sid; return b; }
+  if (!b.titolo) return null;
+  b.url = XAPI + 'testi?titolo=' + encodeURIComponent(b.titolo) + '&artista=' + encodeURIComponent(b.artista) + '&album=' + encodeURIComponent(b.album) + '&durata=' + d;
+  b.k = 'q:' + [b.titolo, b.artista, b.album, d].join('|').toLowerCase();
+  return b;
+}
+const TESTIAV = {fatti:new Set(), occupato:false};
+async function testiAvanti() {
+  if (!SRV || RC.id || TESTIAV.occupato || !curId) return;
+  TESTIAV.occupato = true;
+  try {
+    for (const id of S.queue.slice(S.qi + 1, S.qi + 3)) {
+      const b = testoDi(TT(id)); if (!b || TESTIAV.fatti.has(b.k)) continue;
+      TESTIAV.fatti.add(b.k);
+      if (await testoDalTelefono(b.k)) continue;
+      const r = await fetchT(b.url, {cache:'no-store'}, 20000);
+      const x = testoEsito(r.ok, r.status, await r.json().catch(() => null), null);
+      if (x.salva) testoSalva(b.k, x.j); else if (x.riprova || testoInCorso(x.j)) TESTIAV.fatti.delete(b.k);   // pronto più tardi: si riprova
+      break;   // uno per giro
+    }
+  } catch (e) {} finally { TESTIAV.occupato = false; }
+}
+setInterval(() => { if (!au.paused) testiAvanti(); }, 30000);
 // il testo del brano che suona si prepara anche a lettore chiuso (dopo 5 s di ascolto): poi c'è subito, anche senza rete
 setInterval(() => {
   if (!SRV || RC.id || au.paused || (au.currentTime || 0) < 5) return;

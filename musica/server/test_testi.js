@@ -318,6 +318,7 @@ function proveSincronia(src, fatte) {
 // 14/11: sull'iPhone e sull'iPad niente Whisper dentro l'app (modello, motore e brano decodificato: centinaia di MB, e iOS
 // chiudeva la pagina). Il testo lo trascrive il Mac mini dal vivo. Sul Mac e sui computer resta.
 function proveTelefono(canta, fatte) {
+  const vero = (c, m) => { if (!c) throw new Error(m); };
   const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
   const src = canta.replace('window.telScegli = function (j) {', '\nfunction telScegli(j) {');
   const prova = ios => {
@@ -327,9 +328,12 @@ function proveTelefono(canta, fatte) {
     const F = carica(src, ['telScegli'], ['const senzaTesto = '], env);
     return {r:F.telScegli({stato:'nessuno'}), avviati};
   };
+  // 14/11 (dopo): sull'iPhone torna, con l'audio a pezzi e Whisper solo con l'app davanti
   let x = prova(true);
-  eq([x.r, x.avviati], [{stato:'nessuno'}, []], 'iPhone: senza testo dal Mac, niente Whisper sul telefono');
+  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'iPhone: senza testo dal Mac, il testo si trascrive sul telefono');
   x = prova(false);
-  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'Mac e computer: il testo trascritto qui resta');
-  fatte.push('niente Whisper sull\'iPhone');
+  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'Mac e computer: anche');
+  vero(/telDavanti\(lav\)/.test(canta) && /visibilitychange', \(\) => \{ if \(document\.hidden\) telChiudi/.test(canta), 'Whisper solo con l\'app davanti, chiuso in secondo piano');
+  vero(!/decodeAudioData\(await f\.arrayBuffer\(\)\)\);\n  if \(ab\.duration > 900\)/.test(canta) && /f\.slice\(a, b\)\.arrayBuffer\(\)/.test(canta), 'l\'audio a pezzi, non il brano intero');
+  fatte.push('testo trascritto sull\'iPhone, a pezzi');
 }
