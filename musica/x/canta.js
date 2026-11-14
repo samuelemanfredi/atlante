@@ -298,6 +298,10 @@ window.telScegli = function (j) {
   if (j && j.allineamento === 'dal vivo') { telFerma(b.k); return j; }   // lo scrive il Mac mini, adesso: il telefono non serve
   if (j && j.stato === 'ok' && !senzaTesto(j)) { telFerma(b.k); return j; }   // c'è il testo (dal file, da LRCLIB o da Whisper sul Mac)
   if (!senzaTesto(j) && !(j && j.stato === 'errore')) return j;   // in arrivo, strumentale, vuoto: si aspetta il Mac
+  // iPhone e iPad: niente Whisper dentro l'app (14/11). Modello, motore e brano intero decodificato sono centinaia di MB
+  // nella stessa pagina che suona e mixa: iOS la chiudeva («Si è verificato ripetutamente un errore»). Il testo lo
+  // trascrive il Mac mini, dal vivo, mentre il brano suona.
+  if (typeof isIOS !== 'undefined' && isIOS) return j;
   const mio = TEL.testi.get(b.k);
   if (!TEL.lavoro || TEL.lavoro.k !== b.k) telInizia(b, id);
   if (mio && mio.righe.length) return mio;

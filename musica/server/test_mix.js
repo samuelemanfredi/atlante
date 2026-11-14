@@ -242,18 +242,20 @@ function fattoreComePrima(src) {
 
 // grid() con un punto qualsiasi: il pezzo giusto (dal file o dal Mac) e b0 in secondi del brano; non resta in memoria
 function pezziGrid(src) {
-  const SR = 11025, log = {url:[], put:[], bg:[]};
+  const SR = 11025, log = {url:[], put:[], bg:[], letti:[]};
   const tutto = new Float32Array(200 * SR); for (let i = 0; i < tutto.length; i++) tutto[i] = i;
   const env = {
     Promise:SP, setTimeout:f => f(), BPMC:new Map(), SRV:true, API:'api/musica/', bpmPut:(k, v) => log.put.push(k),
     T:new Map([['rS', {id:'rS', remote:true, sid:'S', duration:200}], ['rL', {id:'rL', remote:true, sid:'L', duration:200}]]),
-    getFile:id => SP.resolve(id === 'rL' ? {size:1000, arrayBuffer:() => SP.resolve('buf')} : null),
-    decodeMono:() => SP.resolve({x:tutto, sr:SR, dur:200}),
+    // il file di rL: 1000 byte al secondo; si legge solo il pezzo (slice) e si decodifica solo quello (14/11)
+    getFile:id => SP.resolve(id === 'rL' ? {size:200000, slice:(a, b) => ({arrayBuffer:() => { log.letti.push(b - a); return SP.resolve({a, b}); }}),
+      arrayBuffer:() => { throw new Error('il file intero non si legge più'); }} : null),
+    decodeMono:buf => SP.resolve({x:tutto.subarray(Math.floor(buf.a / 1000 * SR), Math.floor(buf.b / 1000 * SR)), sr:SR, dur:(buf.b - buf.a) / 1000}),
     fetchT:url => { log.url.push(url); return SP.resolve({ok:true, arrayBuffer:() => SP.resolve('wav')}); },
     wavPCM:() => ({x:new Float32Array(20 * SR), sr:SR}),
     beatGrid:(x, sr) => { log.bg.push([x.length, x[0]]); return {bpm:128, b0:0.25, c:2}; }
   };
-  const F = carica(src, ['grid', 'gridPezzo', 'fineUdibile'], ['const gridWait = '], env, c => {
+  const F = carica(src, ['grid', 'gridPezzo', 'fineUdibile', 'pezzoLocale'], ['const gridWait = ', 'const PEZZOL = '], env, c => {
     vero(c.indexOf('(async () => {') > 0 && c.indexOf('})().catch(() => null)') > 0, 'grid(): forma cambiata, aggiornare la prova');
     return c.replace('(async () => {', 'corri(function* () {').replace('})().catch(() => null)', '}).catch(() => null)').replace(/\bawait /g, 'yield ');
   });
@@ -264,7 +266,13 @@ function pezziGrid(src) {
   vicino(v.b0, 87.55, 1e-9, 'b0 in secondi del brano'); vero(!log.put.length && !env.BPMC.size, 'un pezzo a metà brano non va in memoria');
   v = chiedi('rS', 'f'); vero(/da=170\.000&durata=30$/.test(log.url.pop()), "dal Mac: 'f' come prima"); vero(log.put.pop() === 'rS|f', "'f' in memoria come prima");
   v = chiedi('rS', 'i'); vero(/da=0\.000&durata=30$/.test(log.url.pop()), "dal Mac: 'i' come prima"); vero(log.put.pop() === 'rS|i', "'i' in memoria");
+  // rL è anche sul telefono: con il Mac che risponde, il pezzo dal Mac (prima si decodificava tutto il file: +400 MB)
+  v = chiedi('rL', 'i'); vero(/pezzo\/L\?da=0\.000&durata=30$/.test(log.url.pop()) && !log.letti.length, 'sul telefono ma con il Mac: il pezzo dal Mac');
+  log.put.length = 0; env.BPMC.clear();
+  // senza Mac: solo il pezzo del file, mai tutto
+  env.SRV = false;
   v = chiedi('rL', 50); let b = log.bg.pop();
+  vero(log.letti.pop() === 26000, 'dal file: letti solo i byte di 26 s (20 più il margine)');
   vero(b[0] === 20 * SR && b[1] === 50 * SR, 'dal file: 20 s da quel punto (' + b + ')'); vicino(v.b0, 50.25, 1e-9, 'dal file: b0 in secondi del brano');
   chiedi('rL', 'f'); b = log.bg.pop(); vero(b[0] === 30 * SR && b[1] === 170 * SR, "dal file: 'f' come prima (" + b + ')');
   chiedi('rL', 'i'); b = log.bg.pop(); vero(b[0] === 30 * SR && b[1] === 0, "dal file: 'i' come prima (" + b + ')');

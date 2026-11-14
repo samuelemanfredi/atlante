@@ -53,7 +53,7 @@ function carica(src, nomi, env) {
 function ambiente(scelto, io) {
   const salvati = {};
   const env = {
-    TUTTO: scelto === null ? true : scelto, IO: {ruolo:'', persona:null}, XAPI: 'api/extra/',
+    TUTTO: scelto === null ? true : scelto, IO: {ruolo:'', persona:null}, XAPI: 'api/extra/', DL_MAX: 120e6,
     DLQ: ['a', 'm'], AUTO: new Set(['a']), saved: new Set(), TOLTI: new Set(), dlCur: null, grabbing: new Set(),
     P: [], T: new Map([['a', {id:'a', remote:true}], ['b', {id:'b', remote:true}]]), DB: {}, SRV: 'api/', SRVSCAN: false, SRVN: 2,
     coda: [], salvati,
