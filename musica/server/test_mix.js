@@ -845,14 +845,22 @@ function versioneIOS(src) {
   vero(/function mixerInit\(perEQ\) \{\n  if \(MIX\.ctx \|\| IOS_PRIMA_27 \|\|/.test(src), 'mixerInit deve restare spento prima di iOS 27 (anche con l\'equalizzatore)');
   vero(/const IOS_PRIMA_27 = isIOS && !iosDa27\(navigator\.userAgent, novita27\(\)\);/.test(src), 'IOS_PRIMA_27');
   vero(/240405/.test(src), 'il commento con il numero del bug');
-  // 15/11: su iPhone e iPad il mixer spento di serie (a schermo bloccato fermava la musica), una volta sola
-  const riga = src.split('\n').find(l => l.indexOf("if (isIOS && !ls.get('am-mix-noweb-ios'") === 0);
-  vero(riga, 'manca lo spegnimento del mixer su iPhone');
-  for (const [ios, prima, atteso] of [[true, {}, true], [false, {}, undefined], [true, {'am-mix-noweb-ios':true, 'am-mix-noweb':false}, false]]) {
+  // 15/11: la dissolvenza resta su iPhone e iPad: il mixer si riaccende una volta sola (spento per un'ora di serie, o per
+  // sempre dal vecchio controllo a schermo bloccato), e la sessione audio «playback» si chiede subito all'apertura
+  const riga = src.split('\n').find(l => l.indexOf("if (isIOS && !ls.get('am-mix-web-ripristino'") === 0);
+  vero(riga, 'manca la riaccensione del mixer su iPhone');
+  for (const [ios, prima, atteso] of [[true, {'am-mix-noweb':true, 'am-mix-noweb-ios':true}, false], [true, {'am-mix-noweb':true}, false],
+    [false, {'am-mix-noweb':true}, true], [true, {'am-mix-web-ripristino':true, 'am-mix-noweb':true}, true]]) {
     const m = Object.assign({}, prima);
     new Function('isIOS', 'ls', riga)(ios, {get:(k, d) => k in m ? m[k] : d, set:(k, v) => { m[k] = v; }});
     vero(m['am-mix-noweb'] === atteso, 'mixer su iPhone=' + ios + ' ' + JSON.stringify(prima) + ': ' + m['am-mix-noweb']);
   }
+  const ses = src.split('\n').find(l => l.indexOf("if (isIOS) { try { if (navigator.audioSession) navigator.audioSession.type = 'playback'") === 0);
+  vero(ses, 'manca la sessione «playback» all\'apertura');
+  const nav = {audioSession:{type:'auto'}};
+  new Function('isIOS', 'navigator', ses)(true, nav);
+  vero(nav.audioSession.type === 'playback', 'sessione audio: ' + nav.audioSession.type);
+  vero(!/am-mix-noweb', true\); ls\.set\('am-mix-noweb-ko', false\); toast\('La dissolvenza è stata spenta/.test(src), 'il vecchio controllo spegneva la dissolvenza per sempre');
 }
 
 // «un lettore solo» tolto: una pausa non chiesta mentre si prepara il mix a fine brano va solo nel diario, e il flag

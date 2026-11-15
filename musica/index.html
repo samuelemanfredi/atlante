@@ -3520,11 +3520,13 @@ function novita27() {   // in Safari 27: «width: stretch» e i ReadableStream d
   try { return CSS.supports('width', 'stretch') && typeof ReadableStream === 'function' && Symbol.asyncIterator in ReadableStream.prototype; } catch (e) { return false; }
 }
 const IOS_PRIMA_27 = isIOS && !iosDa27(navigator.userAgent, novita27());
-// IPHONE E IPAD: IL MIXER SPENTO DI SERIE (15/11). Tutta la musica passava dal mixer (Web Audio) per fare la dissolvenza;
-// bloccando il telefono iOS può fermare il mixer, e con lui la musica: «appena blocco il telefono la riproduzione si
-// stoppa». I lettori normali invece continuano a schermo bloccato, come Musica. Il mix a tempo resta (rampa ai BPM del
-// brano dopo e taglio sul battito), senza la dissolvenza di volume. Una volta sola: si potrà riaccendere a mano.
-if (isIOS && !ls.get('am-mix-noweb-ios', false)) { ls.set('am-mix-noweb-ios', true); ls.set('am-mix-noweb', true); }
+// IPHONE E IPAD: LA SESSIONE AUDIO «PLAYBACK» SUBITO, ALL'APERTURA (15/11). È quella che lascia suonare la musica, e il
+// mixer della dissolvenza, a schermo bloccato. Prima si chiedeva solo al primo tocco insieme al mixer: una musica partita
+// in un altro modo (la schermata di blocco, le cuffie, l'app riaperta) restava con la sessione «auto».
+if (isIOS) { try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {} }
+// LA DISSOLVENZA RESTA (15/11): per un'ora il mixer era stato spento di serie su iPhone (am-mix-noweb-ios), e il vecchio
+// controllo a schermo bloccato lo spegneva per sempre (am-mix-noweb-ko). Si riaccende, una volta sola.
+if (isIOS && !ls.get('am-mix-web-ripristino', false)) { ls.set('am-mix-web-ripristino', true); ls.set('am-mix-noweb', false); ls.set('am-mix-noweb-ko', false); }
 function mixerInit(perEQ) {
   if (MIX.ctx || IOS_PRIMA_27 || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
   if (!perEQ && EQ.id === 'no' && (!NEEDS_MIXER || !MIX.on)) return;   // senza mix (iPhone) e senza equalizzatore non serve
@@ -3650,13 +3652,17 @@ function controllaPassaggio() {
 }
 // un lettore che ha suonato con l'audio acceso può ripartire da solo
 DECKS.forEach(el => el.addEventListener('playing', () => { if (!el.muted && el.getAttribute('src') !== SILENZIO) { el._sbloccato = true; el._rifiuta = false; } }));
-// controllo di sicurezza: se a schermo bloccato l'iPhone ferma il mixer mentre la musica dovrebbe suonare, al ritorno
-// il mixer si spegne per sempre (il mix resta a tempo, con un taglio sul battito invece della dissolvenza)
+// a schermo bloccato l'iPhone ferma il mixer mentre la musica dovrebbe suonare: lo si fa ripartire subito (e la guardia
+// continua, mixerMuto). Prima al ritorno nell'app la dissolvenza si spegneva per sempre (15/11: la dissolvenza resta)
 document.addEventListener('visibilitychange', () => {
   if (!MIX.ctx) return;
-  if (document.hidden) { setTimeout(() => { if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && au !== AUX) ls.set('am-mix-noweb-ko', true); }, 2500); return; }
-  if (ls.get('am-mix-noweb-ko', false)) { ls.set('am-mix-noweb', true); ls.set('am-mix-noweb-ko', false); toast('La dissolvenza è stata spenta: a schermo bloccato fermava la musica. Il mix a tempo resta.', true); setTimeout(() => location.reload(), 3000); }
-  else if (MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+  if (document.hidden) {
+    setTimeout(() => {
+      if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && au !== AUX) { diario('mixer fermo a schermo bloccato: riparte', {stato:MIX.ctx.state}); MIX.ctx.resume().catch(() => {}); }
+    }, 2500);
+    return;
+  }
+  if (MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
 });
 // diario degli ultimi passaggi tra i brani (com'è andato e perché): va al Mac con lo stato del dispositivo, così da
 // lontano si vede cosa succede su un iPhone che non mixa (es. «un lettore solo» rimasto acceso)
