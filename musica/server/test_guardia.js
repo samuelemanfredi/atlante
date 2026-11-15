@@ -73,6 +73,7 @@ function ambiente() {
   env.DECKS = [lettore('A'), lettore('B')]; env.au = env.DECKS[0]; env.DIRETTO = lettore('D');
   env.diretti = []; env.passaAlDiretto = perche => { env.diretti.push(perche); return true; };
   env.risvegli = 0; env.risveglia = () => { env.risvegli++; };
+  env.memoria = {}; env.ls = {get: (k, d) => (k in env.memoria ? env.memoria[k] : d), set: (k, v) => { env.memoria[k] = v; }};
   env.Date = {now: () => env.ora};
   env.performance = {now: () => env.perf};
   env.load = (i, play, at) => { env.carichi.push([env.au.nome, i, play, at]); };
@@ -92,7 +93,7 @@ function prove(src, fatte) {
   const mm = /\nconst MACATT = (\{[^\n]*\});/.exec(src);
   if (!mm) throw new Error("nell'app manca MACATT");
   const nuovo = f => { env = ambiente(); env.MACATT = new Function('return ' + mm[1])(); if (f) f(env);
-    F = carica(src, ['guardiaGiro', 'serveIlMac', 'aspettaMac', 'macTornato', 'mixerMuto', 'posVoluta', 'riprendiDopoInterruzione'], env); };
+    F = carica(src, ['guardiaGiro', 'serveIlMac', 'aspettaMac', 'macTornato', 'mixerMuto', 'piccoMixer', 'posVoluta', 'riprendiDopoInterruzione'], env); };
   const giri = (n, passo) => { for (let k = 0; k < n; k++) { env.ora += passo || 2000; env.perf += passo || 2000; F.guardiaGiro(); } };
 
   /* ---------- il tempo va avanti: niente ---------- */
@@ -205,12 +206,22 @@ function prove(src, fatte) {
   eq(env.diretti.length + env.riavvii.length, 0, 'lettore fuori dal mixer (radio, Mac): non conta');
   // il mixer va (running, orologio che avanza) ma dal misuratore non esce suono: a 6 s i guadagni, a 10 s il lettore diretto
   const zitto = picco => e => { mixer('running', true)(e); e.au.duration = 300; e.MIX.metro = {fftSize:8, getFloatTimeDomainData(b) { b.fill(0); b[3] = picco(); }}; };
-  let liv = 0;
-  nuovo(zitto(() => liv)); avanti(4);
+  let liv = 0.2;
+  nuovo(zitto(() => liv)); avanti(2);   // prima la musica si sente: il misuratore funziona (e lo si ricorda)
+  eq([env.MIX.metroOk, env.memoria['am-metro-ok']], [true, true], 'il misuratore ha sentito la musica: ci si fida');
+  liv = 0; avanti(4);
   eq(env.diretti.length, 0, 'silenzio da poco: si aspetta');
-  avanti(2);
+  avanti(1);
   eq(env.diretti, ['dal mixer non esce suono'], '10 s senza suono a metà brano: il lettore diretto');
   if (env.diari.indexOf('muto: dal mixer non esce suono') < 0) throw new Error('nel diario il silenzio');
+  // 15/11: un misuratore che non ha mai sentito niente (su un iPhone potrebbe dare sempre zero): non ci si fida, niente passaggi
+  nuovo(zitto(() => 0)); avanti(30);
+  eq([env.diretti.length, env.risvegli, !!env.MIX.metroOk], [0, 0, false], 'misuratore mai sentito suonare: nessun passaggio');
+  nuovo(e => { zitto(() => 0)(e); e.MIX.metroOk = true; }); avanti(6);   // ricordato da un'altra volta su questo dispositivo
+  eq(env.diretti, ['dal mixer non esce suono'], 'fiducia ricordata: il silenzio conta da subito');
+  // brano fermo con i dati arrivati: «mixer rotto» solo se il misuratore (fidato) è muto; se no, i passi di sempre
+  nuovo(e => { zitto(() => 0)(e); }); giri(6);
+  eq(env.diretti.length, 0, 'brano fermo, misuratore mai sentito: niente lettore diretto');
   nuovo(zitto(() => 0.2)); avanti(20);
   eq(env.diretti.length, 0, 'musica che si sente: niente');
   nuovo(e => { zitto(() => 0)(e); e.au.currentTime = 2; }); avanti(4);   // primi secondi: silenzio vero possibile
@@ -249,6 +260,51 @@ function prove(src, fatte) {
   nuovo(e => { mixer('interrupted', false)(e); e.document.hidden = true; }); avanti(10);
   eq([env.riavvii.length, env.diretti.length >= 1], [0, true], 'mixer fermo a schermo bloccato: il lettore diretto, mai il riavvio');
   fatte.push('mai il riavvio in secondo piano');
+
+  /* ---------- 15/11: passaAlDiretto vero: il lettore diretto deve andare avanti da solo, se no si torna al mixer ---------- */
+  // il lettore diretto finto: «parte» (e.dDa = quando) se load lo fa suonare; il suo tempo va avanti con l'orologio
+  const diretto = (prepara) => {
+    const e = ambiente(), timer = [];
+    e.setTimeout = (f, ms) => { timer.push([e.ora + ms, f]); };
+    e.xfAbort = () => {}; e.MIX.ctx = {state:'interrupted'};
+    e.dDa = null; e.dInizio = 42; e.dParte = true;
+    const D0 = e.DIRETTO; D0._sbloccato = true; D0.paused = true; D0.readyState = 0;
+    Object.defineProperty(D0, 'currentTime', {get: () => e.dInizio + (e.dDa == null ? 0 : (e.ora - e.dDa) / 1000), set() {}});
+    e.load = (i, play, at) => { e.carichi.push([e.au === D0 ? 'D' : e.au.nome, i, play, at, !!e.MIX.fuori]); if (e.MIX.fuori && e.dParte) { D0.paused = false; D0.readyState = 4; e.dDa = e.ora; } };
+    if (prepara) prepara(e);
+    const G = carica(src, ['passaAlDiretto', 'verificaDiretto', 'posVoluta'], e);
+    const passa = ms => { const fine = e.ora + ms; while (e.ora < fine) { e.ora += 250; for (let k = 0; k < timer.length; k++) if (timer[k] && timer[k][0] <= e.ora) { const f = timer[k][1]; timer[k] = null; f(); } } };
+    return {e, G, passa};
+  };
+  const nonSuona = 'il lettore diretto non suona: torno al mixer';
+  let D = diretto();
+  eq(D.G.passaAlDiretto('prova'), true, 'passa al lettore diretto');
+  eq([D.e.au === D.e.DIRETTO, D.e.MIX.fuori, D.e.carichi[0]], [true, true, ['D', 3, true, 42, true]], 'lo stesso brano, dallo stesso punto, sul lettore diretto');
+  D.passa(7000);
+  eq([D.e.carichi.length, D.e.MIX.fuori, D.e.diari.indexOf('lettore diretto: suona') >= 0], [1, true, true], 'il lettore diretto suona: ci si resta');
+  D = diretto(e => { e.dParte = false; });   // iOS non lo lascia partire: resta fermo
+  D.G.passaAlDiretto('prova'); D.passa(7000);
+  eq([D.e.MIX.fuori, D.e.carichi[1], D.e.diari.indexOf(nonSuona) >= 0], [false, ['D', 3, true, 42, false], true], 'non suona: di nuovo sul mixer, dallo stesso punto');
+  D.e.au = D.e.DECKS[0];   // (load ha cambiato lettore)
+  eq(D.G.passaAlDiretto('ancora'), false, 'per 5 minuti non si riprova');
+  D.passa(5 * 60000);
+  eq(D.G.passaAlDiretto('dopo 5 minuti'), true, 'dopo 5 minuti sì');
+  D = diretto(e => { e.load = (i, play, at) => { e.carichi.push(['D', i, play, at, !!e.MIX.fuori]); if (e.MIX.fuori) e.DIRETTO.paused = false; }; });
+  D.G.passaAlDiretto('prova'); D.passa(7000);   // non in pausa ma i dati stanno ancora arrivando dalla rete: si riguarda
+  eq([D.e.carichi.length, D.e.diari.indexOf(nonSuona)], [1, -1], 'ancora in arrivo: si aspetta');
+  D.e.DIRETTO.readyState = 4; D.e.dDa = D.e.ora; D.passa(7000);
+  eq([D.e.carichi.length, D.e.MIX.fuori], [1, true], 'arrivato e suona: ci si resta');
+  D = diretto(e => { e.load = (i, play, at) => { e.carichi.push(['D', i, play, at, !!e.MIX.fuori]); if (e.MIX.fuori) { e.DIRETTO.paused = false; e.DIRETTO.readyState = 4; } }; });
+  D.G.passaAlDiretto('prova'); D.passa(7000);   // «suona» con i dati, ma il tempo non va avanti
+  eq([D.e.MIX.fuori, D.e.carichi.length], [false, 2], 'non va avanti: di nuovo sul mixer');
+  D = diretto(e => { e.load = (i, play, at) => { e.carichi.push(['D', i, play, at, !!e.MIX.fuori]); if (e.MIX.fuori) { e.DIRETTO.paused = false; e.DIRETTO.readyState = 4; e.dInizio = 0; e.dDa = e.ora; } }; });
+  D.G.passaAlDiretto('prova'); D.passa(7000);   // il salto al punto non è riuscito e suona dall'inizio: suona comunque
+  eq([D.e.MIX.fuori, D.e.carichi.length], [true, 1], 'suona dall\'inizio: ci si resta (il suono c\'è)');
+  D = diretto(); D.G.passaAlDiretto('prova'); D.e.pausaVoluta = D.e.ora + 1; D.e.DIRETTO.paused = true; D.e.dDa = null; D.passa(7000);
+  eq(D.e.carichi.length, 1, 'messo in pausa intanto: non si tocca niente');
+  D = diretto(e => { e.DIRETTO._sbloccato = false; });
+  eq([D.G.passaAlDiretto('prova'), D.e.carichi.length], [false, 0], 'lettore diretto mai sbloccato da un tocco: si resta sul mixer');
+  fatte.push('lettore diretto controllato');
 
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);

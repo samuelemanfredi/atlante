@@ -2814,7 +2814,8 @@ function guardiaGiro() {
   if (!GUARDIA.da) { GUARDIA.t = t; GUARDIA.da = ora; return; }
   // il brano fermo su un lettore del mixer, con il mixer fermo o con i dati già arrivati (non è la rete): è il mixer che
   // non lo fa suonare. In 4 s la musica passa al lettore diretto, invece dei tentativi sullo stesso mixer (16/11)
-  const mixerRotto = !fermo && !!MIX.ctx && !!MIX.gains && MIX.gains.has(el) && (MIX.ctx.state !== 'running' || el.readyState >= 3);
+  const mixerRotto = !fermo && !!MIX.ctx && !!MIX.gains && MIX.gains.has(el) &&
+    (MIX.ctx.state !== 'running' || (el.readyState >= 3 && MIX.metroOk && mixerZitto()));   // 15/11: e il misuratore (fidato) muto
   const limite = mixerRotto ? 4000 : fermo ? GUARDIA.PARTE : el.readyState < 3 && navigator.onLine !== false ? GUARDIA.ARRIVA : GUARDIA.FERMO;
   if (ora - GUARDIA.da < limite) return;
   if (mixerRotto) { MIX.ctx.resume().catch(() => {}); if (passaAlDiretto('brano fermo con il mixer ' + MIX.ctx.state)) { GUARDIA.da = ora; return; } }
@@ -2881,15 +2882,23 @@ function mixerMuto(el, ora) {
   GUARDIA.muto = 0;
   // il mixer va: esce davvero del suono? Il misuratore in fondo alla catena, solo a metà brano (non nei primi 8 s né negli
   // ultimi 12, dove ci può essere silenzio vero) e non durante un passaggio
-  const m = MIX.metro, d = el.duration, t = el.currentTime || 0;
-  if (!m || !(t > 8) || (isFinite(d) && d - t < 12) || MIX.act || MIX.salto) { GUARDIA.zitto = 0; return; }
-  const buf = MIX.metroBuf || (MIX.metroBuf = new Float32Array(m.fftSize));
-  m.getFloatTimeDomainData(buf);
-  let picco = 0; for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i]); if (v > picco) picco = v; }
+  const d = el.duration, t = el.currentTime || 0, picco = piccoMixer();
+  if (picco > 1e-3 && !MIX.metroOk) { MIX.metroOk = true; ls.set('am-metro-ok', true); }   // il misuratore funziona: ha sentito la musica
+  // ci si fida del silenzio solo se il misuratore ha già sentito musica (15/11: se su un iPhone desse sempre zero, mai
+  // un passaggio al lettore diretto per sbaglio)
+  if (!MIX.metroOk || picco < 0 || !(t > 8) || (isFinite(d) && d - t < 12) || MIX.act || MIX.salto) { GUARDIA.zitto = 0; return; }
   if (picco > 1e-4) { GUARDIA.zitto = 0; return; }
   GUARDIA.zitto = (GUARDIA.zitto || 0) + 1;
   if (GUARDIA.zitto === 3) { diario('muto: dal mixer non esce suono', {t:Math.round(t)}); risveglia(el); }   // 6 s: guadagni al loro posto
   if (GUARDIA.zitto >= 5) passaAlDiretto('dal mixer non esce suono');   // 10 s: il lettore diretto
+}
+function mixerZitto() { const p = piccoMixer(); return p >= 0 && p <= 1e-4; }
+function piccoMixer() {   // il picco del suono che esce adesso dal mixer (-1: niente misuratore)
+  const m = MIX.metro; if (!m) return -1;
+  const buf = MIX.metroBuf || (MIX.metroBuf = new Float32Array(m.fftSize));
+  try { m.getFloatTimeDomainData(buf); } catch (e) { return -1; }
+  let picco = 0; for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i]); if (v > picco) picco = v; }
+  return picco;
 }
 function risveglia(el) {   // i guadagni del lettore al loro posto (una dissolvenza rimasta a 0?), niente «muto», mixer avviato
   try { const g = MIX.gains.get(el).gain; g.cancelScheduledValues(MIX.ctx.currentTime); g.setValueAtTime(1, MIX.ctx.currentTime); el._g = 1; } catch (e) {}
@@ -2905,6 +2914,7 @@ function risveglia(el) {   // i guadagni del lettore al loro posto (una dissolve
    in funzione la dissolvenza torna, dal brano dopo. */
 function passaAlDiretto(perche) {
   if (au === DIRETTO || au === AUX || !curId) return false;
+  if (MIX.direttoKo && Date.now() - MIX.direttoKo < 5 * 60000) return false;   // poco fa non ha suonato: per ora non si riprova
   if (!DIRETTO._sbloccato) { if (!passaAlDiretto.detto) { passaAlDiretto.detto = true; diario('lettore diretto non pronto (nessun tocco)', {perche}); } return false; }
   const pos = posVoluta(), vecchio = au;
   diario('dal mixer non esce suono: passo al lettore diretto', {perche, t:Math.round(pos), ctx:MIX.ctx ? MIX.ctx.state : 'no', nascosta:!!document.hidden});
@@ -2915,7 +2925,27 @@ function passaAlDiretto(perche) {
   GUARDIA.muto = 0; GUARDIA.zitto = 0;
   load(S.qi, true, pos);
   if (!document.hidden) toast('Il mixer di iOS si era fermato: la musica continua, senza dissolvenza fino al prossimo tocco', true);
+  verificaDiretto(curId, pos, Date.now(), 0);
   return true;
+}
+// il lettore diretto suona davvero? (15/11) Dopo 5 s si guarda il suo tempo, 1,5 s dopo deve essere andato avanti; se
+// sta ancora caricando dalla rete si riguarda una volta. Se no: si torna al lettore del mixer dallo stesso punto, e per
+// 5 minuti niente passaggi (la guardia continua come prima): un lettore diretto che iOS non lascia suonare non deve
+// lasciare l'app muta
+function verificaDiretto(id, pos, t0, volta) {
+  const vale = () => au === DIRETTO && curId === id && pausaVoluta < t0;
+  setTimeout(() => {
+    if (!vale()) return;
+    const c = DIRETTO.currentTime || 0;
+    setTimeout(() => {
+      if (!vale()) return;
+      if (!DIRETTO.paused && (DIRETTO.currentTime || 0) > c + 0.3) { diario('lettore diretto: suona'); return; }
+      if (!DIRETTO.paused && DIRETTO.readyState < 3 && volta === 0) { verificaDiretto(id, pos, t0, 1); return; }
+      diario('il lettore diretto non suona: torno al mixer', {rs:DIRETTO.readyState, fermo:DIRETTO.paused});
+      MIX.direttoKo = Date.now(); MIX.fuori = false;
+      load(S.qi, true, Math.max(pos, posVoluta()));
+    }, 1500);
+  }, 5000);
 }
 function serveIlMac() {
   if (SRV || srvWait) return false;
@@ -3540,7 +3570,8 @@ auOn('error', async () => {
 // X: secondi della dissolvenza a fine brano, verso il successivo (12 dal 28/10, chiesto da Samuele: «allunga un po'»; erano 10)
 // RAMPA: i secondi prima della dissolvenza in cui il brano che finisce va al tempo del successivo (erano 4: troppo svelta;
 // con il mixer dell'iPhone il cambio è uno solo, vedi gradini)
-const MIX = {on:ls.get('am-mix', true), X:12, RAMPA:8, plan:null, act:null, ctx:null, gains:new Map(), norm:new Map(), loop:0, prepT:0};
+const MIX = {on:ls.get('am-mix', true), X:12, RAMPA:8, plan:null, act:null, ctx:null, gains:new Map(), norm:new Map(), loop:0, prepT:0,
+  metroOk:ls.get('am-metro-ok', false)};   // metroOk: su questo dispositivo il misuratore ha già sentito la musica (15/11)
 // «un lettore solo» non c'è più (vedi la pausa del lettore, più sotto): chi l'aveva salvato lo perde, una volta sola. Se
 // era acceso (il mix fermo per sempre per un falso allarme) lo si scrive nel diario
 (function () { const era = ls.get('am-mix-unlettore', null); if (era == null) return; try { localStorage.removeItem('am-mix-unlettore'); } catch (e) {} if (era) setTimeout(() => diario('un lettore solo: tolto'), 0); })();
@@ -3594,7 +3625,8 @@ function mixerInit(perEQ) {
 }
 addEventListener('pointerdown', () => {
   mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
-  if (MIX.fuori && MIX.ctx) setTimeout(() => { if (MIX.fuori && MIX.ctx && MIX.ctx.state === 'running') { MIX.fuori = false; diario('mixer di nuovo pronto: la dissolvenza torna dal brano dopo'); } }, 500);
+  const pronto = () => { if (MIX.fuori && MIX.ctx && MIX.ctx.state === 'running') { MIX.fuori = false; diario('mixer di nuovo pronto: la dissolvenza torna dal brano dopo'); } };
+  if (MIX.fuori && MIX.ctx) { pronto(); setTimeout(pronto, 500); }
 }, {capture:true, passive:true});
 /* ---------- equalizzatore (come Impostazioni › Musica › EQ dell'iPhone) ----------
    10 bande (32 Hz – 16 kHz, come l'EQ di iTunes) dopo il mixer, con i preset di Musica; vale su questo dispositivo
@@ -3637,10 +3669,12 @@ function eqCostruisci(ctx) {   // ingresso (preamp e volume) → 10 filtri → c
     b.type = i === 0 ? 'lowshelf' : i === EQ_BANDE.length - 1 ? 'highshelf' : 'peaking'; b.frequency.value = f; b.Q.value = 1.1; b.gain.value = 0;
     ult.connect(b); ult = b; return b;
   });
-  // il misuratore del suono che esce davvero (16/11): in fondo a tutto, prima delle casse. La guardia lo legge mentre il
-  // brano va avanti: niente suono per 10 s a metà brano = il mixer è muto, e la musica passa al lettore diretto
-  const metro = ctx.createAnalyser(); metro.fftSize = 2048;
-  ult.connect(metro); metro.connect(ctx.destination); MIX.metro = metro; EQ.pre = pre;
+  ult.connect(ctx.destination);
+  // il misuratore del suono che esce dal mixer (16/11), di lato: ascolta quello che va alle casse ma non è sulla strada
+  // del suono (15/11: se su un iPhone desse problemi, la musica non ne risente). La guardia lo legge mentre il brano va
+  // avanti: niente suono per 10 s a metà brano = il mixer è muto, e la musica passa al lettore diretto
+  try { const metro = ctx.createAnalyser(); metro.fftSize = 2048; ult.connect(metro); MIX.metro = metro; } catch (e) { MIX.metro = null; }
+  EQ.pre = pre;
   return pre;
 }
 const eqImposta = (par, v, subito) => { try { if (subito) par.value = v; else { par.cancelScheduledValues(MIX.ctx.currentTime); par.setTargetAtTime(v, MIX.ctx.currentTime, 0.04); } } catch (e) { par.value = v; } };

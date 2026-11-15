@@ -280,11 +280,13 @@ function equalizzatore(src) {
   // catena: sorgente → dissolvenza → volume uniforme → preamp → 10 filtri → casse
   const pre = ctx.sorgenti[0].uscite[0].uscite[0].uscite[0];
   vero(pre && pre === ctx.sorgenti[1].uscite[0].uscite[0].uscite[0], 'i due lettori passano dallo stesso equalizzatore');
-  let n = pre.uscite[0], tipi = [], freq = [];
-  while (n && n.tipo === 'filtro') { tipi.push(n.type); freq.push(n.frequency.value); n = n.uscite[0]; }
+  let n = pre.uscite[0], tipi = [], freq = [], ultimo = null;
+  while (n && n.tipo === 'filtro') { tipi.push(n.type); freq.push(n.frequency.value); ultimo = n; n = n.uscite[0]; }
   uguale(freq, [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000], 'le 10 bande');
-  // 16/11: dopo i filtri il misuratore del suono che esce davvero (lo legge la guardia), poi le casse
-  vero(tipi[0] === 'lowshelf' && tipi[9] === 'highshelf' && tipi.slice(1, 9).every(t => t === 'peaking') && n.tipo === 'misuratore' && n.uscite[0] === ctx.destination && env.MIX.metro === n, 'filtri giusti, il misuratore, poi le casse');
+  vero(tipi[0] === 'lowshelf' && tipi[9] === 'highshelf' && tipi.slice(1, 9).every(t => t === 'peaking') && n === ctx.destination, 'filtri giusti, poi le casse');
+  // 16/11: il misuratore del suono che esce (lo legge la guardia); 17/11: di lato, fuori dalla strada del suono verso le casse
+  const metro = ultimo.uscite[1];
+  vero(ultimo.uscite.length === 2 && metro && metro.tipo === 'misuratore' && !metro.uscite.length && env.MIX.metro === metro, 'il misuratore di lato, non sulla strada del suono');
   const rock = P.find(p => p[0] === 'rock')[2];
   let f = pre.uscite[0], g = []; while (f.tipo === 'filtro') { g.push(f.gain.value); f = f.uscite[0]; }
   uguale(g, rock, 'valori del preset Rock');
