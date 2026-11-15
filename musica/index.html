@@ -577,6 +577,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 <audio id="au" preload="auto" x-webkit-airplay="allow"></audio>
 <audio id="au2" preload="auto" x-webkit-airplay="allow"></audio>
 <audio id="auX" preload="auto" x-webkit-airplay="allow"></audio>
+<audio id="auD" preload="auto" x-webkit-airplay="allow"></audio>
 
 <script>
 'use strict';
@@ -683,8 +684,9 @@ let q = '';
 let lists = [];
 // due lettori per la musica: nel passaggio a tempo il brano che finisce e quello che comincia suonano insieme, poi
 // «au» diventa quello nuovo. Il terzo (auX) è per podcast e audiolibri: non passa mai dal mixer, così suonano anche
-// quelli di altri siti (il mixer dell'iPhone li renderebbe muti)
-const DECKS = [$('au'), $('au2')], AUX = $('auX'), ALLAU = DECKS.concat(AUX);
+// quelli di altri siti (il mixer dell'iPhone li renderebbe muti). Il quarto (auD, DIRETTO) è la riserva della musica:
+// anche lui fuori dal mixer, pronto (sbloccato al primo tocco) per quando dal mixer non esce suono (16/11, passaAlDiretto)
+const DECKS = [$('au'), $('au2')], AUX = $('auX'), DIRETTO = $('auD'), ALLAU = DECKS.concat(AUX, DIRETTO);
 let au = DECKS[0];
 // eventi del lettore: arrivano da tutti e tre, ma contano solo quelli del lettore in uso
 const auOn = (ev, fn) => ALLAU.forEach(el => el.addEventListener(ev, e => { if (el === au) fn(e); }));
@@ -2678,8 +2680,9 @@ async function load(i, play, at) {
   }
   S.qi = i;
   xfAbort();
-  const el = castUnLettore() ? au : t.ext ? AUX : au === AUX ? DECKS[0] : au;   // AirPlay del Mac o Chromecast: si resta sul lettore collegato
+  const el = castUnLettore() ? au : t.ext ? AUX : MIX.fuori ? DIRETTO : au === AUX || au === DIRETTO ? DECKS[0] : au;   // AirPlay del Mac o Chromecast: si resta sul lettore collegato
   if (el !== au) { au.pause(); au.removeAttribute('src'); try { au.load(); } catch (e) {} au = el; }
+  if (MIX.gains && MIX.gains.has(au)) setGain(au, 1);   // un brano che parte da solo, non in dissolvenza: volume pieno (16/11)
   if (curUrl) URL.revokeObjectURL(curUrl); curUrl = null;
   if (t.ext) au.src = t.url;
   else if (f && !castDalMac(t)) { if (!gemelloSalvato(id)) saved.add(id); curUrl = URL.createObjectURL(f); au.src = curUrl; }
@@ -2809,8 +2812,12 @@ function guardiaGiro() {
   if (serveIlMac()) { aspettaMac(el, t); return; }   // il brano che serve è solo sul Mac e il Mac non risponde: si aspetta, non si conta
   if (INTERR.da && el.paused && !el.ended) { riprendiDopoInterruzione(el); return; }   // l'iPhone ha interrotto l'audio: si aspetta che finisca
   if (!GUARDIA.da) { GUARDIA.t = t; GUARDIA.da = ora; return; }
-  const limite = fermo ? GUARDIA.PARTE : el.readyState < 3 && navigator.onLine !== false ? GUARDIA.ARRIVA : GUARDIA.FERMO;
+  // il brano fermo su un lettore del mixer, con il mixer fermo o con i dati già arrivati (non è la rete): è il mixer che
+  // non lo fa suonare. In 4 s la musica passa al lettore diretto, invece dei tentativi sullo stesso mixer (16/11)
+  const mixerRotto = !fermo && !!MIX.ctx && !!MIX.gains && MIX.gains.has(el) && (MIX.ctx.state !== 'running' || el.readyState >= 3);
+  const limite = mixerRotto ? 4000 : fermo ? GUARDIA.PARTE : el.readyState < 3 && navigator.onLine !== false ? GUARDIA.ARRIVA : GUARDIA.FERMO;
   if (ora - GUARDIA.da < limite) return;
+  if (mixerRotto) { MIX.ctx.resume().catch(() => {}); if (passaAlDiretto('brano fermo con il mixer ' + MIX.ctx.state)) { GUARDIA.da = ora; return; } }
   GUARDIA.da = ora; GUARDIA.volte++;
   diario(el.ended ? 'finito e mai ripartito' : el.paused ? 'fermo senza pausa' : 'fermo a metà', {t:Math.round(t), rs:el.readyState,
     rete:el.networkState, err:el.error ? el.error.code : 0, volta:GUARDIA.volte, ctx:MIX.ctx ? MIX.ctx.state : 'no', nascosta:!!document.hidden});
@@ -2831,7 +2838,7 @@ function guardiaGiro() {
     return;
   }
   const altro = DECKS.find(x => x !== el && x._sbloccato && !x.error);
-  if (GUARDIA.volte === 3 && altro && el !== AUX) {   // questo lettore non vuole ripartire: l'altro, che ha già suonato
+  if (GUARDIA.volte === 3 && altro && el !== AUX && el !== DIRETTO) {   // questo lettore non vuole ripartire: l'altro, che ha già suonato
     el.pause(); el.removeAttribute('src'); try { el.load(); } catch (e) {}
     au = altro;
   }
@@ -2859,13 +2866,56 @@ function mixerMuto(el, ora) {
   GUARDIA.mc = c; GUARDIA.mt = ora;
   const passato = quando ? (ora - quando) / 1000 : 0;
   const fermo = ctx.state !== 'running' || (passato >= 1 && prima != null && c - prima < passato * 0.3);
-  if (!fermo) { if (GUARDIA.muto) diario('mixer ripartito'); GUARDIA.muto = 0; return; }
-  GUARDIA.muto = (GUARDIA.muto || 0) + 1;
-  if (GUARDIA.muto === 1) diario('muto: mixer fermo', {stato:ctx.state, nascosta:!!document.hidden});
-  ctx.resume().catch(() => {});
-  // un'interruzione (un'altra app ha l'audio) finisce da sola; in secondo piano un riavvio fermerebbe la musica (14/11)
-  if (ctx.state === 'interrupted' || sessioneInterrotta() || document.hidden) return;
-  if (GUARDIA.muto >= 3) { GUARDIA.muto = 0; riavviaApp('mixer fermo mentre suona', true); }
+  if (fermo) {
+    // il brano va avanti ma il mixer è fermo: non si sente niente. Lo si fa ripartire; se al giro dopo è ancora fermo
+    // (a schermo bloccato iOS non sempre lo lascia ripartire) la musica passa al lettore diretto: al più 4 s di silenzio,
+    // senza ricaricare l'app e senza un tocco (16/11)
+    GUARDIA.zitto = 0;
+    GUARDIA.muto = (GUARDIA.muto || 0) + 1;
+    if (GUARDIA.muto === 1) diario('muto: mixer fermo', {stato:ctx.state, nascosta:!!document.hidden});
+    ctx.resume().catch(() => {});
+    if (GUARDIA.muto >= 2) passaAlDiretto('mixer ' + ctx.state);
+    return;
+  }
+  if (GUARDIA.muto) diario('mixer ripartito');
+  GUARDIA.muto = 0;
+  // il mixer va: esce davvero del suono? Il misuratore in fondo alla catena, solo a metà brano (non nei primi 8 s né negli
+  // ultimi 12, dove ci può essere silenzio vero) e non durante un passaggio
+  const m = MIX.metro, d = el.duration, t = el.currentTime || 0;
+  if (!m || !(t > 8) || (isFinite(d) && d - t < 12) || MIX.act || MIX.salto) { GUARDIA.zitto = 0; return; }
+  const buf = MIX.metroBuf || (MIX.metroBuf = new Float32Array(m.fftSize));
+  m.getFloatTimeDomainData(buf);
+  let picco = 0; for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i]); if (v > picco) picco = v; }
+  if (picco > 1e-4) { GUARDIA.zitto = 0; return; }
+  GUARDIA.zitto = (GUARDIA.zitto || 0) + 1;
+  if (GUARDIA.zitto === 3) { diario('muto: dal mixer non esce suono', {t:Math.round(t)}); risveglia(el); }   // 6 s: guadagni al loro posto
+  if (GUARDIA.zitto >= 5) passaAlDiretto('dal mixer non esce suono');   // 10 s: il lettore diretto
+}
+function risveglia(el) {   // i guadagni del lettore al loro posto (una dissolvenza rimasta a 0?), niente «muto», mixer avviato
+  try { const g = MIX.gains.get(el).gain; g.cancelScheduledValues(MIX.ctx.currentTime); g.setValueAtTime(1, MIX.ctx.currentTime); el._g = 1; } catch (e) {}
+  try { const n = MIX.norm.get(el); if (n) n.gain.value = el._n == null ? 1 : el._n; } catch (e) {}
+  try { eqLivello(true); } catch (e) {}
+  if (el.muted) el.muted = false;
+  try { MIX.ctx.resume().catch(() => {}); } catch (e) {}
+}
+/* IL LETTORE DIRETTO (16/11): «la riproduzione del file continua ma non si sente niente». Tutta la musica dell'iPhone passa
+   dal mixer della dissolvenza; se il mixer si ferma, o non ne esce suono, il brano va avanti muto. Allora la musica passa,
+   dallo stesso punto, al lettore di riserva fuori dal mixer (sbloccato al primo tocco: può partire da solo, anche a
+   schermo bloccato), e ci resta: i passaggi diventano a taglio, senza dissolvenza. Al primo tocco con il mixer di nuovo
+   in funzione la dissolvenza torna, dal brano dopo. */
+function passaAlDiretto(perche) {
+  if (au === DIRETTO || au === AUX || !curId) return false;
+  if (!DIRETTO._sbloccato) { if (!passaAlDiretto.detto) { passaAlDiretto.detto = true; diario('lettore diretto non pronto (nessun tocco)', {perche}); } return false; }
+  const pos = posVoluta(), vecchio = au;
+  diario('dal mixer non esce suono: passo al lettore diretto', {perche, t:Math.round(pos), ctx:MIX.ctx ? MIX.ctx.state : 'no', nascosta:!!document.hidden});
+  xfAbort();
+  MIX.fuori = true;
+  au = DIRETTO;   // prima di fermare il vecchio: i suoi eventi non contano più
+  try { vecchio.pause(); vecchio.removeAttribute('src'); vecchio.load(); } catch (e) {}
+  GUARDIA.muto = 0; GUARDIA.zitto = 0;
+  load(S.qi, true, pos);
+  if (!document.hidden) toast('Il mixer di iOS si era fermato: la musica continua, senza dissolvenza fino al prossimo tocco', true);
+  return true;
 }
 function serveIlMac() {
   if (SRV || srvWait) return false;
@@ -3542,7 +3592,10 @@ function mixerInit(perEQ) {
     ctx.addEventListener('statechange', () => diario('mixer', {stato:ctx.state, nascosta:document.hidden}));   // ogni cambio nel diario
   } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
 }
-addEventListener('pointerdown', () => { mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {}); }, {capture:true, passive:true});
+addEventListener('pointerdown', () => {
+  mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+  if (MIX.fuori && MIX.ctx) setTimeout(() => { if (MIX.fuori && MIX.ctx && MIX.ctx.state === 'running') { MIX.fuori = false; diario('mixer di nuovo pronto: la dissolvenza torna dal brano dopo'); } }, 500);
+}, {capture:true, passive:true});
 /* ---------- equalizzatore (come Impostazioni › Musica › EQ dell'iPhone) ----------
    10 bande (32 Hz – 16 kHz, come l'EQ di iTunes) dopo il mixer, con i preset di Musica; vale su questo dispositivo
    (am-eq). Serve il mixer (Web Audio): sull'iPhone c'è già (da iOS 27); su Mac e PC si accende la prima volta che si
@@ -3584,7 +3637,10 @@ function eqCostruisci(ctx) {   // ingresso (preamp e volume) → 10 filtri → c
     b.type = i === 0 ? 'lowshelf' : i === EQ_BANDE.length - 1 ? 'highshelf' : 'peaking'; b.frequency.value = f; b.Q.value = 1.1; b.gain.value = 0;
     ult.connect(b); ult = b; return b;
   });
-  ult.connect(ctx.destination); EQ.pre = pre;
+  // il misuratore del suono che esce davvero (16/11): in fondo a tutto, prima delle casse. La guardia lo legge mentre il
+  // brano va avanti: niente suono per 10 s a metà brano = il mixer è muto, e la musica passa al lettore diretto
+  const metro = ctx.createAnalyser(); metro.fftSize = 2048;
+  ult.connect(metro); metro.connect(ctx.destination); MIX.metro = metro; EQ.pre = pre;
   return pre;
 }
 const eqImposta = (par, v, subito) => { try { if (subito) par.value = v; else { par.cancelScheduledValues(MIX.ctx.currentTime); par.setTargetAtTime(v, MIX.ctx.currentTime, 0.04); } } catch (e) { par.value = v; } };
@@ -3619,7 +3675,7 @@ function eqSheet() {
 const SILENZIO = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';   // 0,05 s di silenzio
 function sbloccaLettori() {
   if (!au.paused) return;   // solo a musica ferma (es. il tocco su ▶︎): un iPhone che non fa suonare due lettori insieme fermerebbe il brano
-  for (const el of DECKS) {
+  for (const el of DECKS.concat(DIRETTO)) {
     if (el._sbloccato || el.getAttribute('src')) continue;   // un lettore con un brano dentro non si tocca
     el._sbloccato = true; el._rifiuta = false;
     try {
@@ -3636,7 +3692,7 @@ function sbloccaLettori() {
 function controllaPassaggio() {
   const t0 = Date.now();
   setTimeout(() => {
-    if (!curId || pausaVoluta >= t0 || !au.paused || au === AUX) return;
+    if (!curId || pausaVoluta >= t0 || !au.paused || au === AUX || au === DIRETTO) return;
     const vecchio = au, pos = au.currentTime || 0, i = S.qi;
     diario('fermo dopo il passaggio: riparto');
     const pr = au.play();
@@ -3658,7 +3714,10 @@ document.addEventListener('visibilitychange', () => {
   if (!MIX.ctx) return;
   if (document.hidden) {
     setTimeout(() => {
-      if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && au !== AUX) { diario('mixer fermo a schermo bloccato: riparte', {stato:MIX.ctx.state}); MIX.ctx.resume().catch(() => {}); }
+      if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && MIX.gains.has(au)) {
+        diario('mixer fermo a schermo bloccato: riparte', {stato:MIX.ctx.state}); MIX.ctx.resume().catch(() => {});
+        setTimeout(() => { if (MIX.ctx.state !== 'running' && !au.paused && MIX.gains.has(au)) passaAlDiretto('mixer ' + MIX.ctx.state + ' a schermo bloccato'); }, 1500);
+      }
     }, 2500);
     return;
   }
@@ -3738,7 +3797,15 @@ function riprendiDopoInterruzione(el) {
   if (ora - INTERR.da > INTERR.MAX) { INTERR.da = 0; pausaVoluta = ora; updateNow(); diario('interruzione di oltre 30 minuti: mi fermo'); return; }
   if (sessioneInterrotta() || ora - INTERR.prova < INTERR.OGNI) return;   // l'altra app ha ancora l'audio: si aspetta
   INTERR.prova = ora;
-  if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
+  // un lettore del mixer con il mixer fermo suonerebbe muto (16/11): prima il mixer; se non riparte, il lettore diretto
+  if (MIX.ctx && MIX.gains && MIX.gains.has(el) && MIX.ctx.state !== 'running') {
+    MIX.ctx.resume().catch(() => {});
+    if (!INTERR.mixer) { INTERR.mixer = ora; return; }
+    if (ora - INTERR.mixer < 3000) return;
+    INTERR.mixer = 0;
+    if (passaAlDiretto('mixer ' + MIX.ctx.state + ' dopo l\'interruzione')) { INTERR.da = 0; return; }
+  }
+  INTERR.mixer = 0;
   const da = INTERR.da, pr = el.play();
   if (pr && pr.then) pr.then(() => { if (INTERR.da === da || !INTERR.da) diario('ripartito dopo l\'interruzione', {s:Math.round((Date.now() - da) / 1000)}); INTERR.da = 0; },
     e => diario('ripartenza dopo l\'interruzione rifiutata', {err:(e && e.name) || String(e)}));
@@ -4038,7 +4105,7 @@ function xfLoop() { clearInterval(MIX.loop); MIX.loop = setInterval(() => { if (
 function xfTick() {
   if (MIX.act) { xfRun(); return; }
   if (MIX.salto) return;   // un salto a mano in preparazione: il mix a fine brano aspetta
-  if (!MIX.on || au === AUX || au.paused || castUnLettore()) return;   // AirPlay del Mac, Chromecast: l'altro lettore suonerebbe qui
+  if (!MIX.on || MIX.fuori || au === AUX || au === DIRETTO || au.paused || castUnLettore()) return;   // AirPlay del Mac, Chromecast: l'altro lettore suonerebbe qui
   const t = T.get(curId), d = au.duration, c = au.currentTime;
   if (!t || !isFinite(d) || d < 45) return;
   const j = nextIdx(), idB = j >= 0 ? S.queue[j] : null, tb = idB && T.get(idB);
@@ -4160,7 +4227,7 @@ function saltaA(j, subito, daCoda) {
     return k >= 0 ? load(k, true) : subito();
   }
   const id = S.queue[j], tb = id && TT(id), d = au.duration, c = au.currentTime;
-  if (!MIX.on || !curId || au === AUX || au.paused || !tb || tb.ext || id === curId || !canPlay(id) || tb.duration && tb.duration < 20 ||
+  if (!MIX.on || MIX.fuori || !curId || au === AUX || au === DIRETTO || au.paused || !tb || tb.ext || id === curId || !canPlay(id) || tb.duration && tb.duration < 20 ||
     otherDeck()._rifiuta || !isFinite(d) || d - c < saltoResto()) return subito();
   if (MIX.plan) xfAbort();   // il mix a fine brano che si stava preparando lascia il posto al salto
   if (MIX.act) xfAccorcia(1);   // durante una dissolvenza: quella finisce in 1 s e si salta dal brano nuovo
@@ -5247,7 +5314,7 @@ const inLib = t => t && t.remote && t.sid;
 
 function devStato() {   // quello che gli altri vedono di questo dispositivo
   const t = curId && TT(curId);
-  const mix = {on:MIX.on, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', diario:DIARIO.slice(-30)};
+  const mix = {on:MIX.on, noweb:ls.get('am-mix-noweb', false), mixer:MIX.gains.size > 0, ctx:MIX.ctx ? MIX.ctx.state : '', fuori:!!MIX.fuori, diario:DIARIO.slice(-30)};
   if (!t) return {suona:false, vol:userVol, bloccato:DEV.bloccato, mix};
   const coda = [];   // dal brano in corso in avanti, solo quelli della libreria (gli altri non si possono spostare)
   for (let k = Math.max(0, S.qi); k < S.queue.length && coda.length < 300; k++) { const x = TT(S.queue[k]); if (inLib(x)) coda.push(x.sid); }
@@ -5581,7 +5648,7 @@ function fuoriTasto(a, e) {
   const d = au.duration, c = au.currentTime || 0;
   const vai = t => { try { if (e && e.fastSeek && au.fastSeek) au.fastSeek(t); else au.currentTime = t; } catch (x) {} };
   switch (a) {
-    case 'play': if (!curId) toggle(); else if (au.paused) riprendi(true); break;
+    case 'play': sbloccaLettori(); if (!curId) toggle(); else if (au.paused) riprendi(true); break;
     case 'pause': case 'stop': if (!au.paused) { pausaVoluta = Date.now(); au.pause(); } break;   // «stop» non svuota la coda
     case 'next': avanti(); break;   // con il mix acceso: il passaggio a tempo anche dalla schermata di blocco
     case 'prev': prev(); break;
