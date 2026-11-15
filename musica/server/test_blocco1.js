@@ -257,11 +257,11 @@ function equalizzatore(src) {
   class Nodo { constructor(tipo) { this.tipo = tipo; this.uscite = []; this.gain = new Par(1); this.frequency = new Par(350); this.Q = new Par(1); this.type = ''; } connect(n) { this.uscite.push(n); return n; } }
   let creati = 0;
   class Ctx { constructor() { creati++; this.state = 'running'; this.currentTime = 0; this.destination = new Nodo('casse'); this.sorgenti = []; }
-    createGain() { return new Nodo('gain'); } createBiquadFilter() { return new Nodo('filtro'); }
+    createGain() { return new Nodo('gain'); } createBiquadFilter() { return new Nodo('filtro'); } createAnalyser() { const n = new Nodo('misuratore'); n.fftSize = 2048; return n; }
     createMediaElementSource(el) { const n = new Nodo('sorgente'); n.el = el; this.sorgenti.push(n); return n; } resume() { return {catch() {}}; } addEventListener() {} }
   const ls = memoria(), log = {toast:[], chiusa:0};
   const env = {ls, MIX:{ctx:null, gains:new Map(), norm:new Map(), on:true}, NEEDS_MIXER:false, IOS_PRIMA_27:false, userVol:0.5, AudioContext:Ctx, window:{AudioContext:Ctx},
-    navigator:{}, DECKS:[{}, {}], au:{paused:true}, AUX:{}, diario() {}, document:{hidden:false}, Math, esc:x => x, ic:n => '<' + n + '>', cancel:'',
+    navigator:{}, DECKS:[{}, {}], au:{paused:true}, AUX:{}, DIRETTO:{}, diario() {}, document:{hidden:false}, Math, esc:x => x, ic:n => '<' + n + '>', cancel:'',
     applyVol() {}, toast:m => log.toast.push(m), closeSheet:() => log.chiusa++, openSheet:h => { log.foglio = h; }};
   const F = carica(src, ['eqValori', 'eqNome', 'eqPre', 'eqCostruisci', 'eqLivello', 'eqApplica', 'eqDisponibile', 'eqScegli', 'eqSheet', 'mixerInit'],
     ['const EQ_BANDE = ', 'const EQ = ', 'const eqImposta = '], env);
@@ -283,7 +283,8 @@ function equalizzatore(src) {
   let n = pre.uscite[0], tipi = [], freq = [];
   while (n && n.tipo === 'filtro') { tipi.push(n.type); freq.push(n.frequency.value); n = n.uscite[0]; }
   uguale(freq, [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000], 'le 10 bande');
-  vero(tipi[0] === 'lowshelf' && tipi[9] === 'highshelf' && tipi.slice(1, 9).every(t => t === 'peaking') && n === ctx.destination, 'filtri giusti, poi le casse');
+  // 16/11: dopo i filtri il misuratore del suono che esce davvero (lo legge la guardia), poi le casse
+  vero(tipi[0] === 'lowshelf' && tipi[9] === 'highshelf' && tipi.slice(1, 9).every(t => t === 'peaking') && n.tipo === 'misuratore' && n.uscite[0] === ctx.destination && env.MIX.metro === n, 'filtri giusti, il misuratore, poi le casse');
   const rock = P.find(p => p[0] === 'rock')[2];
   let f = pre.uscite[0], g = []; while (f.tipo === 'filtro') { g.push(f.gain.value); f = f.uscite[0]; }
   uguale(g, rock, 'valori del preset Rock');

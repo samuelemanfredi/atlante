@@ -70,7 +70,9 @@ function ambiente() {
   const lettore = nome => ({nome, paused:false, ended:false, currentTime:42, readyState:4, networkState:1, error:null, _sbloccato:true,
     getAttribute: () => 'blob:x', removeAttribute() {}, load() {}, pause() { this.paused = true; },
     play() { env.suonati++; return {catch() {}}; }});
-  env.DECKS = [lettore('A'), lettore('B')]; env.au = env.DECKS[0];
+  env.DECKS = [lettore('A'), lettore('B')]; env.au = env.DECKS[0]; env.DIRETTO = lettore('D');
+  env.diretti = []; env.passaAlDiretto = perche => { env.diretti.push(perche); return true; };
+  env.risvegli = 0; env.risveglia = () => { env.risvegli++; };
   env.Date = {now: () => env.ora};
   env.performance = {now: () => env.perf};
   env.load = (i, play, at) => { env.carichi.push([env.au.nome, i, play, at]); };
@@ -190,17 +192,29 @@ function prove(src, fatte) {
   const avanti = n => { for (let k = 0; k < n; k++) { env.au.currentTime += 2; env.ora += 2000; F.guardiaGiro(); } };
   nuovo(mixer('running', true)); avanti(10);
   eq([env.riavvii, env.MIX.ctx.resumes], [[], 0], 'mixer che va: niente');
-  // sospeso (non un'interruzione di un'altra app), con l'app davanti: prima lo si fa ripartire, poi il riavvio
+  // 16/11: il brano va avanti ma il mixer è fermo: prima lo si fa ripartire, al giro dopo il lettore diretto (niente riavvii)
   nuovo(mixer('suspended', false)); avanti(2);
-  eq([env.MIX.ctx.resumes, env.riavvii.length], [1, 0], 'mixer sospeso: prima lo si fa ripartire');
-  avanti(2);
-  eq(env.riavvii, [['mixer fermo mentre suona', true]], 'ancora fermo: l\'app si riavvia');
-  nuovo(mixer('running', false)); avanti(5);   // il primo giro conosce il brano, il secondo l'orologio, poi tre giri fermi
-  eq(env.riavvii.length, 1, 'mixer «running» con l\'orologio fermo: muto anche lui');
+  eq([env.MIX.ctx.resumes, env.diretti.length], [1, 0], 'mixer sospeso: prima lo si fa ripartire');
+  avanti(1);
+  eq([env.diretti, env.riavvii], [['mixer suspended'], []], 'ancora fermo: il lettore diretto, senza ricaricare l\'app');
+  nuovo(mixer('running', false)); avanti(4);   // il primo giro conosce il brano, il secondo l'orologio, poi due giri fermi
+  eq(env.diretti.length, 1, 'mixer «running» con l\'orologio fermo: muto anche lui');
   nuovo(e => { mixer('interrupted', false)(e); e.riparte = true; }); avanti(6);
-  eq([env.MIX.ctx.resumes, env.riavvii.length, env.diari.indexOf('mixer ripartito') >= 0], [1, 0, true], 'ripartito: niente riavvio');
+  eq([env.MIX.ctx.resumes, env.diretti.length, env.diari.indexOf('mixer ripartito') >= 0], [1, 0, true], 'ripartito: resta il mixer');
   nuovo(e => { mixer('interrupted', false)(e); e.MIX.gains = new Map(); }); avanti(6);
-  eq(env.riavvii.length, 0, 'lettore fuori dal mixer (radio, Mac): non conta');
+  eq(env.diretti.length + env.riavvii.length, 0, 'lettore fuori dal mixer (radio, Mac): non conta');
+  // il mixer va (running, orologio che avanza) ma dal misuratore non esce suono: a 6 s i guadagni, a 10 s il lettore diretto
+  const zitto = picco => e => { mixer('running', true)(e); e.au.duration = 300; e.MIX.metro = {fftSize:8, getFloatTimeDomainData(b) { b.fill(0); b[3] = picco(); }}; };
+  let liv = 0;
+  nuovo(zitto(() => liv)); avanti(4);
+  eq(env.diretti.length, 0, 'silenzio da poco: si aspetta');
+  avanti(2);
+  eq(env.diretti, ['dal mixer non esce suono'], '10 s senza suono a metà brano: il lettore diretto');
+  if (env.diari.indexOf('muto: dal mixer non esce suono') < 0) throw new Error('nel diario il silenzio');
+  nuovo(zitto(() => 0.2)); avanti(20);
+  eq(env.diretti.length, 0, 'musica che si sente: niente');
+  nuovo(e => { zitto(() => 0)(e); e.au.currentTime = 2; }); avanti(4);   // primi secondi: silenzio vero possibile
+  eq(env.diretti.length, 0, 'nei primi 8 s non conta');
   fatte.push('mixer muto');
 
   /* ---------- ricaricato due volte di fila: torna sempre al punto voluto, non all'inizio ---------- */
@@ -233,9 +247,7 @@ function prove(src, fatte) {
   eq([env.riavvii.length, env.pausaVoluta], [0, 0], 'in secondo piano: nessun riavvio, nessuna resa');
   if (env.carichi.length < 3) throw new Error('in secondo piano deve continuare a riprovare: ' + JSON.stringify(env.carichi));
   nuovo(e => { mixer('interrupted', false)(e); e.document.hidden = true; }); avanti(10);
-  eq(env.riavvii.length, 0, 'mixer fermo in secondo piano: lo si fa ripartire, mai il riavvio');
-  nuovo(mixer('interrupted', false)); env.interrotta = true; avanti(10);
-  eq(env.riavvii.length, 0, 'mixer interrotto da un\'altra app: si aspetta');
+  eq([env.riavvii.length, env.diretti.length >= 1], [0, true], 'mixer fermo a schermo bloccato: il lettore diretto, mai il riavvio');
   fatte.push('mai il riavvio in secondo piano');
 
   /* ---------- brano cambiato: il conto riparte ---------- */

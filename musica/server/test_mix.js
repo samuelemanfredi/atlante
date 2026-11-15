@@ -349,7 +349,7 @@ function mondo(src, opz) {
   const ritardo = (ms, v) => new SP(ok => tempo.setTimeout(() => ok(v), ms));
   const memoria = opz.memoria || {};   // localStorage: si può passare da un mondo al successivo
   const env = {
-    au:DECKS[0], DECKS, AUX, curId:null, curUrl:null, keptFor:null, countFor:null, userVol:1, pausaVoluta:0,
+    au:DECKS[0], DECKS, AUX, DIRETTO:new Lettore('auD'), curId:null, curUrl:null, keptFor:null, countFor:null, userVol:1, pausaVoluta:0,
     S:{queue:brani.map(b => b.id), orig:[], qi:0, shuffle:false, repeat:'off', from:''}, T,
     MIX:{on:true, X:10, RAMPA:8, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0, XS:6, salto:null},
     BPMC:new Map(), RC:{id:null}, NEEDS_MIXER:false, API:'api/musica/', SRV:true,
