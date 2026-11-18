@@ -2395,6 +2395,12 @@ def _proxy_ytdlp():
 # La ricerca fa la stessa richiesta delle pagine web di YouTube Music e YouTube (youtubei/v1/search): risponde in un
 # secondo con titolo, artisti, album, durata, copertina e «E» degli explicit (yt-dlp `ytsearch` impiega 14 secondi e
 # da YouTube Music dà solo i titoli). Se YouTube cambia formato o non risponde si ripiega su yt-dlp.
+# YOUTUBE MUSIC SENZA «BRANI» (18/11/2026, «non funziona più la ricerca da YouTube»): a chi non ha fatto l'accesso
+# YouTube Music non dà più i brani: il filtro «Brani» risponde «Nessun risultato» e la ricerca senza filtro ha solo
+# video, artisti e podcast (uguale dal web, da Android e da iOS, in Italia e negli Stati Uniti). Prima si ripiegava su
+# yt-dlp, che impiega decine di secondi e spesso non risponde in tempo: la ricerca «non funzionava». Ora, se non arriva
+# nessun brano: il primo risultato di YouTube Music (il riquadro in alto: titolo e artista puliti, durata) e i suoi
+# video ufficiali, poi i video di YouTube (con la durata). yt-dlp resta l'ultima riserva.
 # Ascolto e scaricamento usano lo stesso audio originale (m4a), preparato una volta sola nella cache degli ascolti;
 # il brano scaricato diventa un MP3 alla qualità massima (come quelli del Cloud) con tag, copertina quadrata e
 # indirizzo d'origine (purl), nella cartella della musica scaricata, che fa parte della libreria.
@@ -2410,6 +2416,8 @@ CENSURATA = re.compile(r"[(\[\-–—][^()\[\]]{0,100}?\b(clean|censored|censura
 # primo, non da ognuno (con tanti spazi di seguito la ricerca costerebbe il loro quadrato e terrebbe fermo il server)
 RUMORE = re.compile(r"(?<!\s)\s*[(\[][^()\[\]]*\b(official|video|audio|lyrics?|testo|visuali[sz]er|videoclip|ufficiale|hd|"
                     r"4k|mv)\b[^()\[\]]*[)\]]", re.I)
+# i video non hanno la «E» degli explicit: la si riconosce dal titolo («(Explicit)», «(Dirty Version)»)
+EXPLICIT_TITOLO = re.compile(r"[(\[][^()\[\]]{0,60}?\b(explicit|dirty)\b[^()\[\]]{0,60}[)\]]", re.I)
 HOST_COPERTINE = ("googleusercontent.com", "ggpht.com", "ytimg.com", "sndcdn.com", "bcbits.com")
 MAX_COPERTINA = 5 * 1024 * 1024
 ASCOLTI_MAX = 40       # brani pronti per l'ascolto tenuti nella cache (i più vecchi si cancellano)
@@ -2443,8 +2451,10 @@ def _corse(runs):
     return "".join(r.get("text", "") for r in runs or [] if isinstance(r, dict))
 
 
-def _youtubei(fonte, q):
+def _youtubei(fonte, q, filtro=True):
     base, client, params = YOUTUBEI[fonte]
+    if not filtro:
+        params = None
     base = os.environ.get("ATLANTE_YOUTUBEI") or base   # le prove usano un YouTube finto
     corpo = {"context": {"client": dict(client, hl="it", gl="IT")}, "query": q}
     if params:
@@ -2453,6 +2463,32 @@ def _youtubei(fonte, q):
                                headers={"Content-Type": "application/json", "Origin": base, "User-Agent": BROWSER})
     with urllib.request.urlopen(r, timeout=15) as f:
         return json.loads(f.read(16 * 1024 * 1024).decode("utf-8"))
+
+
+# parti del sottotitolo che non sono né artista né album: le visualizzazioni e gli ascoltatori
+VISTE_YT = re.compile(r"\b(visualizzazion\w*|views?|riproduzion\w*|plays?|ascoltator\w*|listeners?)\b", re.I)
+ETICHETTE_YTM = ("Brano", "Song", "Video", "Episodio", "Episode", "Puntata")
+
+
+def _parti_ytm(runs):
+    """(parti, durata) di un sottotitolo di YouTube Music («Brano • artisti • album • 4:51», «Video • artista •
+    2,1 Mld visualizzazioni • 6:00»): senza l'etichetta del tipo, la durata e le visualizzazioni."""
+    parti, pezzo = [], []
+    for r in runs or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("text", "").strip() == "•":
+            parti.append(pezzo)
+            pezzo = []
+        else:
+            pezzo.append(r.get("text", ""))
+    parti = [x for x in ("".join(p).strip() for p in parti + [pezzo]) if x]
+    if parti and parti[0] in ETICHETTE_YTM:
+        parti = parti[1:]
+    durata = _secondi(parti[-1]) if parti else 0
+    if durata:
+        parti = parti[:-1]
+    return [x for x in parti if not VISTE_YT.search(x)], durata
 
 
 def _brano_ytm(it):
@@ -2464,19 +2500,7 @@ def _brano_ytm(it):
     vid = next(_trova(cols[0], "videoId"), None) or next(_trova(it.get("overlay"), "videoId"), None)
     if not isinstance(vid, str) or not ID_YT.match(vid):
         return None
-    parti, pezzo = [], []
-    for r in (cols[1] if len(cols) > 1 else []):
-        if r.get("text", "").strip() == "•":
-            parti.append(pezzo)
-            pezzo = []
-        else:
-            pezzo.append(r.get("text", ""))
-    parti = [x for x in ("".join(p).strip() for p in parti + [pezzo]) if x]
-    if parti and parti[0] in ("Brano", "Song", "Video", "Episodio", "Episode"):
-        parti = parti[1:]
-    durata = _secondi(parti[-1]) if parti else 0
-    if durata:
-        parti = parti[:-1]
+    parti, durata = _parti_ytm(cols[1] if len(cols) > 1 else [])
     miniature = next(_trova(it.get("thumbnail"), "thumbnails"), None) or []
     copertina = (miniature[-1].get("url") or "") if miniature and isinstance(miniature[-1], dict) else ""
     return {"id": vid, "titolo": _corse(cols[0]).strip(), "artista": parti[0] if parti else "",
@@ -2486,11 +2510,12 @@ def _brano_ytm(it):
 
 
 def _da_titolo_video(titolo, canale):
-    """(artista, titolo) dal titolo di un video («Artista - Titolo (Official Video)») e dal nome del canale."""
+    """(artista, titolo) dal titolo di un video («Artista - Titolo (Official Video)», anche con il trattino lungo
+    «Artista – Titolo») e dal nome del canale."""
     t = RUMORE.sub("", titolo or "").strip()
-    if " - " in t:
-        a, t = t.split(" - ", 1)
-        return a.strip(), t.strip()
+    m = re.search(r" [-–—] ", t)
+    if m:
+        return t[:m.start()].strip(), t[m.end():].strip()
     canale = re.sub(r"(?<!\s)\s*(?:- Topic|VEVO)$", "", canale or "").strip()
     return canale, t
 
@@ -2503,7 +2528,7 @@ def _brano_yt(v):
     artista, titolo = _da_titolo_video(_corse((v.get("title") or {}).get("runs")), canale)
     return {"id": vid, "titolo": titolo, "artista": artista, "album": "",
             "durata": _secondi((v.get("lengthText") or {}).get("simpleText")),
-            "copertina": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid, "explicit": False}
+            "copertina": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid, "explicit": bool(EXPLICIT_TITOLO.search(titolo))}
 
 
 def _cerca_ytdlp(q):
@@ -2520,6 +2545,49 @@ def _cerca_ytdlp(q):
             fuori.append({"id": e["id"], "titolo": titolo, "artista": artista, "album": "", "durata": int(e["duration"]),
                           "copertina": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % e["id"], "explicit": False})
     return fuori
+
+
+def _ytm_ufficiali(d):
+    """Dalla ricerca di YouTube Music senza filtro (vedi «YouTube Music senza brani»): il primo risultato (il
+    riquadro in alto) e i brani e video ufficiali dell'elenco. Niente video caricati da altri, artisti, podcast."""
+    fuori = []
+    for card in _trova(d, "musicCardShelfRenderer"):
+        if not isinstance(card, dict):
+            continue
+        tit = (card.get("title") or {}).get("runs") or []
+        vid = next(_trova(tit, "videoId"), None)
+        tipo = next(_trova(tit, "musicVideoType"), "")
+        if not isinstance(vid, str) or not ID_YT.match(vid) or tipo not in ("MUSIC_VIDEO_TYPE_ATV", "MUSIC_VIDEO_TYPE_OMV"):
+            continue
+        parti, durata = _parti_ytm((card.get("subtitle") or {}).get("runs"))
+        fuori.append({"id": vid, "titolo": RUMORE.sub("", _corse(tit)).strip(), "artista": parti[0] if parti else "",
+                      "album": parti[1] if len(parti) > 1 and tipo == "MUSIC_VIDEO_TYPE_ATV" else "", "durata": durata,
+                      "copertina": "https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid,
+                      "explicit": bool(EXPLICIT_TITOLO.search(_corse(tit)))})
+    for it in _trova(d, "musicResponsiveListItemRenderer"):
+        if not isinstance(it, dict) or next(_trova(it, "musicVideoType"), "") not in ("MUSIC_VIDEO_TYPE_ATV", "MUSIC_VIDEO_TYPE_OMV"):
+            continue
+        b = _brano_ytm(it)
+        if b:
+            b["titolo"] = RUMORE.sub("", b["titolo"]).strip()
+            b["copertina"] = "https://i.ytimg.com/vi/%s/mqdefault.jpg" % b["id"]
+            b["explicit"] = b["explicit"] or bool(EXPLICIT_TITOLO.search(b["titolo"]))
+            fuori.append(b)
+    return fuori
+
+
+def _ytm_senza_brani(q):
+    """YouTube Music non ha dato brani: i suoi risultati ufficiali (senza filtro), poi i video di YouTube."""
+    risultati, errori = [], []
+    for fonte, filtro in (("ytm", False), ("yt", True)):
+        try:
+            d = _youtubei(fonte, q, filtro)
+        except (OSError, ValueError) as e:
+            errori.append(str(e))
+            continue
+        risultati += _ytm_ufficiali(d) if fonte == "ytm" else \
+            [b for b in (_brano_yt(x) for x in _trova(d, "videoRenderer") if isinstance(x, dict)) if b]
+    return risultati, "; ".join(errori)
 
 
 def _ordina(risultati):
@@ -2546,6 +2614,10 @@ def cerca_musica(q, fonte):
         risultati = [b for b in ((_brano_ytm if fonte == "ytm" else _brano_yt)(x) for x in voci if isinstance(x, dict)) if b]
     except (OSError, ValueError) as e:   # anche urllib.error.URLError e HTTPError
         errore = str(e)
+    if fonte == "ytm" and not risultati:   # YouTube Music senza brani (vedi sopra): i suoi ufficiali, poi YouTube
+        risultati, e2 = _ytm_senza_brani(q)
+        voci = risultati or voci
+        errore = errore or e2
     if not voci:   # nessuna risposta o formato cambiato (una ricerca senza risultati ha comunque la sua struttura)
         risultati = _cerca_ytdlp(q)
         if not risultati and errore:

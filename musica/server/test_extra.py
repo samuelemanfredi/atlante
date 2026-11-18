@@ -296,6 +296,41 @@ RISPOSTA_YT = {"contents": {"twoColumnSearchResultsRenderer": {"primaryContents"
         _video_yt("fsG39JgqTmo", "Without Me [HD]", "Eminem - Topic", "4:51")]}}]}}}}}
 
 
+# 18/11/2026: YouTube Music senza accesso non dà più brani. Il filtro «Brani» risponde «Nessun risultato»; senza filtro:
+# il riquadro in alto (video ufficiale), video ufficiali e caricati da altri, artisti e puntate di podcast
+def _voce_ytm(vid, titolo, tipo, sottotitolo):
+    corse = []
+    for x in sottotitolo:
+        corse += [{"text": x}, {"text": " • "}]
+    return {"musicResponsiveListItemRenderer": {"flexColumns": [
+        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": titolo, "navigationEndpoint": {"watchEndpoint": {
+            "videoId": vid, "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": tipo}}}}}]}}},
+        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": corse[:-1]}}}]}}
+
+
+RISPOSTA_YTM_NESSUNO = {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {
+    "contents": [{"itemSectionRenderer": {"contents": [{"messageRenderer": {"text": {"runs": [
+        {"text": "Nessun risultato per "}, {"text": "queen", "bold": True}, {"text": "."}]}}}]}}]}}}}]}}}
+RISPOSTA_YTM_SENZA_FILTRO = {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
+    "sectionListRenderer": {"contents": [
+        {"musicCardShelfRenderer": {
+            "title": {"runs": [{"text": "Bohemian Rhapsody (Official Video Remastered)", "navigationEndpoint": {"watchEndpoint": {
+                "videoId": "fJ9rUzIMcZQ", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {
+                    "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"}}}}}]},
+            "subtitle": {"runs": [{"text": "Video"}, {"text": " • "}, {"text": "Queen"}, {"text": " • "},
+                                  {"text": "2,1 Mld visualizzazioni"}, {"text": " • "}, {"text": "6:00"}]}}},
+        {"itemSectionRenderer": {"contents": [
+            _voce_ytm("", "Queen", "", ["Artista", "120 Mln ascoltatori mensili"]),
+            _voce_ytm("UgcCopia001", "Queen - Bohemian Rhapsody (Lyrics)", "MUSIC_VIDEO_TYPE_UGC", ["Video", "7clouds Rock", "7,2 Mln di visualizzazioni"]),
+            _voce_ytm("OmvLive0001", "Bohemian Rhapsody (Live Aid 1985)", "MUSIC_VIDEO_TYPE_OMV", ["Video", "Queen", "317 Mln di visualizzazioni"]),
+            _voce_ytm("Podcast0001", "La storia di Bohemian Rhapsody", "MUSIC_VIDEO_TYPE_PODCAST_EPISODE", ["Puntata", "28 nov 2025", "Storie"])]}}]}}}}]}}}
+RISPOSTA_YT_SENZA_BRANI = {"contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {"sectionListRenderer": {"contents": [
+    {"itemSectionRenderer": {"contents": [
+        _video_yt("fJ9rUzIMcZQ", "Queen – Bohemian Rhapsody (Official Video Remastered)", "Queen Official", "6:00"),
+        _video_yt("YtDirty0001", "Queen - Fat Bottomed Girls (Explicit)", "Queen Official", "4:16"),
+        _video_yt("YtLive00001", "Queen live 24/7", "Radio", None)]}}]}}}}}
+
+
 class FintoYouTube(http.server.BaseHTTPRequestHandler):
     richieste = []
 
@@ -308,7 +343,11 @@ class FintoYouTube(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         musica = corpo.get("context", {}).get("client", {}).get("clientName") == "WEB_REMIX"
-        dati = json.dumps(RISPOSTA_YTM if musica else RISPOSTA_YT).encode("utf-8")
+        if str(corpo.get("query") or "").startswith("senza brani"):   # YouTube Music di oggi, senza accesso
+            r = (RISPOSTA_YTM_NESSUNO if corpo.get("params") else RISPOSTA_YTM_SENZA_FILTRO) if musica else RISPOSTA_YT_SENZA_BRANI
+        else:
+            r = RISPOSTA_YTM if musica else RISPOSTA_YT
+        dati = json.dumps(r).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(dati)))
@@ -703,6 +742,31 @@ class TestExtra(unittest.TestCase):
         self.assertEqual(corpo["context"]["client"]["clientName"], "WEB_REMIX")
         self.assertEqual(corpo["context"]["client"]["hl"], "it")
         self.assertTrue(corpo["params"])   # filtro «Brani»
+
+    def test_musica_cerca_youtube_music_senza_brani(self):
+        """18/11/2026: YouTube Music senza accesso non dà più brani. Il primo risultato ufficiale e i video ufficiali di
+        YouTube Music, poi i video di YouTube; niente yt-dlp (che impiega decine di secondi), niente podcast né artisti."""
+        n = len(FintoYouTube.richieste)
+        j = self.s.json("GET", "/api/extra/musica/cerca?q=" + quote("senza brani queen"))
+        self.assertEqual(j["fonte"], "ytm")
+        r = j["risultati"]
+        self.assertEqual([x["id"] for x in r], ["fJ9rUzIMcZQ", "OmvLive0001", "YtDirty0001"])   # doppione e diretta tolti
+        self.assertEqual(r[0], {"id": "fJ9rUzIMcZQ", "titolo": "Bohemian Rhapsody", "artista": "Queen", "album": "",
+                                "durata": 360, "copertina": "https://i.ytimg.com/vi/fJ9rUzIMcZQ/mqdefault.jpg",
+                                "explicit": False, "censurata": False})
+        self.assertEqual((r[1]["artista"], r[1]["album"], r[1]["titolo"]), ("Queen", "", "Bohemian Rhapsody (Live Aid 1985)"))
+        self.assertEqual((r[2]["artista"], r[2]["titolo"], r[2]["explicit"], r[2]["durata"]),
+                         ("Queen", "Fat Bottomed Girls (Explicit)", True, 256))
+        fatte = FintoYouTube.richieste[n:]
+        self.assertEqual([(c["context"]["client"]["clientName"], bool(c.get("params"))) for _, c in fatte],
+                         [("WEB_REMIX", True), ("WEB_REMIX", False), ("WEB", False)])
+        self.assertEqual(self.chiamate_ytdlp("ytsearch15:senza brani queen"), 0)
+
+    def test_musica_cerca_titoli_con_il_trattino_lungo(self):
+        M = carica_modulo("musica_libreria_titoli")
+        self.assertEqual(M._da_titolo_video("Queen – Bohemian Rhapsody (Official Video)", "Queen Official"), ("Queen", "Bohemian Rhapsody"))
+        self.assertEqual(M._da_titolo_video("Vasco Rossi — Albachiara", "x"), ("Vasco Rossi", "Albachiara"))
+        self.assertEqual(M._da_titolo_video("Albachiara", "Vasco Rossi - Topic"), ("Vasco Rossi", "Albachiara"))
 
     def test_musica_cerca_youtube(self):
         r = self.s.json("GET", "/api/extra/musica/cerca?fonte=yt&q=eminem")["risultati"]
