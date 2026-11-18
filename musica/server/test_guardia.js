@@ -59,7 +59,7 @@ function ambiente() {
     GUARDIA: {t:-1, da:0, id:null, volte:0, FERMO:8000, ARRIVA:15000, PARTE:5000, MIXMAX:15000, SALTOMAX:25000},
     seekH: null, seekOnLoad: {at:0},   // nessun brano che sta tornando a un punto
     INTERR: {da:0, uscita:0, prova:0, MAX:30 * 60000, OGNI:3000}, interrotta: false,
-    MACATT: null, SRV: true, srvWait: false, sulMac: new Set(), sulTelefono: new Set(), macTorna: false, richieste: 0,
+    MACATT: null, ERRATT: null, SRV: true, SRVKO: 0, srvWait: false, sulMac: new Set(), sulTelefono: new Set(), macTorna: false, richieste: 0,
   };
   env.TT = id => (id ? {id, remote:env.sulMac.has(id)} : null);
   env.sulTel = id => env.sulTelefono.has(id);
@@ -90,9 +90,10 @@ function prove(src, fatte) {
   const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
   let env, F;
   // MACATT com'è nell'app (i tempi dell'attesa del Mac)
-  const mm = /\nconst MACATT = (\{[^\n]*\});/.exec(src);
-  if (!mm) throw new Error("nell'app manca MACATT");
-  const nuovo = f => { env = ambiente(); env.MACATT = new Function('return ' + mm[1])(); if (f) f(env);
+  const mm = /\nconst MACATT = (\{[^\n]*\});/.exec(src), me = /\nconst ERRATT = (\{[^\n]*\});/.exec(src), mi = /\nconst INTERR = (\{[^\n]*\});/.exec(src);
+  if (!mm || !me || !mi) throw new Error("nell'app manca MACATT, ERRATT o INTERR");
+  const nuovo = f => { env = ambiente(); env.MACATT = new Function('return ' + mm[1])(); env.ERRATT = new Function('return ' + me[1])();
+    env.INTERR = new Function('return ' + mi[1])(); if (f) f(env);
     F = carica(src, ['guardiaGiro', 'serveIlMac', 'aspettaMac', 'macTornato', 'mixerMuto', 'piccoMixer', 'posVoluta', 'riprendiDopoInterruzione'], env); };
   const giri = (n, passo) => { for (let k = 0; k < n; k++) { env.ora += passo || 2000; env.perf += passo || 2000; F.guardiaGiro(); } };
 
@@ -114,14 +115,18 @@ function prove(src, fatte) {
   giri(3);
   eq(env.carichi, [['A', 3, true, 0]], 'secondo passo: ricaricato');
   giri(3);
-  eq(env.carichi[1], ['B', 3, true, 0], 'terzo passo: sull\'altro lettore, già sbloccato');
-  env.au = env.DECKS[0]; env.au.paused = true;
+  eq([env.diretti, env.carichi.length], [['lettore fermo: in pausa'], 1], 'terzo passo: il lettore diretto');
   giri(3);
   eq(env.avanti, [false], 'quarto passo: il brano dopo');
   giri(3);
-  eq([env.au.paused, env.pausaVoluta > 0, env.riavvii], [true, true, [['la musica non ripartiva', true]]], 'quinto: l\'app si riavvia da sola (come chiuderla e riaprirla)');
-  giri(6);
-  eq(env.avanti.length, 1, 'dopo, fermo davvero: niente altro');
+  eq([env.pausaVoluta, env.riavvii, env.diari.indexOf('niente è servito: riprovo da capo') >= 0], [0, [], true], 'quinto: mai fermi, mai l\'app ricaricata: da capo');
+  giri(30);
+  if (env.carichi.length < 3 || env.avanti.length < 2) throw new Error('dopo deve continuare a provare: ' + JSON.stringify([env.carichi, env.avanti]));
+  eq([env.pausaVoluta, env.riavvii.length], [0, 0], 'per un minuto: sempre tentativi, mai una pausa');
+  // lettore diretto non disponibile (mai sbloccato): il terzo passo è l'altro lettore, già sbloccato
+  nuovo(e => { e.au.paused = true; e.au.currentTime = 0; e.passaAlDiretto = () => false; });
+  giri(10);
+  eq(env.carichi[1], ['B', 3, true, 0], 'senza lettore diretto: sull\'altro lettore, già sbloccato');
   fatte.push('passaggio non riuscito');
 
   /* ---------- brano finito e il successivo mai partito: avanti ---------- */
@@ -176,12 +181,37 @@ function prove(src, fatte) {
   eq(env.carichi, [['A', 4, true, undefined]], 'poi il brano già sul telefono');
   fatte.push('intanto un brano sul telefono');
 
-  /* ---------- 10 minuti senza Mac: ci si ferma (una volta) ---------- */
+  /* ---------- 18/11: senza Mac per ore non ci si ferma mai: lo si richiama più piano, e quando torna si riparte ---------- */
   nuovo(macSparito);
   giri(305);
-  eq([env.pausaVoluta > 0, env.avvisi[env.avvisi.length - 1]], [true, 'Il Mac non risponde da 10 minuti: tocca ▶︎ quando torna'], '10 minuti: ci si ferma');
+  eq([env.pausaVoluta, env.avvisi[env.avvisi.length - 1]], [0, 'Il Mac non risponde da 10 minuti: la musica riprende da sola appena torna'], '10 minuti: nessuna pausa');
   eq(env.carichi.length + env.avanti.length, 0, 'senza saltare brani');
-  fatte.push('10 minuti senza Mac');
+  let prima = env.richieste; giri(150);   // altri 5 minuti
+  if (env.richieste - prima > 25 || env.richieste - prima < 15) throw new Error('dopo 10 minuti il Mac si richiede ogni 15 s: ' + (env.richieste - prima) + ' volte in 5 minuti');
+  giri(1500);   // un'ora
+  eq(env.pausaVoluta, 0, 'un\'ora dopo: ancora nessuna pausa');
+  env.macTorna = true; giri(3);
+  eq(env.carichi, [['A', 3, true, 42]], 'il Mac torna dopo un\'ora: lo stesso brano, dallo stesso punto');
+  fatte.push('ore senza Mac');
+
+  /* ---------- 18/11: il Mac non risponde da pochi secondi (SRVKO, ancora «collegato»): si aspetta, niente tentativi ---------- */
+  nuovo(e => { e.SRVKO = e.ora; e.sulMac = new Set(['b1']); e.au.paused = true; });
+  giri(10);
+  eq([env.carichi.length, env.avanti.length, env.suonati, env.pausaVoluta], [0, 0, 0, 0], 'Mac che tarda: si aspetta senza contare');
+  env.SRVKO = 0; env.macTorna = true; giri(2);
+  eq(env.carichi, [['A', 3, true, 42]], 'risponde: lo stesso brano, dallo stesso punto');
+  nuovo(e => { e.SRVKO = e.ora; e.sulMac = new Set(['b1']); e.sulTelefono = new Set(['b1']); e.au.paused = true; });
+  giri(4);
+  eq(env.suonati, 1, 'brano già sul telefono: il Mac non serve, si riparte subito');
+  fatte.push('Mac che tarda');
+
+  /* ---------- 18/11: brani che non arrivano (tre errori di fila): mai fermi, si riprova da soli ogni 30 s ---------- */
+  nuovo(e => { e.au.paused = true; e.au.error = {code:4}; e.ERRATT.fino = e.ora + 30000; });
+  giri(14);
+  eq([env.carichi.length, env.suonati, env.pausaVoluta], [0, 0, 0], 'si aspettano i 30 s');
+  giri(2);
+  eq(env.carichi, [['A', 3, true, 42]], 'poi lo stesso brano, dallo stesso punto');
+  fatte.push('errori: si riprova');
 
   /* ---------- il brano va avanti ma il mixer dell'iPhone è fermo: musica muta. Lo si fa ripartire, poi riavvio ---------- */
   const mixer = (stato, va) => e => {
@@ -249,14 +279,16 @@ function prove(src, fatte) {
   eq([env.carichi.length + env.avanti.length + env.riavvii.length, env.pausaVoluta, env.suonati >= 15], [0, 0, true], 'play() ripetuto, mai altro');
   nuovo(e => { e.au.paused = true; e.INTERR.da = e.ora; e.interrotta = true; });
   giri(905);   // oltre 30 minuti
-  eq([env.pausaVoluta > 0, env.suonati], [true, 0], 'oltre 30 minuti di interruzione: ci si ferma');
+  eq([env.pausaVoluta, env.suonati], [0, 0], 'oltre 30 minuti di interruzione: nessuna pausa, si aspetta ancora');
+  env.interrotta = false; giri(8);
+  if (env.suonati < 1) throw new Error('finita l\'interruzione lunga deve ripartire');
   fatte.push('interruzione lunga');
 
   /* ---------- in secondo piano mai il riavvio dell'app (fermerebbe la musica): si ricomincia dai passi gentili ---------- */
   nuovo(e => { e.au.paused = true; e.au.currentTime = 0; e.document.hidden = true; });
   giri(30);
   eq([env.riavvii.length, env.pausaVoluta], [0, 0], 'in secondo piano: nessun riavvio, nessuna resa');
-  if (env.carichi.length < 3) throw new Error('in secondo piano deve continuare a riprovare: ' + JSON.stringify(env.carichi));
+  if (env.carichi.length + env.diretti.length + env.avanti.length < 4) throw new Error('in secondo piano deve continuare a riprovare: ' + JSON.stringify([env.carichi, env.diretti, env.avanti]));
   nuovo(e => { mixer('interrupted', false)(e); e.document.hidden = true; }); avanti(10);
   eq([env.riavvii.length, env.diretti.length >= 1], [0, true], 'mixer fermo a schermo bloccato: il lettore diretto, mai il riavvio');
   fatte.push('mai il riavvio in secondo piano');
@@ -305,6 +337,31 @@ function prove(src, fatte) {
   D = diretto(e => { e.DIRETTO._sbloccato = false; });
   eq([D.G.passaAlDiretto('prova'), D.e.carichi.length], [false, 0], 'lettore diretto mai sbloccato da un tocco: si resta sul mixer');
   fatte.push('lettore diretto controllato');
+
+  /* ---------- 18/11: il Mac non sparisce per una risposta mancata: perso solo dopo 30 s di silenzio, richiamato ogni 5 s ---------- */
+  const collegamento = (risponde) => {
+    const e = ambiente(), timer = [];
+    e.SRV = true; e.SRVKO = 0; e.srvKoT = 0; e.render = () => {}; e.chiamate = 0;
+    e.setTimeout = (f, ms) => { timer.push([e.ora + ms, f]); return timer.length; }; e.clearTimeout = () => {};
+    e.loadServer = () => { e.chiamate++; if (risponde(e)) G.macRisponde(); else G.macTace(); };
+    const SRVT = /\nconst SRV_TOLLERA = (\d+);/.exec(src); if (!SRVT) throw new Error("nell'app manca SRV_TOLLERA");
+    e.SRV_TOLLERA = +SRVT[1];
+    const G = carica(src, ['macTace', 'macRisponde'], e);
+    const passa = ms => { const fine = e.ora + ms; while (e.ora < fine) { e.ora += 500; for (let k = 0; k < timer.length; k++) if (timer[k] && timer[k][0] <= e.ora) { const f = timer[k][1]; timer[k] = null; f(); } } };
+    return {e, G, passa};
+  };
+  let K = collegamento(() => false);
+  K.G.macTace();
+  eq([K.e.SRV, K.e.SRVKO > 0], [true, true], 'una risposta mancata: il Mac resta collegato');
+  K.passa(20000);
+  eq(K.e.SRV, true, 'dopo 20 s: ancora collegato');
+  if (K.e.chiamate < 3) throw new Error('il Mac si richiama ogni 5 s: ' + K.e.chiamate);
+  K.passa(15000);
+  eq([K.e.SRV, K.e.diari.indexOf('Mac perso') >= 0], [false, true], 'dopo 30 s di silenzio: perso');
+  K = collegamento(e => e.chiamate >= 2);   // al secondo richiamo risponde
+  K.G.macTace(); K.passa(12000);
+  eq([K.e.SRV, K.e.SRVKO, K.e.diari.indexOf('il Mac risponde di nuovo') >= 0], [true, 0, true], 'risponde al richiamo: mai perso');
+  fatte.push('il Mac non sparisce per una risposta');
 
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);
