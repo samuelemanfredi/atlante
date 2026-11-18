@@ -3192,11 +3192,14 @@ class Dispositivi:
 
     def suonano(self):
         """Quanti dispositivi (di tutti) stanno suonando, o vogliono suonare e aspettano (il Mac che torna, un brano che
-        arriva): aggiorna.sh non riavvia il server finché è più di zero (13/11)."""
+        arriva), con musica che ha bisogno del Mac: aggiorna.sh non riavvia il server finché è più di zero (13/11).
+        18/11/2026: chi suona dal telefono (dalMac falso: i brani scaricati) non conta, il riavvio non lo tocca; le app
+        di prima, senza dalMac, contano come prima."""
         ora = time.time()
         with self.cond:
             return sum(1 for x in self.d.values() if self._vivo(x, ora)
-                       and ((x.get("stato") or {}).get("suona") is True or (x.get("stato") or {}).get("vuole") is True))
+                       and ((x.get("stato") or {}).get("suona") is True or (x.get("stato") or {}).get("vuole") is True)
+                       and (x.get("stato") or {}).get("dalMac") is not False)
 
     def chi_suona(self, di="p", tipo=""):
         """Il dispositivo della persona con il brano che sta ascoltando adesso (★ dalla schermata di blocco): prima uno
