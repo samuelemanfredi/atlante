@@ -4,10 +4,12 @@
 # samuelemanfredi/atlante la cartella musica/ è cambiata, la scarica, fa le prove del server e solo
 # se passano la mette al posto di quella installata e riavvia il server. Se le prove falliscono resta
 # la versione di prima. L'app sull'iPhone prende la versione nuova alla prossima apertura.
-# Mentre qualcuno ascolta (il server dice quanti dispositivi suonano: api/extra/suona) non si installa niente: il
-# riavvio del server fermerebbe la musica in streaming (13/11). Si riprova al giro dopo; dopo 6 ore si installa lo stesso.
+# Mentre qualcuno ascolta musica che arriva dal Mac (il server dice quanti: api/extra/suona; chi suona dal telefono non
+# conta) non si installa niente: il riavvio del server fermerebbe la musica in streaming (13/11). Si riprova al giro dopo;
+# dopo 2 ore si installa lo stesso (18/11/2026: erano 6, e le correzioni arrivavano tardi; l'app ora aspetta il Mac e
+# riparte da sola dallo stesso punto).
 # Il server, all'avvio, mette questo file al posto di ~/Atlante/aggiorna.sh se la versione qui sotto è più nuova.
-# aggiorna-versione: 2
+# aggiorna-versione: 3
 set -u
 REPO="${ATLANTE_REPO:-$HOME/Atlante/repo}"         # copia del repo usata solo per gli aggiornamenti
 APP="${ATLANTE_APP:-$HOME/Atlante/musica}"         # app installata (quella servita)
@@ -32,8 +34,8 @@ musica_in_corso() {
   case "$primo" in
     ''|*[!0-9]*) primo=$ora; echo "$ora" > "$RIMANDATO"; log "musica in riproduzione su $n dispositivi: l'aggiornamento aspetta" ;;
   esac
-  if [ $((ora - primo)) -ge "${AGGIORNA_ATTESA_MAX:-21600}" ]; then
-    log "musica in riproduzione da oltre $(( ${AGGIORNA_ATTESA_MAX:-21600} / 3600 )) ore: installo lo stesso"; rm -f "$RIMANDATO"; FORZATO=1; return 1
+  if [ $((ora - primo)) -ge "${AGGIORNA_ATTESA_MAX:-7200}" ]; then
+    log "musica in riproduzione da oltre $(( ${AGGIORNA_ATTESA_MAX:-7200} / 3600 )) ore: installo lo stesso"; rm -f "$RIMANDATO"; FORZATO=1; return 1
   fi
   return 0
 }

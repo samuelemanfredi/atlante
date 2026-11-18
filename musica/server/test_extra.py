@@ -4835,6 +4835,14 @@ class TestAggiornaSenzaFermareLaMusica(ProvaCaricamenti, unittest.TestCase):
         self.stato(None, "iphone-suona-0001", {"suona": False, "vuole": False})
         self.stato(anna, "iphone-anna-0001", {"suona": "sì", "vuole": 1})   # solo true conta
         self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 0})
+        # 18/11/2026: chi suona dal telefono (brani scaricati) non ferma l'aggiornamento; chi suona dal Mac sì
+        self.stato(None, "iphone-suona-0001", {"suona": True, "dalMac": False})
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 0})
+        self.stato(None, "iphone-suona-0001", {"suona": True, "dalMac": True})
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 1})
+        self.stato(None, "iphone-suona-0001", {"suona": False, "vuole": True, "dalMac": False})
+        self.assertEqual(self.j(None, "GET", "/api/extra/suona"), {"suonano": 0})
+        self.stato(None, "iphone-suona-0001", {"suona": False})
         self.j(anna, "GET", "/api/extra/suona", codice=403)
         self.assertEqual(richiesta(self.s.porta, "GET", "/api/extra/suona", intest=FUNNEL)[0], 401)
 
@@ -4842,7 +4850,8 @@ class TestAggiornaSenzaFermareLaMusica(ProvaCaricamenti, unittest.TestCase):
         with open(os.path.join(QUI, "aggiorna.sh"), encoding="utf-8") as f:
             sh = f.read()
         self.assertEqual(subprocess.run(["bash", "-n", os.path.join(QUI, "aggiorna.sh")]).returncode, 0)
-        self.assertGreaterEqual(int(re.search(r"^# aggiorna-versione: (\d+)$", sh, re.M).group(1)), 2)
+        self.assertGreaterEqual(int(re.search(r"^# aggiorna-versione: (\d+)$", sh, re.M).group(1)), 3)
+        self.assertIn("${AGGIORNA_ATTESA_MAX:-7200}", sh)   # al più 2 ore di attesa (18/11/2026: erano 6)
         # prima delle prove e subito prima di installare; mai dopo aver cambiato i file dell'app
         self.assertEqual(sh.count("musica_in_corso && exit 0"), 2)
         self.assertLess(sh.rindex("musica_in_corso && exit 0"), sh.index('rsync -a --delete --exclude VERSIONE.txt'))

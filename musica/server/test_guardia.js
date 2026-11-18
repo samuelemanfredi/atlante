@@ -399,6 +399,16 @@ function prove(src, fatte) {
   }
   fatte.push('schermo bloccato');
 
+  /* ---------- 18/11/2026: la musica di adesso ha bisogno del Mac? (l'aggiornamento del Mac aspetta solo se sì) ---------- */
+  const serve = prepara => { const e = ambiente(); e.MACATT = {da:0}; e.au.duration = 300; e.au.currentTime = 42; if (prepara) prepara(e); return carica(src, ['serveMacOra'], e).serveMacOra(); };
+  eq(serve(e => { e.sulMac = new Set(['b1']); }), true, 'brano dal Mac in streaming: serve');
+  eq(serve(e => { e.sulMac = new Set(['b1']); e.sulTelefono = new Set(['b1']); }), false, 'lo stesso brano già sul telefono: non serve');
+  eq(serve(e => { e.sulMac = new Set(['d']); }), false, 'il prossimo dal Mac, ma mancano 4 minuti: non ancora');
+  eq(serve(e => { e.sulMac = new Set(['d']); e.au.currentTime = 250; }), true, 'il prossimo dal Mac fra meno di 2 minuti: serve');
+  eq(serve(e => { e.MACATT = {da:e.ora}; }), true, 'si sta aspettando il Mac: serve');
+  eq(serve(), false, 'tutto sul telefono: non serve');
+  fatte.push('serve il Mac');
+
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);
   eq(env.carichi.length, 0, 'brano nuovo: il conto riparte');

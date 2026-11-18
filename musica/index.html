@@ -228,6 +228,12 @@ html.ts-torna [data-ts]>ts-in{transform:none;animation:none;transition:transform
 
 /* moduli extra (scheda Altro): riquadro sopra la pagina, sotto mini player e schede; la musica continua */
 #xp{position:fixed;z-index:29;inset:0;background:var(--bg)}
+/* 18/11/2026: la pagina del modulo che non arriva (Mac lento o irraggiungibile): un avviso invece del riquadro vuoto */
+#xattesa{position:absolute;left:16px;right:16px;top:calc(env(safe-area-inset-top,0px) + 80px);display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:22px 16px;border-radius:14px;background:var(--fill);color:var(--fg)}
+#xattesa[hidden]{display:none}
+#xattesa span{color:var(--fg2);font-size:15px}
+#xattesa button{min-width:160px;min-height:40px;border-radius:10px;background:var(--accent);color:#fff;font-weight:600}
+#xattesa button[data-a="xchiudi"]{background:transparent;color:var(--accent)}
 #xp iframe{width:100%;height:calc(100% - 52px - env(safe-area-inset-bottom,0px));border:0;display:block;background:var(--bg)}
 body.hasmini #xp iframe{height:calc(100% - 122px - env(safe-area-inset-bottom,0px))}
 /* il navigatore ha già i suoi comandi della musica, grandi per l'auto */
@@ -565,7 +571,8 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
   </div>
 </section>
 
-<div id="xp" hidden><iframe id="xf" title="Modulo" allow="camera; microphone; geolocation; clipboard-read; clipboard-write; screen-wake-lock; web-share; fullscreen"></iframe></div>
+<div id="xp" hidden><iframe id="xf" title="Modulo" allow="camera; microphone; geolocation; clipboard-read; clipboard-write; screen-wake-lock; web-share; fullscreen"></iframe>
+<div id="xattesa" hidden><b>La pagina non arriva dal Mac</b><span>Il Mac è lento o non risponde. La musica continua.</span><button type="button" data-a="xriprova">Riprova</button><button type="button" data-a="xchiudi">Chiudi</button></div></div>
 <button id="dlpill" data-a="dlpill" hidden aria-label="Download"></button>
 
 <div id="sh"><div class="scrim" data-a="closesheet"></div><div class="sheet" id="sheet"></div></div>
@@ -1505,7 +1512,13 @@ async function verOra() {
 async function controllaVersione() {
   const v = await verOra(); if (!v) return;
   if (!verApp) { verApp = v; return; }
-  if (v !== verApp) { verNuova = true; aggiornaApp(); }
+  if (v !== verApp) {
+    verNuova = true;
+    // 18/11/2026: anche il service worker nuovo subito (le pagine dei moduli, la copia offline): si installa in sottofondo e
+    // vale dalla prossima pagina aperta, senza ricaricare l'app né fermare la musica
+    try { navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {}); } catch (e) {}
+    aggiornaApp();
+  }
 }
 function aggiornaApp() {
   if (!verNuova || ALLAU.some(a => !a.paused) || xCur || document.visibilityState !== 'visible') return;   // si riprova dopo
@@ -5061,7 +5074,9 @@ document.addEventListener('click', e => {
     case 'favcur': favCorrente(); break;
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
-    case 'xopen': if (b.closest('#side') && tab !== 'altro') setTab('altro'); openX(d.k); break;   // dalla barra dell'iPad: chiuso il modulo («‹ Altro») si torna ad Altro
+    case 'xopen': if (b.closest('#side') && tab !== 'altro') setTab('altro'); openX(d.k); break;
+    case 'xriprova': xRiprova(); break;   // la pagina del modulo non arrivava: di nuovo dal Mac (o dalla copia)
+    case 'xchiudi': closeX(); break;   // dalla barra dell'iPad: chiuso il modulo («‹ Altro») si torna ad Altro
     case 'sgo': sideVai(d.v); break;
     case 'condividi': closeSheet(); if (tab !== 'altro') setTab('altro'); openX('inviti'); break;   // il tasto in Libreria: «Condividi l'app»
     case 'caricax': closeSheet(); openX('carica', d.v ? '?' + d.v : ''); break;
@@ -5309,7 +5324,7 @@ function openX(k, q) {
   if (k === 'remoto') { apriRemoto(); return; }   // una finestra a parte: niente riquadro, niente «am-x» per l'avvio
   closeNP(); xCur = k;
   const f = $('xf'), src = 'x/' + k + '.html' + (q || '');
-  if (f.getAttribute('src') !== src) f.setAttribute('src', src);
+  if (f.getAttribute('src') !== src) { xAttesa(f); f.setAttribute('src', src); }
   $('xp').hidden = false; ls.set('am-x', k); document.body.classList.toggle('xnav', k === 'naviga'); sideMark();
 }
 // l'indirizzo pubblico di Atlante Accessi: lo stesso nome del Mac mini (…ts.net, in https, dalla rete Tailscale o da
@@ -5323,7 +5338,19 @@ function apriRemoto() {
   if (!u) { toast('Da qui non so l\'indirizzo: apri Atlante dal suo link (…ts.net), il controllo remoto è sulla porta 8443'); return; }
   window.open(u, '_blank', 'noopener');
 }
-function closeX() { const era = xCur; document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); sideMark(); if (era === 'gestione') ioCarica(); if (verNuova) setTimeout(aggiornaApp, 1000); }   // i numeri del riquadro Gestione dopo averla usata
+// la pagina del modulo deve arrivare (evento «load» del riquadro): se dopo 8 s non è arrivata, un avviso con «Riprova»
+// invece di un riquadro vuoto (nero col tema scuro). Arrivata, l'avviso sparisce da solo (18/11/2026)
+const XATT = {tm:0, f:null};
+function xAttesa(f) {
+  clearTimeout(XATT.tm); $('xattesa').hidden = true;
+  if (!XATT.f) { XATT.f = f; f.addEventListener('load', () => { clearTimeout(XATT.tm); $('xattesa').hidden = true; }); }
+  XATT.tm = setTimeout(() => { if (xCur) { $('xattesa').hidden = false; diario('modulo che non arriva', {k:xCur}); } }, 8000);
+}
+function xRiprova() {
+  const f = $('xf'), src = f.getAttribute('src'); if (!src) return;
+  xAttesa(f); f.setAttribute('src', 'about:blank'); setTimeout(() => f.setAttribute('src', src), 50);
+}
+function closeX() { clearTimeout(XATT.tm); $('xattesa').hidden = true; const era = xCur; document.body.classList.remove('xnav'); $('xp').hidden = true; xCur = ''; ls.set('am-x', ''); sideMark(); if (era === 'gestione') ioCarica(); if (verNuova) setTimeout(aggiornaApp, 1000); }   // i numeri del riquadro Gestione dopo averla usata
 const xSubs = new Set();
 function xNotify() { const n = AM.now(); xSubs.forEach(cb => { try { cb(n); } catch (e) {} }); }
 window.AM = {
@@ -5460,7 +5487,20 @@ function devStato() {   // quello che gli altri vedono di questo dispositivo
   return {brano:{sid:inLib(t) ? t.sid : '', titolo:t.title, artista:t.artist || '', album:t.album || '', copertina:t.cover && t.cover.startsWith('u:') ? t.cover.slice(2) : '',
     durata:isFinite(au.duration) && au.duration ? au.duration : t.duration || 0}, esterno:!inLib(t), suona:!au.paused, t:au.currentTime || 0, vol:userVol,
     vuole:typeof suonaVoluta === 'number' && suonaVoluta > pausaVoluta,   // musica voluta anche se ferma (Mac che torna): il Mac non si aggiorna
+    dalMac:serveMacOra(),   // 18/11/2026: solo se la musica di adesso ha bisogno del Mac il suo aggiornamento aspetta
     coda, da:S.from || '', shuffle:S.shuffle, repeat:S.repeat, bloccato:DEV.bloccato, mix};
+}
+// la musica di adesso ha bisogno del Mac? (per l'aggiornamento automatico del Mac, che riavvia il server per qualche
+// secondo: aspetta solo se serve). Sì se il brano in corso arriva dal Mac, se il successivo arriva dal Mac e mancano meno
+// di 2 minuti, o se si sta aspettando il Mac. No se suona dal telefono (i brani scaricati, quasi sempre)
+function serveMacOra() {
+  try {
+    if (MACATT.da) return true;
+    const daMac = id => { const x = id && TT(id); return !!x && !!x.remote && !x.ext && !sulTel(id); };
+    if (daMac(curId)) return true;
+    const resta = isFinite(au.duration) ? au.duration - (au.currentTime || 0) : 0;
+    return resta < 120 && daMac(S.queue[S.qi + 1]);
+  } catch (e) { return true; }
 }
 let devUltimo = 0, devTimer = 0;
 function devInvia(subito) {
