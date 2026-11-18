@@ -1,11 +1,15 @@
 // Atlante Musica: copia offline dell'app (la musica è salvata a parte, in IndexedDB).
-const CACHE = 'atlante-musica-v6';   // v6: «Condividi l'app» (x/inviti.html) nella copia; le app già installate la rinnovano da sole
+const CACHE = 'atlante-musica-v7';   // v7: tutti i moduli nella copia, anche «Cerca e scarica»; le app già installate la rinnovano da sole
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png?v=2', './icon-512.png?v=2', './icon-maskable-512.png?v=2', './apple-touch-icon.png?v=2'];
 // moduli della scheda Altro: si mettono in copia uno per uno (se uno manca, gli altri restano)
-const MODULI = ['x/kit.css', 'x/kit.js'].concat(['podcast', 'libri', 'video', 'live', 'naviga', 'benessere', 'strumenti', 'studio', 'inviti'].map(m => 'x/' + m + '.html'));
+// (18/11/2026, «"Cerca e scarica musica" non si apre»: non era nella copia, e un Mac lento a rispondere lasciava il riquadro
+// bianco. Ora ci sono tutti; quelli che un account non può aprire il Mac li rifiuta e restano fuori)
+const MODULI = ['x/kit.css', 'x/kit.js'].concat(['cerca', 'carica', 'chat', 'podcast', 'libri', 'video', 'live', 'naviga', 'benessere',
+  'strumenti', 'studio', 'inviti', 'idee', 'posizione', 'chiamate', 'password', 'contenuti', 'gestione', 'controllo', 'auto'].map(m => 'x/' + m + '.html'));
 // «Rete e VPN» serve proprio quando il Mac non risponde (Tailscale spento fuori casa): deve aprirsi anche offline
 MODULI.push('x/rete.html');
 const ATTESA = 3000;   // se il Mac non risponde entro 3 s l'app si apre dalla copia offline
+const ATTESA_MODULI = 2500;   // e un modulo (x/…) entro 2,5 s, se ce n'è la copia (la rete aggiorna comunque la copia)
 // 'reload': la copia offline si prende dal Mac, non da una vecchia copia nella cache del browser
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES.map(f => new Request(f, {cache:'reload'})))
   .then(() => Promise.all(MODULI.map(f => c.add(new Request(f, {cache:'reload'})).catch(() => {}))))).then(() => self.skipWaiting())); });
@@ -21,11 +25,23 @@ self.addEventListener('fetch', e => {
     // solo la pagina dell'app (./ o ./index.html, anche con ?…): le altre pagine dello stesso indirizzo (un'icona, una cartella)
     // passano senza toccare la copia offline, che altrimenti verrebbe sostituita da loro
     const base = new URL('./', self.registration.scope).pathname;
-    // pagine dei moduli (x/…): prima la rete, se il Mac non risponde la copia offline
+    // pagine dei moduli (x/…): prima la rete (versione nuova), ma con un limite d'attesa come l'app: se il Mac non risponde
+    // entro ATTESA_MODULI, o risponde con un errore suo (502/503/504 di tailscale serve, Mac occupato), la copia sul
+    // telefono. Prima l'attesa non aveva limite: un Mac lento lasciava il riquadro bianco (18/11/2026). La password
+    // (401/403) e i rimandi passano com'erano: lì decide il Mac
     if (u.pathname.startsWith(base + 'x/') && u.pathname.endsWith('.html')) {
-      const k = new Request(u.origin + u.pathname);
-      e.respondWith(fetch(r).then(res => { if (res.ok) { const cp = res.clone(); caches.open(CACHE).then(c => c.put(k, cp)); } return res; })
-        .catch(() => caches.match(k).then(hit => hit || Response.error())));
+      const k = new Request(u.origin + u.pathname), net = fetch(r);
+      // la copia si aggiorna con ogni risposta buona (prima di consegnarla: il clone va fatto prima che la pagina la legga)
+      e.waitUntil(net.then(res => { if (res.ok) { const cp = res.clone(); return caches.open(CACHE).then(c => c.put(k, cp)); } }).catch(() => {}));
+      e.respondWith(new Promise(ok => {
+        let fatto = false;
+        const usa = p => { if (!fatto) { fatto = true; clearTimeout(tm); ok(p); } };
+        const tm = setTimeout(() => caches.match(k).then(hit => { if (hit) usa(hit); }), ATTESA_MODULI);
+        net.then(res => {
+          if (res.ok || res.status === 401 || res.status === 403 || res.type === 'opaqueredirect' || res.redirected) { usa(res); return; }
+          caches.match(k).then(hit => usa(hit || res));   // un errore del Mac: la copia, se c'è
+        }, () => caches.match(k).then(hit => usa(hit || Response.error())));
+      }));
       return;
     }
     if (u.pathname !== base && u.pathname !== base + 'index.html') return;
@@ -47,9 +63,17 @@ self.addEventListener('fetch', e => {
     return;
   }
   // file comuni dei moduli (x/kit.*): prima la rete, così un aggiornamento arriva insieme alle pagine
+  // (18/11/2026: con lo stesso limite d'attesa delle pagine: un Mac che non risponde lasciava il modulo senza stile né kit)
   if (u.pathname.startsWith(new URL('./x/', self.registration.scope).pathname)) {
-    e.respondWith(fetch(r).then(res => { if (res.ok) { const cp = res.clone(); caches.open(CACHE).then(c => c.put(r, cp)); } return res; })
-      .catch(() => caches.match(r).then(hit => hit || Response.error())));
+    const net = fetch(r);
+    e.waitUntil(net.then(res => { if (res.ok) { const cp = res.clone(); return caches.open(CACHE).then(c => c.put(r, cp)); } }).catch(() => {}));
+    e.respondWith(new Promise(ok => {
+      let fatto = false;
+      const usa = p => { if (!fatto) { fatto = true; clearTimeout(tm); ok(p); } };
+      const tm = setTimeout(() => caches.match(r).then(hit => { if (hit) usa(hit); }), ATTESA_MODULI);
+      net.then(res => { if (res.ok) usa(res); else caches.match(r).then(hit => usa(hit || res)); },
+        () => caches.match(r).then(hit => usa(hit || Response.error())));
+    }));
     return;
   }
   e.respondWith(caches.match(r).then(hit => hit || fetch(r).then(res => {

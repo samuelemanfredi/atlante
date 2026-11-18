@@ -182,6 +182,14 @@ function prove(app, inv, sw, fatte) {
   /* ---------- sw.js: copia nuova con la pagina degli inviti ---------- */
   const cache = /const CACHE = '([^']+)'/.exec(sw);
   vero(cache && cache[1] !== 'atlante-musica-v5' && /^atlante-musica-v\d+$/.test(cache[1]), 'una copia offline nuova (le app già installate la rinnovano): ' + (cache && cache[1]));
-  vero(/'inviti'\]\.map\(m => 'x\/' \+ m \+ '\.html'\)/.test(sw), 'la pagina degli inviti nella copia offline');
+  const moduli = /const MODULI = \['x\/kit\.css', 'x\/kit\.js'\]\.concat\(\[([^\]]+)\]\.map\(m => 'x\/' \+ m \+ '\.html'\)\)/.exec(sw);
+  const nomiCopia = moduli ? (moduli[1].match(/'([a-z-]+)'/g) || []).map(x => x.slice(1, -1)) : [];
+  vero(nomiCopia.indexOf('inviti') >= 0, 'la pagina degli inviti nella copia offline');
+  // 18/11/2026: «"Cerca e scarica musica" non si apre»: anche lei (e Carica) nella copia, e i moduli con un limite d'attesa
+  vero(nomiCopia.indexOf('cerca') >= 0 && nomiCopia.indexOf('carica') >= 0, '«Cerca e scarica» e «Carica» nella copia offline: ' + nomiCopia.join(' '));
+  const attesa = /const ATTESA_MODULI = (\d+);/.exec(sw);
+  vero(attesa && +attesa[1] >= 1000 && +attesa[1] <= 4000, 'un limite d\'attesa per i moduli: ' + (attesa && attesa[1]));
+  vero((sw.match(/setTimeout\(\(\) => caches\.match\((k|r)\)\.then\(hit => \{ if \(hit\) usa\(hit\); \}\), ATTESA_MODULI\)/g) || []).length === 2,
+    'pagine e file dei moduli: se il Mac tarda, la copia sul telefono');
   fatte.push('copia offline');
 }
