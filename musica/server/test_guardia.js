@@ -363,6 +363,42 @@ function prove(src, fatte) {
   eq([K.e.SRV, K.e.SRVKO, K.e.diari.indexOf('il Mac risponde di nuovo') >= 0], [true, 0, true], 'risponde al richiamo: mai perso');
   fatte.push('il Mac non sparisce per una risposta');
 
+  /* ---------- 18/11: schermo bloccato: la musica passa subito al lettore diretto (fuori dal mixer), senza buchi ---------- */
+  const blocco = (accetta) => {
+    const e = ambiente();
+    e.NEEDS_MIXER = true; e.SILENZIO = 'data:silenzio'; e.suonaVoluta = 99000; e.pausaVoluta = 0;
+    e.MIX.ctx = {state:'running'}; e.MIX.gains = new Map([[e.DECKS[0], {}], [e.DECKS[1], {}]]);
+    e.castUnLettore = () => false; e.saltoAnnulla = () => {}; e.xfAbort = () => {}; e.setGain = () => {}; e.verificaDiretto = () => {};
+    e.updateNow = () => {}; e.chiusi = [];
+    const A = e.DECKS[0]; A.paused = false; A.currentTime = 42; A.getAttribute = () => 'blob:brano'; A.removeAttribute = () => { A.tolto = true; };
+    const D = e.DIRETTO; D._sbloccato = true; D.paused = true; D.ascolta = {};
+    D.addEventListener = (n, f) => { D.ascolta[n] = f; }; D.removeEventListener = (n) => { delete D.ascolta[n]; };
+    D.removeAttribute = () => { D.src = ''; };
+    let esito = null;
+    D.play = () => { D.paused = !accetta; return {then(si, no) { esito = () => (accetta ? si() : no({name:'NotAllowedError'})); }}; };
+    const G = carica(src, ['alSicuro', 'tornaAlMixer'], e);
+    return {e, G, A, D, finisci: () => esito && esito()};
+  };
+  let B = blocco(true);
+  eq(B.G.alSicuro('prova'), true, 'schermo bloccato: si passa al lettore diretto');
+  eq([B.e.au === B.D, B.D.src, B.D.currentTime, B.e.MIX.fuori, B.A.paused], [true, 'blob:brano', 42, true, false], 'stesso file, stesso punto; il mixer suona finché il diretto non parte');
+  B.finisci();
+  eq([B.A.paused, B.A.tolto, B.e.diari.indexOf('schermo bloccato: suona il lettore diretto') >= 0], [true, true, true], 'il diretto suona: il lettore del mixer si ferma');
+  B.e.MIX.ctx.state = 'suspended'; B.G.tornaAlMixer();
+  eq(B.e.MIX.fuori, true, 'di nuovo nell\'app con il mixer fermo: si resta sul diretto');
+  B.e.MIX.ctx.state = 'running'; B.G.tornaAlMixer();
+  eq([B.e.MIX.fuori, B.e.MIX.perBlocco], [false, false], 'mixer di nuovo in funzione: la dissolvenza torna dal brano dopo');
+  B = blocco(false);
+  B.G.alSicuro('prova'); B.finisci();
+  eq([B.e.au === B.A, B.A.paused, B.e.MIX.fuori, !!B.e.MIX.bloccoNo], [true, false, false, true], 'iOS rifiuta il diretto: la musica resta sul mixer, come prima');
+  eq(B.G.alSicuro('ancora'), false, 'appena rifiutato: non si insiste');
+  for (const [k, f] of [['in pausa', b => { b.e.pausaVoluta = b.e.ora; }], ['diretto mai sbloccato', b => { b.D._sbloccato = false; }],
+    ['telecomando', b => { b.e.RC.id = 'x'; }], ['radio', b => { b.e.au = b.e.AUX; }], ['non iPhone', b => { b.e.NEEDS_MIXER = false; }]]) {
+    B = blocco(true); f(B);
+    eq([B.G.alSicuro('prova'), B.e.au === B.D], [false, false], k + ': niente');
+  }
+  fatte.push('schermo bloccato');
+
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);
   eq(env.carichi.length, 0, 'brano nuovo: il conto riparte');
