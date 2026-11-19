@@ -1280,11 +1280,19 @@ function keep(id) {
 }
 // i 3 brani dopo quello che suona si scaricano subito sul telefono (anche se «Scarica tutta la musica» è spento): al cambio
 // sono già pronti, senza attese né rete. Si rifà a ogni cambio di brano, di coda e ogni 5 s
+// IN SECONDO PIANO SOLO QUELLO CHE SERVE ALLA MUSICA (19/11/2026, «la musica deve andare anche quando non visualizzo
+// l'app»). iOS chiude le app in secondo piano che usano troppa memoria, e con la pagina si ferma la musica. Con l'app
+// non a schermo si scaricano solo i prossimi 3 brani della coda (non oltre DL_NASCOSTA), il resto della libreria
+// («Scarica tutta la musica») riprende da solo appena l'app torna a schermo
+const DL_NASCOSTA = 40 * 1024 * 1024;
+let dlNascosto = false;
+document.addEventListener('visibilitychange', () => { if (!document.hidden && dlNascosto) { dlNascosto = false; runDl(); } });
 function precarica() {
   if (!DB || !SRV || RC.id || !curId || Date.now() - ls.get('am-pieno', 0) < 86400000) return;
   for (const id of S.queue.slice(S.qi + 1, S.qi + 4)) {
     const t = T.get(id);
-    if (t && t.remote && !sulTel(id) && !TOLTI.has(id) && !noKeep.has(id) && !grabbing.has(id) && dlCur !== id && !(t.size > DL_MAX)) grab(id);
+    if (t && t.remote && !sulTel(id) && !TOLTI.has(id) && !noKeep.has(id) && !grabbing.has(id) && dlCur !== id && !(t.size > DL_MAX) &&
+      !(document.hidden && t.size > DL_NASCOSTA)) grab(id);   // in secondo piano un file enorme arriva in streaming
   }
 }
 function grab(id) {
@@ -1303,6 +1311,7 @@ async function runDl() {
   if (dlBusy || !SRV || !DLQ.length) return; dlBusy = true; dlWait = false; dlDisk = false; clearTimeout(dlTimer); dlTimer = 0;
   let fails = 0, reread = false;
   while (SRV) {
+    if (document.hidden) { dlNascosto = true; break; }   // in secondo piano la libreria aspetta (vedi sopra)
     // il primo brano pronto dall'inizio della coda; quelli già sul telefono (o importati) che si incontrano escono. Niente
     // giro su tutta la coda a ogni brano: con la libreria intera in coda rallentava l'app per ore (2/11). I brani che ora
     // non sono nel catalogo (Mac che sta leggendo il disco, disco scollegato) restano in coda per dopo

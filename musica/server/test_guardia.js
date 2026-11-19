@@ -387,6 +387,34 @@ function prove(src, fatte) {
   eq(serve(), false, 'tutto sul telefono: non serve');
   fatte.push('serve il Mac');
 
+  /* ---------- 19/11/2026: in secondo piano si scarica solo quello che serve alla musica (iOS chiude chi usa troppa memoria) ---------- */
+  const dl = prepara => {
+    const e = ambiente(), MB = 1024 * 1024;
+    Object.assign(e, {DLQ:['x1', 'x2', 'x3'], dlBusy:false, dlWait:false, dlDisk:false, dlCur:null, dlTimer:0, dlNascosto:false, DB:true,
+      scaricati:[], afferrati:[], TOLTI:new Set(), noKeep:new Set(), grabbing:new Set(), RC:{id:null}, DL_MAX:120e6,
+      DL_NASCOSTA:+(/\nconst DL_NASCOSTA = (\d+) \* 1024 \* 1024;/.exec(src) || [0, 0])[1] * MB});
+    e.T = new Map(['x1', 'x2', 'x3', 'a', 'b', 'c', 'd'].map(id => [id, {id, remote:true, size:(id === 'c' ? 90 : 5) * MB}]));
+    e.ls = {get: () => -1e13}; e.clearTimeout = () => {}; e.setTimeout = () => 0;   // «am-pieno»: mai pieno
+    e.dlReady = () => true; e.dlMarkUno = () => {}; e.dlqSalva = () => {}; e.reconnect = () => {};
+    e.fetchTrack = id => { e.scaricati.push(id); if (e.dopoUno) e.document.hidden = true; return 'ok'; };
+    e.grab = id => { e.afferrati.push(id); };
+    e.S = {qi:0, queue:['a', 'b', 'c', 'd']}; e.curId = 'a';
+    if (prepara) prepara(e);
+    if (!e.DL_NASCOSTA) throw new Error("nell'app manca DL_NASCOSTA");
+    return {e, G:carica(src, ['runDl', 'precarica'], e)};
+  };
+  let Q = dl(); Q.G.runDl();
+  eq(Q.e.scaricati, ['x1', 'x2', 'x3'], 'app a schermo: tutta la coda');
+  Q = dl(e => { e.document.hidden = true; }); Q.G.runDl();
+  eq([Q.e.scaricati, Q.e.dlNascosto, Q.e.dlBusy], [[], true, false], 'app in secondo piano: la libreria aspetta');
+  Q = dl(e => { e.dopoUno = true; }); Q.G.runDl();
+  eq([Q.e.scaricati, Q.e.dlNascosto], [['x1'], true], 'uscendo dall\'app: finito quello in corso, poi si aspetta');
+  Q = dl(); Q.G.precarica();
+  eq(Q.e.afferrati, ['b', 'c', 'd'], 'i prossimi 3 della coda, a schermo anche quello grande');
+  Q = dl(e => { e.document.hidden = true; }); Q.G.precarica();
+  eq(Q.e.afferrati, ['b', 'd'], 'in secondo piano i prossimi 3 sì, ma non il file enorme (arriva in streaming)');
+  fatte.push('in secondo piano solo i download che servono');
+
   /* ---------- brano cambiato: il conto riparte ---------- */
   nuovo(); giri(3); env.curId = 'd'; giri(3);
   eq(env.carichi.length, 0, 'brano nuovo: il conto riparte');
