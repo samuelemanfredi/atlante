@@ -2957,6 +2957,8 @@ function risveglia(el) {   // i guadagni del lettore al loro posto (una dissolve
    in funzione la dissolvenza torna, dal brano dopo. */
 function passaAlDiretto(perche) {
   if (au === DIRETTO || au === AUX || !curId) return false;
+  // mai con l'app in secondo piano o a schermo bloccato (19/11/2026): lì iOS non lo lascia partire e la musica si ferma
+  if (document.hidden) { if (!passaAlDiretto.nascosta) { passaAlDiretto.nascosta = true; diario('lettore diretto: non in secondo piano', {perche}); } return false; }
   if (MIX.direttoKo && Date.now() - MIX.direttoKo < 5 * 60000) return false;   // poco fa non ha suonato: per ora non si riprova
   if (!DIRETTO._sbloccato) { if (!passaAlDiretto.detto) { passaAlDiretto.detto = true; diario('lettore diretto non pronto (nessun tocco)', {perche}); } return false; }
   const pos = posVoluta(), vecchio = au;
@@ -3686,7 +3688,7 @@ function mixerInit(perEQ) {
 }
 addEventListener('pointerdown', () => {
   mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
-  const pronto = () => { if (MIX.fuori && (!MIX.ctx || MIX.ctx.state === 'running')) { MIX.fuori = false; MIX.perBlocco = false; diario('mixer di nuovo pronto: la dissolvenza torna dal brano dopo'); } };
+  const pronto = () => { if (MIX.fuori && (!MIX.ctx || MIX.ctx.state === 'running')) { MIX.fuori = false; diario('mixer di nuovo pronto: la dissolvenza torna dal brano dopo'); } };
   if (MIX.fuori) { pronto(); setTimeout(pronto, 500); }
 }, {capture:true, passive:true});
 /* ---------- equalizzatore (come Impostazioni › Musica › EQ dell'iPhone) ----------
@@ -3803,77 +3805,26 @@ function controllaPassaggio() {
 }
 // un lettore che ha suonato con l'audio acceso può ripartire da solo
 DECKS.forEach(el => el.addEventListener('playing', () => { if (!el.muted && el.getAttribute('src') !== SILENZIO) { el._sbloccato = true; el._rifiuta = false; } }));
-/* SCHERMO BLOCCATO (18/11, «non posso bloccare il telefono che l'audio si blocca»). Il mixer della dissolvenza (Web
-   Audio) a schermo bloccato iOS lo può fermare in ogni momento, e da lì non sempre lo lascia ripartire: la musica restava
-   muta, e il rimedio (il lettore diretto) arrivava dopo, quando a schermo bloccato iOS spesso non lascia più partire
-   niente. Ora la musica passa al lettore diretto (fuori dal mixer: iOS lo lascia suonare a schermo bloccato, come Musica)
-   NELL'ISTANTE in cui la pagina si nasconde, prima che il mixer si possa fermare: stesso file, stesso punto, e il lettore
-   del mixer si ferma solo quando il diretto suona davvero (nessun buco). Se iOS non lo lascia partire, la musica resta sul
-   mixer com'era (e restano i rimedi di prima). A schermo bloccato i passaggi tra i brani sono a taglio; tornando
-   nell'app, con il mixer di nuovo in funzione, la dissolvenza riprende dal brano dopo. */
-function alSicuro(perche) {
-  if (!NEEDS_MIXER || !MIX.ctx || !MIX.gains || !DIRETTO._sbloccato || RC.id || !curId || !(suonaVoluta > pausaVoluta)) return false;
-  if (castUnLettore()) return false;   // AirPlay del Mac, Chromecast: si resta sul lettore collegato
-  if (MIX.bloccoNo && Date.now() - MIX.bloccoNo < 30000) return false;   // iOS l'ha appena rifiutato: non si insiste
-  if (MIX.salto) saltoAnnulla();
-  if (MIX.act) xfEnd();   // a metà dissolvenza: resta il brano nuovo (au), quello vecchio si chiude
-  else if (MIX.plan) xfAbort();
-  const el = au; if (!MIX.gains.has(el) || el.paused || el.ended) return false;   // già fuori dal mixer, o ferma
-  const src = el.getAttribute('src'); if (!src || src === SILENZIO) return false;
-  const pos = el.currentTime || 0, id = curId;
-  diario('schermo bloccato: passo al lettore diretto', {perche, t:Math.round(pos), ctx:MIX.ctx.state});
-  MIX.fuori = true; MIX.perBlocco = true;
-  au = DIRETTO;   // da qui contano i suoi eventi: la pausa del lettore del mixer non è un'interruzione
-  try { DIRETTO.muted = false; DIRETTO.src = src; DIRETTO.currentTime = pos; } catch (e) {}
-  // con i metadati: allineato al lettore del mixer, che intanto è andato avanti
-  const allinea = () => { try { if (!el.paused && Math.abs((DIRETTO.currentTime || 0) - (el.currentTime || 0)) > 0.25) DIRETTO.currentTime = el.currentTime; } catch (e) {} };
-  DIRETTO.addEventListener('loadedmetadata', allinea, {once:true});
-  const fatto = () => {
-    if (au !== DIRETTO || curId !== id) return;
-    try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
-    setGain(el, 1);
-    diario('schermo bloccato: suona il lettore diretto', {t:Math.round(DIRETTO.currentTime || 0)});
-    verificaDiretto(id, pos, Date.now(), 0);
-  };
-  const no = e => {
-    DIRETTO.removeEventListener('loadedmetadata', allinea);
-    if (au !== DIRETTO || curId !== id) return;
-    au = el; MIX.fuori = false; MIX.perBlocco = false; MIX.bloccoNo = Date.now();
-    try { DIRETTO.pause(); DIRETTO.removeAttribute('src'); DIRETTO.load(); } catch (x) {}
-    diario('schermo bloccato: lettore diretto rifiutato, resta il mixer', {err:(e && e.name) || String(e)});
-    if (el.paused && suonaVoluta > pausaVoluta) el.play().catch(() => {});
-    updateNow();
-  };
-  let pr = null;
-  try { pr = DIRETTO.play(); } catch (e) { no(e); return false; }
-  if (pr && pr.then) pr.then(fatto, no); else fatto();
-  updateNow();
-  return true;
-}
-// la musica fatta ripartire a schermo bloccato (schermata di blocco, cuffie, un altro dispositivo) su un lettore del
-// mixer: subito anche lei sul lettore diretto
-auOn('playing', () => { if (document.hidden && MIX.gains && MIX.gains.has(au)) setTimeout(() => alSicuro('ripartita a schermo bloccato'), 0); });
-// tornando nell'app: il mixer riparte e, se la musica era passata al lettore diretto per lo schermo bloccato, la
-// dissolvenza torna dal brano dopo (il brano in corso finisce sul lettore diretto)
-function tornaAlMixer() {   // (il mixer lo fa ripartire chi chiama: una richiesta sola)
-  if (MIX.ctx && MIX.perBlocco && MIX.ctx.state === 'running') { MIX.perBlocco = false; MIX.fuori = false; diario('di nuovo nell\'app: la dissolvenza torna dal brano dopo'); }
-}
+/* IN SECONDO PIANO LA MUSICA NON CAMBIA MAI LETTORE (19/11/2026, «quando esco dall'applicazione si interrompe la
+   riproduzione»). Il 18/11 la musica passava al lettore diretto nell'istante in cui si usciva dall'app o si bloccava lo
+   schermo: ma iOS non lascia partire in modo affidabile un lettore nuovo con l'app in secondo piano (difetto noto di
+   WebKit: il lettore «suona» e non si sente niente), e la musica si fermava. Il mixer della dissolvenza invece, con la
+   sessione audio «playback» chiesta all'apertura, iOS lo lascia suonare in secondo piano e a schermo bloccato (WebKit
+   bug 261554, da iOS 17): resta lui. Il lettore diretto è solo per l'app aperta (passaAlDiretto). */
 // a schermo bloccato l'iPhone ferma il mixer mentre la musica dovrebbe suonare: lo si fa ripartire subito (e la guardia
 // continua, mixerMuto). Prima al ritorno nell'app la dissolvenza si spegneva per sempre (15/11: la dissolvenza resta)
 document.addEventListener('visibilitychange', () => {
   if (!MIX.ctx) return;
   if (document.hidden) {
-    alSicuro('pagina nascosta');   // 18/11: subito, prima che iOS possa fermare il mixer
+    // in secondo piano niente cambio di lettore (vedi sopra): solo il mixer fatto ripartire, se iOS l'ha fermato
     setTimeout(() => {
       if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && MIX.gains.has(au)) {
         diario('mixer fermo a schermo bloccato: riparte', {stato:MIX.ctx.state}); MIX.ctx.resume().catch(() => {});
-        setTimeout(() => { if (MIX.ctx.state !== 'running' && !au.paused && MIX.gains.has(au)) passaAlDiretto('mixer ' + MIX.ctx.state + ' a schermo bloccato'); }, 1500);
       }
     }, 2500);
     return;
   }
-  if (MIX.ctx.state === 'running') { tornaAlMixer(); return; }
-  try { MIX.ctx.resume().then(tornaAlMixer, () => {}); } catch (e) {}
+  if (MIX.ctx.state !== 'running') { try { MIX.ctx.resume().catch(() => {}); } catch (e) {} }
 });
 // diario degli ultimi passaggi tra i brani (com'è andato e perché): va al Mac con lo stato del dispositivo, così da
 // lontano si vede cosa succede su un iPhone che non mixa (es. «un lettore solo» rimasto acceso)
