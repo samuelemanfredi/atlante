@@ -16844,6 +16844,70 @@ def _installa_aggiorna(sorgente, dest):
     return True
 
 
+# ----- Lavori di una volta sul Mac mini (server/una_volta/*.sh) -----
+# Per cambiare sul Mac mini una cosa che non è nel repo (un altro programma, come Atlante Accessi) senza esserci davanti:
+# uno script in server/una_volta/ arriva con l'aggiornamento automatico e il server, all'avvio, lo lancia in sottofondo
+# (in una sessione sua: un riavvio del server non lo ferma). Riuscito (uscita 0) non riparte più (<stato>/<nome>.fatto);
+# andato male riprova ai prossimi avvii, al più UNA_VOLTA_TENTATIVI volte in tutto. Mentre gira c'è <nome>.in-corso e
+# non si lancia una seconda volta (un segno più vecchio di UNA_VOLTA_IN_CORSO_MAX è di un Mac spento a metà: si
+# riparte). Quello che scrive va in <stato>/<nome>.txt. Lo stato è in ~/Atlante/una_volta. Il primo (20/11/2026)
+# toglie il codice a 6 cifre dalla schermata di accesso di Atlante Accessi.
+UNA_VOLTA_TENTATIVI = 3
+UNA_VOLTA_IN_CORSO_MAX = 6 * 3600
+# $1 bash, $2 lo script, $3 dove scrive, $4 il segno «in corso» (lo toglie alla fine), $5 il segno «fatto» (solo se riesce)
+_UNA_VOLTA_GIRO = 'trap \'rmdir "$4" 2>/dev/null\' EXIT; "$1" "$2" >"$3" 2>&1 </dev/null && : >"$5"'
+
+
+def avvia_una_volta(cartella, stato, aspetta=False):
+    """Lancia gli script *.sh di `cartella` (in ordine di nome) non ancora riusciti, lo stato in `stato` (vedi sopra).
+    Torna i nomi lanciati. `aspetta`: aspetta che finiscano (per le prove)."""
+    try:
+        nomi = sorted(n for n in os.listdir(cartella) if n.endswith(".sh") and not n.startswith("."))
+    except OSError:
+        return []
+    bash = "/bin/bash" if os.path.exists("/bin/bash") else shutil.which("bash")
+    if not nomi or not bash:
+        return []
+    try:
+        os.makedirs(stato, exist_ok=True)
+    except OSError:
+        return []
+    lanciati = []
+    for n in nomi:
+        base = os.path.join(stato, n[:-3])
+        if os.path.exists(base + ".fatto"):
+            continue
+        try:
+            if time.time() - os.path.getmtime(base + ".in-corso") < UNA_VOLTA_IN_CORSO_MAX:
+                continue   # sta ancora girando (lanciato da un avvio di prima)
+            os.rmdir(base + ".in-corso")
+        except OSError:
+            pass
+        try:
+            with open(base + ".tentativi", encoding="utf-8") as f:
+                tentativi = int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            tentativi = 0
+        if tentativi >= UNA_VOLTA_TENTATIVI:
+            continue
+        try:
+            with open(base + ".tentativi", "w", encoding="utf-8") as f:
+                f.write(str(tentativi + 1))
+            os.mkdir(base + ".in-corso")
+            p = subprocess.Popen([bash, "-c", _UNA_VOLTA_GIRO, "atlante-una-volta", bash, os.path.join(cartella, n),
+                                  base + ".txt", base + ".in-corso", base + ".fatto"], cwd=stato, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except (OSError, subprocess.SubprocessError) as e:
+            print("Atlante: lavoro di una volta %s non lanciato: %s" % (n, e), flush=True)
+            continue
+        print("Atlante: lavoro di una volta %s lanciato (tentativo %d di %d)" % (n, tentativi + 1, UNA_VOLTA_TENTATIVI),
+              flush=True)
+        lanciati.append(n)
+        if aspetta:
+            p.wait()
+    return lanciati
+
+
 def avvia_auto():
     """All'avvio del server: se l'account Volkswagen è collegato, il collegamento riparte da solo (in un filo)."""
     try:
@@ -19029,6 +19093,8 @@ def main():
     if sys.platform == "darwin" and os.environ.get("ATLANTE_AGGIORNA_INSTALLA", "1") != "0":
         _installa_aggiorna(os.path.join(os.path.dirname(os.path.abspath(__file__)), "aggiorna.sh"),
                            os.path.expanduser("~/Atlante/aggiorna.sh"))
+        avvia_una_volta(os.path.join(os.path.dirname(os.path.abspath(__file__)), "una_volta"),
+                        os.path.expanduser("~/Atlante/una_volta"))
     _tst().riprendi()   # il lavoro sui testi di tutta la libreria riparte solo se Samuele l'ha acceso da Gestione
     signal.signal(signal.SIGTERM, _alla_fine)   # launchctl kickstart -k (aggiornamento): prima si ferma Whisper
     if a.tematiche or a.tematiche_prova > 0:

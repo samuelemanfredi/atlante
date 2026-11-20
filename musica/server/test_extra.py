@@ -4893,6 +4893,73 @@ class TestAggiornaSenzaFermareLaMusica(ProvaCaricamenti, unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestUnaVolta(unittest.TestCase):
+    """Lavori di una volta sul Mac mini (server/una_volta/*.sh, 20/11/2026): il server li lancia all'avvio; uno riuscito
+    non riparte più, uno andato male riprova al più UNA_VOLTA_TENTATIVI volte, uno ancora in corso non parte due volte."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = modulo_server("musica_libreria_una_volta")
+
+    def test_una_volta(self):
+        m, d = self.m, tempfile.mkdtemp(prefix="atlante-una-volta-")
+        try:
+            lav, stato, conta = os.path.join(d, "lavori"), os.path.join(d, "stato"), os.path.join(d, "conta")
+            os.makedirs(lav)
+
+            def scrivi(nome, testo):
+                with open(os.path.join(lav, nome), "w", encoding="utf-8") as f:
+                    f.write("#!/bin/bash\n" + testo + "\n")
+
+            def leggi(p):
+                with open(p, encoding="utf-8") as f:
+                    return f.read()
+            scrivi("a_va.sh", 'echo fatto; echo x >> "%s"' % conta)
+            scrivi("b_no.sh", "echo rotto; exit 3")
+            scrivi("leggimi.txt", "non è uno script")
+            self.assertEqual(m.avvia_una_volta(lav, stato, aspetta=True), ["a_va.sh", "b_no.sh"])
+            self.assertTrue(os.path.exists(os.path.join(stato, "a_va.fatto")))
+            self.assertFalse(os.path.exists(os.path.join(stato, "b_no.fatto")))
+            self.assertEqual(leggi(os.path.join(stato, "a_va.txt")).strip(), "fatto")
+            self.assertEqual(leggi(os.path.join(stato, "b_no.txt")).strip(), "rotto")
+            self.assertFalse(os.path.exists(os.path.join(stato, "a_va.in-corso")))   # finito: il segno se ne va
+            # riuscito non riparte; andato male riprova, al più UNA_VOLTA_TENTATIVI volte in tutto
+            for _ in range(m.UNA_VOLTA_TENTATIVI - 1):
+                self.assertEqual(m.avvia_una_volta(lav, stato, aspetta=True), ["b_no.sh"])
+            self.assertEqual(m.avvia_una_volta(lav, stato, aspetta=True), [])
+            self.assertEqual(leggi(conta).count("x"), 1)
+            # uno ancora in corso (il server riavviato a metà) non parte una seconda volta
+            scrivi("c_lungo.sh", "echo c")
+            os.mkdir(os.path.join(stato, "c_lungo.in-corso"))
+            self.assertEqual(m.avvia_una_volta(lav, stato, aspetta=True), [])
+            # ... a meno che il segno sia vecchio (il Mac spento a metà): allora riparte
+            vecchio = time.time() - m.UNA_VOLTA_IN_CORSO_MAX - 60
+            os.utime(os.path.join(stato, "c_lungo.in-corso"), (vecchio, vecchio))
+            self.assertEqual(m.avvia_una_volta(lav, stato, aspetta=True), ["c_lungo.sh"])
+            self.assertTrue(os.path.exists(os.path.join(stato, "c_lungo.fatto")))
+            self.assertFalse(os.path.exists(os.path.join(stato, "c_lungo.in-corso")))
+            self.assertEqual(m.avvia_una_volta(os.path.join(d, "manca"), stato), [])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_accessi_senza_codice(self):
+        """Il primo lavoro: Claude Code sul Mac toglie il codice a 6 cifre da Atlante Accessi (il codice di Accessi è
+        solo sul Mac). Lo script è bash valido, riesce solo con «ESITO: OK» e non dà a Claude né sudo né rm."""
+        p = os.path.join(QUI, "una_volta", "accessi_senza_codice.sh")
+        self.assertEqual(subprocess.run(["bash", "-n", p]).returncode, 0)
+        with open(p, encoding="utf-8") as f:
+            sh = f.read()
+        self.assertTrue(sh.startswith("#!/bin/bash\n"))
+        self.assertIn("tail -5 \"$USCITA\" | grep -q 'ESITO: OK'", sh)
+        self.assertIn("--permission-mode acceptEdits", sh)
+        strumenti = "".join(re.findall(r'^STRUMENTI="([^"]*)"$', sh, re.M))
+        self.assertIn("Bash(launchctl:*)", strumenti)
+        self.assertNotIn("sudo", strumenti)
+        self.assertNotIn("Bash(rm", strumenti)
+        self.assertIn("8443", sh)
+        self.assertIn(".prima-senza-codice", sh)
+
+
 class TestLibreriaAppModulo(unittest.TestCase):
     """Le parti della libreria delle app senza server: righe, codici scaduti, varco senza biscotto, firma che manca."""
 
