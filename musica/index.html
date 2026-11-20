@@ -5184,8 +5184,8 @@ const XMODS = [
 // una persona invitata (ascolta e basta: dei moduli solo «Invita un amico» e «Idee»). Il Mac controlla comunque ogni richiesta.
 let IO = ls.get('am-io', {ruolo:'', persona:null});
 // «Controllo remoto»: lo schermo dei Mac con Atlante Accessi, dalla sua porta pubblica (Funnel 8443) dello stesso nome del
-// Mac mini: si apre da qualsiasi dispositivo, con Tailscale acceso o spento. La sicurezza è di Accessi: utente, password e
-// codice, poi la password del Mac. Solo per Samuele (le altre persone e i loro Mac li sceglie Accessi, in «Persone»).
+// Mac mini: si apre da qualsiasi dispositivo, con Tailscale acceso o spento. La sicurezza è di Accessi: utente e password
+// (niente più codice a 6 cifre, 20/11/2026), poi la password del Mac. Solo per Samuele (le altre persone e i loro Mac li sceglie Accessi, in «Persone»).
 // Non è una pagina in x/: si apre in una finestra a parte, grande, e la musica continua qui.
 const ACCESSI_PORTA = '8443';
 const XREMOTO = {k:'remoto', t:'Controllo remoto', d:'Lo schermo dei tuoi Mac, da qui', i:'🖥️', c:'#5e5ce6'};
