@@ -235,7 +235,7 @@ function cantaGiro() {
 }
 
 /* ---------- testo trascritto su questo telefono (Whisper nell'app) ---------- */
-const TEL = {w:null, k:'', id:null, testi:new Map(), lavoro:null, scarico:'', errore:''};
+const TEL = {w:null, k:'', id:null, testi:new Map(), lavoro:null, scarico:'', errore:'', spento:!!window.TEL_SPENTO};
 const TEL_FINESTRA = 25, TEL_PASSO = 20;   // pezzi da 25 s ogni 20: 5 s in comune, nessuna riga tagliata a metà
 const TEL_RITARDO = 0.12;   // Whisper nell'app dà le parole in media 0,12 s prima della voce (misurato il 31/10 su parole a tempo noto)
 const TEL_INVENTATE = /^[\s(\[♪*-]*(musica|music|applausi|applause|risate|sottotitoli|subtitles|amara\.org|grazie per la visione|thanks? for watching)/i;
@@ -299,6 +299,14 @@ window.telScegli = function (j) {
   if (j && j.stato === 'ok' && !senzaTesto(j)) { telFerma(b.k); return j; }   // c'è il testo (dal file, da LRCLIB o da Whisper sul Mac)
   if (!senzaTesto(j) && !(j && j.stato === 'errore')) return j;   // in arrivo, strumentale, vuoto: si aspetta il Mac
   const mio = TEL.testi.get(b.k);
+  // SULL'IPHONE SOLO A RICHIESTA (20/11/2026, «l'app continua a bloccarsi ed uscire dalla pagina, a volte con il Mac
+  // offline»): Whisper nella pagina (80 MB di modello, il processore o la scheda grafica al massimo) partiva da solo appena
+  // si apriva il testo con il Mac spento, e iOS può chiudere la pagina che consuma così, e con lei la musica. Ora parte
+  // solo con il tasto «Trascrivi su questo iPhone», per il brano che si ascolta; un testo già trascritto resta
+  if (window.TEL_A_RICHIESTA && TEL.si !== b.k && !(TEL.lavoro && TEL.lavoro.k === b.k)) {
+    if (mio && mio.righe.length) return mio;
+    return {stato:'chiedi-telefono', nota:TEL.spento ? 'La trascrizione su questo iPhone è spenta: l\'ultima volta iOS ha chiuso l\'app mentre trascriveva' : ''};
+  }
   if (!TEL.lavoro || TEL.lavoro.k !== b.k) telInizia(b, id);
   if (mio && mio.righe.length) return mio;
   return {stato:'trascrivo', nota:TEL.errore || TEL.scarico || 'Il testo non c\'è nel file né su LRCLIB: lo ascolto qui, mentre suona'};
@@ -439,6 +447,14 @@ async function telInizia(b, id) {
 
 /* ---------- avvio ---------- */
 cantaTasto();
+// «Trascrivi su questo iPhone» (vedi telScegli): il brano di adesso si trascrive qui
+window.telAvvia = function () {
+  const b = TESTO.b; if (!b || !curId) return;
+  TEL.si = b.k; TEL.spento = false;
+  try { localStorage.removeItem('am-tel-spento'); } catch (e) {}
+  testoUsa(TESTO.j && TESTO.j.stato !== 'chiedi-telefono' ? TESTO.j : {stato:'errore', errore:'Il Mac non risponde'});
+};
+window.telInCorso = () => !!(TEL.lavoro && !TEL.lavoro.fermo && TEL.w);
 document.addEventListener('click', e => {
   const x = e.target.closest('[data-a="canta"]'); if (!x) return;
   if (CANTA.on) cantaSpegni(); else cantaAccendi();

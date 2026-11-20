@@ -1,5 +1,5 @@
 // Atlante Musica: copia offline dell'app (la musica è salvata a parte, in IndexedDB).
-const CACHE = 'atlante-musica-v7';   // v7: tutti i moduli nella copia, anche «Cerca e scarica»; le app già installate la rinnovano da sole
+const CACHE = 'atlante-musica-v8';   // v8: anche gli script dell'app in x/ (testi, posizione); le app già installate la rinnovano da sole
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png?v=2', './icon-512.png?v=2', './icon-maskable-512.png?v=2', './apple-touch-icon.png?v=2'];
 // moduli della scheda Altro: si mettono in copia uno per uno (se uno manca, gli altri restano)
 // (18/11/2026, «"Cerca e scarica musica" non si apre»: non era nella copia, e un Mac lento a rispondere lasciava il riquadro
@@ -8,6 +8,8 @@ const MODULI = ['x/kit.css', 'x/kit.js'].concat(['cerca', 'carica', 'chat', 'pod
   'strumenti', 'studio', 'inviti', 'idee', 'posizione', 'chiamate', 'password', 'contenuti', 'gestione', 'controllo', 'auto'].map(m => 'x/' + m + '.html'));
 // «Rete e VPN» serve proprio quando il Mac non risponde (Tailscale spento fuori casa): deve aprirsi anche offline
 MODULI.push('x/rete.html');
+// gli script che l'app carica da x/ (20/11/2026): con il Mac spento e la copia senza di loro, mancavano i testi e la posizione
+MODULI.push('x/canta.js', 'x/trascrivi.js', 'x/posizione.js', 'x/chat-cifra.js', 'x/cifra.js', 'x/qrcode.js');
 const ATTESA = 3000;   // se il Mac non risponde entro 3 s l'app si apre dalla copia offline
 const ATTESA_MODULI = 2500;   // e un modulo (x/…) entro 2,5 s, se ce n'è la copia (la rete aggiorna comunque la copia)
 // 'reload': la copia offline si prende dal Mac, non da una vecchia copia nella cache del browser

@@ -321,18 +321,24 @@ function proveTelefono(canta, fatte) {
   const vero = (c, m) => { if (!c) throw new Error(m); };
   const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(m + ': ' + x + ' invece di ' + y); };
   const src = canta.replace('window.telScegli = function (j) {', '\nfunction telScegli(j) {');
-  const prova = ios => {
+  const prova = (aRichiesta, si, prepara) => {
     const avviati = [];
-    const env = {isIOS:ios, TESTO:{b:{k:'k1'}}, RC:{id:null}, curId:'r1', T:new Map([['r1', {id:'r1'}]]),
-      TEL:{testi:new Map(), lavoro:null, errore:'', scarico:''}, telInizia:(b, id) => avviati.push(id), telFerma:() => {}};
+    const env = {window:{TEL_A_RICHIESTA:aRichiesta}, TESTO:{b:{k:'k1'}}, RC:{id:null}, curId:'r1', T:new Map([['r1', {id:'r1'}]]),
+      TEL:{testi:new Map(), lavoro:null, errore:'', scarico:'', si:si || ''}, telInizia:(b, id) => avviati.push(id), telFerma:() => {}};
+    if (prepara) prepara(env);
     const F = carica(src, ['telScegli'], ['const senzaTesto = '], env);
     return {r:F.telScegli({stato:'nessuno'}), avviati};
   };
-  // 14/11 (dopo): sull'iPhone torna, con l'audio a pezzi e Whisper solo con l'app davanti
+  // 20/11/2026: sull'iPhone (TEL_A_RICHIESTA) Whisper solo con il tasto «Trascrivi su questo iPhone»: partiva da solo con il
+  // Mac spento, e iOS può chiudere la pagina che consuma così (e con lei la musica)
   let x = prova(true);
-  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'iPhone: senza testo dal Mac, il testo si trascrive sul telefono');
+  eq([x.r.stato, x.avviati], ['chiedi-telefono', []], 'iPhone: senza testo dal Mac, il tasto per trascrivere, niente Whisper da solo');
+  x = prova(true, 'k1');
+  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'iPhone: toccato il tasto, si trascrive questo brano');
+  x = prova(true, '', e => { e.TEL.testi.set('k1', {stato:'ok', righe:[{testo:'ciao'}]}); });
+  eq([x.r.stato, x.avviati], ['ok', []], 'iPhone: un testo già trascritto resta');
   x = prova(false);
-  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'Mac e computer: anche');
+  eq([x.r.stato, x.avviati], ['trascrivo', ['r1']], 'Mac e computer: da solo, come prima');
   vero(/telDavanti\(lav\)/.test(canta) && /visibilitychange', \(\) => \{ if \(document\.hidden\) telChiudi/.test(canta), 'Whisper solo con l\'app davanti, chiuso in secondo piano');
   vero(!/decodeAudioData\(await f\.arrayBuffer\(\)\)\);\n  if \(ab\.duration > 900\)/.test(canta) && /f\.slice\(a, b\)\.arrayBuffer\(\)/.test(canta), 'l\'audio a pezzi, non il brano intero');
   fatte.push('testo trascritto sull\'iPhone, a pezzi');
