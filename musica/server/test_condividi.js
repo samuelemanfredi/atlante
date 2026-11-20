@@ -191,5 +191,7 @@ function prove(app, inv, sw, fatte) {
   vero(attesa && +attesa[1] >= 1000 && +attesa[1] <= 4000, 'un limite d\'attesa per i moduli: ' + (attesa && attesa[1]));
   vero((sw.match(/setTimeout\(\(\) => caches\.match\((k|r)\)\.then\(hit => \{ if \(hit\) usa\(hit\); \}\), ATTESA_MODULI\)/g) || []).length === 2,
     'pagine e file dei moduli: se il Mac tarda, la copia sul telefono');
+  // 20/11/2026: anche gli script che l'app carica da x/ (i testi, la posizione): con il Mac spento devono esserci
+  vero(/MODULI\.push\([^)]*'x\/canta\.js'[^)]*'x\/posizione\.js'/.test(sw), 'gli script dell\'app (testi, posizione) nella copia offline');
   fatte.push('copia offline');
 }

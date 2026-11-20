@@ -644,6 +644,22 @@ const shuffleArr = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) 
 const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
 const UNK_ART = 'Artista sconosciuto', UNK_ALB = 'Album sconosciuto';
 const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+/* CHIUSURE IMPROVVISE (20/11/2026, «l'app continua a bloccarsi ed uscire dalla pagina»). Quando iOS chiude la pagina
+   (troppa memoria, un blocco) la musica si ferma e la pagina si ricarica. Ogni 3 s la scatola nera scrive cosa sta
+   facendo l'app (brano, punto, trascrizione sul telefono, download, schermata); un'uscita normale (pagehide) lo segna.
+   Alla riapertura, una scatola nera senza uscita normale e con la musica voluta = chiusura improvvisa: si scrive nel
+   diario (che va al Mac) cosa stava facendo, si riprende dallo stesso brano e punto (se iOS lo lascia, da sola; se no
+   «tocca ▶︎»), e se stava trascrivendo il testo sul telefono la trascrizione su questo dispositivo resta a richiesta. */
+const VIVO_PRIMA = ls.get('am-vivo', null);
+const CHIUSA_IMPROVVISA = !!(VIVO_PRIMA && !VIVO_PRIMA.uscita && VIVO_PRIMA.suona && Date.now() - (VIVO_PRIMA.t || 0) < 6 * 3600e3);
+if (CHIUSA_IMPROVVISA) {
+  ls.set('am-riavvio', {t:Date.now(), msg:true, perche:'chiusura improvvisa della pagina', suonava:true});
+  if (VIVO_PRIMA.tel) ls.set('am-tel-spento', Date.now());
+}
+// Whisper nella pagina: sull'iPhone e sull'iPad solo a richiesta (x/canta.js), e così ovunque dopo una chiusura durante
+// una trascrizione
+window.TEL_A_RICHIESTA = isIOS || !!ls.get('am-tel-spento', 0);
+window.TEL_SPENTO = !!ls.get('am-tel-spento', 0);
 const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
 /* ---------- archivio (IndexedDB) ---------- */
@@ -3835,6 +3851,15 @@ document.addEventListener('visibilitychange', () => {
   }
   if (MIX.ctx.state !== 'running') { try { MIX.ctx.resume().catch(() => {}); } catch (e) {} }
 });
+function vivoScrivi() {   // la scatola nera (vedi «chiusure improvvise»)
+  try {
+    ls.set('am-vivo', {t:Date.now(), suona:!!curId && !RC.id && suonaVoluta > pausaVoluta, id:curId || '', pos:Math.round((au.currentTime || 0) * 10) / 10,
+      tel:!!(window.telInCorso && telInCorso()), dl:!!dlCur || grabbing.size > 0, np:np.classList.contains('open'), testo:!!TESTO.vis,
+      x:xCur || '', mixer:MIX.ctx ? MIX.ctx.state : '', fuori:!!MIX.fuori, nascosta:document.hidden, srv:SRV});
+  } catch (e) {}
+}
+setInterval(vivoScrivi, 3000);
+addEventListener('pagehide', () => ls.set('am-vivo', {uscita:'pulita', t:Date.now()}));
 // diario degli ultimi passaggi tra i brani (com'è andato e perché): va al Mac con lo stato del dispositivo, così da
 // lontano si vede cosa succede su un iPhone che non mixa (es. «un lettore solo» rimasto acceso)
 const DIARIO = ls.get('am-mix-diario', []);
@@ -5035,7 +5060,8 @@ document.addEventListener('click', e => {
     case 'morecur': if (curId) trackMenu(curId); break;
     case 'cast': castPick(); break;
     case 'xopen': if (b.closest('#side') && tab !== 'altro') setTab('altro'); openX(d.k); break;
-    case 'xriprova': xRiprova(); break;   // la pagina del modulo non arrivava: di nuovo dal Mac (o dalla copia)
+    case 'xriprova': xRiprova(); break;
+    case 'teltrascrivi': if (window.telAvvia) telAvvia(); break;   // 20/11/2026: Whisper sull'iPhone solo a richiesta   // la pagina del modulo non arrivava: di nuovo dal Mac (o dalla copia)
     case 'xchiudi': closeX(); break;   // dalla barra dell'iPad: chiuso il modulo («‹ Altro») si torna ad Altro
     case 'sgo': sideVai(d.v); break;
     case 'condividi': closeSheet(); if (tab !== 'altro') setTab('altro'); openX('inviti'); break;   // il tasto in Libreria: «Condividi l'app»
@@ -6908,6 +6934,12 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   } catch (e) {}
   const lt = ls.get('am-tab', null); tab = lt && tabs[lt] ? lt : (T.size ? 'home' : 'lib');
   render();   // subito la musica già sul telefono, poi quella del Mac
+  // dopo una chiusura improvvisa, con il brano sul telefono: si riparte subito, senza aspettare il Mac (spento o lento:
+  // fino a 14 s di attese). Il resto dell'avvio poi trova il brano già al suo posto (20/11/2026)
+  if (CHIUSA_IMPROVVISA && !curId && VIVO_PRIMA.id && sulTel(VIVO_PRIMA.id)) {
+    const k = (S.queue || []).indexOf(VIVO_PRIMA.id);
+    if (k >= 0) { try { await load(k, true, VIVO_PRIMA.pos || 0); } catch (e) {} }
+  }
   if (window.PWA && 'serviceWorker' in navigator) { try { navigator.serviceWorker.register('sw.js'); } catch (e) {} }
   await ioCarica();   // prima del catalogo: chi è decide se scaricare tutta la musica
   await loadServer();
@@ -6916,6 +6948,7 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   if (ls.get('am-aggiornata', 0)) { ls.set('am-aggiornata', 0); setTimeout(() => toast('Atlante aggiornato all\'ultima versione'), 1500); }
   const dopoRiavvio = ls.get('am-riavvio', {});
   if (dopoRiavvio.msg) { ls.set('am-riavvio', Object.assign({}, dopoRiavvio, {msg:false})); diario('dopo il riavvio', {perche:dopoRiavvio.perche}); }
+  if (CHIUSA_IMPROVVISA) diario('ripartita dopo una chiusura improvvisa', Object.assign({}, VIVO_PRIMA, {s:Math.round((Date.now() - VIVO_PRIMA.t) / 1000)}));
   // brano del Mac toccato durante il collegamento, ma il Mac non ha risposto: lo si dice (e si passa a uno salvato) invece del silenzio
   if (!SRV && curId && !au.paused && au.readyState < 3) {
     const t = T.get(curId);
@@ -6927,7 +6960,9 @@ $('miniNx').innerHTML = ic('fwd'); $('bPrev').innerHTML = ic('bwd'); $('bNext').
   if (!curId) {
     const ps = ls.get('am-play', {}), was = (S.queue || [])[S.qi];
     S.queue = (S.queue || []).filter(id => T.has(id)); S.orig = (S.orig || []).filter(id => T.has(id));
-    if (S.queue.length) { const k = S.queue.indexOf(was), i = k >= 0 ? k : Math.min(Math.max(0, S.qi), S.queue.length - 1); await load(i, false, k >= 0 ? ps.t || 0 : 0); }
+    // dopo una chiusura improvvisa il punto esatto dalla scatola nera (am-play ha quello dell'inizio del brano)
+    const pos = CHIUSA_IMPROVVISA && VIVO_PRIMA.id === was && VIVO_PRIMA.pos > 0 ? VIVO_PRIMA.pos : ps.t || 0;
+    if (S.queue.length) { const k = S.queue.indexOf(was), i = k >= 0 ? k : Math.min(Math.max(0, S.qi), S.queue.length - 1); await load(i, false, k >= 0 ? pos : 0); }
   }
   updateNow();
   // dopo un riavvio fatto dall'app (audio incastrato): si prova a ripartire da soli dallo stesso punto. L'iPhone di solito
@@ -7490,6 +7525,12 @@ function testoDisegna(j, agg) {   // agg: righe nuove dal vivo (si resta dove si
   if (!j || j.stato === 'in arrivo') return msg('Cerco il testo…', j ? 'Il Mac lo sta chiedendo a LRCLIB' : '');
   if (j.stato === 'nessuno' && testoVivo(j)) return msg('Il Mac mini scrive il testo…', testoVivoNota(j));
   if (j.stato === 'trascrivo') return msg('Trascrivo il testo su questo telefono…', j.nota || '');   // x/canta.js
+  if (j.stato === 'chiedi-telefono') {   // 20/11/2026: sull'iPhone la trascrizione solo a richiesta (x/canta.js)
+    L.innerHTML = '<div class="lyrmsg">Testo non disponibile<small>' + esc(j.nota || 'Il testo non c\'è nel file né su LRCLIB e il Mac non risponde.') +
+      '</small><button type="button" class="pill" data-a="teltrascrivi" style="margin-top:14px">Trascrivi su questo iPhone</button>' +
+      '<small>Usa molta memoria: su un iPhone con poca memoria iOS può chiudere l\'app.</small></div>';
+    L.scrollTop = 0; testoTasti(); return;
+  }
   if (j.stato === 'vuoto') return msg(RC.id || curId ? 'Nessun testo' : 'Niente in riproduzione', RC.id || curId ? 'Podcast, audiolibri e radio non hanno un testo a tempo' : '');
   if (j.stato === 'errore') return msg('Testo non disponibile', j.errore);
   if (j.stato === 'strumentale') return msg('Brano strumentale', j.fonte === 'voce' ? 'Whisper non ha sentito una voce: solo musica' : 'Niente parole: solo musica');
