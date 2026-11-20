@@ -4959,6 +4959,22 @@ class TestUnaVolta(unittest.TestCase):
         self.assertIn("8443", sh)
         self.assertIn(".prima-senza-codice", sh)
 
+    def test_controllo_remoto(self):
+        """Il secondo lavoro: il Remote Control di Claude Code sempre acceso sul Mac mini (un LaunchAgent). Bash valido,
+        il plist controllato con plutil, e se non si collega il LaunchAgent si toglie (niente tentativi a vuoto)."""
+        p = os.path.join(QUI, "una_volta", "controllo_remoto.sh")
+        self.assertEqual(subprocess.run(["bash", "-n", p]).returncode, 0)
+        with open(p, encoding="utf-8") as f:
+            sh = f.read()
+        self.assertTrue(sh.startswith("#!/bin/bash\n"))
+        self.assertIn('"$CLAUDE" remote-control', sh)
+        self.assertIn("<key>KeepAlive</key><true/>", sh)
+        self.assertIn("<key>ThrottleInterval</key><integer>300</integer>", sh)
+        self.assertIn('plutil -lint "$PLIST"', sh)
+        fine = sh[sh.rindex("non si è collegato entro 2 minuti"):]
+        self.assertIn('launchctl bootout "$DOM/$ETICHETTA"', fine)
+        self.assertIn('mv -f "$PLIST" "$PLIST.non-va"', fine)
+
 
 class TestLibreriaAppModulo(unittest.TestCase):
     """Le parti della libreria delle app senza server: righe, codici scaduti, varco senza biscotto, firma che manca."""

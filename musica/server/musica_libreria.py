@@ -16851,7 +16851,8 @@ def _installa_aggiorna(sorgente, dest):
 # andato male riprova ai prossimi avvii, al più UNA_VOLTA_TENTATIVI volte in tutto. Mentre gira c'è <nome>.in-corso e
 # non si lancia una seconda volta (un segno più vecchio di UNA_VOLTA_IN_CORSO_MAX è di un Mac spento a metà: si
 # riparte). Quello che scrive va in <stato>/<nome>.txt. Lo stato è in ~/Atlante/una_volta. Il primo (20/11/2026)
-# toglie il codice a 6 cifre dalla schermata di accesso di Atlante Accessi.
+# toglie il codice a 6 cifre dalla schermata di accesso di Atlante Accessi; il secondo riaccende il Remote Control di
+# Claude Code sul Mac mini e lo tiene acceso (sessioni sul Mac dall'app Claude, come prima del 7/11/2026).
 UNA_VOLTA_TENTATIVI = 3
 UNA_VOLTA_IN_CORSO_MAX = 6 * 3600
 # $1 bash, $2 lo script, $3 dove scrive, $4 il segno «in corso» (lo toglie alla fine), $5 il segno «fatto» (solo se riesce)
