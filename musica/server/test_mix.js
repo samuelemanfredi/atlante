@@ -125,6 +125,7 @@ function prove(src, fatte) {
   prova('velocità a gradini', () => gradiniPuri(src));
   prova('mix a fine brano senza mixer', () => scenarioFineBrano(src, false));
   prova('mix a fine brano con il mixer', () => scenarioFineBrano(src, true));
+  prova('iPhone: musica fuori dal mixer, dissolvenza in uscita', () => dissolvenzaInUscita(src));
   prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
   prova('ritardo di partenza imparato', () => ritardoImparato(src));
   prova('▶︎ bloccato: si sblocca da sola', () => partenzaBloccata(src));
@@ -150,6 +151,10 @@ function collegamenti(src) {
   c(/P\.tR = tS - MIX\.RAMPA;/, 'la rampa a fine brano usa MIX.RAMPA');
   c(/const SALTO = \{MISURA:4, PRONTO:6, RAMPA:2\};/, 'rampa al salto di 2 s');
   c(/function gradini\(sec\) \{ return MIX\.gains\.size \? 1 : 0; \}/, 'con il mixer un gradino solo');
+  // iPhone (21/11/2026): nel mixer solo DISSOLVI, mai i lettori della musica; nel passaggio la coda del vecchio sfuma da lì
+  c(/if \(NEEDS_MIXER\) \{[^\n]*\n      const g = ctx\.createGain\(\); g\.gain\.value = 0;\n      ctx\.createMediaElementSource\(DISSOLVI\)\.connect\(g\); g\.connect\(ctx\.destination\);/, 'iPhone: nel mixer solo DISSOLVI');
+  c(/if \(NEEDS_MIXER && !MIX\.gains\.size\) \{ setGain\(inn, 1\); dissolviAvvia\(out, P, W\); xfEnd\(\); return; \}/, 'iPhone: il nuovo sul suo lettore, il vecchio sfuma da DISSOLVI');
+  c(/if \(MIX\.dissolvi && !document\.hidden\) dissolviPrepara\(P\);/, 'iPhone: DISSOLVI si prepara con l\'app aperta');
   c(/else allineaMuto\(A, e, TBe\);/, 'con il mixer i battiti si sistemano spostando il brano nuovo');
   c(/pos = p\.pos \+ ritAvvio\(\);/, 'a fine brano il nuovo parte avanti del ritardo imparato');
   c(/saltoVia\(X, p\.pos \+ ritAvvio\(\)\)/, 'al salto il nuovo parte avanti del ritardo imparato');
@@ -345,11 +350,11 @@ function mondo(src, opz) {
       if (this._t >= this.duration) { this._t = this.duration; this.ended = true; this.paused = true; this.emit('pause'); this.emit('ended'); }
     }
   }
-  const DECKS = [new Lettore('au'), new Lettore('au2')], AUX = new Lettore('auX'), tutti = DECKS.concat(AUX);
+  const DECKS = [new Lettore('au'), new Lettore('au2')], AUX = new Lettore('auX'), DISSOLVI = new Lettore('auF'), tutti = DECKS.concat(AUX, DISSOLVI);
   const ritardo = (ms, v) => new SP(ok => tempo.setTimeout(() => ok(v), ms));
   const memoria = opz.memoria || {};   // localStorage: si può passare da un mondo al successivo
   const env = {
-    au:DECKS[0], DECKS, AUX, DIRETTO:new Lettore('auD'), curId:null, curUrl:null, keptFor:null, countFor:null, userVol:1, pausaVoluta:0,
+    au:DECKS[0], DECKS, AUX, DIRETTO:new Lettore('auD'), DISSOLVI, SILENZIO:'data:silenzio', curId:null, curUrl:null, keptFor:null, countFor:null, userVol:1, pausaVoluta:0,
     S:{queue:brani.map(b => b.id), orig:[], qi:0, shuffle:false, repeat:'off', from:''}, T,
     MIX:{on:true, X:10, RAMPA:8, plan:null, act:null, ctx:null, gains:new Map(), loop:0, prepT:0, XS:6, salto:null},
     BPMC:new Map(), RC:{id:null}, NEEDS_MIXER:false, API:'api/musica/', SRV:true,
@@ -379,9 +384,10 @@ function mondo(src, opz) {
   const F = carica(src, ['xfStart', 'xfRun', 'xfEnd', 'xfAbort', 'xfLoop', 'xfRifiutato', 'xfTick', 'xfAccorcia', 'nextIdx', 'setGain', 'applyVol', 'prev', 'xfPausa', 'diarioPausa', 'mixInfo', 'osservaNuovo',
     'mixFattore', 'rampaVel', 'pezzoQui', 'partenzaBattito', 'accorciaW', 'saltoResto', 'velocita', 'conPitch', 'gradini', 'rampaGradini', 'correzioneFase',
     'avanti', 'saltaA', 'saltoIdx', 'gridQui', 'saltoMisurato', 'saltoTick', 'saltoParti', 'saltoCarica', 'saltoVia', 'saltoSubito', 'saltoAnnulla', 'saltoPausa', 'saltoSpostato',
-    'allineaMuto', 'ritImpara', 'ritAvvio'],
-  ['const wrap = ', 'const otherDeck = ', 'const SALTO = ', 'const ALLINEA = ', 'MIX.rit = '], env, null,
-  {xfPrepare:opz.finebrano ? sincrona(src, 'xfPrepare') : 'function xfPrepare(P) { return xfPreparaFinto(P); }'});
+    'allineaMuto', 'ritImpara', 'ritAvvio', 'dissolviAvvia', 'dissolviFerma', 'mixerRiposo'],
+  ['const wrap = ', 'const otherDeck = ', 'const SALTO = ', 'const ALLINEA = ', 'MIX.rit = ', 'const DIS = '], env, null,
+  {xfPrepare:opz.finebrano ? sincrona(src, 'xfPrepare') : 'function xfPrepare(P) { return xfPreparaFinto(P); }',
+    dissolviPrepara:sincrona(src, 'dissolviPrepara')});
   // gli eventi come auOn nell'app: contano solo quelli del lettore in uso
   tutti.forEach(el => {
     el.addEventListener('timeupdate', () => { if (el === env.au) { F.xfTick(); F.saltoTick(); } });
@@ -692,6 +698,66 @@ function scenarioFineBrano(src, mixer) {
     vero(log.diario.some(x => x.e === 'allineo'), 'lo spostamento va nel diario');
     vero(env.MIX.rit.p > 0.02 && env.MIX.rit.p < 0.06, 'ritardo di partenza imparato: ' + env.MIX.rit.p);
   } else vero(cambiRampa > 20, 'senza mixer la rampa resta continua (' + cambiRampa + ')');
+}
+
+// IPHONE (21/11/2026): la musica non passa mai dal mixer, perché iOS la fermava uscendo dall'app o bloccando il telefono.
+// Nel passaggio con l'app aperta il brano nuovo entra sul battito sul suo lettore normale e la coda del vecchio continua da
+// DISSOLVI (l'unico lettore nel mixer), dallo stesso punto e alla stessa velocità, abbassandosi in al più 6 s. Con l'app
+// nascosta o il mixer fermo: il taglio sul battito di sempre. Un altro brano scelto durante la dissolvenza la ferma.
+function dissolvenzaInUscita(src) {
+  const iphone = () => {
+    const M = mondo(src, {finebrano:true, da:240 - 42}), curve = [];
+    M.env.NEEDS_MIXER = true;
+    M.env.MIX.ctx = {state:'running', sospeso:0, ripreso:0, get currentTime() { return M.ora() / 1000; }, suspend() { this.sospeso++; this.state = 'suspended'; return SP.resolve(); },
+      resume() { this.ripreso++; this.state = 'running'; return SP.resolve(); }};
+    M.env.MIX.dissolvi = {gain:{value:0, cancelScheduledValues() {}, setValueAtTime(v) { this.value = v; curve.push(['set', v]); },
+      setValueCurveAtTime(c, t, d) { curve.push(['curva', c[0], c[c.length - 1], d]); }}};
+    return {M, curve, D:M.env.DISSOLVI};
+  };
+  const pronto = D => D.getAttribute('src') === 'blob:rA' && D.paused && !D.muted && D.readyState >= 3;
+  // 1. app aperta
+  let {M, curve, D} = iphone(), A = M.DECKS[0], B = M.DECKS[1];
+  let partito = 0, aPrima = 0, dInizio = null, dSuona = 0, dSrc = null, primaPronto = false;
+  M.passa(45, () => {
+    if (!M.env.curId || M.env.curId === 'rA') { aPrima = A.currentTime; if (pronto(D)) primaPronto = true; }
+    if (!partito && M.env.curId === 'rB') { partito = M.ora(); dInizio = D.currentTime; }
+    if (partito && !dSuona && !D.paused && D.readyState >= 3) { dSuona = M.ora(); dSrc = D.getAttribute('src'); }
+  });
+  vero(partito, 'iPhone: il passaggio non è arrivato');
+  vero(primaPronto, 'iPhone: prima del passaggio DISSOLVI è pronto con il brano che finisce');
+  vero(M.env.MIX.gains.size === 0, 'iPhone: la musica non passa mai dal mixer');
+  vero(M.env.au === B && A.paused && !A.getAttribute('src'), 'iPhone: il brano nuovo sul suo lettore normale, il vecchio fermo');
+  vero(dSuona && dSuona - partito <= 100 && dSrc === 'blob:rA', 'iPhone: la coda del vecchio da DISSOLVI subito al passaggio (' + (dSuona - partito) + ' ms, ' + dSrc + ')');
+  vicino(D.playbackRate, 128 / 124, 0.003, 'iPhone: DISSOLVI alla velocità che il vecchio aveva raggiunto');
+  vicino(dInizio, aPrima + 0.055 * D.playbackRate, 0.02, 'iPhone: DISSOLVI dallo stesso punto del vecchio');
+  vero(curve.some(c => c[0] === 'curva' && c[1] === 1 && c[2] < 0.01 && c[3] >= 1 && c[3] <= 6), 'iPhone: curva di volume in uscita di al più 6 s: ' + JSON.stringify(curve));
+  vero(D.paused && !D.getAttribute('src'), 'iPhone: dopo la dissolvenza DISSOLVI fermo e vuoto');
+  vero(M.env.MIX.ctx.state === 'running' && !M.env.MIX.ctx.sospeso, 'iPhone con l\'app aperta: il mixer resta acceso per il passaggio dopo');
+  vero(ultimo(M.log, 'dissolvenza in uscita') && !ultimo(M.log, 'dissolvenza in uscita saltata'), 'iPhone: la dissolvenza nel diario');
+  // 2. app nascosta al passaggio (DISSOLVI era pronto): taglio sul battito, DISSOLVI fermo
+  ({M, curve, D} = iphone());
+  let nascosta = false;
+  M.passa(45, () => { if (!nascosta && pronto(D)) { nascosta = true; M.env.document.hidden = true; } });
+  let s = ultimo(M.log, 'dissolvenza in uscita saltata');
+  vero(nascosta && M.env.curId === 'rB' && M.env.au === M.DECKS[1] && !M.DECKS[1].paused, 'app nascosta: il passaggio c\'è, a taglio');
+  vero(s && s.nascosta === true && !ultimo(M.log, 'dissolvenza in uscita') && D.paused && !D.getAttribute('src'), 'app nascosta: niente dissolvenza, DISSOLVI fermo');
+  vero(M.env.MIX.ctx.state === 'suspended' && M.env.MIX.ctx.sospeso === 1, 'app nascosta: il mixer dell\'iPhone si ferma (la musica non passa da lì)');
+  // 3. mixer fermato da iOS: taglio
+  ({M, curve, D} = iphone());
+  let fermo = false;
+  M.passa(45, () => { if (!fermo && pronto(D)) { fermo = true; M.env.MIX.ctx.state = 'suspended'; } });
+  s = ultimo(M.log, 'dissolvenza in uscita saltata');
+  vero(fermo && M.env.curId === 'rB' && s && s.ctx === 'suspended' && D.paused && !D.getAttribute('src'), 'mixer fermo: taglio, DISSOLVI fermo');
+  // 5. il mixer fermo (app nascosta poco fa): si riaccende preparando il passaggio, e la coda sfuma come sempre
+  ({M, curve, D} = iphone());
+  M.env.MIX.ctx.state = 'suspended';
+  M.passa(45);
+  vero(M.env.MIX.ctx.ripreso >= 1 && M.env.curId === 'rB' && ultimo(M.log, 'dissolvenza in uscita'), 'mixer fermo: si riaccende preparando il passaggio, e la dissolvenza c\'è');
+  // 4. un altro brano durante la dissolvenza la ferma
+  ({M, curve, D} = iphone());
+  let scelto = null;   // subito dopo la scelta (non alla fine: lì DISSOLVI si è già fermato da solo, finita la curva)
+  M.passa(45, () => { if (!scelto && M.env.curId === 'rB' && !D.paused && D.readyState >= 3) { M.env.load(2, true); scelto = {fermo:D.paused, src:D.getAttribute('src')}; } });
+  vero(scelto && scelto.fermo && !scelto.src && M.env.curId === 'rC', 'un altro brano durante la dissolvenza la ferma subito: ' + JSON.stringify(scelto));
 }
 
 function scenarioSaltoCambi(src) {

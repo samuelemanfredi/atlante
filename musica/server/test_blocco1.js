@@ -295,11 +295,31 @@ function equalizzatore(src) {
   F.eqScegli('no'); f = pre.uscite[0]; while (f.tipo === 'filtro') { vero(f.gain.value === 0, 'No: tutte le bande a 0'); f = f.uscite[0]; }
   vero(/Equalizzatore spento/.test(log.toast.pop()), 'spento');
   vero(F.eqScegli('inventato') === false, 'preset che non c\'è');
-  // iPhone: il volume resta ai tasti (preamp senza userVol); prima di iOS 27 niente equalizzatore
-  env.NEEDS_MIXER = true; env.userVol = 0.3; F.eqScegli('bassi-su'); vicino(pre.gain.value, F.eqPre(P.find(p => p[0] === 'bassi-su')[2]), 1e-9, 'iPhone: volume dei tasti');
-  env.IOS_PRIMA_27 = true; vero(!F.eqDisponibile() && F.eqScegli('rock') === false, 'prima di iOS 27: non disponibile');
-  F.eqSheet(); vero(/serve iOS 27/.test(log.foglio) && !/data-a="eq"/.test(log.foglio), 'il foglio lo dice');
-  env.IOS_PRIMA_27 = false; F.eqSheet(); vero(/data-a="eq" data-k="bassi-su" aria-pressed="true"><span class="l">Aumento bassi<\/span><check>/.test(log.foglio), 'il preset scelto è segnato');
+  // iPhone e iPad (21/11/2026): niente equalizzatore: vorrebbe la musica nel mixer, e iOS la fermava uscendo dall'app
+  env.NEEDS_MIXER = true; env.userVol = 0.3;
+  vero(!F.eqDisponibile() && F.eqScegli('bassi-su') === false, 'iPhone: equalizzatore non disponibile');
+  F.eqSheet(); vero(/Su iPhone e iPad non c'è/.test(log.foglio) && /bloccando il telefono/.test(log.foglio) && !/data-a="eq"/.test(log.foglio), 'il foglio lo dice: ' + log.foglio.slice(0, 300));
+  env.NEEDS_MIXER = false; F.eqScegli('bassi-su'); F.eqSheet();
+  vero(/data-a="eq" data-k="bassi-su" aria-pressed="true"><span class="l">Aumento bassi<\/span><check>/.test(log.foglio), 'il preset scelto è segnato');
+  // iPhone: nel mixer solo DISSOLVI (la coda del brano che finisce), mai i lettori della musica; solo con il mix acceso
+  const DISSOLVI = {nome:'auF'};
+  const envI = Object.assign({}, env, {ls:memoria(), MIX:{ctx:null, gains:new Map(), norm:new Map(), on:false}, NEEDS_MIXER:true, DISSOLVI,
+    navigator:{audioSession:{type:'auto'}}});
+  const FI = carica(src, ['eqValori', 'eqNome', 'eqPre', 'eqCostruisci', 'eqLivello', 'eqApplica', 'eqDisponibile', 'eqScegli', 'mixerInit'],
+    ['const EQ_BANDE = ', 'const EQ = ', 'const eqImposta = '], envI);
+  envI.EQ_PRESET = P;
+  const prima = creati; FI.mixerInit(); vero(creati === prima && !envI.MIX.ctx, 'iPhone con il mix spento: niente mixer');
+  envI.MIX.on = true; FI.mixerInit(true);
+  const ci = envI.MIX.ctx;
+  vero(ci && creati === prima + 1 && envI.navigator.audioSession.type === 'playback', 'iPhone: mixer acceso con la sessione «playback»');
+  vero(ci.sorgenti.length === 1 && ci.sorgenti[0].el === DISSOLVI && envI.MIX.gains.size === 0, 'iPhone: nel mixer solo DISSOLVI, nessun lettore della musica');
+  vero(envI.MIX.dissolvi && envI.MIX.dissolvi.gain.value === 0 && ci.sorgenti[0].uscite[0] === envI.MIX.dissolvi && envI.MIX.dissolvi.uscite[0] === ci.destination, 'iPhone: DISSOLVI muto finché non serve, poi le casse');
+  // la ripartenza dopo una chiamata non aspetta il mixer fermo dell'iPhone (la musica non passa da lì)
+  const si = new Function('env', 'with (env) { ' + src.split('\n').find(l => l.indexOf('const sessioneInterrotta = ') === 0) + ' return sessioneInterrotta; }');
+  const deck = {}, mixerFermo = {state:'interrupted'};
+  vero(si({navigator:{audioSession:{state:'active'}}, MIX:{ctx:mixerFermo, gains:new Map()}, au:deck})() === false, 'iPhone: il mixer fermo non è un\'interruzione');
+  vero(si({navigator:{audioSession:{state:'active'}}, MIX:{ctx:mixerFermo, gains:new Map([[deck, {}]])}, au:deck})() === true, 'Mac: con la musica nel mixer sì');
+  vero(si({navigator:{audioSession:{state:'interrupted'}}, MIX:{ctx:null, gains:new Map()}, au:deck})() === true, 'la sessione audio interrotta (chiamata) sì');
   vero(/'<button data-a="m-eq"><span class="l">Equalizzatore: ' \+ esc\(eqNome\(EQ\.id\)\)/.test(src) && /case 'eq': eqScegli\(d\.k\); break;/.test(src), 'nel menu del brano in riproduzione');
   vero(/n\.connect\(uscita\)/.test(src) && /if \(MIX\.gains\.has\(el\)\) \{ el\.volume = 1; eqLivello\(\); return; \}/.test(src), 'collegamenti del mixer e del volume');
 }

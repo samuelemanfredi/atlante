@@ -586,6 +586,7 @@ input[type=range].rg{-webkit-appearance:none;appearance:none;width:100%;height:2
 <audio id="au2" preload="auto" x-webkit-airplay="allow"></audio>
 <audio id="auX" preload="auto" x-webkit-airplay="allow"></audio>
 <audio id="auD" preload="auto" x-webkit-airplay="allow"></audio>
+<audio id="auF" preload="auto"></audio>
 
 <script>
 'use strict';
@@ -709,8 +710,10 @@ let lists = [];
 // due lettori per la musica: nel passaggio a tempo il brano che finisce e quello che comincia suonano insieme, poi
 // «au» diventa quello nuovo. Il terzo (auX) è per podcast e audiolibri: non passa mai dal mixer, così suonano anche
 // quelli di altri siti (il mixer dell'iPhone li renderebbe muti). Il quarto (auD, DIRETTO) è la riserva della musica:
-// anche lui fuori dal mixer, pronto (sbloccato al primo tocco) per quando dal mixer non esce suono (16/11, passaAlDiretto)
-const DECKS = [$('au'), $('au2')], AUX = $('auX'), DIRETTO = $('auD'), ALLAU = DECKS.concat(AUX, DIRETTO);
+// anche lui fuori dal mixer, pronto (sbloccato al primo tocco) per quando dal mixer non esce suono (16/11, passaAlDiretto).
+// Il quinto (auF, DISSOLVI) è solo dell'iPhone: l'unico nel mixer, ripete la coda del brano che finisce per la dissolvenza
+// in uscita (dissolviAvvia); non è mai il lettore della musica, per questo non sta in ALLAU
+const DECKS = [$('au'), $('au2')], AUX = $('auX'), DIRETTO = $('auD'), DISSOLVI = $('auF'), ALLAU = DECKS.concat(AUX, DIRETTO);
 let au = DECKS[0];
 // eventi del lettore: arrivano da tutti e tre, ma contano solo quelli del lettore in uso
 const auOn = (ev, fn) => ALLAU.forEach(el => el.addEventListener(ev, e => { if (el === au) fn(e); }));
@@ -3675,7 +3678,15 @@ function applyVol(el) {   // volume = scelta dell'utente × dissolvenza (sull'iP
 }
 function setGain(el, g) { el._g = g; if (MIX.gains.has(el)) { const n = MIX.gains.get(el).gain; try { n.cancelScheduledValues(MIX.ctx.currentTime); n.setValueAtTime(g, MIX.ctx.currentTime); } catch (e) { n.value = g; } } else applyVol(el); }
 // iPhone e iPad: il volume dei lettori è fisso, la dissolvenza passa da un piccolo mixer (Web Audio). Si prepara al primo
-// tocco (serve un gesto) e con la sessione audio «playback», che lo lascia suonare anche a schermo bloccato.
+// tocco (serve un gesto), con la sessione audio «playback».
+/* LA MUSICA DELL'IPHONE NON PASSA MAI DAL MIXER (21/11/2026: «non posso uscire dall'app, altrimenti la riproduzione si
+   arresta»). Con la musica nel mixer iOS l'ha fermata uscendo dall'app o bloccando il telefono il 15/11, il 18/11 e il
+   21/11, con la sessione «playback» e senza; il lettore cambiato all'uscita (18/11) non parte con l'app nascosta. Con i
+   lettori normali, invece, per settimane la musica è andata avanti a schermo bloccato, anche da un brano all'altro.
+   Ora i lettori della musica sono sempre quelli normali; nel mixer c'è solo DISSOLVI, che nei passaggi con l'app aperta
+   ripete la coda del brano che finisce e la abbassa piano mentre il nuovo entra sul battito (dissolvenza in uscita). Se
+   iOS ferma il mixer, al più la dissolvenza diventa un taglio sul battito: la musica non si ferma. Niente equalizzatore
+   né volume uniforme sull'iPhone: vorrebbero la musica nel mixer. Su Mac e PC tutto come prima. */
 const NEEDS_MIXER = isIOS;
 // iOS prima del 27: un lettore collegato al mixer non cambia davvero velocità (bug WebKit 240405, corretto in Safari 27:
 // l'accelerazione non si sente, il brano va a scatti e scivola rispetto a currentTime). Lì il mixer resta spento, come
@@ -3702,18 +3713,26 @@ if (isIOS) { try { if (navigator.audioSession) navigator.audioSession.type = 'pl
 if (isIOS && !ls.get('am-mix-web-ripristino', false)) { ls.set('am-mix-web-ripristino', true); ls.set('am-mix-noweb', false); ls.set('am-mix-noweb-ko', false); }
 function mixerInit(perEQ) {
   if (MIX.ctx || IOS_PRIMA_27 || ls.get('am-mix-noweb', false) || !window.AudioContext) return;
-  if (!perEQ && EQ.id === 'no' && (!NEEDS_MIXER || !MIX.on)) return;   // senza mix (iPhone) e senza equalizzatore non serve
+  // iPhone: serve solo con il mix acceso (dissolvenza in uscita); Mac e PC: con il mix o con l'equalizzatore
+  if (NEEDS_MIXER ? !MIX.on : !perEQ && EQ.id === 'no') return;
   try {
     if (navigator.audioSession) navigator.audioSession.type = 'playback';
     else if (NEEDS_MIXER) return;   // senza sessione audio l'iPhone fermerebbe il mixer a schermo bloccato: niente dissolvenza, resta il tempo
     const ctx = new AudioContext({latencyHint:'playback'});
-    const uscita = eqCostruisci(ctx);   // equalizzatore e volume (su Mac e PC), poi le casse
-    // dissolvenza (g) e volume uniforme (n, vedi volNorm) in due nodi: le curve della dissolvenza non lo toccano
-    DECKS.forEach(el => { const g = ctx.createGain(), n = ctx.createGain(); n.gain.value = el._n == null ? 1 : el._n; ctx.createMediaElementSource(el).connect(g); g.connect(n); n.connect(uscita); MIX.gains.set(el, g); MIX.norm.set(el, n); applyVol(el); });
-    MIX.ctx = ctx; ctx.resume().catch(() => {}); eqApplica(EQ.id, true);
-    ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && !au.paused && au !== AUX) ctx.resume().catch(() => {}); });
+    if (NEEDS_MIXER) {   // iPhone e iPad: nel mixer solo DISSOLVI, mai la musica (vedi NEEDS_MIXER)
+      const g = ctx.createGain(); g.gain.value = 0;
+      ctx.createMediaElementSource(DISSOLVI).connect(g); g.connect(ctx.destination);
+      MIX.dissolvi = g;
+    } else {
+      const uscita = eqCostruisci(ctx);   // equalizzatore e volume (su Mac e PC), poi le casse
+      // dissolvenza (g) e volume uniforme (n, vedi volNorm) in due nodi: le curve della dissolvenza non lo toccano
+      DECKS.forEach(el => { const g = ctx.createGain(), n = ctx.createGain(); n.gain.value = el._n == null ? 1 : el._n; ctx.createMediaElementSource(el).connect(g); g.connect(n); n.connect(uscita); MIX.gains.set(el, g); MIX.norm.set(el, n); applyVol(el); });
+    }
+    MIX.ctx = ctx; ctx.resume().catch(() => {}); if (!NEEDS_MIXER) eqApplica(EQ.id, true);
+    // iOS lo ferma mentre serve: la musica nel mixer (Mac e PC) o una dissolvenza in uscita in corso (iPhone)
+    ctx.addEventListener('statechange', () => { if (ctx.state !== 'running' && ((!au.paused && au !== AUX && MIX.gains.has(au)) || !DISSOLVI.paused)) ctx.resume().catch(() => {}); });
     ctx.addEventListener('statechange', () => diario('mixer', {stato:ctx.state, nascosta:document.hidden}));   // ogni cambio nel diario
-  } catch (e) { MIX.ctx = null; MIX.gains.clear(); }
+  } catch (e) { MIX.ctx = null; MIX.gains.clear(); MIX.dissolvi = null; }
 }
 addEventListener('pointerdown', () => {
   mixerInit(); if (MIX.ctx && MIX.ctx.state !== 'running') MIX.ctx.resume().catch(() => {});
@@ -3778,7 +3797,8 @@ function eqApplica(id, subito) {
   eqLivello(subito);
   return true;
 }
-function eqDisponibile() { return !IOS_PRIMA_27 && !ls.get('am-mix-noweb', false) && typeof AudioContext === 'function'; }
+// sull'iPhone no (21/11/2026): vorrebbe la musica nel mixer, e iOS la fermerebbe uscendo dall'app (vedi NEEDS_MIXER)
+function eqDisponibile() { return !NEEDS_MIXER && !ls.get('am-mix-noweb', false) && typeof AudioContext === 'function'; }
 function eqScegli(id) {
   if (!EQ_PRESET.some(x => x[0] === id) || !eqDisponibile()) return false;
   ls.set('am-eq', id); EQ.id = id;
@@ -3791,7 +3811,7 @@ function eqScegli(id) {
 I.eq = '<path d="M5 3h2v6.2a2.5 2.5 0 0 1 0 4.6V21H5v-7.2a2.5 2.5 0 0 1 0-4.6zm6 0h2v12.2a2.5 2.5 0 0 1 0 4.6V21h-2v-1.2a2.5 2.5 0 0 1 0-4.6zm6 0h2v2.2a2.5 2.5 0 0 1 0 4.6V21h-2V9.8a2.5 2.5 0 0 1 0-4.6z"/>';
 function eqSheet() {
   const ok = eqDisponibile();
-  openSheet('<div class="grp scroll"><div class="smsg"><b>Equalizzatore</b>' + (ok ? 'Come l\'EQ di Musica sull\'iPhone. Vale per tutta la musica su questo dispositivo.' : IOS_PRIMA_27 ? 'Su questo iPhone serve iOS 27 o successivo.' : 'Serve il mixer dell\'app, che qui è spento.') + '</div>' +
+  openSheet('<div class="grp scroll"><div class="smsg"><b>Equalizzatore</b>' + (ok ? 'Come l\'EQ di Musica sull\'iPhone. Vale per tutta la musica su questo dispositivo.' : NEEDS_MIXER ? 'Su iPhone e iPad non c\'è: per funzionare la musica dovrebbe passare dal mixer dell\'app, e iOS la fermerebbe uscendo dall\'app o bloccando il telefono. C\'è su Mac e PC.' : 'Serve il mixer dell\'app, che qui è spento.') + '</div>' +
     (ok ? EQ_PRESET.map(p => '<button data-a="eq" data-k="' + p[0] + '" aria-pressed="' + (p[0] === EQ.id) + '"><span class="l">' + esc(p[1]) + '</span>' + (p[0] === EQ.id ? ic('check') : '') + '</button>').join('') : '') + '</div>' + cancel);
 }
 // iPhone e iPad: un lettore può partire da solo (a fine brano, a schermo bloccato) solo se è già partito una volta durante
@@ -3801,7 +3821,7 @@ function eqSheet() {
 const SILENZIO = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';   // 0,05 s di silenzio
 function sbloccaLettori() {
   if (!au.paused) return;   // solo a musica ferma (es. il tocco su ▶︎): un iPhone che non fa suonare due lettori insieme fermerebbe il brano
-  for (const el of DECKS.concat(DIRETTO)) {
+  for (const el of DECKS.concat(DIRETTO, DISSOLVI)) {
     if (el._sbloccato || el.getAttribute('src')) continue;   // un lettore con un brano dentro non si tocca
     el._sbloccato = true; el._rifiuta = false;
     try {
@@ -3834,18 +3854,19 @@ function controllaPassaggio() {
 }
 // un lettore che ha suonato con l'audio acceso può ripartire da solo
 DECKS.forEach(el => el.addEventListener('playing', () => { if (!el.muted && el.getAttribute('src') !== SILENZIO) { el._sbloccato = true; el._rifiuta = false; } }));
-/* IN SECONDO PIANO LA MUSICA NON CAMBIA MAI LETTORE (19/11/2026, «quando esco dall'applicazione si interrompe la
-   riproduzione»). Il 18/11 la musica passava al lettore diretto nell'istante in cui si usciva dall'app o si bloccava lo
-   schermo: ma iOS non lascia partire in modo affidabile un lettore nuovo con l'app in secondo piano (difetto noto di
-   WebKit: il lettore «suona» e non si sente niente), e la musica si fermava. Il mixer della dissolvenza invece, con la
-   sessione audio «playback» chiesta all'apertura, iOS lo lascia suonare in secondo piano e a schermo bloccato (WebKit
-   bug 261554, da iOS 17): resta lui. Il lettore diretto è solo per l'app aperta (passaAlDiretto). */
-// a schermo bloccato l'iPhone ferma il mixer mentre la musica dovrebbe suonare: lo si fa ripartire subito (e la guardia
-// continua, mixerMuto). Prima al ritorno nell'app la dissolvenza si spegneva per sempre (15/11: la dissolvenza resta)
+/* IN SECONDO PIANO LA MUSICA NON CAMBIA MAI LETTORE (19/11/2026): iOS non lascia partire in modo affidabile un lettore
+   nuovo con l'app in secondo piano (il lettore «suona» e non si sente niente). E sull'iPhone la musica non passa mai dal
+   mixer (21/11/2026, vedi NEEDS_MIXER): uscendo dall'app o bloccando il telefono non c'è niente da cambiare, il lettore
+   normale continua. Il lettore diretto resta il rimedio per un lettore incastrato, solo con l'app aperta. */
+// Mac e PC con la musica nel mixer: se il sistema lo ferma mentre la musica dovrebbe suonare, lo si fa ripartire. Tornando
+// nell'app il mixer si riaccende (sull'iPhone serve alle dissolvenze in uscita)
 document.addEventListener('visibilitychange', () => {
   if (!MIX.ctx) return;
   if (document.hidden) {
-    // in secondo piano niente cambio di lettore (vedi sopra): solo il mixer fatto ripartire, se iOS l'ha fermato
+    // iPhone: con l'app nascosta il mixer non serve (le dissolvenze sono solo con l'app aperta): si ferma, così in secondo
+    // piano la pagina suona come quando il mixer non c'era. Una dissolvenza già partita finisce (dissolviFerma lo ferma)
+    if (MIX.dissolvi && !MIX.gains.size) { if (DISSOLVI.paused) mixerRiposo(); return; }
+    // in secondo piano niente cambio di lettore (vedi sopra): solo il mixer fatto ripartire, se il sistema l'ha fermato
     setTimeout(() => {
       if (document.hidden && MIX.ctx && MIX.ctx.state !== 'running' && !au.paused && MIX.gains.has(au)) {
         diario('mixer fermo a schermo bloccato: riparte', {stato:MIX.ctx.state}); MIX.ctx.resume().catch(() => {});
@@ -3853,6 +3874,7 @@ document.addEventListener('visibilitychange', () => {
     }, 2500);
     return;
   }
+  if (MIX.dissolvi && !MIX.gains.size) return;   // iPhone: si riaccende quando serve (dissolviPrepara o un tocco), non al rientro
   if (MIX.ctx.state !== 'running') { try { MIX.ctx.resume().catch(() => {}); } catch (e) {} }
 });
 function vivoScrivi() {   // la scatola nera (vedi «chiusure improvvise»)
@@ -3880,7 +3902,7 @@ function diarioAvvio() {
   try { nav = ((performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {}).type || ''; } catch (e) {}
   try { app = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; } catch (e) {}
   diario('avvio', {ua:String(navigator.userAgent || '').slice(0, 200), app, nav,
-    mixer:!NEEDS_MIXER ? '' : IOS_PRIMA_27 ? 'no: iOS prima del 27' : ls.get('am-mix-noweb', false) ? 'no: spento' : 'sì'});
+    mixer:!NEEDS_MIXER ? '' : IOS_PRIMA_27 ? 'no: iOS prima del 27' : ls.get('am-mix-noweb', false) ? 'no: spento' : 'solo dissolvenza in uscita'});
 }
 setTimeout(diarioAvvio, 0);   // dopo tutto lo script (diario usa cose definite più avanti)
 // chiusure improvvise: iOS che chiude la pagina (memoria finita: «Si è verificato ripetutamente un errore»). Ogni 10 s
@@ -3924,7 +3946,9 @@ auOn('pause', diarioPausa);
    come in Musica. Quella all'inizio di un brano o in un passaggio è un passaggio non riuscito: ci pensa la guardia. */
 // (18/11) dopo 30 minuti non ci si ferma più: si aspetta che l'interruzione finisca, riprovando ogni 15 s invece che ogni 3
 const INTERR = {da:0, uscita:0, prova:0, MAX:30 * 60000, OGNI:3000, POI:15000};
-const sessioneInterrotta = () => { try { return (navigator.audioSession && navigator.audioSession.state === 'interrupted') || (!!MIX.ctx && MIX.ctx.state === 'interrupted'); } catch (e) { return false; } };
+// il mixer conta solo se la musica passa da lì (Mac e PC): sull'iPhone resta fermo tra un passaggio e l'altro, e un suo
+// «interrupted» farebbe aspettare per sempre la ripartenza dopo una chiamata (21/11/2026)
+const sessioneInterrotta = () => { try { return (navigator.audioSession && navigator.audioSession.state === 'interrupted') || (!!MIX.ctx && MIX.gains.has(au) && MIX.ctx.state === 'interrupted'); } catch (e) { return false; } };
 try { if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', () => { INTERR.uscita = Date.now(); }); } catch (e) {}
 auOn('pause', () => {
   if (Date.now() - pausaVoluta < 1000 || au.ended || MIX.act || MIX.salto) return;
@@ -4143,9 +4167,69 @@ async function xfPrepare(P) {
   el.src = P.url || API + 'file/' + encodeURIComponent(tb.sid);
   MIX.prepT = Date.now(); diario('preparo', {da:P.url ? 'file' : 'rete'});
   const pr = el.play(); if (pr && pr.catch) pr.catch(e => { diario('prep rifiutata', {err:(e && e.name) || String(e)}); el.muted = false; if (MIX.plan === P) P.st = 'ready'; });
+  if (MIX.dissolvi && !document.hidden) dissolviPrepara(P);   // iPhone: la coda del brano che finisce, per sfumarla
+}
+/* DISSOLVENZA IN USCITA (iPhone, 21/11/2026): la musica non passa mai dal mixer (vedi NEEDS_MIXER). Nel passaggio con
+   l'app aperta il brano nuovo entra sul battito sul suo lettore normale; il brano che finisce, invece di tacere di colpo,
+   continua da DISSOLVI (l'unico lettore nel mixer) dallo stesso punto e alla stessa velocità, e si abbassa piano in al
+   più DIS.MAX secondi. Il salto dal suo lettore a DISSOLVI cade proprio sull'entrata del brano nuovo, che lo copre.
+   Con l'app nascosta, il mixer fermo o DISSOLVI non pronto: il taglio sul battito di sempre. */
+const DIS = {st:'', P:null, url:null, tm:0, MAX:6, ANTICIPO:0.05};
+async function dissolviPrepara(P) {
+  const ta = T.get(P.idA); if (!ta) return;
+  const f = await getFile(P.idA).catch(() => null);
+  if (MIX.plan !== P || !MIX.dissolvi) return;
+  dissolviFerma();
+  // il mixer si riaccende qui, una quarantina di secondi prima del passaggio (fermo con l'app nascosta, vedi mixerRiposo)
+  if (MIX.ctx.state !== 'running') { try { const p = MIX.ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+  // un indirizzo suo: quello del lettore (curUrl) si chiude appena comincia il passaggio, mentre qui serve ancora
+  const url = f ? URL.createObjectURL(f) : ta.sid && !ta.ext ? API + 'file/' + encodeURIComponent(ta.sid) : null;
+  if (!url) return;
+  const el = DISSOLVI;
+  DIS.P = P; DIS.url = f ? url : null; DIS.st = 'carico';
+  // si carica davvero (l'iPhone non scarica un lettore fermo): parte muto, si ferma appena suona, va al punto del passaggio
+  el.muted = true;
+  const pronto = () => { if (DIS.P !== P) return; el.pause(); try { el.currentTime = Math.max(0, (P.tS || 0) - 0.5); } catch (e) {} el.muted = false; DIS.st = 'pronto'; };
+  el.addEventListener('playing', pronto, {once:true});
+  el.src = url;
+  const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.removeEventListener('playing', pronto); if (DIS.P === P) { DIS.st = 'no'; el.muted = false; } });
+}
+function dissolviAvvia(out, P, W) {   // nel passaggio: la coda di «out» da DISSOLVI, che si abbassa. true se parte
+  const el = DISSOLVI, g = MIX.dissolvi, ctx = MIX.ctx;
+  if (!g || !ctx || DIS.P !== P || DIS.st !== 'pronto' || document.hidden || ctx.state !== 'running' || out.paused || !el.getAttribute('src')) {
+    if (DIS.P === P && DIS.st) diario('dissolvenza in uscita saltata', {pronto:DIS.st, ctx:ctx ? ctx.state : 'no', nascosta:!!document.hidden});
+    dissolviFerma(); return false;
+  }
+  const Wf = Math.max(1, Math.min(DIS.MAX, W || DIS.MAX)), r = out.playbackRate || 1;
+  try {
+    el.playbackRate = r; conPitch(el);
+    el.currentTime = (out.currentTime || 0) + DIS.ANTICIPO * r;   // dove sarà il brano quando DISSOLVI comincia a suonare
+    const N = 64, dn = new Float32Array(N), t = ctx.currentTime;
+    for (let i = 0; i < N; i++) dn[i] = Math.cos(i / (N - 1) * Math.PI / 2);
+    g.gain.cancelScheduledValues(t); g.gain.setValueCurveAtTime(dn, t, Wf);
+    const pr = el.play(); if (pr && pr.catch) pr.catch(() => dissolviFerma());
+  } catch (e) { dissolviFerma(); return false; }
+  DIS.st = 'suona'; clearTimeout(DIS.tm); DIS.tm = setTimeout(dissolviFerma, (Wf + 0.4) * 1000);
+  diario('dissolvenza in uscita', {s:Math.round(Wf * 10) / 10});
+  return true;
+}
+function dissolviFerma() {
+  clearTimeout(DIS.tm); DIS.tm = 0;
+  try { if (MIX.dissolvi && MIX.ctx) { const t = MIX.ctx.currentTime; MIX.dissolvi.gain.cancelScheduledValues(t); MIX.dissolvi.gain.setValueAtTime(0, t); } } catch (e) {}
+  const el = DISSOLVI;
+  if (el.getAttribute('src') && el.getAttribute('src') !== SILENZIO) { try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {} }
+  el.muted = false;
+  if (DIS.url) { URL.revokeObjectURL(DIS.url); DIS.url = null; }
+  DIS.st = ''; DIS.P = null;
+  if (document.hidden) mixerRiposo();   // finita con l'app nascosta: il mixer si ferma fino al ritorno nell'app
+}
+function mixerRiposo() {   // iPhone: il mixer fermo (solo quello di DISSOLVI: la musica non passa mai da lì)
+  if (!MIX.ctx || !MIX.dissolvi || MIX.gains.size || MIX.ctx.state !== 'running') return;
+  try { const p = MIX.ctx.suspend(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
 }
 function xfAbort() {
   saltoAnnulla();   // anche il salto a mano in attesa (si è scelto un altro brano, mix spento…)
+  dissolviFerma();  // e la coda del brano di prima che sfuma, o quella pronta per il passaggio
   const A = MIX.act; if (A) xfEnd();
   const P = MIX.plan; MIX.plan = null;
   if (P) {
@@ -4174,7 +4258,8 @@ function xfStart(P) {
   osservaNuovo(inn, W);
   controllaPassaggio();
   MIX.plan = null;
-  if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); xfEnd(); return; }   // iPhone senza mixer: niente dissolvenza, taglio sul battito
+  // iPhone: la musica fuori dal mixer, il nuovo entra sul battito; il vecchio sfuma da DISSOLVI se si può (se no taglio)
+  if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); dissolviAvvia(out, P, W); xfEnd(); return; }
   if (MIX.gains.size) {   // iPhone: curve di volume precise sull'orologio audio, anche a schermo bloccato
     const N = 64, up = new Float32Array(N), dn = new Float32Array(N);
     for (let i = 0; i < N; i++) { const q = i / (N - 1); up[i] = Math.sin(q * Math.PI / 2); dn[i] = Math.cos(q * Math.PI / 2); }
@@ -4972,7 +5057,8 @@ function trackMenu(id, pl) {
     '<button data-a="m-last" data-id="' + id + '"><span class="l">Riproduci per ultimo</span>' + ic('last') + '</button>' +
     '<button data-a="m-stazione" data-id="' + id + '"><span class="l">Crea stazione</span>' + ic('radio') + '</button></div>' +
     (id === curId ? '<div class="grp"><button data-a="m-timer"><span class="l">Timer di spegnimento' + (TIMER.fine ? ': ' + Math.max(1, Math.round((TIMER.fine - Date.now()) / 60000)) + ' min' : TIMER.finebrano ? ': fine del brano' : '') + '</span>' + ic('timer') + '</button>' +
-      '<button data-a="volnorm"><span class="l">Volume uniforme: ' + (VOLN.on ? 'acceso' : 'spento') + '</span>' + ic('spkHi') + '</button>' +
+      // sull'iPhone il volume uniforme vorrebbe la musica nel mixer, che iOS ferma fuori dall'app (vedi NEEDS_MIXER)
+      (NEEDS_MIXER ? '' : '<button data-a="volnorm"><span class="l">Volume uniforme: ' + (VOLN.on ? 'acceso' : 'spento') + '</span>' + ic('spkHi') + '</button>') +
       '<button data-a="m-eq"><span class="l">Equalizzatore: ' + esc(eqNome(EQ.id)) + '</span>' + ic('eq') + '</button>' +
       '<button data-a="m-blocco"><span class="l">★ dalla schermata di blocco…</span>' + ic('star') + '</button></div>' : '') +
     '<div class="grp"><button data-a="m-fav" data-id="' + id + '"><span class="l">' + (t.fav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti') + '</span>' + ic(t.fav ? 'star' : 'staro') + '</button>' +
