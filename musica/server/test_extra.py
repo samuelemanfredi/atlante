@@ -5338,8 +5338,8 @@ def voce(i, titolo, artista, anno="", genere="", durata=200, added=0, album="", 
 
 
 def scheda(m, **k):
-    s = {"v": m.TEM_VERSIONE, "mb": "fatto", "audio": "fatto", "ia": "fatto", "f": "1:1", "generi": [], "etichette": [],
-         "italiano": None, "anno": None, "bpm": None, "energia": None, "regolarita": None}
+    s = {"v": m.TEM_VERSIONE, "mb": "fatto", "audio": "fatto", "av": m.TEM_AUDIO_V, "ia": "fatto", "f": "1:1", "generi": [],
+         "etichette": [], "italiano": None, "anno": None, "bpm": None, "energia": None, "regolarita": None}
     s.update(k)
     return s
 
@@ -5381,9 +5381,13 @@ class TestRegoleAtlante(unittest.TestCase):
         self.assertEqual(errori, [])
         self.assertEqual([g["id"] for g in gruppi], ["generi", "umore", "attivita", "ritmo", "epoche", "momenti", "feste", "focus", "relax-e-chill", "occasioni"])
         conta = {g["id"]: len(g["playlist"]) for g in gruppi}
-        self.assertEqual((conta["generi"], conta["umore"], conta["attivita"], conta["ritmo"]), (30, 12, 12, 12))
+        self.assertEqual((conta["generi"], conta["umore"], conta["attivita"], conta["ritmo"]), (30, 15, 12, 12))
         self.assertEqual(set(nomi), set(self.m.GENERI))   # i generi del file sono quelli del programma
         pl = {p["id"]: p for g in gruppi for p in g["playlist"]}
+        # i mood chiesti da Samuele in cima a «Umore», e tutti quelli della Home dell'app esistono
+        umore = next(g for g in gruppi if g["id"] == "umore")["playlist"]
+        self.assertEqual([p["nome"] for p in umore[:3]], ["Focus", "Rilassamento", "Attivazione"])
+        self.assertTrue(set(self.m.UMORI_APP) <= set(pl), set(self.m.UMORI_APP) - set(pl))
         self.assertEqual(pl["attivita-handbike-salita"]["nome"], "Handbike: salita e scatti")
         self.assertEqual(pl["attivita-handbike-salita"]["regola"]["bpm"], [140, 180])
         self.assertGreaterEqual(pl["attivita-handbike-salita"]["regola"]["energia"][0], 0.7)
@@ -5393,12 +5397,12 @@ class TestRegoleAtlante(unittest.TestCase):
         self.assertEqual(len([p for p in pl if p.startswith("momento-")]), 6)
 
     def test_ritmo_fasce_di_bpm(self):
-        """Ritmo (BPM): fasce 60–80, 80–90, 90–100… senza buchi né sovrapposizioni, ognuna dal brano più lento."""
+        """Ritmo (BPM): fasce fino a 80, 80–90, 90–100… senza buchi né sovrapposizioni, ognuna dal brano più lento."""
         gruppi, _, errori = self.m.regole_atlante()
         self.assertEqual(errori, [])
         ritmo = next(g for g in gruppi if g["id"] == "ritmo")
         fasce = [p["regola"]["bpm"] for p in ritmo["playlist"]]
-        self.assertEqual(fasce[0], [60, 79.9])
+        self.assertEqual(fasce[0], [0, 79.9])   # anche le ballate sotto i 60 (All of Me, 63; Your Song, 64)
         self.assertEqual(fasce[1:3], [[80, 89.9], [90, 99.9]])
         for (a, b), (c, _) in zip(fasce, fasce[1:]):
             self.assertAlmostEqual(c - b, 0.1)          # la fascia dopo parte subito dopo: nessun brano perso
@@ -5406,7 +5410,7 @@ class TestRegoleAtlante(unittest.TestCase):
         self.assertTrue(all(p["ordine"] == "bpm" and p["nome"].endswith("BPM") for p in ritmo["playlist"]))
         # un BPM misurato (arrotondato a 0,1) sta in una fascia sola, anche sul confine
         prove = {p["id"]: p["_prova"] for p in ritmo["playlist"]}
-        for bpm, attesa in ((70.0, "ritmo-060-080"), (79.9, "ritmo-060-080"), (80.0, "ritmo-080-090"),
+        for bpm, attesa in ((55.0, "ritmo-060-080"), (70.0, "ritmo-060-080"), (79.9, "ritmo-060-080"), (80.0, "ritmo-080-090"),
                             (89.9, "ritmo-080-090"), (90.0, "ritmo-090-100"), (150.2, "ritmo-150-160"),
                             (180.0, "ritmo-180-oltre"), (189.9, "ritmo-180-oltre")):
             dentro = [i for i, f in prove.items() if f({"bpm": bpm})]
@@ -5504,10 +5508,27 @@ class TestRegoleAtlante(unittest.TestCase):
         self.t.schede["a"]["modo"] = 1
         self.t.schede["a"]["db"] = -9.04   # il volume misurato: per il volume uniforme nell'app
         r = self.t.ritmi()
-        self.assertEqual(r["ritmi"]["a"], [150.2, 0.9, 0.85, 1, -9.0])
+        self.assertEqual(r["ritmi"]["a"][:5], [150.2, 0.9, 0.85, 1, -9.0])
         self.assertIsNone(r["ritmi"]["b"][4])   # misurato prima che si tenesse il volume
         self.assertEqual(set(r["ritmi"]), {"a", "b", "e"})   # c e d non hanno ancora l'audio misurato
+        # «Mood» nell'app: le playlist non vuote di UMORI_APP, nel loro ordine, e un bit per ognuna in ogni brano
+        ids = [u["id"] for u in r["umori"]]
+        self.assertEqual(ids, [u for u in self.m.UMORI_APP if u in ids])
+        self.assertEqual(r["umori"][0], {"id": "umore-focus", "nome": "Focus"})
+        umori = lambda i: {u for k, u in enumerate(ids) if r["ritmi"][i][5] & (1 << k)}   # noqa: E731
+        self.assertEqual(umori("a"), {"umore-attivazione"})   # 150 BPM, energia alta, battito netto
+        self.assertEqual(umori("b"), {"umore-focus"})         # rock a 120 con energia media e battito costante
+        self.assertEqual(umori("e"), {"umore-focus", "umore-rilassamento", "attivita-sonno"})   # classica lenta e piano
+        # un brano con un mood dalle etichette ma senza audio misurato: c'è, senza BPM (non entra in «Per ritmo»)
+        self.t.schede["c"] = scheda(self.m, audio="attesa", etichette=["relaxing"])
+        self.t.versione += 1
+        r = self.t.ritmi()
+        ids = [u["id"] for u in r["umori"]]
+        self.assertEqual(r["ritmi"]["c"][0], None)
+        self.assertTrue(r["ritmi"]["c"][5] & (1 << ids.index("umore-rilassamento")))
+        self.assertEqual(r["misurati"], 3)   # «c» non è misurato
         self.assertEqual(dict((i, p) for i, p in r["buonumore"]), {"a": 2})   # Energia e Buonumore; modo maggiore pesa di più
+        del self.t.schede["c"]
         self.t.schede["e"]["modo"] = -1
         self.t.versione += 1
         pl = {p["id"] for g in self.t.elenco("p")["gruppi"] for p in g["playlist"]}
@@ -5675,6 +5696,68 @@ class TestMisuraAudio(unittest.TestCase):
         self.assertEqual(m._finestre(5), [])
         with unittest.mock.patch.object(m, "_pezzo_wav", lambda p, da, d: None):
             self.assertEqual(m.misura_audio("/x/y.mp3", 200), {"senza_ffmpeg": True})
+        self.assertEqual(r["forte"]["ottava"], "")   # un battito netto a 150: resta 150
+
+    def test_ottava_giusta(self):
+        """Ballate misurate al doppio e brani veloci misurati alla metà tornano al tempo che si batte col piede
+        (provato su 136 brani veri dal tempo noto: nessuno peggiorato). Gli altri restano come sono."""
+        o = self.m.ottava_giusta
+        self.assertEqual(o(133.6, 1.54, 0.79, None), (66.8, "ballata"))   # Someone Like You: battito vago
+        self.assertEqual(o(143.6, 1.96, 0.58, None), (71.8, "ballata"))   # Let It Be: un po' meno vago, ma piano
+        self.assertEqual(o(152.0, 1.81, 0.91, None), (152.0, ""))        # Mr. Brightside: vago ma carico, resta
+        self.assertEqual(o(126.0, 4.32, 0.88, None), (126.0, ""))        # Levels: battito netto
+        self.assertEqual(o(116.5, 1.30, 0.40, None), (116.5, ""))        # sotto la fascia delle ballate al doppio
+        self.assertEqual(o(85.5, 4.11, 0.96, 1.21), (171.0, "veloce"))    # Blinding Lights: rullante un battito dopo
+        self.assertEqual(o(86.9, 4.5, 0.94, 0.92), (86.9, ""))            # Umbrella: rullante due battiti dopo
+        self.assertEqual(o(86.9, 4.5, 0.94, None), (86.9, ""))            # senza la misura del rullante: resta
+        self.assertEqual(o(95.8, 4.5, 1.0, 1.77), (95.8, ""))             # Shape of You: 191 sarebbe troppo
+        self.assertEqual(o(None, None, None, None), (None, ""))
+
+    def test_rullante_dopo(self):
+        """Rock a 172 (cassa sull'1 e sul 3, rullante sul 2 e sul 4) contro hip hop a 86 (lo stesso schema a metà
+        tempo): al tempo veloce il rullante arriva un battito dopo la cassa nel primo, due battiti dopo nel secondo."""
+        fps, nf = 11025 / 128, 2600
+
+        def colpi(bpm, quali, ogni):
+            v, lag = [0.0] * nf, 60 * fps / bpm
+            k = 0
+            while k * lag < nf - 3:
+                if k % ogni in quali:
+                    f = int(round(k * lag))
+                    v[f] += 1.0
+                    v[f + 1] += 0.5
+                k += 1
+            return v
+        rock = (colpi(172, (0,), 2), colpi(172, (1,), 2))           # cassa 1-3, rullante 2-4 a 172
+        hiphop = (colpi(86, (0,), 2), colpi(86, (1,), 2))           # lo stesso a 86: tra cassa e rullante due battiti a 172
+        self.assertGreater(self.m.rullante_dopo(rock, fps, 172), 1.15)
+        self.assertLess(self.m.rullante_dopo(hiphop, fps, 172), 1.0)
+        self.assertEqual(self.m.rullante_dopo(([0.0] * nf, [0.0] * nf), fps, 172), 1.0)   # silenzio: nessun parere
+
+    def test_misura_all_ottava_giusta(self):
+        """Il brano intero (tre pezzi): la regola guarda il tempo e le misure di tutto il brano, non di un pezzo solo."""
+        m, fps = self.m, 11025 / 128
+
+        def pezzo(bpm, c, bande=None):
+            return {"bpm": bpm, "c": c, "flusso": 0.15, "db": -14.0, "spettro": [0.0] * 464, "fps": fps,
+                    "bande": bande or ([0.0] * 2600, [0.0] * 2600)}
+
+        def misura(pezzi):
+            giri = iter(pezzi)
+            with unittest.mock.patch.object(m, "_pezzo_wav", lambda p, da, d: b"RIFF"), \
+                    unittest.mock.patch.object(m, "_campioni_wav", lambda b: []), \
+                    unittest.mock.patch.object(m, "griglia_battiti", lambda x, sr: next(giri)):
+                return m.misura_audio("/x/brano.mp3", 200)
+        r = misura([pezzo(133.6, 1.5), pezzo(134.0, 1.6), pezzo(66.9, 1.4)])   # un pezzo già a metà: si piega sugli altri
+        self.assertEqual((r["bpm"], r["ottava"]), (66.9, "ballata"))
+        lag = 60 * fps / 171
+        cassa, rullante = [0.0] * 2600, [0.0] * 2600
+        for k in range(0, int(2590 / lag)):
+            (cassa if k % 2 == 0 else rullante)[int(round(k * lag))] = 1.0
+        r = misura([pezzo(85.5, 4.0, (cassa, rullante))] * 3)
+        self.assertEqual((r["bpm"], r["ottava"]), (171.0, "veloce"))
+        r = misura([pezzo(120.0, 4.0)] * 3)
+        self.assertEqual((r["bpm"], r["ottava"]), (120.0, ""))
 
 
 class TestMusicBrainz(unittest.TestCase):
@@ -5946,6 +6029,28 @@ class TestLottiInsieme(unittest.TestCase):
     def tearDown(self):
         self.m.LIB = None
         shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_rimisura_con_la_misura_nuova(self):
+        """Una misura dell'audio più vecchia (senza «av» o con un'altra versione) si rifà, solo l'audio e dopo i brani
+        mai misurati, anche se questi hanno una data più vecchia (un file scaricato può tenere la data dell'uscita)."""
+        m, t = self.m, self.t
+        vecchia = dict(scheda(m, bpm=134.0, energia=0.4, regolarita=0.3), t="Brano d", a="Artista d")
+        del vecchia["av"]
+        t.schede = {"d": vecchia, "b": dict(scheda(m, bpm=100.0), t="Brano b", a="Artista b"),
+                    "c": dict(scheda(m, bpm=120.0, av=1), t="Brano c", a="Artista c")}   # a: mai misurato (il più vecchio)
+        self.assertEqual(t._passi(t.schede["d"], m.LIB.brani["d"], time.time()), ["audio"])   # MusicBrainz no
+        self.assertEqual(t._passi(t.schede["b"], m.LIB.brani["b"], time.time()), [])
+        self.assertEqual([x[0] for x in t._prossimi(4)], ["a", "d", "c"])
+
+        def misura(percorso, durata):
+            return {"bpm": 67.0, "energia": 0.4, "regolarita": 0.3, "db": -15.0, "modo": 1, "tonalita": "Do maggiore",
+                    "ottava": "ballata"}
+        with unittest.mock.patch.object(m, "_misura_in_processo", misura):
+            t.un_lotto(t._prossimi(4))
+        s = t.schede["d"]
+        self.assertEqual((s["bpm"], s["av"], s["ottava"], s["mb"]), (67.0, m.TEM_AUDIO_V, "ballata", "fatto"))
+        self.assertEqual(t.schede["b"]["bpm"], 100.0)   # già con la misura nuova: non rifatto
+        self.assertEqual(t._prossimi(4), [])
 
     def test_lotto_misura_insieme(self):
         bpm = {"/x/a.mp3": 72.0, "/x/b.mp3": 95.0, "/x/c.mp3": 128.0, "/x/d.mp3": 175.5}
@@ -6533,6 +6638,22 @@ class TestMixApp(unittest.TestCase):
         self.assertTrue(out.startswith("OK"), out + "\n" + err)
 
 
+class TestRitmoApp(unittest.TestCase):
+    """«Per ritmo» e «Mood» nell'app: ogni BPM in un gruppo pronto solo, i brani di ogni mood anche senza rete e una
+    scelta nuova a ogni tocco. Gira in JavaScriptCore (osascript -l JavaScript): test_ritmo.js. Senza osascript si salta."""
+
+    def test_ritmo_e_mood(self):
+        osa = shutil.which("osascript") or ("/usr/bin/osascript" if os.path.exists("/usr/bin/osascript") else None)
+        if not osa:
+            self.skipTest("osascript non c'è: non è un Mac")
+        js, app = os.path.join(QUI, "test_ritmo.js"), os.path.abspath(os.path.join(QUI, "..", "index.html"))
+        r = subprocess.run([osa, "-l", "JavaScript", js, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        out, err = r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()
+        if not out.startswith(("OK", "PROVA FALLITA")):   # JavaScriptCore non partito (non una prova sbagliata)
+            self.skipTest("osascript non utilizzabile qui: " + (err or out)[-300:])
+        self.assertTrue(out.startswith("OK"), out + "\n" + err)
+
+
 # ----- grande libreria (50 000 brani e più): catalogo compresso e con ETag, niente riletture inutili -----
 
 def scrivi_mp3(percorso, titolo, artista, album=""):
@@ -6644,10 +6765,14 @@ class TestLibreriaGrande(unittest.TestCase):
 
     def test_indice_riscritto_solo_se_cambia(self):
         prima = self.impronta()
+        self.m.TEM = unittest.mock.Mock(sveglia=threading.Event())   # il lavoro di BPM e mood: si sveglia per i brani nuovi
+        self.addCleanup(setattr, self.m, "TEM", None)
         self.assertEqual(self.lib.scansiona(), 3)
         self.assertEqual(self.impronta(), prima)   # niente di nuovo: con 50 000 brani sono 26 MB in meno ogni 10 minuti
+        self.assertFalse(self.m.TEM.sveglia.is_set())
         scrivi_mp3(os.path.join(self.musica, "Altro.mp3"), "Altro", "Altro")
         self.assertEqual(self.lib.scansiona(), 4)
+        self.assertTrue(self.m.TEM.sveglia.is_set())   # BPM e mood del brano nuovo subito, non tra due minuti
         dopo = self.impronta()
         self.assertNotEqual(dopo, prima)
         os.unlink(os.path.join(self.musica, "Altro.mp3"))
@@ -6658,12 +6783,15 @@ class TestLibreriaGrande(unittest.TestCase):
 
     def test_brano_scaricato_senza_rileggere_il_disco(self):
         self.m.LIB = self.lib
+        self.m.TEM = unittest.mock.Mock(sveglia=threading.Event())
+        self.addCleanup(setattr, self.m, "TEM", None)
         letture, prima = self.lib.letture, self.impronta()
         nuovo = os.path.join(self.musica, "Raccolta", "Ospite - Nuovo.mp3")
         scrivi_mp3(nuovo, "Nuovo", "Ospite", "Raccolta")
         with unittest.mock.patch.object(self.m.os, "walk", side_effect=AssertionError("rilettura di tutto il disco")):
             i = self.m._in_libreria(nuovo)
         self.assertRegex(i, r"^[0-9a-f]{16}$")
+        self.assertTrue(self.m.TEM.sveglia.is_set())   # il brano scaricato entra subito nei gruppi per BPM e mood
         self.assertEqual(self.lib.letture, letture)
         cat = {b["id"]: b for b in self.lib.catalogo()["brani"]}
         self.assertEqual((cat[i]["title"], cat[i]["artist"], cat[i]["album"]), ("Nuovo", "Ospite", "Raccolta"))

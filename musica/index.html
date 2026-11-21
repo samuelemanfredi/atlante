@@ -172,6 +172,7 @@ img{max-width:100%;display:block}
 .ritart{display:flex!important;flex-direction:column;align-items:center;justify-content:center;color:#fff}
 .ritart .rn{font-size:28px;font-weight:800;line-height:1.1;display:flex}.ritart .rn svg{font-size:40px}
 .ritart .ru{font-size:13px;font-weight:600;opacity:.85;margin-top:2px}
+.umart .rn svg{font-size:54px}
 .ritg{display:flex;flex-wrap:wrap;gap:10px}
 .ritb{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 14px;border-radius:12px;background:var(--c,var(--fill));color:#fff;min-width:96px;text-align:left}
 .ritb b{font-size:18px}.ritb span{font-size:13px;opacity:.9}
@@ -1022,9 +1023,11 @@ async function loadServer() {
   // brani sostituiti sul Mac (stesso file, contenuto nuovo: es. la versione explicit al posto di quella censurata):
   // la data del file cambia e la copia sull'iPhone è quella vecchia
   const cambiati = [];
+  let arrivati = 0;   // brani mai visti: tra poco hanno BPM e mood (ritDopoNuovi)
   for (const b of j.brani) {
     const id = 'r' + b.id; now.add(id);
     const old = T.get(id) || GONE.get(id); GONE.delete(id);
+    if (!old) arrivati++;
     if (old && old.added && b.added && old.added !== b.added && saved.has(id)) cambiati.push(id);
     const m = Object.assign({fav:false, plays:0, last:0}, old || {}, {id, sid:b.id, remote:true, src:'srv|' + b.id,
       title:b.title || '', artist:b.artist || '', album:b.album || '', albumArtist:b.albumArtist || '', track:b.track || 0, disc:b.disc || 0,
@@ -1066,6 +1069,7 @@ async function loadServer() {
   oldIds();
   if (put.length) rematch(put.filter(t => T.has(t.id)));   // brani nuovi o cambiati: forse sono quelli che mancavano alle playlist importate
   if (put.length || del.length) nuoviGemelli();   // catalogo uguale: i doppioni sono quelli di prima (grande libreria)
+  if (arrivati && arrivati < j.brani.length) ritDopoNuovi();   // non alla prima apertura: lì i dati arrivano comunque
   scaricaTutto();
   CATET = et;
   clCarica();
@@ -2248,7 +2252,7 @@ const pages = {
     const al = albums();
     const all = regList(songs().map(t => t.id), 'Tutti i brani');
     h += '<button class="mixcard" data-a="shufall" data-l="' + all + '"><span class="mi">' + ic('shuf') + '</span><span><b>Riproduzione casuale</b><span>' + T.size + ' brani della tua libreria</span></span></button>';
-    h += bnCard() + ritScaffale();   // «Mettimi di buonumore» in evidenza e i tasti «Per ritmo»
+    h += bnCard() + umScaffale() + ritScaffale();   // «Mettimi di buonumore» in evidenza, i «Mood» e i tasti «Per ritmo»
     const rec = al.filter(a => a.last).sort((a, b) => b.last - a.last).slice(0, 12);
     if (rec.length) h += '<h2 class="h2">Ascoltati di recente</h2><div class="shelf">' + rec.map(tile).join('') + '</div>';
     h += '<h2 class="h2"><button data-a="go" data-v="albums" style="display:flex;align-items:center;gap:4px">Aggiunti di recente<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' + al.sort((a, b) => b.added - a.added).slice(0, 12).map(tile).join('') + '</div>';
@@ -2284,7 +2288,7 @@ const pages = {
         (Date.now() - ls.get('am-pieno', 0) < 86400000 ? 'Spazio esaurito: tocca per vedere perché e cosa fare' : 'Cosa manca e perché · ferma o cancella i download') + '</small></span></button></div>';
     }
     if (DLQ.length) h += '<p class="dlbar" id="dlbar" style="margin-top:10px">' + dlText() + '</p>';
-    h += ritScaffale() + atlSezione();   // «Per ritmo», Playlist di Atlante (dal Mac mini) e «Crea con l'IA»
+    h += umScaffale() + ritScaffale() + atlSezione();   // «Mood», «Per ritmo», Playlist di Atlante (dal Mac mini) e «Crea con l'IA»
     h += '<h2 class="h2">Aggiunti di recente</h2><div class="grid">' + albums().sort((a, b) => b.added - a.added).slice(0, 24).map(tile).join('') + '</div>';
     return h;
   },
@@ -4670,8 +4674,12 @@ document.addEventListener('submit', e => {
 // telefono vale il BPM misurato dal mix a tempo (BPMC). Un brano vale anche a mezzo tempo e a doppio tempo (85 vale per 170).
 I.sole = '<circle cx="12" cy="12" r="4.6"/><g stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.5 1.5M17.2 17.2l1.5 1.5M5.3 18.7l1.5-1.5M17.2 6.8l1.5-1.5"/></g>';
 I.batt = '<path d="M9 3.5h6l3.5 17h-13zM12 15.5l4.5-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-const RIT_PRONTI = [{nome:'Calmo', da:60, a:80, c:'#5e5ce6'}, {nome:'Camminata', da:90, a:110, c:'#30b0c7'}, {nome:'Ritmo costante', da:120, a:130, c:'#34c759'},
-  {nome:'Handbike in salita', da:140, a:160, c:'#ff9f0a'}, {nome:'Scatti', da:170, a:190, c:'#ff375f'}];
+// i gruppi pronti coprono tutti i tempi, uno dopo l'altro: ogni brano misurato sta in uno e uno solo (da compreso, a escluso)
+const RIT_PRONTI = [{nome:'Calmo', da:0, a:80, c:'#5e5ce6'}, {nome:'Tranquillo', da:80, a:90, c:'#4f7fe0'}, {nome:'Camminata', da:90, a:110, c:'#30b0c7'},
+  {nome:'Passo svelto', da:110, a:120, c:'#2fb39a'}, {nome:'Ritmo costante', da:120, a:130, c:'#34c759'}, {nome:'Energico', da:130, a:140, c:'#c99a00'},
+  {nome:'Handbike in salita', da:140, a:160, c:'#ff9f0a'}, {nome:'Veloce', da:160, a:170, c:'#ff6a3d'}, {nome:'Scatti', da:170, a:null, c:'#ff375f'}];
+const ritEtichetta = p => !p.da ? '<' + p.a : p.a == null ? p.da + '+' : p.da + '–' + p.a;
+const ritIntervallo = i => i[0] <= 0 ? 'fino a ' + i[1] : i[1] >= 999 ? i[0] + ' e oltre' : i[0] + '–' + i[1];
 const RIT_REGOLARE = 0.65;   // «solo ritmo regolare»: la stessa soglia di «Handbike: ritmo costante»
 let RITMI = ls.get('am-ritmi', null), ritT = 0, AMATI = ls.get('am-amati', []), amaT = 0;
 let RITMIEI = ls.get('am-ritmi-miei', []);   // ritmi preferiti salvati: [{nome, sc}]
@@ -4682,7 +4690,12 @@ async function ritCarica(force) {
   ritT = Date.now();
   try {
     const r = await fetchT(XAPI + 'tematiche/ritmi', {cache:'no-store'}, 20000);
-    if (r.ok) { const j = await r.json(), prima = RITMI ? Object.keys(RITMI.ritmi || {}).length : -1; RITMI = j; ls.set('am-ritmi', j); if (Object.keys(j.ritmi || {}).length !== prima && ['home', 'lib', 'ritmo'].indexOf(curRoute().v) >= 0) render(true); }
+    if (r.ok) {
+      // si ridisegna quando cambiano i brani misurati o i mood (non a ogni giro: Home e Libreria contano tutto)
+      const impronta = x => x ? Object.keys(x.ritmi || {}).length + '|' + (x.umori || []).map(u => u.id + ':' + u.nome).join(',') : '';
+      const j = await r.json(), prima = impronta(RITMI); RITMI = j; ls.set('am-ritmi', j);
+      if (impronta(j) !== prima && ['home', 'lib', 'ritmo'].indexOf(curRoute().v) >= 0) render(true);
+    }
     else ritT -= 240000;
   } catch (e) { ritT -= 240000; }
   if (Date.now() - amaT > 1800000) {   // i più amati in Atlante (classifiche d'ascolto), se il Mac le ha
@@ -4699,9 +4712,9 @@ function bpmDi(t) {
 const ritObiettivi = sc => sc.valori.length || sc.intervalli.length ? sc : {valori:[sc.cursore], intervalli:[]};
 // 1 = il brano è a quel ritmo, 0 = no. Multipli e sottomultipli non contano più (9/11): un brano a 60 BPM sta nel ritmo
 // 60, non anche in quello a 120 (e viceversa); chi ha salvato un ritmo con «mezzo e doppio tempo» lo ritrova senza
-function ritFattore(bpm, sc) {
+function ritFattore(bpm, sc) {   // intervallo [da, a] o, con il terzo valore, [da, a) (i gruppi pronti)
   const o = ritObiettivi(sc);
-  return o.valori.some(x => Math.abs(bpm - x) <= sc.tol) || o.intervalli.some(i => bpm >= i[0] && bpm <= i[1]) ? 1 : 0;
+  return o.valori.some(x => Math.abs(bpm - x) <= sc.tol) || o.intervalli.some(i => bpm >= i[0] && (i[2] ? bpm < i[1] : bpm <= i[1])) ? 1 : 0;
 }
 function ritBrani(sc) {
   const out = [];
@@ -4715,7 +4728,7 @@ function ritBrani(sc) {
 const ritSegno = f => f === 2 ? '×2' : f === 0.5 ? '÷2' : '';
 function ritNome(sc) {
   const o = ritObiettivi(sc);
-  return o.valori.map(v => v + (sc.tol ? ' ±' + sc.tol : '')).concat(o.intervalli.map(i => i[0] + '–' + i[1])).join(', ') + ' BPM';
+  return o.valori.map(v => v + (sc.tol ? ' ±' + sc.tol : '')).concat(o.intervalli.map(ritIntervallo)).join(', ') + ' BPM';
 }
 function ritSuona(sc, nome) {
   const L = ritBrani(sc);
@@ -4764,12 +4777,12 @@ function ritTile(nome, sotto, sc, k, colore, a) {
   return '<button class="tile" data-a="' + a + '" data-k="' + k + '"><span class="art ritart" style="background:' + colore + '"><span class="rn">' + esc(sotto) + '</span><span class="ru">BPM</span></span>' +
     '<div class="n">' + esc(nome) + '</div><div class="a">' + esc(ritConta(sc)) + '</div></button>';
 }
-const ritPronto = p => ({valori:[], intervalli:[[p.da, p.a]], tol:0, regolare:RSC.regolare, mezzo:RSC.mezzo});
+const ritPronto = p => ({valori:[], intervalli:[[p.da, p.a == null ? 999 : p.a, 1]], tol:0, regolare:RSC.regolare, mezzo:RSC.mezzo});
 function ritScaffale() {   // in Home e in Libreria
   ritCarica();
   if (!RITMI && !BPMC.size && !SRV) return '';
   return '<h2 class="h2"><button data-a="go" data-v="ritmo" style="display:flex;align-items:center;gap:4px">Per ritmo<span class="chev">' + ic('chevR') + '</span></button></h2><div class="shelf">' +
-    RIT_PRONTI.map((p, i) => ritTile(p.nome, p.da + '–' + p.a, ritPronto(p), i, p.c, 'rit-pronto')).join('') +
+    RIT_PRONTI.map((p, i) => ritTile(p.nome, ritEtichetta(p), ritPronto(p), i, p.c, 'rit-pronto')).join('') +
     RITMIEI.map((p, i) => ritTile(p.nome, ritNome(p.sc).replace(' BPM', ''), p.sc, i, '#636366', 'rit-mio')).join('') +
     '<button class="tile" data-a="go" data-v="ritmo"><span class="art ritart" style="background:var(--fill);color:var(--accent)"><span class="rn">' + ic('batt') + '</span><span class="ru">Scegli tu</span></span><div class="n">I tuoi BPM</div><div class="a">Esatti, più ritmi, tolleranza</div></button></div>';
 }
@@ -4783,16 +4796,68 @@ function bnPool() {   // brani per «Mettimi di buonumore»: Buonumore ed Energi
   }
   return [...p.entries()];
 }
+// sempre diversa: a caso con i pesi ([id, peso]), e i brani dell'ultima volta (salvati in «chiave») molto meno probabili
+function sceltaFresca(pool, N, chiave) {
+  const ultimi = new Set(ls.get(chiave, []));
+  const scelti = pool.map(([id, w]) => ({id, k:Math.pow(Math.random(), 1 / (w * (ultimi.has(id) && pool.length > N ? 0.15 : 1)))}))
+    .sort((a, b) => b.k - a.k).slice(0, N).map(x => x.id);
+  ls.set(chiave, scelti);
+  return shuffleArr(scelti);
+}
 function bnVia() {
   const pool = bnPool(), N = 30;
   if (!pool.length) { toast(RITMI ? 'Per ora non ci sono brani di buonumore' + (SRV ? '' : ' sull\'iPhone') : 'I brani di buonumore li trova il Mac mini mentre ascolta la musica: riprova più tardi', true); return; }
-  // sempre diversa: a caso con i pesi, e i brani dell'ultima volta molto meno probabili
-  const ultimi = new Set(ls.get('am-bn-ultimi', []));
-  const scelti = pool.map(([id, w]) => ({id, k:Math.pow(Math.random(), 1 / (w * (ultimi.has(id) && pool.length > N ? 0.15 : 1)))}))
-    .sort((a, b) => b.k - a.k).slice(0, N).map(x => x.id);
-  ls.set('am-bn-ultimi', scelti);
-  playList(shuffleArr(scelti), 0, false, 'Buonumore');
+  const scelti = sceltaFresca(pool, N, 'am-bn-ultimi');
+  playList(scelti, 0, false, 'Buonumore');
   toast('Buonumore: ' + scelti.length + ' brani');
+}
+/* «Mood»: Focus, Rilassamento, Attivazione… sono playlist di Atlante del Mac mini (regole su BPM, energia, regolarità,
+   generi ed etichette). Per ogni brano RITMI dice in quali mood sta (un bit per mood, nell'ordine di RITMI.umori), così
+   la scelta si fa qui e funziona anche senza rete, con i brani salvati sul telefono. I brani nuovi entrano da soli. */
+I.umFocus = '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.2"/>';
+I.umOnde = '<path d="M3 9.5c3-3 6 3 9 0s6 3 9 0M3 14.5c3-3 6 3 9 0s6 3 9 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+I.umFulmine = '<path d="M13.5 2.5 5.5 13.5h5.5l-1 8 8-11.5h-5.5z"/>';
+I.umPioggia = '<path d="M7 14.5a4 4 0 0 1 .5-8A5.5 5.5 0 0 1 18 7.8a3.4 3.4 0 0 1-.5 6.7z"/><path d="M8.5 17.5l-1.2 3M12.5 17.5l-1.2 3M16.5 17.5l-1.2 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>';
+I.umFiamma = '<path d="M12 2.5c1 3.5 5.5 5.5 5.5 11a5.5 5.5 0 0 1-11 0c0-2.6 1.3-4.2 2.6-5.5.2 1.8 1 2.9 2.2 3.4C11 9 10.6 5.5 12 2.5z"/>';
+I.umLuna = '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>';
+const UMORE_ASPETTO = {'umore-focus':['#5856d6', 'umFocus'], 'umore-rilassamento':['#30b0c7', 'umOnde'], 'umore-attivazione':['#ff9f0a', 'umFulmine'],
+  'umore-buonumore':['#e0a100', 'sole'], 'umore-malinconia':['#5e7a9a', 'umPioggia'], 'umore-grinta':['#ff375f', 'umFiamma'], 'attivita-sonno':['#3a3a8c', 'umLuna']};
+const UMC = {rif:null, k:'', pool:[]};
+function umPool() {   // per ogni mood i brani che si possono ascoltare ora ([id, peso]); un giro solo, rifatto quando cambia qualcosa
+  const um = (RITMI && RITMI.umori) || [], kk = T.size + '|' + saved.size + '|' + SRV + '|' + Math.floor(Date.now() / 60000);
+  if (UMC.rif === RITMI && UMC.k === kk) return UMC.pool;
+  const amati = new Set(AMATI || []), pool = um.map(() => []), R = (RITMI && RITMI.ritmi) || {};
+  for (const sid in R) {
+    const m = R[sid] && R[sid][5]; if (!m) continue;
+    const id = 'r' + sid; if (!T.has(id) || !canPlay(id)) continue;
+    const w = amati.has(sid) ? 2 : 1;   // i più amati in Atlante un po' più spesso
+    for (let k = 0; k < pool.length; k++) if (m & (1 << k)) pool[k].push([id, w]);
+  }
+  UMC.rif = RITMI; UMC.k = kk; UMC.pool = pool;
+  return pool;
+}
+function umVia(k) {
+  const u = ((RITMI && RITMI.umori) || [])[k]; if (!u) return;
+  const pool = umPool()[k] || [];
+  if (!pool.length) { toast(ritMisura() ? u.nome + ': il Mac mini sta ancora misurando i brani, riprova tra poco' : 'Per ora non ci sono brani per «' + u.nome + '»' + (SRV ? '' : ' sull\'iPhone'), true); return; }
+  const scelti = sceltaFresca(pool, 40, 'am-um-ultimi-' + u.id);
+  playList(scelti, 0, false, 'Mood · ' + u.nome);
+  toast(u.nome + ': ' + scelti.length + (scelti.length === 1 ? ' brano' : ' brani') + ', ogni volta una scelta nuova');
+}
+function umScaffale() {   // in Home e in Libreria
+  const um = (RITMI && RITMI.umori) || [];
+  if (!um.length) return '';
+  const pool = umPool();
+  return '<h2 class="h2">Mood</h2><div class="shelf">' + um.map((u, k) => {
+    const a = UMORE_ASPETTO[u.id] || ['#636366', 'batt'], n = (pool[k] || []).length;
+    return '<button class="tile" data-a="um-via" data-k="' + k + '"><span class="art ritart umart" style="background:' + a[0] + '"><span class="rn">' + ic(a[1]) + '</span></span>' +
+      '<div class="n">' + esc(u.nome) + '</div><div class="a">' + esc(n ? (n === 1 ? '1 brano' : n + ' brani') : ritMisura() || '0 brani') + '</div></button>';
+  }).join('') + '</div>';
+}
+var ritNuoviT = null;   // var: loadServer può chiamare ritDopoNuovi prima che questa parte dello script sia stata letta
+function ritDopoNuovi() {   // brani nuovi sul Mac: lui li misura subito (BPM e mood); qui i dati si riprendono poco dopo
+  (ritNuoviT || []).forEach(clearTimeout);
+  ritNuoviT = [60e3, 180e3, 600e3].map(ms => setTimeout(() => ritCarica(true), ms));
 }
 function bnCard() {   // in evidenza nella Home
   const n = bnPool().length;
@@ -4802,11 +4867,11 @@ function bnCard() {   // in evidenza nella Home
 pages.ritmo = function () {
   ritCarica();
   const sw = (a, on, t) => '<button class="lrow" data-a="' + a + '" role="switch" aria-checked="' + !!on + '"><span class="t">' + t + '</span><span class="sw' + (on ? ' on' : '') + '"></span></button>';
-  let h = topBar() + '<h1 class="lt">Per ritmo</h1><p class="dlbar">Scegli un ritmo: parte subito una riproduzione casuale dei brani con quei BPM.  Ogni brano sta solo nel suo ritmo: 85 BPM non entra tra i 170.</p>';
+  let h = topBar() + '<h1 class="lt">Per ritmo</h1><p class="dlbar">Scegli un ritmo: parte subito una riproduzione casuale dei brani con quei BPM. I gruppi pronti coprono tutti i tempi e ogni brano sta in uno solo: i brani nuovi ci entrano da soli appena il Mac mini li ha misurati.</p>';
   if (!RITMI && SRV) h += '<p class="dlbar">I BPM dei brani li sta misurando il Mac mini: le scelte si riempiono man mano.</p>';
   else if (ritMisura()) h += '<p class="dlbar" id="ritMis">Il Mac mini ha misurato i BPM di ' + RITMI.misurati.toLocaleString('it-IT') + ' brani su ' + RITMI.totale.toLocaleString('it-IT') + ': le scelte si riempiono man mano.</p>';
   h += '<div id="ritNow"></div><h2 class="h2">Pronti</h2><div class="ritg">' +
-    RIT_PRONTI.map((p, i) => '<button class="ritb" data-a="rit-pronto" data-k="' + i + '" style="--c:' + p.c + '"><b>' + p.da + '–' + p.a + '</b><span>' + p.nome + '</span></button>').join('') +
+    RIT_PRONTI.map((p, i) => '<button class="ritb" data-a="rit-pronto" data-k="' + i + '" style="--c:' + p.c + '"><b>' + esc(ritEtichetta(p)) + '</b><span>' + p.nome + '</span></button>').join('') +
     RITMIEI.map((p, i) => '<span class="ritb mio"><button data-a="rit-mio" data-k="' + i + '"><b>' + esc(ritNome(p.sc).replace(' BPM', '')) + '</b><span>' + esc(p.nome) + '</span></button><button class="x" data-a="rit-mio-x" data-k="' + i + '" aria-label="Togli ' + esc(p.nome) + '">' + ic('close') + '</button></span>').join('') + '</div>';
   h += '<h2 class="h2">Scegli tu</h2><div class="ritbox">' +
     '<label class="ritl" for="ritCur">BPM <b id="ritCurV">' + RSC.cursore + '</b></label><input type="range" class="ritr" id="ritCur" min="50" max="200" step="1" value="' + RSC.cursore + '">' +
@@ -4849,6 +4914,7 @@ document.addEventListener('click', e => {
   const b = e.target.closest('[data-a]'); if (!b) return;
   const a = b.dataset.a, k = +b.dataset.k;
   if (a === 'bn-via') bnVia();
+  else if (a === 'um-via') umVia(k);
   else if (a === 'rit-pronto') { const p = RIT_PRONTI[k]; if (p) ritSuona(ritPronto(p), p.nome); }
   else if (a === 'rit-mio') { const p = RITMIEI[k]; if (p) ritSuona(p.sc, p.nome); }
   else if (a === 'rit-mio-x') { const p = RITMIEI[k]; RITMIEI.splice(k, 1); ls.set('am-ritmi-miei', RITMIEI); render(true); if (p) toast('Tolto «' + p.nome + '»'); }
