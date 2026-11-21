@@ -72,6 +72,7 @@ function ambiente(ruolo, loc) {
     $: id => ({xf: {getAttribute: () => xf.src, setAttribute: (n, v) => { xf.src = v; }}, xp}[id]),
     ls: {get: (k, d) => (k in salvati ? salvati[k] : d), set: (k, v) => { salvati[k] = v; }},
     toast: m => { env.avvisi.push(m); }, closeNP: () => {}, uiApri: () => {}, sideMark: () => {},   // la barra dell'iPad
+    xAttesa: () => { env.attese = (env.attese || 0) + 1; },   // l'avviso «il modulo non arriva» (18/11): qui solo contato
   };
   return env;
 }
@@ -132,5 +133,6 @@ function prove(src, fatte) {
   env = ambiente('proprietario'); F = carica(src, env);
   F.openX('cerca');
   eq([env.xf.src, env.xp.hidden, env.salvati['am-x'], env.aperti], ['x/cerca.html', false, 'cerca', []], '«Cerca e scarica» nel riquadro');
+  eq(env.attese, 1, 'con l\'avviso pronto se la pagina del modulo non arriva');
   fatte.push('altri moduli');
 }

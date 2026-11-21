@@ -323,6 +323,191 @@
    "nome": "Umore",
    "playlist": [
     {
+     "id": "umore-focus",
+     "nome": "Focus",
+     "descrizione": "Battito costante ed energia media, niente brani aggressivi: aiutano a concentrarsi",
+     "regola": {
+      "una_di": [
+       {
+        "etichette": [
+         "instrumental",
+         "ambient",
+         "study",
+         "focus",
+         "deep focus",
+         "piano",
+         "post-rock",
+         "minimal",
+         "downtempo"
+        ]
+       },
+       {
+        "generi": [
+         "lofi",
+         "classica",
+         "jazz"
+        ],
+        "energia": [
+         0,
+         0.6
+        ]
+       },
+       {
+        "energia": [
+         0.25,
+         0.6
+        ],
+        "regolarita": [
+         0.55,
+         1
+        ],
+        "bpm": [
+         70,
+         125
+        ]
+       }
+      ],
+      "nessuna_di": [
+       {
+        "generi": [
+         "metal",
+         "punk",
+         "trap",
+         "rap"
+        ]
+       },
+       {
+        "etichette": [
+         "aggressive",
+         "angry",
+         "party",
+         "sad",
+         "heartbreak"
+        ]
+       },
+       {
+        "energia": [
+         0.75,
+         1
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "umore-rilassamento",
+     "nome": "Rilassamento",
+     "descrizione": "Lenti e morbidi, per staccare e respirare",
+     "ordine": "energia",
+     "regola": {
+      "una_di": [
+       {
+        "etichette": [
+         "chill",
+         "chillout",
+         "relaxing",
+         "relax",
+         "mellow",
+         "calm",
+         "peaceful",
+         "soft",
+         "easy listening",
+         "smooth",
+         "meditation"
+        ]
+       },
+       {
+        "generi": [
+         "lofi"
+        ]
+       },
+       {
+        "energia": [
+         0,
+         0.45
+        ],
+        "bpm": [
+         0,
+         105
+        ]
+       }
+      ],
+      "nessuna_di": [
+       {
+        "generi": [
+         "metal",
+         "punk",
+         "techno",
+         "trap"
+        ]
+       },
+       {
+        "energia": [
+         0.7,
+         1
+        ]
+       },
+       {
+        "bpm": [
+         140,
+         300
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "umore-attivazione",
+     "nome": "Attivazione",
+     "descrizione": "Ritmo svelto, battito netto ed energia alta: per partire e muoversi",
+     "ordine": "-energia",
+     "regola": {
+      "una_di": [
+       {
+        "energia": [
+         0.7,
+         1
+        ],
+        "bpm": [
+         112,
+         180
+        ]
+       },
+       {
+        "energia": [
+         0.85,
+         1
+        ],
+        "bpm": [
+         85,
+         112
+        ]
+       }
+      ],
+      "regolarita": [
+       0.45,
+       1
+      ],
+      "nessuna_di": [
+       {
+        "generi": [
+         "classica",
+         "lofi"
+        ]
+       },
+       {
+        "etichette": [
+         "sad",
+         "melancholic",
+         "melancholy",
+         "heartbreak",
+         "sadcore"
+        ]
+       }
+      ]
+     }
+    },
+    {
      "id": "umore-energia",
      "nome": "Energia",
      "ordine": "-energia",
@@ -1011,12 +1196,12 @@
    "playlist": [
     {
      "id": "ritmo-060-080",
-     "nome": "60–80 BPM",
-     "descrizione": "Da 60 a 80 battiti al minuto, dal più lento al più veloce",
+     "nome": "Fino a 80 BPM",
+     "descrizione": "Fino a 80 battiti al minuto (le ballate e i brani lenti), dal più lento al più veloce",
      "ordine": "bpm",
      "regola": {
       "bpm": [
-       60,
+       0,
        79.9
       ]
      }

@@ -690,6 +690,8 @@ class Libreria:
             self.brani, self.percorsi, self.compilation = nuovi, percorsi, comp
             self.vecchie = {v["_p"]: v for v in indice}
             self.ultima = time.time()
+        if riletti:
+            _sveglia_tematiche()   # brani nuovi o cambiati: BPM e mood subito
         if uguale:
             return len(nuovi)
         self._sporco = True   # finché l'indice non è salvato davvero (disco pieno?): la prossima lettura ci riprova
@@ -1233,7 +1235,16 @@ def _aggiungi_brano(lib, percorso):
             lib.brani, lib.percorsi, lib.compilation = brani, percorsi, comp
         lib.vecchie[p] = voce
         lib._sporco = True   # la prossima lettura salva l'indice anche se per lei non è cambiato niente
+        _sveglia_tematiche()
         return voce["id"]
+
+
+def _sveglia_tematiche():
+    """Brani nuovi nel catalogo: il lavoro delle playlist di Atlante (BPM, mood, generi) li prende subito, senza
+    aspettare il suo giro di TEM_RIPOSO secondi. Se il lavoro non c'è non fa niente."""
+    t = TEM
+    if t is not None:
+        t.sveglia.set()
 
 
 # ----- due dischi: il principale e il backup, senza doppioni -----
@@ -12912,6 +12923,9 @@ def _chiedi_ia(corpo):
 # giorno per persona. La playlist resta di chi la crea (salvata sul telefono come le altre).
 
 TEM_VERSIONE = 1          # versione delle schede: quelle più vecchie si rifanno
+# versione della misura dell'audio: una misura più vecchia si rifà (solo l'audio, non MusicBrainz), dopo i brani mai
+# misurati. 2: ballate e brani veloci all'ottava giusta (ottava_giusta)
+TEM_AUDIO_V = 2
 TEM_FINESTRA = 30.0       # secondi di audio per ogni misura (come il mix a tempo dell'app)
 TEM_RIPOSO = 120          # secondi di pausa quando non c'è niente da fare
 TEM_RIPROVA = 6 * 3600    # brano non riuscito per un motivo passeggero (rete, IA spenta, ffmpeg mancante): si riprova dopo
@@ -12927,6 +12941,9 @@ MB_CONTATTO = "https://github.com/samuelemanfredi/atlante"   # ATLANTE_CONTATTO 
 IA_ATTESA = 90            # secondi che una richiesta aspetta il suo turno con l'IA
 IA_AL_GIORNO = 20
 CONDIVISE_MAX, CONDIVISE_PERSONA, CONDIVISA_BRANI = 300, 30, 1000
+# «Mood» nella Home dell'app: queste playlist di Atlante, in quest'ordine (i nomi sono quelli delle regole)
+UMORI_APP = ("umore-focus", "umore-rilassamento", "umore-attivazione", "umore-buonumore", "umore-malinconia",
+             "umore-grinta", "attivita-sonno")
 REGOLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playlist-atlante.json")
 # i generi delle schede: gli stessi id di "generi" in playlist-atlante.json
 GENERI = ("pop", "rap", "trap", "rock", "alternative", "indie", "punk", "metal", "dance", "house", "techno", "edm",
@@ -13036,36 +13053,46 @@ def _moduli(fin, k):
     return [abs((a + b) * 0.5 - 0.5j * w * (a - b)) for a, b, w in zip(z, zc, _FFT_POST)]
 
 
-def griglia_battiti(x, sr):
-    """Come beatGrid dell'app: flusso spettrale (FFT 1024, passo 128), autocorrelazione con le armoniche e preferenza
-    per i tempi tra 90 e 160, poi la fase del primo battito. In più: flusso medio per canale e volume (dB),
-    che servono all'energia. None con meno di 8 s di audio."""
-    passo = 128
-    fps = sr / passo
-    nf = (len(x) - FFTN) // passo
-    if nf < fps * 8:
-        return None
-    k = min(FFTN // 2, int(round(5000 / (sr / FFTN))))
-    prec, on, log1p, pot = [0.0] * k, [0.0] * nf, math.log1p, [0.0] * k
-    for f in range(nf):
-        o = f * passo
-        mag = _moduli([a * w for a, w in zip(x[o:o + FFTN], _HANN)], k)
-        pot = [a + v * v for a, v in zip(pot, mag)]   # spettro di potenza di tutto il pezzo: serve alla tonalità
-        l = [log1p(100 * m) for m in mag]
-        s = 0.0
-        for a, b in zip(l[1:], prec[1:]):
-            if a > b:
-                s += a - b
-        prec = l
-        on[f] = s if f else 0.0
-    # via la tendenza lenta (media mobile di ~1 s), restano i colpi
-    w = int(round(fps))
+BANDA_BASSI, BANDA_MEDI = (30, 160), (160, 1000)   # Hz: la cassa e il corpo del rullante (per rullante_dopo)
+
+
+def _togli_tendenza(on, w):
+    """Via la tendenza lenta (media mobile di w istanti, ~1 s): restano i colpi."""
+    nf = len(on)
     env, acc = [0.0] * nf, 0.0
     for f in range(nf):
         acc += on[f]
         if f >= w:
             acc -= on[f - w]
         env[f] = max(0.0, on[f] - acc / min(f + 1, w))
+    return env
+
+
+def griglia_battiti(x, sr):
+    """Come beatGrid dell'app: flusso spettrale (FFT 1024, passo 128), autocorrelazione con le armoniche e preferenza
+    per i tempi tra 90 e 160, poi la fase del primo battito. In più: flusso medio per canale e volume (dB),
+    che servono all'energia, e i colpi dei bassi e dei medi (bande, per rullante_dopo). None con meno di 8 s di audio."""
+    passo = 128
+    fps = sr / passo
+    nf = (len(x) - FFTN) // passo
+    if nf < fps * 8:
+        return None
+    k = min(FFTN // 2, int(round(5000 / (sr / FFTN))))
+    b0, b1, b2 = (min(k, int(round(hz / (sr / FFTN)))) for hz in (BANDA_BASSI[0], BANDA_BASSI[1], BANDA_MEDI[1]))
+    prec, on, log1p, pot = [0.0] * k, [0.0] * nf, math.log1p, [0.0] * k
+    bassi, medi = [0.0] * nf, [0.0] * nf
+    for f in range(nf):
+        o = f * passo
+        mag = _moduli([a * w for a, w in zip(x[o:o + FFTN], _HANN)], k)
+        pot = [a + v * v for a, v in zip(pot, mag)]   # spettro di potenza di tutto il pezzo: serve alla tonalità
+        l = [log1p(100 * m) for m in mag]
+        d = [a - b if a > b else 0.0 for a, b in zip(l, prec)]   # quanto sale ogni canale
+        prec = l
+        if f:
+            on[f] = sum(d[1:])
+            bassi[f], medi[f] = sum(d[b0:b1]), sum(d[b1:b2])
+    w = int(round(fps))
+    env = _togli_tendenza(on, w)
     max_lag = int(math.ceil(4 * 60 * fps / 70)) + 2
     ac = [sum(a * b for a, b in zip(env[lag:], env)) / (nf - lag) for lag in range(max_lag + 1)]
     if not ac[0] > 0:
@@ -13102,7 +13129,51 @@ def griglia_battiti(x, sr):
         p += 0.25
     rms = math.sqrt(sum(v * v for v in x) / len(x))
     return {"bpm": round(best, 1), "b0": (fase * passo + FFTN / 2) / sr, "c": round(bs / (tot / 1201), 2),
-            "flusso": sum(on) / nf / k, "db": 20 * math.log10(max(rms, 1e-9)), "spettro": pot}
+            "flusso": sum(on) / nf / k, "db": 20 * math.log10(max(rms, 1e-9)), "spettro": pot,
+            "bande": (_togli_tendenza(bassi, w), _togli_tendenza(medi, w)), "fps": fps}
+
+
+def _incrocio(a, b, lag):
+    """Quanto i colpi di a tornano in b dopo lag istanti (anche frazionario o negativo), in media per istante."""
+    n, l0 = len(a), int(math.floor(lag))
+    fr = lag - l0
+    da, fino = max(0, -l0), min(n, n - l0 - 1)
+    if fino <= da:
+        return 0.0
+    return sum(a[f] * (b[f + l0] * (1 - fr) + b[f + l0 + 1] * fr) for f in range(da, fino)) / (fino - da)
+
+
+def rullante_dopo(bande, fps, veloce):
+    """Al tempo «veloce» il rullante (medi) arriva un battito dopo la cassa (bassi), come nel rock a quel tempo, o due,
+    come a metà tempo (hip hop, ballate)? Più di 1: un battito; meno di 1: due. Non serve sapere dove cade il battito:
+    va bene anche con un batterista che accelera un poco."""
+    bassi, medi = bande
+    lag = 60.0 * fps / veloce
+    uno = _incrocio(bassi, medi, lag) + _incrocio(bassi, medi, -lag)
+    due = _incrocio(bassi, medi, 2 * lag) + _incrocio(bassi, medi, -2 * lag)
+    if due > 0:
+        return uno / due
+    return 10.0 if uno > 0 else 1.0   # mai due battiti dopo: è un battito (silenzio: nessun parere)
+
+
+# Il tempo che si batte col piede tra il misurato, la metà e il doppio. La misura sceglie spesso il doppio nelle ballate
+# (conta le crome del pianoforte: Someone Like You 67 → 134) e la metà nei brani veloci (Blinding Lights 171 → 85,5).
+# Provato su 136 brani dal tempo noto (anteprime di 30 s): da 113 a 125 giusti, nessuno peggiorato.
+OTTAVA_BALLATA = (118, 160)   # qui un battito vago (c basso) è una ballata: si dimezza
+OTTAVA_VELOCE = (74, 94)      # qui il rullante un battito dopo la cassa al doppio è un brano veloce: si raddoppia
+
+
+def ottava_giusta(bpm, c, energia, rullante):
+    """(bpm, perché): bpm misurato, c quanto il battito spicca (1 = per niente), energia 0–1, rullante = rullante_dopo
+    al doppio di bpm (None se non misurato). Perché: «ballata», «veloce» o "" se il tempo resta quello."""
+    if bpm is None:
+        return None, ""
+    if OTTAVA_BALLATA[0] <= bpm <= OTTAVA_BALLATA[1] and c is not None and \
+            (c < 1.75 or (c < 2.2 and energia is not None and energia < 0.7)):
+        return bpm / 2, "ballata"
+    if OTTAVA_VELOCE[0] <= bpm <= OTTAVA_VELOCE[1] and rullante is not None and rullante > 1.15:
+        return bpm * 2, "veloce"
+    return bpm, ""
 
 
 # profili di Krumhansl e Kessler: quanto pesa ogni grado della scala in un brano in modo maggiore e minore
@@ -13176,7 +13247,8 @@ def misura_audio(percorso, durata):
         g = griglia_battiti(_campioni_wav(wav), PEZZO_HZ)
         if g:
             misure.append(g)
-    o = {"bpm": None, "energia": None, "regolarita": None, "db": None, "modo": 0, "tonalita": "", "pezzi": len(misure)}
+    o = {"bpm": None, "energia": None, "regolarita": None, "db": None, "modo": 0, "tonalita": "", "pezzi": len(misure),
+         "ottava": ""}
     if not misure:
         return o
     o["modo"], o["tonalita"] = tonalita([sum(v) for v in zip(*(g["spettro"] for g in misure))], PEZZO_HZ)
@@ -13192,7 +13264,8 @@ def misura_audio(percorso, durata):
         battiti.append(v)
     bpm = med(battiti)
     # regolarità: un battito netto (c: quanto il tempo migliore spicca sugli altri) e lo stesso in tutti i pezzi
-    forza = min(1.0, max(0.0, (med([g["c"] for g in misure]) - 1.2) / 1.3))
+    c = med([g["c"] for g in misure])
+    forza = min(1.0, max(0.0, (c - 1.2) / 1.3))
     if len(battiti) > 1:
         scarto = (max(battiti) - min(battiti)) / bpm
         accordo = min(1.0, max(0.0, 1 - (scarto - 0.015) / 0.06)) * (0.8 if piegati else 1.0)
@@ -13203,8 +13276,12 @@ def misura_audio(percorso, durata):
     # energia: quanto cambia lo spettro da un istante all'altro (colpi, chitarre, voce piena) e quanto è forte
     flusso = min(1.0, max(0.0, (med([g["flusso"] for g in misure]) - 0.06) / 0.14))
     forte = min(1.0, max(0.0, (db + 30) / 20))
-    o.update(bpm=round(bpm, 1), energia=round(0.5 * flusso + 0.5 * forte, 2), regolarita=round(regolarita, 2),
-             db=round(db, 1))
+    energia = round(0.5 * flusso + 0.5 * forte, 2)
+    rullante = None
+    if OTTAVA_VELOCE[0] <= bpm <= OTTAVA_VELOCE[1]:
+        rullante = med([rullante_dopo(g["bande"], g["fps"], 2 * bpm) for g in misure])
+    bpm, perche = ottava_giusta(bpm, c, energia, rullante)
+    o.update(bpm=round(bpm, 1), energia=energia, regolarita=round(regolarita, 2), db=round(db, 1), ottava=perche)
     return o
 
 
@@ -13971,13 +14048,20 @@ class Tematiche:
         return dict(ris["info"][pid], brani=ris["brani"][pid])
 
     def ritmi(self):
-        """Per «Per ritmo», «Mettimi di buonumore» e il volume uniforme nell'app, che li tiene anche per quando non c'è
-        rete: BPM, regolarità, energia, modo e volume (dB RMS dei pezzi misurati) di ogni brano misurato; i brani di
-        «Buonumore» ed «Energia» (con energia almeno media) con il loro peso: il modo maggiore conta di più, il minore
-        meno (la misura del modo è una stima)."""
+        """Per «Per ritmo», «Mood», «Mettimi di buonumore» e il volume uniforme nell'app, che li tiene anche per quando
+        non c'è rete: BPM, regolarità, energia, modo, volume (dB RMS dei pezzi misurati) e mood di ogni brano; i brani
+        di «Buonumore» ed «Energia» (con energia almeno media) con il loro peso: il modo maggiore conta di più, il minore
+        meno (la misura del modo è una stima). Mood: un numero per brano, un bit per ogni playlist di «umori» (nel loro
+        ordine); un brano con un mood ma senza BPM (etichette di MusicBrainz, audio non ancora misurato) ha bpm null."""
         ris = self._calcola()
+        umori = [u for u in UMORI_APP if u in ris["info"]]   # le vuote (o nascoste in regole.json) non ci sono
+        maschera = collections.defaultdict(int)
+        for k, u in enumerate(umori):
+            for i in ris["brani"][u]:
+                maschera[i] |= 1 << k
         ritmi = {d["id"]: [d["bpm"], d["regolarita"], d["energia"], d["modo"],
-                           None if d.get("db") is None else round(d["db"], 1)] for d in ris["dati"] if d["bpm"] is not None}
+                           None if d.get("db") is None else round(d["db"], 1), maschera.get(d["id"], 0)]
+                 for d in ris["dati"] if d["bpm"] is not None or maschera.get(d["id"])}
         allegri = set(ris["brani"].get("umore-buonumore", ())) | set(ris["brani"].get("umore-energia", ()))
         buonumore = [[d["id"], 2 if d["modo"] == 1 else 0.5 if d["modo"] == -1 else 1] for d in ris["dati"]
                      if d["id"] in allegri and (d["energia"] is None or d["energia"] >= 0.45)]
@@ -13985,7 +14069,7 @@ class Tematiche:
         with self.blocco:
             misurati = sum(1 for d in ris["dati"] if (self.schede.get(d["id"]) or {}).get("audio") in ("fatto", "errore"))
         return {"ritmi": ritmi, "buonumore": buonumore, "misurati": misurati, "totale": len(ris["dati"]),
-                "attivo": self.attivo}
+                "attivo": self.attivo, "umori": [{"id": u, "nome": ris["info"][u]["nome"]} for u in umori]}
 
     # --- il lavoro in sottofondo ---
 
@@ -14021,7 +14105,8 @@ class Tematiche:
                           "fonte": "musicbrainz" if s.get("generi") else "ia" if s.get("generi_ia") else
                           "tag del file" if d["generi"] else "", "etichette": (s.get("etichette") or [])[:8],
                           "bpm": s.get("bpm"), "energia": s.get("energia"), "regolarita": s.get("regolarita"),
-                          "tonalita": s.get("tonalita") or "", "playlist": dove.get(i, [])})
+                          "ottava": s.get("ottava") or "", "tonalita": s.get("tonalita") or "",
+                          "playlist": dove.get(i, [])})
         return righe[:1000]
 
     def stato(self):
@@ -14060,6 +14145,7 @@ class Tematiche:
             p.append("ia")
         # audio non letto (disco scollegato a metà?) o ffmpeg mancante: si riprova dopo qualche ora, al più tre volte
         if s.get("f") != b.get("_f") or s.get("audio") not in ("fatto", "errore", "attesa") or \
+                (s.get("audio") == "fatto" and s.get("av", 1) != TEM_AUDIO_V) or \
                 (s.get("audio") == "attesa" and ora - s.get("audio_q", 0) >= TEM_RIPROVA) or \
                 (s.get("audio") == "errore" and s.get("audio_n", 0) < 3 and ora - s.get("audio_q", 0) >= TEM_RIPROVA):
             p.append("audio")
@@ -14082,18 +14168,23 @@ class Tematiche:
         return lotto[0] if lotto else None
 
     def _prossimi(self, n):
-        """Fino a n brani con qualcosa da fare: i brani nuovi (classifiche, caricamenti) per primi."""
+        """Fino a n brani con qualcosa da fare: i brani nuovi (classifiche, caricamenti) per primi, e quelli mai misurati
+        prima di quelli da rimisurare con una misura più nuova (un file scaricato può avere una data vecchia)."""
         voci = self._voci()
         voci.sort(key=lambda x: -(x[1].get("added") or 0))
-        ora, lotto = time.time(), []
+        ora, nuovi, altri = time.time(), [], []
         with self.blocco:
             for i, b in voci:
-                p = self._passi(self.schede.get(i), b, ora)
+                s = self.schede.get(i)
+                visto = s and s.get("f") == b.get("_f") and s.get("audio") in ("fatto", "errore", "attesa")
+                if visto and len(altri) >= n:
+                    continue   # già abbastanza da rifare: si cercano solo i mai misurati (con 50 000 brani è un attimo)
+                p = self._passi(s, b, ora)
                 if p:
-                    lotto.append((i, b, p))
-                    if len(lotto) >= n:
+                    (altri if visto else nuovi).append((i, b, p))
+                    if len(nuovi) >= n:
                         break
-        return lotto
+        return (nuovi + altri)[:n]
 
     def _lavora(self):
         while LIB is None or not LIB.ultima:   # si aspetta la prima lettura del disco
@@ -14189,7 +14280,7 @@ class Tematiche:
                 else:
                     s.update(audio="fatto", audio_q=ora, f=b.get("_f"), bpm=m.get("bpm"), energia=m.get("energia"),
                              regolarita=m.get("regolarita"), db=m.get("db"), modo=m.get("modo") or 0,
-                             tonalita=m.get("tonalita") or "", audio_n=0)
+                             tonalita=m.get("tonalita") or "", audio_n=0, av=TEM_AUDIO_V, ottava=m.get("ottava") or "")
         with self.blocco:
             self.schede[i] = s
             self.versione += 1
