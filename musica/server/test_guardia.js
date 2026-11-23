@@ -127,6 +127,10 @@ function prove(src, fatte) {
   nuovo(e => { e.au.paused = true; e.au.currentTime = 0; e.passaAlDiretto = () => false; });
   giri(10);
   eq(env.carichi[1], ['B', 3, true, 0], 'senza lettore diretto: sull\'altro lettore, già sbloccato');
+  // con l'app nascosta (23/11/2026) mai un lettore diverso: iOS non lo lascia partire. Si ricarica lo stesso
+  nuovo(e => { e.au.paused = true; e.au.currentTime = 0; e.passaAlDiretto = () => false; e.document.hidden = true; });
+  giri(10);
+  eq(env.carichi[1], ['A', 3, true, 0], 'app nascosta: il terzo passo ricarica lo stesso lettore, non l\'altro');
   fatte.push('passaggio non riuscito');
 
   /* ---------- brano finito e il successivo mai partito: avanti ---------- */
