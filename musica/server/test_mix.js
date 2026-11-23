@@ -126,6 +126,7 @@ function prove(src, fatte) {
   prova('mix a fine brano senza mixer', () => scenarioFineBrano(src, false));
   prova('mix a fine brano con il mixer', () => scenarioFineBrano(src, true));
   prova('iPhone: musica fuori dal mixer, dissolvenza in uscita', () => dissolvenzaInUscita(src));
+  prova('iPhone in secondo piano: fine brano sullo stesso lettore', () => secondoPiano(src));
   prova('salto con il mixer: pochi cambi di velocità', () => scenarioSaltoCambi(src));
   prova('ritardo di partenza imparato', () => ritardoImparato(src));
   prova('▶︎ bloccato: si sblocca da sola', () => partenzaBloccata(src));
@@ -325,11 +326,12 @@ function mondo(src, opz) {
     return {dur:b.duration, ms:u.startsWith('blob:') ? 60 : (opz.streamMs != null ? opz.streamMs : 700)};
   };
   class Lettore {
-    constructor(nome) { Object.assign(this, {nome, paused:true, _t:0, salti:[], currentTime:0, _v:1, cambi:[], readyState:0, muted:false, duration:NaN, ended:false, seeking:false, volume:1, _src:null, _l:{}, _vuole:false, _da:0, rifiuta:false, rifiutaUnaVolta:false}); }
+    constructor(nome) { Object.assign(this, {nome, paused:true, _t:0, salti:[], currentTime:0, _v:1, cambi:[], readyState:0, muted:false, duration:NaN, ended:false, seeking:false, volume:1, _src:null, _l:{}, _vuole:false, _da:0, rifiuta:false, rifiutaUnaVolta:false, loop:false, giri:0}); this._seekJs = -1e9; }
     get playbackRate() { return this._v; }
     get currentTime() { return this._t; }
     // uno spostamento mentre suona: si segna (salti) e il lettore resta fermo latenzaSpost ms, come il vero
-    set currentTime(v) { if (!this.paused && !this._vuole && this.readyState >= 3 && Math.abs(v - this._t) > 1e-9) { this.salti.push([W.t, v - this._t]); this._da = Math.max(this._da, W.t + (opz.latenzaSpost || 0)); } this._t = v; }
+    // come nell'app, i salti chiesti dal codice si segnano (_seekJs): il ritorno all'inizio del loop no
+    set currentTime(v) { this._seekJs = W.t; if (!this.paused && !this._vuole && this.readyState >= 3 && Math.abs(v - this._t) > 1e-9) { this.salti.push([W.t, v - this._t]); this._da = Math.max(this._da, W.t + (opz.latenzaSpost || 0)); } this._t = v; }
     set playbackRate(v) { if (v !== this._v) this.cambi.push([W.t, v]); this._v = v; }   // i cambi veri di velocità
     get buffered() { const d = this.readyState >= 3 ? this.duration : 0; return {length:d ? 1 : 0, start:() => 0, end:() => d}; }
     addEventListener(ev, fn, o) { (this._l[ev] = this._l[ev] || []).push({fn, once:!!(o && o.once)}); }
@@ -347,6 +349,8 @@ function mondo(src, opz) {
     avanza(dt) {
       if (this.paused || this.readyState < 3 || this._vuole || W.t < this._da) return;
       this._t += dt * this.playbackRate;
+      // con il loop, come WebKit: niente «ended», si torna all'inizio con un salto (seeking, seeked) che il codice non ha chiesto
+      if (this._t >= this.duration && this.loop) { this._t = 0; this.giri++; this.emit('seeking'); this.emit('seeked'); this.emit('timeupdate'); return; }
       if (this._t >= this.duration) { this._t = this.duration; this.ended = true; this.paused = true; this.emit('pause'); this.emit('ended'); }
     }
   }
@@ -370,7 +374,7 @@ function mondo(src, opz) {
     updateNow() {}, saveState() {}, markCur() {}, checkHeard() {}, controllaPassaggio() {},
     castUnLettore:() => false,   // AirPlay del Mac / Chromecast (controlli fuori dall'app): qui nessuna trasmissione
     xfPreparaFinto:P => { log.prep.push([P.idB, W.t, !!env.MIX.salto]); return SP.resolve(); },   // mix a fine brano finto: si guarda solo quando si prepara
-    document:{hidden:false}, corri,
+    document:{hidden:false}, corri, isIOS:false, sfondoAttivo:() => !!env.isIOS && !!env.document.hidden,
     getFile:id => SP.resolve(salvati.has(id) ? {nome:id} : null),
     grid:(id, part) => {
       log.grid.push([id, part]);
@@ -758,6 +762,67 @@ function dissolvenzaInUscita(src) {
   let scelto = null;   // subito dopo la scelta (non alla fine: lì DISSOLVI si è già fermato da solo, finita la curva)
   M.passa(45, () => { if (!scelto && M.env.curId === 'rB' && !D.paused && D.readyState >= 3) { M.env.load(2, true); scelto = {fermo:D.paused, src:D.getAttribute('src')}; } });
   vero(scelto && scelto.fermo && !scelto.src && M.env.curId === 'rC', 'un altro brano durante la dissolvenza la ferma subito: ' + JSON.stringify(scelto));
+}
+
+// IPHONE IN SECONDO PIANO (23/11/2026: «quando cambio app la musica si interrompe»). Con l'app nascosta iOS chiude la
+// sessione audio quando un brano arriva alla fine, e non lascia partire il brano dopo (né un lettore diverso). Quindi:
+// il lettore in loop (mai alla fine); il ritorno all'inizio che nessuno ha chiesto è la fine del brano → pausa e brano
+// dopo SULLO STESSO lettore; niente mix né preparazione sull'altro lettore. Tornando nell'app, tutto come prima.
+function secondoPiano(src) {
+  const iphone = opz => {
+    const M = mondo(src, Object.assign({finebrano:true, da:240 - 42}, opz || {})), {env} = M;
+    Object.assign(env, {NEEDS_MIXER:true, isIOS:true, ALLAU:M.DECKS.concat(M.AUX)});
+    env.MIX.ctx = {state:'running', get currentTime() { return M.ora() / 1000; }, suspend() { return SP.resolve(); }, resume() { return SP.resolve(); }};
+    env.MIX.dissolvi = {gain:{value:0, cancelScheduledValues() {}, setValueAtTime() {}, setValueCurveAtTime() {}}};
+    const G = carica(src, ['sfondoImposta', 'sfondoControlla', 'next'], ['var SFONDO = '], env);
+    Object.assign(env, {sfondoImposta:G.sfondoImposta, next:G.next});
+    // come auOn nell'app: solo gli eventi del lettore in uso
+    M.DECKS.forEach(el => ['timeupdate', 'seeking'].forEach(n => el.addEventListener(n, () => { if (el === env.au) G.sfondoControlla(); })));
+    const nascondi = v => { env.document.hidden = v; if (v && env.MIX.plan) M.F.xfAbort(); G.sfondoImposta(); };
+    return {M, env, G, nascondi, A:M.DECKS[0], B:M.DECKS[1]};
+  };
+  // 1. app nascosta a 42 s dalla fine: niente mix, il brano finisce in loop e il dopo parte sullo stesso lettore
+  let {M, env, nascondi, A, B} = iphone();
+  nascondi(true);
+  vero(A.loop === true && B.loop === false, 'app nascosta: il loop solo sul lettore in uso');
+  M.passa(45);
+  vero(env.curId === 'rB' && env.au === A && !A.paused && A.getAttribute('src') === 'blob:rB', 'app nascosta: il brano dopo sullo stesso lettore (' + env.curId + ', ' + (env.au === A ? 'A' : 'B') + ', ' + A.getAttribute('src') + ')');
+  vero(!B.getAttribute('src') && B.paused, 'app nascosta: l\'altro lettore non si tocca');
+  vero(M.log.fine.length === 0 && A.giri === 1, 'app nascosta: il brano non arriva mai alla fine (loop)');
+  vero(!M.log.diario.some(x => x.e === 'preparo' || x.e === 'mix'), 'app nascosta: niente mix');
+  vero(M.log.diario.some(x => x.e === 'fine brano in secondo piano: avanti sullo stesso lettore'), 'il passaggio nel diario');
+  vero(A.loop === true, 'ancora nascosta: il brano nuovo in loop');
+  // di nuovo nell'app: niente loop, il passaggio dopo torna col mix sull'altro lettore
+  nascondi(false);
+  vero(A.loop === false, 'app aperta: niente loop');
+  A.currentTime = 200 - 42; M.passa(45);
+  vero(env.curId === 'rC' && env.au === B && M.log.diario.some(x => x.e === 'mix'), 'app aperta: il passaggio dopo con il mix, come prima');
+  // 2. un salto all'inizio chiesto dal codice (tasto ⏮ dalla schermata di blocco) non è la fine del brano
+  ({M, env, nascondi, A, B} = iphone());
+  nascondi(true); M.passa(30);
+  A.currentTime = 0; M.passa(1);
+  vero(env.curId === 'rA' && !A.paused && A.currentTime < 2, '⏮ dalla schermata di blocco: resta lo stesso brano, da capo');
+  // 3. «ripeti questo brano» con l'app nascosta: il loop stesso
+  ({M, env, nascondi, A, B} = iphone());
+  env.S.repeat = 'one'; nascondi(true); M.passa(45);
+  vero(env.curId === 'rA' && !A.paused && A.giri === 1 && M.log.load.length === 0, 'ripeti questo brano: lo stesso, senza ricaricarlo');
+  // 4. nascosta con il mix già pronto sull'altro lettore: il mix si annulla, il passaggio sullo stesso lettore
+  ({M, env, nascondi, A, B} = iphone());
+  M.passa(20);
+  vero(env.MIX.plan && env.MIX.plan.st === 'ready' && B.getAttribute('src'), 'il mix si era preparato sull\'altro lettore');
+  nascondi(true);
+  vero(!env.MIX.plan && !B.getAttribute('src'), 'nascosta: il mix preparato si annulla');
+  M.passa(25);
+  vero(env.curId === 'rB' && env.au === A && !A.paused, 'nascosta dopo la preparazione: il brano dopo sullo stesso lettore');
+  // 5. ⏭ dalla schermata di blocco: niente salto a tempo, il cambio subito
+  ({M, env, nascondi, A, B} = iphone({da:60}));
+  nascondi(true); M.passa(0.5);
+  M.fai(() => M.F.avanti());
+  vero(!env.MIX.salto && M.log.next.length === 0 && env.curId === 'rB' && env.au === A, '⏭ con l\'app nascosta: subito, sullo stesso lettore');
+  // 6. un brano di pochi secondi (una sigla): anche la sua fine si riconosce, non resta in loop
+  ({M, env, nascondi, A, B} = iphone({da:0, brani:[{id:'rA', title:'Sigla', sid:'A', duration:5, bpm:120, b0:0, c:2}, {id:'rB', title:'Brano B', sid:'B', duration:200, bpm:128, b0:0.21, c:2}]}));
+  nascondi(true); M.passa(7);
+  vero(env.curId === 'rB' && env.au === A && !A.paused && A.giri === 1, 'una sigla di 5 s: finita, il brano dopo sullo stesso lettore (' + env.curId + ', giri ' + A.giri + ')');
 }
 
 function scenarioSaltoCambi(src) {
