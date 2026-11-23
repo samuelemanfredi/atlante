@@ -3891,7 +3891,7 @@ document.addEventListener('visibilitychange', () => {
    - niente mix né salti a tempo, che fanno partire l'altro lettore: i passaggi sono a taglio.
    Tornando nell'app il loop si toglie e torna tutto come prima, mix compreso. Mac e PC come prima. */
 // var e function: load() può arrivare qui anche durante l'avvio (ripresa dopo una chiusura), prima di questa riga
-var SFONDO = {id:null, ultimo:0, passo:0};
+var SFONDO = {id:null, ultimo:0, passo:0, PRIMA:0.35};   // PRIMA: secondi dalla fine in cui si passa al brano dopo
 function sfondoAttivo() { return isIOS && document.hidden; }
 function sfondoImposta() {   // il loop solo sul lettore in uso, e solo con l'app nascosta
   const on = sfondoAttivo();
@@ -3901,14 +3901,18 @@ function sfondoControlla() {   // a ogni «timeupdate» e «seeking» del lettor
   const t = au.currentTime || 0, prima = SFONDO.id === curId ? SFONDO.ultimo : t;
   SFONDO.id = curId; SFONDO.ultimo = t;
   if (!au.loop || !sfondoAttivo() || !curId) return;
-  // tornato all'inizio dalla seconda metà del brano (anche di un brano di pochi secondi) senza che il codice l'abbia
-  // chiesto (tasti, schermata di blocco, guardia): è il loop
-  const d = au.duration, metà = isFinite(d) && d > 0 ? d / 2 : 8;
-  if (!(prima > metà && t < Math.min(6, prima / 2)) || performance.now() - (au._seekJs || -1e9) < 2500) return;
+  const d = au.duration, metà = isFinite(d) && d > 0 ? d / 2 : 8, chiesto = performance.now() - (au._seekJs || -1e9) < 2500;
+  // a SFONDO.PRIMA secondi dalla fine (dall'evento del lettore, non da un timer: in secondo piano i timer ritardano) si
+  // passa al brano dopo, prima che il loop faccia ripartire per un attimo il brano vecchio (23/11/2026: «a scatti»)
+  const quasiFine = isFinite(d) && d > 0 && t > metà && d - t <= SFONDO.PRIMA && !au.paused && !chiesto && S.repeat !== 'one';
+  // se quell'evento non è arrivato in tempo: tornato all'inizio dalla seconda metà del brano (anche di un brano di pochi
+  // secondi) senza che il codice l'abbia chiesto (tasti, schermata di blocco, guardia), è il loop
+  const giro = prima > metà && t < Math.min(6, prima / 2) && !chiesto;
+  if (!quasiFine && !giro) return;
   SFONDO.ultimo = 0;
   checkHeard();
   if (S.repeat === 'one') return;   // «ripeti questo brano»: il loop è già lui
-  diario('fine brano in secondo piano: avanti sullo stesso lettore', {da:Math.round(prima)});
+  diario('fine brano in secondo piano: avanti sullo stesso lettore', {da:Math.round(giro ? prima : t), prima:quasiFine});
   SFONDO.passo = Date.now();
   au.pause();   // prima la pausa (la sessione audio resta aperta), poi il brano dopo sullo stesso lettore
   next(true);
@@ -4207,7 +4211,8 @@ async function xfPrepare(P) {
   const d0 = au.duration, d = ga && ga.fine > d0 - 20 && ga.fine < d0 - 1 ? ga.fine + 0.5 : d0, X = MIX.X;
   P.dE = d < d0 ? d : 0;
   P.ga = ga; P.gb = gb;
-  const m = mixFattore(ga, gb); P.match = m.match; P.f = m.f; P.r = m.r;
+  const m = mixFattore(ga, gb); if (senzaVelocita()) m.r = 1;   // iPhone: mai cambi di velocità (vedi senzaVelocita)
+  P.match = m.match; P.f = m.f; P.r = m.r;
   const TA = 60 / (P.ga ? P.ga.bpm : 120);
   let tS = d - X * P.r;
   if (P.match) { const k = Math.round((tS - ga.b0) / TA); tS = ga.b0 + k * TA; if (d - tS < X * P.r * 0.7) tS -= TA * Math.ceil((X * P.r * 0.7 - (d - tS)) / TA); }
@@ -4230,10 +4235,14 @@ async function xfPrepare(P) {
 }
 /* DISSOLVENZA IN USCITA (iPhone, 21/11/2026): la musica non passa mai dal mixer (vedi NEEDS_MIXER). Nel passaggio con
    l'app aperta il brano nuovo entra sul battito sul suo lettore normale; il brano che finisce, invece di tacere di colpo,
-   continua da DISSOLVI (l'unico lettore nel mixer) dallo stesso punto e alla stessa velocità, e si abbassa piano in al
-   più DIS.MAX secondi. Il salto dal suo lettore a DISSOLVI cade proprio sull'entrata del brano nuovo, che lo copre.
-   Con l'app nascosta, il mixer fermo o DISSOLVI non pronto: il taglio sul battito di sempre. */
-const DIS = {st:'', P:null, url:null, tm:0, MAX:6, ANTICIPO:0.05};
+   continua da DISSOLVI (l'unico lettore nel mixer) e si abbassa piano in al più DIS.MAX secondi.
+   SENZA BUCHI (23/11/2026, «non devi andare a scatti»): prima DISSOLVI partiva solo al passaggio, e per il tempo che ci
+   mette un lettore a partire la coda del vecchio spariva, poi tornava un po' indietro. Ora DISSOLVI parte DIS.PREROLL
+   secondi prima, muto (volume 0 nel mixer), e si allinea al lettore che suona (dissolviPreroll: un salto quando è fuori,
+   imparando quanto ci mette a ripartire); al passaggio basta alzare il suo volume e fermare l'altro. Se non è allineato
+   (o non è partito) niente dissolvenza: il vecchio si ferma quando il nuovo suona davvero, senza buchi in mezzo.
+   Con l'app nascosta, il mixer fermo o DISSOLVI non pronto: lo stesso taglio. */
+const DIS = {st:'', P:null, url:null, tm:0, MAX:6, PREROLL:2.5, SCARTO:0.06, ultimo:0, lag:ls.get('am-dis-lag', 0.06)};
 async function dissolviPrepara(P) {
   const ta = T.get(P.idA); if (!ta) return;
   const f = await getFile(P.idA).catch(() => null);
@@ -4253,23 +4262,54 @@ async function dissolviPrepara(P) {
   el.src = url;
   const pr = el.play(); if (pr && pr.catch) pr.catch(() => { el.removeEventListener('playing', pronto); if (DIS.P === P) { DIS.st = 'no'; el.muted = false; } });
 }
-function dissolviAvvia(out, P, W) {   // nel passaggio: la coda di «out» da DISSOLVI, che si abbassa. true se parte
+// quanto DISSOLVI è avanti (+) o indietro (−) rispetto al lettore che suona, in secondi; il suono del mixer esce un
+// soffio dopo (baseLatency), quindi DISSOLVI deve stare avanti di tanto
+function dissolviLat() { return (MIX.ctx && MIX.ctx.baseLatency) || 0; }
+function dissolviScarto(out) { return (DISSOLVI.currentTime || 0) - (out.currentTime || 0) - dissolviLat(); }
+// prima del passaggio (dagli ultimi DIS.PREROLL secondi): DISSOLVI parte muto dallo stesso punto del lettore che suona e
+// ci resta allineato. Un salto ogni mezzo secondo quando è fuori di più di 25 ms (è muto: non si sente), e si
+// impara quanto ci mette a ripartire dopo un salto (DIS.lag, tenuto sul telefono), così di solito basta il primo
+function dissolviPreroll(out, P) {
+  const el = DISSOLVI, ctx = MIX.ctx, g = MIX.dissolvi;
+  if (!g || !ctx || DIS.P !== P || document.hidden) return;
+  const ora = performance.now();
+  if (DIS.st === 'pronto') {
+    if (ctx.state !== 'running') { try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {} return; }
+    try { const t = ctx.currentTime; g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(0, t); } catch (e) {}
+    try { el.playbackRate = out.playbackRate || 1; conPitch(el); el.currentTime = (out.currentTime || 0) + dissolviLat() + DIS.lag; } catch (e) {}
+    const pr = el.play(); if (pr && pr.catch) pr.catch(() => { if (DIS.P === P) { diario('dissolvenza: DISSOLVI non parte'); dissolviFerma(); } });
+    DIS.st = 'preroll'; DIS.ultimo = ora; return;
+  }
+  if (DIS.st !== 'preroll' || el.paused || el.seeking || el.readyState < 3 || ora - DIS.ultimo < 500) return;
+  DIS.ultimo = ora;
+  const e = dissolviScarto(out);
+  if (Math.abs(e) <= 0.025) return;   // allineato (al passaggio se ne accetta fino a DIS.SCARTO)
+  DIS.lag = Math.max(0, Math.min(0.4, DIS.lag - e)); ls.set('am-dis-lag', Math.round(DIS.lag * 1000) / 1000);   // indietro → più avanti
+  if (P.tS - (out.currentTime || 0) > 0.8) { try { el.currentTime = (out.currentTime || 0) + dissolviLat() + DIS.lag; } catch (x) {} }
+}
+// la durata della dissolvenza: al più DIS.MAX; la velocità non cambia, quindi se i BPM dei due brani sono diversi i
+// battiti si allontanano piano: la dissolvenza finisce prima che si allontanino di più di 0,3 battiti (almeno 1,5 s)
+function dissolviDurata(P, W) {
+  let w = Math.min(DIS.MAX, W || DIS.MAX);
+  if (P.match && P.ga && P.gb) { const v = Math.abs(P.gb.bpm * (P.f || 1) - P.ga.bpm) / 60; if (v > 0) w = Math.min(w, 0.3 / v); }
+  return Math.max(1.5, w);
+}
+function dissolviAvvia(out, P, W) {   // nel passaggio: la coda di «out», già su DISSOLVI e allineata, si sente e si abbassa
   const el = DISSOLVI, g = MIX.dissolvi, ctx = MIX.ctx;
-  if (!g || !ctx || DIS.P !== P || DIS.st !== 'pronto' || document.hidden || ctx.state !== 'running' || out.paused || !el.getAttribute('src')) {
-    if (DIS.P === P && DIS.st) diario('dissolvenza in uscita saltata', {pronto:DIS.st, ctx:ctx ? ctx.state : 'no', nascosta:!!document.hidden});
+  const e = DIS.st === 'preroll' ? dissolviScarto(out) : NaN;
+  if (!g || !ctx || DIS.P !== P || DIS.st !== 'preroll' || document.hidden || ctx.state !== 'running' || out.paused ||
+    el.paused || el.seeking || el.readyState < 3 || !(Math.abs(e) <= DIS.SCARTO)) {
+    if (DIS.P === P && DIS.st) diario('dissolvenza in uscita saltata', {stato:DIS.st, ctx:ctx ? ctx.state : 'no', scarto:isFinite(e) ? Math.round(e * 1000) : null, nascosta:!!document.hidden});
     dissolviFerma(); return false;
   }
-  const Wf = Math.max(1, Math.min(DIS.MAX, W || DIS.MAX)), r = out.playbackRate || 1;
+  const Wf = dissolviDurata(P, W);
   try {
-    el.playbackRate = r; conPitch(el);
-    el.currentTime = (out.currentTime || 0) + DIS.ANTICIPO * r;   // dove sarà il brano quando DISSOLVI comincia a suonare
     const N = 64, dn = new Float32Array(N), t = ctx.currentTime;
     for (let i = 0; i < N; i++) dn[i] = Math.cos(i / (N - 1) * Math.PI / 2);
-    g.gain.cancelScheduledValues(t); g.gain.setValueCurveAtTime(dn, t, Wf);
-    const pr = el.play(); if (pr && pr.catch) pr.catch(() => dissolviFerma());
-  } catch (e) { dissolviFerma(); return false; }
+    g.gain.cancelScheduledValues(t); g.gain.setValueCurveAtTime(dn, t, Wf);   // da 0 subito a 1, poi giù
+  } catch (x) { dissolviFerma(); return false; }
   DIS.st = 'suona'; clearTimeout(DIS.tm); DIS.tm = setTimeout(dissolviFerma, (Wf + 0.4) * 1000);
-  diario('dissolvenza in uscita', {s:Math.round(Wf * 10) / 10});
+  diario('dissolvenza in uscita', {s:Math.round(Wf * 10) / 10, scarto:Math.round(e * 1000)});
   return true;
 }
 function dissolviFerma() {
@@ -4317,8 +4357,23 @@ function xfStart(P) {
   osservaNuovo(inn, W);
   controllaPassaggio();
   MIX.plan = null;
-  // iPhone: la musica fuori dal mixer, il nuovo entra sul battito; il vecchio sfuma da DISSOLVI se si può (se no taglio)
-  if (NEEDS_MIXER && !MIX.gains.size) { setGain(inn, 1); dissolviAvvia(out, P, W); xfEnd(); return; }
+  // iPhone: la musica fuori dal mixer, il nuovo entra sul battito. Il vecchio continua su DISSOLVI, già allineato, e
+  // sfuma (il suo lettore si ferma subito: nessun buco); se no il taglio, ma il vecchio si ferma solo quando il nuovo
+  // suona davvero, così tra i due non resta un attimo di silenzio (23/11/2026, «non devi andare a scatti»)
+  if (NEEDS_MIXER && !MIX.gains.size) {
+    setGain(inn, 1);
+    ritImparaIphone(inn, MIX.act.innDa, MIX.act.t0);
+    if (dissolviAvvia(out, P, W)) { xfEnd(); return; }
+    // il nuovo suona davvero quando il suo tempo va avanti («playing» può arrivare prima del suono); al più 450 ms
+    const A = MIX.act, da = A.innDa, t0 = performance.now();
+    const guarda = () => {
+      if (MIX.act !== A) return;
+      if ((inn.currentTime || 0) > da + 0.02 || performance.now() - t0 > 450) { xfEnd(); return; }
+      setTimeout(guarda, 25);
+    };
+    setTimeout(guarda, 25);
+    return;
+  }
   if (MIX.gains.size) {   // iPhone: curve di volume precise sull'orologio audio, anche a schermo bloccato
     const N = 64, up = new Float32Array(N), dn = new Float32Array(N);
     for (let i = 0; i < N; i++) { const q = i / (N - 1); up[i] = Math.sin(q * Math.PI / 2); dn[i] = Math.cos(q * Math.PI / 2); }
@@ -4362,6 +4417,7 @@ function xfRun() {
     // i battiti del brano che finisce inseguono quelli del nuovo: piccola correzione di velocità (al più ±5%)
     const TA = 60 / P.ga.bpm, TBe = 60 / (P.gb.bpm * P.f);
     const e = wrap((out.currentTime - P.ga.b0) / TA - (inn.currentTime - P.gb.b0) / TBe);
+    if (senzaVelocita()) return;   // iPhone: niente correzioni di velocità (ognuna un piccolo salto)
     if (!MIX.gains.size) out.playbackRate = P.r * (1 + correzioneFase(e, TBe, false));
     else allineaMuto(A, e, TBe);   // con il mixer il brano che esce non cambia più velocità: si sposta il nuovo, ancora quasi muto
   }
@@ -4372,9 +4428,18 @@ function xfRun() {
 // Il ritardo con cui il nuovo parte (dopo play() e dopo uno spostamento) si impara a ogni passaggio (MIX.rit): di solito
 // la partenza è già giusta e non serve spostare niente.
 const ALLINEA = {DA:400, OGNI:400, FINO:1700, MAX:2, SOGLIA:0.05};
-MIX.rit = Object.assign({p:0, s:0}, ls.get('am-mix-rit', {}));
+MIX.rit = Object.assign({p:0, s:0, i:0.05}, ls.get('am-mix-rit', {}));   // i: iPhone con i lettori normali (ritImparaIphone)
 function ritImpara(k, sec) { const v = MIX.rit[k] + sec / 2; MIX.rit[k] = Math.max(0, Math.min(0.4, isFinite(v) ? v : 0)); ls.set('am-mix-rit', MIX.rit); }
-function ritAvvio() { return MIX.gains.size ? MIX.rit.p : 0; }   // di quanto partire avanti (solo con il mixer)
+function ritAvvio() { return senzaVelocita() ? MIX.rit.i : MIX.gains.size ? MIX.rit.p : 0; }   // di quanto partire avanti
+// iPhone: quanto ci ha messo davvero il brano nuovo a partire (dal play al primo suono), misurato dal suo tempo poco dopo;
+// la volta dopo parte avanti di altrettanto, così entra proprio sul battito del vecchio invece di un soffio dopo
+function ritImparaIphone(el, pos0, t0) {
+  setTimeout(() => {
+    if (el !== au || el.paused || el.seeking) return;
+    const L = (performance.now() - t0) / 1000 - ((el.currentTime || 0) - pos0) / (el.playbackRate || 1);
+    if (L > -0.05 && L < 0.6) ritImpara('i', L - MIX.rit.i);   // a metà strada verso il ritardo vero
+  }, 700);
+}
 function allineaMuto(A, e, TBe) {
   const ora = performance.now(), ms = ora - A.t0, inn = A.inn;
   if (A.fisso || ms < ALLINEA.DA || ms > ALLINEA.FINO || inn.seeking || A.tAll && ora - A.tAll < ALLINEA.OGNI) return;
@@ -4400,6 +4465,7 @@ function xfTick() {
   if (P && (P.idA !== curId || P.idB !== idB)) { xfAbort(); P = null; }
   if (!P) { if (d - c > 40 || d - c < MIX.X + 2 || otherDeck()._rifiuta) return; P = MIX.plan = {idA:curId, idB, j, st:'prep'}; xfPrepare(P).catch(e => { diario('prep errore', {err:(e && e.name) || String(e)}); if (MIX.plan === P) MIX.plan = null; }); xfLoop(); return; }
   if (P.st !== 'ready') return;
+  if (MIX.dissolvi && c >= P.tS - DIS.PREROLL) dissolviPreroll(au, P);   // iPhone: la coda del vecchio già su DISSOLVI, muta
   if (c < P.tR) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
   if (c < P.tS) {   // accelera o rallenta piano verso i BPM del successivo (forma a S; con il mixer a gradini)
     const q = Math.min(1, (c - P.tR) / Math.max(0.1, P.tS - P.tR));
@@ -4459,6 +4525,10 @@ function rampaVel(q, r) { const s = q <= 0 ? 0 : q >= 1 ? 1 : q * q * (3 - 2 * q
 // secondo prima della dissolvenza, e i battiti si sistemano spostando il brano nuovo quando è ancora quasi muto
 // (allineaMuto); senza mixer (Mac, PC, Android) tutto resta continuo e graduale.
 function velocita(el, v) { if (Math.abs((el.playbackRate || 1) - v) > 1e-4) el.playbackRate = v; }   // solo se cambia davvero
+// iPhone con la musica fuori dal mixer (21/11/2026): neanche i lettori normali cambiano velocità senza un piccolo salto nel
+// suono, e la rampa continua degli ultimi 8 s faceva andare il brano «a scatti» (23/11). Lì la velocità non cambia mai:
+// il brano nuovo entra sul battito alla sua velocità e il vecchio sfuma (dissolvenza più corta se i BPM sono lontani)
+function senzaVelocita() { return NEEDS_MIXER && !MIX.gains.size; }
 function conPitch(el) { try { if (el.preservesPitch !== true) el.preservesPitch = true; if (el.webkitPreservesPitch === false) el.webkitPreservesPitch = true; } catch (e) {} }
 // quanti gradini per una rampa di «sec» secondi: con il mixer uno solo (un buco invece di quattro), senza mixer 0 = continua
 function gradini(sec) { return MIX.gains.size ? 1 : 0; }
@@ -4530,6 +4600,7 @@ function gridQui(id, c, d) { return grid(id, pezzoQui(c, d)); }
 function saltoMisurato(X, ga, gb, perche) {
   X.misurato = true; X.ga = ga; X.gb = gb;
   const m = perche || X.spostato ? {match:false, f:1, r:1, perche:perche || 'brano spostato'} : mixFattore(ga, gb);
+  if (senzaVelocita()) m.r = 1;   // iPhone: mai cambi di velocità (vedi senzaVelocita)
   X.match = m.match; X.f = m.f; X.r = m.r; X.startB = m.match ? gb.b0 : 0;
   X.esito = m.match ? 'a tempo' : 'dissolvenza: ' + m.perche;
   if (m.match && Math.abs(m.r - 1) > 0.001) {
